@@ -37,7 +37,7 @@ jest.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
-let mockRouteParams: { keyholder: { invite: { name: string }; result?: { invokedId: string } }; electionEngine: typeof mockElectionEngine };
+let mockRouteParams: { keyholder: { invite: { name: string }; result?: { invokedId: string; isAccepted?: boolean } }; electionEngine: typeof mockElectionEngine };
 
 const mockSetOptions = jest.fn();
 const mockNavigate = jest.fn();
@@ -102,10 +102,10 @@ describe('KeyholderScreen — DKG status wiring (62-26)', () => {
     const inviteButton = tr.root.findAll((n) => n.props?.title === 'invite')[0];
     expect(inviteButton).toBeTruthy();
 
-    // The "type" detail row's grandparent is the first `section` View. The status row must live
+    // The status detail row's grandparent is the first `section` View. The status row must live
     // in THAT SAME subtree, and that subtree must NOT contain the Invite button.
     const typeLabelText = tr.root.findAll(
-      (n) => (n.type as unknown) === 'Text' && Array.isArray(n.props?.children) && n.props.children[0] === 'type'
+      (n) => (n.type as unknown) === 'Text' && Array.isArray(n.props?.children) && n.props.children[0] === 'keyholderStatusLabel'
     )[0];
     expect(typeLabelText).toBeTruthy();
     const detailRow = nearestViewAncestor(typeLabelText); // the `styles.detail` row View
@@ -186,5 +186,48 @@ describe('KeyholderScreen — DKG status wiring (62-26)', () => {
 
     expect(hasTestID(tr, 'keyholder-dkg-status-failed')).toBe(true);
     expect(hasTestID(tr, 'keyholder-dkg-status-complaint')).toBe(false);
+  });
+});
+
+describe('KeyholderScreen — invite status line (UAT 62 M)', () => {
+  function statusText(tr: renderer.ReactTestRenderer): string {
+    return tr.root.findAll((n) => n.props?.testID === 'keyholder-invite-status' && typeof n.props?.children === 'string')[0].props.children;
+  }
+
+  beforeEach(() => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'blocked', threshold: 2, self: undefined }, advanced: false, actions: [] });
+  });
+
+  it('labels the line Status (never Type) and reads accepted for a keyholder with an accepted result', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Alice' }, result: { isAccepted: true, invokedId: 'user-1' } } as never;
+    const tr = await render();
+    const labels = tr.root.findAll((n) => (n.type as unknown) === 'Text' && Array.isArray(n.props?.children)).map((n) => n.props.children[0]);
+    expect(labels).toContain('keyholderStatusLabel');
+    expect(labels).not.toContain('type');
+    expect(statusText(tr)).toBe('accepted');
+  });
+
+  it('a keyholder with no result reads pending (not "sent"/"unsent")', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Bob' } };
+    const tr = await render();
+    expect(statusText(tr)).toBe('pending');
+  });
+
+  it('on focus, swaps in the fresh engine keyholder: an accept since the card was tapped reads accepted and drives the DKG as that user', async () => {
+    mockRouteParams.keyholder = { invite: { name: 'Bob' } };
+    mockGetElectionDetails.mockResolvedValue({
+      election: { id: 'election-1' },
+      current: { keyholders: [{ invite: { name: 'Bob' }, result: { isAccepted: true, invokedId: 'user-bob' } }] },
+    } as never);
+    const tr = await render();
+    expect(statusText(tr)).toBe('accepted');
+    expect(mockDriveKeyholderDkg).toHaveBeenCalledWith(expect.anything(), 'election-1', 'user-bob');
+  });
+
+  it('a 1-of-1 policy shows the threshold-too-low DKG copy, not "waiting for other keyholders"', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'blocked', blockedReason: 'threshold-out-of-range', threshold: 1, self: undefined }, advanced: false, actions: [] });
+    const tr = await render();
+    expect(hasTestID(tr, 'keyholder-dkg-status-thresholdTooLow')).toBe(true);
+    expect(hasTestID(tr, 'keyholder-dkg-status-pending')).toBe(false);
   });
 });

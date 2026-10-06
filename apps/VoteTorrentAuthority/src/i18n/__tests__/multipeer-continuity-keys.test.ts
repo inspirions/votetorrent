@@ -154,6 +154,8 @@ const GROUPS: readonly Group[] = [
 			"keyholderDkgStatusComplete",
 			"keyholderDkgStatusComplaint",
 			"keyholderDkgStatusHeading",
+			// UAT 62 M: a blocked DKG whose policy threshold is below 2 (1-of-1) can never start.
+			"keyholderDkgStatusThresholdTooLow",
 		],
 	],
 	[
@@ -246,8 +248,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		});
 	});
 
-	test("the total catalog is 94 keys per locale", () => {
-		expect(ALL_CATALOG_KEYS).toHaveLength(94);
+	test("the total catalog is 95 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62)", () => {
+		expect(ALL_CATALOG_KEYS).toHaveLength(95);
 	});
 
 	test.each(ALL_CATALOG_KEYS)("%s: non-empty value in both locales, EN !== ES", (key) => {

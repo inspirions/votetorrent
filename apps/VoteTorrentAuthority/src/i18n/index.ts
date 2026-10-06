@@ -351,6 +351,9 @@ const resources = {
 			dateTime: 'Date/time',
 			sent: 'Sent',
 			unsent: 'Unsent',
+			// Keyholder card / KeyholderScreen: the invite-status line (accepted / declined / pending).
+			keyholderStatusLabel: 'Status',
+			keyholderStatusDeclined: 'Declined',
 			accepted: 'Accepted',
 			invite: 'Invite',
 			administrators: 'Administrators',
@@ -1061,6 +1064,10 @@ const resources = {
 				'Too few officers can still approve this request, so it is refused.',
 			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
 			keyholderDkgStatusPending: 'Waiting for other keyholders to join',
+			// A threshold below 2 (e.g. a 1-of-1 policy) can never run key generation (the DKG needs
+			// 2 <= threshold <= participants), so "waiting" would never end.
+			keyholderDkgStatusThresholdTooLow:
+				'Key generation needs a keyholder threshold of at least 2. Revise the election to require 2 or more keyholders.',
 			keyholderDkgStatusInProgress: 'Generating key material…',
 			keyholderDkgStatusComplete: 'Key generation complete',
 			keyholderDkgStatusComplaint:
@@ -1439,6 +1446,8 @@ const resources = {
 			dateTime: 'Fecha/hora',
 			sent: 'Enviada',
 			unsent: 'No enviada',
+			keyholderStatusLabel: 'Estado',
+			keyholderStatusDeclined: 'Rechazado',
 			accepted: 'Aceptado',
 			invite: 'Invitar',
 			administrators: 'Administradores',
@@ -2133,6 +2142,8 @@ const resources = {
 				'Ya no quedan suficientes funcionarios que puedan aprobar esta solicitud, así que queda rechazada.',
 			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
 			keyholderDkgStatusPending: 'Esperando a que otros custodios se unan',
+			keyholderDkgStatusThresholdTooLow:
+				'La generación de clave necesita un umbral de al menos 2 custodios. Revisa la elección para requerir 2 o más custodios.',
 			keyholderDkgStatusInProgress: 'Generando material de clave…',
 			keyholderDkgStatusComplete: 'Generación de clave completa',
 			keyholderDkgStatusComplaint:

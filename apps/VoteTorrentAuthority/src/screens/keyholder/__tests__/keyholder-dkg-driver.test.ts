@@ -71,6 +71,20 @@ describe('keyholderDkgRowState (M1)', () => {
 		expect(keyholderDkgRowState(statusWith({ phase }))).toBe(expected);
 	});
 
+	// UAT 62 M: a 1-of-1 policy read "Waiting for other keyholders to join" forever. The DKG needs
+	// 2 <= threshold <= participants, so a threshold below 2 is blocked for good.
+	it.each(['no-keyholders', 'threshold-out-of-range'] as const)('blocked (%s) at threshold 1 -> thresholdTooLow', (blockedReason) => {
+		expect(keyholderDkgRowState(statusWith({ phase: 'blocked', blockedReason, threshold: 1 }))).toBe('thresholdTooLow');
+	});
+
+	it('blocked at threshold 2 with too few accepted keyholders is still a real wait -> pending', () => {
+		expect(keyholderDkgRowState(statusWith({ phase: 'blocked', blockedReason: 'threshold-out-of-range', threshold: 2 }))).toBe('pending');
+	});
+
+	it('blocked with no current revision (threshold null) -> pending', () => {
+		expect(keyholderDkgRowState(statusWith({ phase: 'blocked', blockedReason: 'no-current-revision', threshold: null }))).toBe('pending');
+	});
+
 	it.each(['not-started', 'blocked', 'in-progress', 'restarting', 'complete', 'failed'] as const)(
 		'self.isDisqualified -> failed, never complaint (phase %s)',
 		(phase) => {

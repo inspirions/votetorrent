@@ -41,6 +41,7 @@ const mockSetOptions = jest.fn();
 // Prefixed `mock` so babel-plugin-jest-hoist allows the jest.mock() factory
 // below (hoisted above this declaration) to close over it.
 let mockElectionEngine: any;
+const mockFocusCallbacks: Array<() => void | (() => void)> = [];
 
 jest.mock("@react-navigation/native", () => ({
 	useTheme: () => ({
@@ -69,6 +70,8 @@ jest.mock("@react-navigation/native", () => ({
 	// unconditionally during render can infinite-loop a screen whose focus
 	// callback sets state on every invocation.
 	useFocusEffect: (cb: () => void | (() => void)) => {
+		// Recorded so a test can simulate a RE-focus (UAT 62 M) by invoking the latest callbacks.
+		mockFocusCallbacks.push(cb);
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const ReactLib = require("react");
 		ReactLib.useEffect(() => {
@@ -200,5 +203,29 @@ describe("ElectionDetailsScreen — keyholder INVITE prefill (UAT 62 L1)", () =>
 		const tr = await renderScreen();
 		await pressInvite(tr);
 		expect(mockNavigate).toHaveBeenCalledWith("KeyholderInvitation", expect.objectContaining({ mode: "send", keyholder: undefined }));
+	});
+});
+
+describe("ElectionDetailsScreen — keyholder cards refresh on focus (UAT 62 M)", () => {
+	it("a keyholder accepted while the screen was under the stack reads Accepted after re-focus", async () => {
+		const pending = { invite: { name: "Kay Holder" } };
+		const accepted = { invite: { name: "Kay Holder" }, result: { isAccepted: true, invitationSignature: "", invokedId: "u-kay" } };
+		mockElectionEngine = makeElectionEngine({ keyholders: [pending], keyholderThreshold: 1 });
+		const tr = await renderScreen();
+		expect(tr.root.findAllByType(KeyholderCard)[0].props.invitationStatus).toEqual(pending);
+
+		const refreshed = makeElectionEngine({ keyholders: [accepted], keyholderThreshold: 1 });
+		mockElectionEngine.getElectionDetails.mockImplementation(refreshed.getElectionDetails);
+		const callbacks = mockFocusCallbacks.splice(0);
+		await renderer.act(async () => {
+			callbacks.slice(-2).forEach((cb) => cb());
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+
+		expect(tr.root.findAllByType(KeyholderCard)[0].props.invitationStatus).toEqual(accepted);
+		const allText = tr.root.findAllByType(ThemedText).map(textOf).join(" | ");
+		expect(allText).toContain("accepted");
+		expect(allText).not.toContain("unsent");
 	});
 });

@@ -67,6 +67,17 @@ describe('KeyholderDkgStatusRow (Surface 6)', () => {
     expect(tr.root.findAllByType(require('react-native-vector-icons/FontAwesome6'))).toHaveLength(0);
   });
 
+  it('W1g: thresholdTooLow renders keyholderDkgStatusThresholdTooLow with a warning glyph (EN + ES exist)', () => {
+    const tr = render('thresholdTooLow');
+    const node = findByTestID(tr, 'keyholder-dkg-status-thresholdTooLow');
+    expect(node.props.children).toBe(resources.en.translation.keyholderDkgStatusThresholdTooLow);
+    expect(StyleSheet.flatten(node.props.style).color).toBe(SENTINEL_COLORS.warning);
+    const icon = tr.root.findByType(require('react-native-vector-icons/FontAwesome6'));
+    expect(icon.props.name).toBe('triangle-exclamation');
+    expect(typeof resources.es.translation.keyholderDkgStatusThresholdTooLow).toBe('string');
+    expect(resources.es.translation.keyholderDkgStatusThresholdTooLow).not.toBe(resources.en.translation.keyholderDkgStatusThresholdTooLow);
+  });
+
   it('W1b: inProgress renders keyholderDkgStatusInProgress in textSecondary, no glyph', () => {
     const tr = render('inProgress');
     const node = findByTestID(tr, 'keyholder-dkg-status-inProgress');

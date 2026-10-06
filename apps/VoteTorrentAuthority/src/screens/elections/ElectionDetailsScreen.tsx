@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { View, ScrollView, StyleSheet, Share } from "react-native";
 import { ExtendedTheme, useRoute, useTheme, useNavigation, useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -50,22 +50,31 @@ export default function ElectionDetailsScreen() {
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
 
-	useEffect(() => {
-		const loadElectionDetails = async () => {
-			try {
-				if (electionEngine) {
-					// D-27: keyholders come from the engine only — no AsyncStorage merge.
-					const details = await electionEngine.getElectionDetails();
-					setElectionDetails(details);
+	// UAT 62 M: re-read on every focus, not once per mount. The keyholder cards are derived from
+	// these details, so a send or a same-device accept that happened while this screen sat under
+	// the stack never reached them until the screen was rebuilt.
+	useFocusEffect(
+		useCallback(() => {
+			let active = true;
+			const loadElectionDetails = async () => {
+				try {
+					if (electionEngine) {
+						// D-27: keyholders come from the engine only — no AsyncStorage merge.
+						const details = await electionEngine.getElectionDetails();
+						if (active) setElectionDetails(details);
+					}
+				} catch (error) {
+					console.warn("Error loading election details:", error);
+					if (active) setErrorMessage(error instanceof Error ? error.message : String(error));
 				}
-			} catch (error) {
-				console.warn("Error loading election details:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
-			}
-		};
+			};
 
-		loadElectionDetails();
-	}, [electionEngine]);
+			loadElectionDetails();
+			return () => {
+				active = false;
+			};
+		}, [electionEngine])
+	);
 
 	// G2/G12: Refresh ballot list on every focus so newly proposed templates appear
 	// immediately on return from CreateBallot/EditBallot.

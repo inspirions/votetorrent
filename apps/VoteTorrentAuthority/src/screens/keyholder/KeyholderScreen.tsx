@@ -12,6 +12,7 @@ import { useApp } from "../../providers/AppProvider";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { driveKeyholderDkg, keyholderDkgRowState, type KeyholderDkgRowState } from "./keyholder-dkg-driver";
 import { KeyholderDkgStatusRow } from "./components/KeyholderDkgStatusRow";
+import { KEYHOLDER_INVITE_STATE_META, keyholderInviteState } from "./keyholder-invite-status";
 
 type KeyholderParams = {
 	keyholder: InviteStatus<SentKeyholderInvite>;
@@ -22,8 +23,12 @@ export function KeyholderScreen() {
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NavigationProp>();
-	const { keyholder, electionEngine } = useRoute().params as KeyholderParams;
+	const { keyholder: routeKeyholder, electionEngine } = useRoute().params as KeyholderParams;
 	const { getEngine } = useApp();
+	// UAT 62 M: the route param is a snapshot taken when the card was tapped. Each focus re-reads
+	// the election and swaps in the same-named keyholder from the engine, so an accept (or decline)
+	// that happened since shows here without leaving the screen.
+	const [keyholder, setKeyholder] = useState<InviteStatus<SentKeyholderInvite>>(routeKeyholder);
 
 	useLayoutEffect(() => {
 		navigation.setOptions({ title: t("keyholder") });
@@ -40,7 +45,6 @@ export function KeyholderScreen() {
 	};
 
 	const seedInvite = keyholder.invite;
-	const isSent = Boolean(keyholder.result);
 
 	// D-19 (62-26): the keyholder DKG round driver runs pull-only, on screen focus — which
 	// covers "open" too, since useFocusEffect fires on first focus. No timer, no interval.
@@ -55,11 +59,15 @@ export function KeyholderScreen() {
 				inFlight.current = true;
 				(async () => {
 					try {
-						const electionId = (await electionEngine.getElectionDetails()).election.id;
+						const details = await electionEngine.getElectionDetails();
+						const electionId = details.election.id;
+						const fresh = details.current?.keyholders?.find((k) => k.invite?.name === routeKeyholder.invite?.name);
+						const current = fresh ?? routeKeyholder;
+						if (active && fresh) setKeyholder(fresh);
 						const outcome = await driveKeyholderDkg(
 							{ getEngine, vault: resolveKeyholderKeyVault() },
 							electionId,
-							keyholder.result?.invokedId
+							current.result?.invokedId
 						);
 						if (!active) return;
 						// Per this screen's own contract: when the status is unknown (null) AND an
@@ -80,7 +88,7 @@ export function KeyholderScreen() {
 			return () => {
 				active = false;
 			};
-		}, [electionEngine, getEngine, keyholder.result?.invokedId, t])
+		}, [electionEngine, getEngine, routeKeyholder, t])
 	);
 
 	return (
@@ -91,8 +99,8 @@ export function KeyholderScreen() {
 					<ThemedText>{seedInvite?.name ?? "(unnamed)"}</ThemedText>
 				</View>
 				<View style={styles.detail}>
-					<ThemedText type="defaultSemiBold">{t("type")}: </ThemedText>
-					<ThemedText>{isSent ? t("sent") : t("unsent")}</ThemedText>
+					<ThemedText type="defaultSemiBold">{t("keyholderStatusLabel")}: </ThemedText>
+					<ThemedText testID="keyholder-invite-status">{t(KEYHOLDER_INVITE_STATE_META[keyholderInviteState(keyholder)].labelKey)}</ThemedText>
 				</View>
 				{dkgRowState !== null ? <KeyholderDkgStatusRow state={dkgRowState} /> : null}
 				<InlineError message={dkgErrorMessage} />

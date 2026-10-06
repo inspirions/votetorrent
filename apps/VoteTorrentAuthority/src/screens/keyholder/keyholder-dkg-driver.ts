@@ -19,7 +19,7 @@ import type { IKeyVault } from '@votetorrent/vote-engine/rn';
 import { getKeyholderIdentity, keyholderSigningKeyAlias, createKeyholderSigner } from '../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../engines/key-vault';
 
-export type KeyholderDkgRowState = 'loading' | 'pending' | 'inProgress' | 'complete' | 'complaint' | 'failed';
+export type KeyholderDkgRowState = 'loading' | 'pending' | 'thresholdTooLow' | 'inProgress' | 'complete' | 'complaint' | 'failed';
 
 /**
  * Exhaustive mapping. `null` (no status read yet, or the read failed) is 'loading'. A
@@ -33,8 +33,14 @@ export function keyholderDkgRowState(status: KeyholderDkgStatus | null): Keyhold
 	if (status === null) return 'loading';
 	if (status.self?.isDisqualified) return 'failed';
 	switch (status.phase) {
-		case 'not-started':
 		case 'blocked':
+			// The DKG needs 2 <= threshold <= participants (`assertDkgThreshold`). A policy threshold
+			// below 2 (1-of-1) is blocked FOREVER — before anyone accepts it reads 'no-keyholders',
+			// after it reads 'threshold-out-of-range' — so "waiting for other keyholders" would
+			// never end. A threshold ABOVE the accepted count is a real wait and stays 'pending'.
+			if (status.threshold !== null && status.threshold !== undefined && status.threshold < 2) return 'thresholdTooLow';
+			return 'pending';
+		case 'not-started':
 			return 'pending';
 		case 'in-progress':
 			return 'inProgress';

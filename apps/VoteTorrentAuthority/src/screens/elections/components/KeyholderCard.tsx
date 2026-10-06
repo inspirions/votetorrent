@@ -6,6 +6,7 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { useTheme } from "@react-navigation/native";
 import { ExtendedTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
+import { KEYHOLDER_INVITE_STATE_META, keyholderInviteState } from "../../keyholder/keyholder-invite-status";
 
 interface KeyholderCardParams {
 	invitationStatus: InviteStatus<SentKeyholderInvite>;
@@ -17,9 +18,10 @@ export function KeyholderCard({ invitationStatus, onPress }: KeyholderCardParams
 	const { t } = useTranslation();
 
 	const determineStatus = (invitationStatus: InviteStatus<SentKeyholderInvite>) => {
-		const sent = Boolean(invitationStatus.result);
-		const status = sent ? t("sent") : t("unsent");
-		const color = sent ? colors.success : colors.warning;
+		// `result` means the keyholder RESPONDED (accepted/declined), never that an invite was sent.
+		const meta = KEYHOLDER_INVITE_STATE_META[keyholderInviteState(invitationStatus)];
+		const status = t(meta.labelKey);
+		const color = colors[meta.colorKey];
 
 		return (
 			<ThemedText type="defaultSemiBold" style={{ color }} numberOfLines={1}>

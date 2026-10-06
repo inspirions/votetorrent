@@ -38,6 +38,12 @@ export function KeyholderDkgStatusRow({ state }: KeyholderDkgStatusRowProps) {
 		case 'pending':
 			text = t('keyholderDkgStatusPending');
 			break;
+		case 'thresholdTooLow':
+			glyph = 'triangle-exclamation';
+			glyphColor = colors.warning;
+			textColor = colors.warning;
+			text = t('keyholderDkgStatusThresholdTooLow');
+			break;
 		case 'inProgress':
 			text = t('keyholderDkgStatusInProgress');
 			break;
