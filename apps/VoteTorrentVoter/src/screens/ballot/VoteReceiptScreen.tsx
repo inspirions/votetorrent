@@ -12,6 +12,9 @@
  * wrapped groups of the exact stored characters. D-21: a revision mismatch shows the stale line.
  *
  * Storage is reached only through `engines/vote-receipt.ts` (gate K1). Nothing is logged.
+ *
+ * CR-01 (review): FLAG_SECURE while focused, and an opaque privacy cover instead of the revealed
+ * record while the app is not active (see utils/receipt-privacy.ts).
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {AppState, Platform, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
@@ -33,6 +36,7 @@ import type {VoteReceiptLoad} from '../../engines/vote-receipt';
 import type {VoteRecord, VoteRecordEnvelope} from '../../engines/vote-record-vault';
 import {copyVoteCode} from '../../utils/vote-code-clipboard';
 import type {VoteCodeCopyResult} from '../../utils/vote-code-clipboard';
+import {usePrivacyCover, useSecureScreenWhileFocused} from '../../utils/receipt-privacy';
 
 type ReceiptRoute = RouteProp<VoteStackParamList, 'VoteReceipt'>;
 type ReceiptNavigation = NativeStackNavigationProp<VoteStackParamList, 'VoteReceipt'>;
@@ -51,6 +55,8 @@ export default function VoteReceiptScreen() {
 	const {t} = useTranslation('ballot');
 	const route = useRoute<ReceiptRoute>();
 	const navigation = useNavigation<ReceiptNavigation>();
+	useSecureScreenWhileFocused();
+	const covered = usePrivacyCover();
 
 	const rawId: unknown = route.params?.electionId;
 	const electionId = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
@@ -263,7 +269,7 @@ export default function VoteReceiptScreen() {
 							</View>
 						) : null}
 
-						{record !== null ? (
+						{record !== null && !covered ? (
 							<View style={styles.block}>
 								<Text style={[bodyFont, mediumFont, {color: colors.text}]}>{t('receipt.choicesHeading')}</Text>
 								{views.map((view, i) => (
@@ -337,6 +343,10 @@ export default function VoteReceiptScreen() {
 					</>
 				) : null}
 			</ScrollView>
+
+			{covered && record !== null ? (
+				<View testID="receipt-privacy-cover" style={[StyleSheet.absoluteFill, {backgroundColor: colors.background}]} />
+			) : null}
 
 			<View style={[globalStyles.footerButtonsContainer, styles.footer]}>
 				<Pressable
