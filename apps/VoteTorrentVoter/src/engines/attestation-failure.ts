@@ -18,6 +18,11 @@
  *     request to the authority (an `IntakeError`, e.g. `no-recipients` when the authority has no
  *     officer able to receive it yet). Blaming the device here misleads the voter; the copy
  *     instead says the authority can't take the registration right now. Retry stays available.
+ *   - `'identity-lost'` — the voter identity on this phone can no longer be unwrapped, PERMANENTLY
+ *     (a `DeviceIdentityKeyUnavailableError` with reason `no-wrap-key` / `tag-mismatch` /
+ *     `key-mismatch`). Retrying can never succeed; the screens render the identity recovery view
+ *     (an explicit, confirmed "create a new identity"). Transient identity reasons stay
+ *     `'recoverable-transient'`. Not subject to the `__DEV__` terminal downgrade.
  *
  * Release-only terminal invariant (D-09/D-07): a terminal-class code is downgraded to
  * `'recoverable-transient'` whenever `__DEV__` is true, so the emulator (which has no real
@@ -29,6 +34,8 @@
  * cannot be reached in release.
  */
 
+import {isReplaceableIdentityError} from './identity-errors'
+
 /** D-09 three-way failure UX class. */
 export type AttestationFailureClass =
 	| 'terminal'
@@ -36,6 +43,8 @@ export type AttestationFailureClass =
 	| 'recoverable-transient'
 	| 'intake-unavailable'
 	| 'no-election'
+	/** WR-02: the device identity is permanently unrecoverable — offer the recovery view, never a retry. */
+	| 'identity-lost'
 
 /** Terminal-class native reject codes (45-02 native reject mapping / 45-05 wrapper contract). */
 const TERMINAL_CODES = new Set(['NO_STRONGBOX_OR_TEE', 'DEVICE_INTEGRITY_FAILED', 'PROVISION_FAILED'])
@@ -51,6 +60,11 @@ const RECOVERABLE_ACTION_CODES = new Set(['NO_BIOMETRICS_ENROLLED'])
  * classifies as `'intake-unavailable'`.
  */
 export function classifyAttestationFailure(err: unknown): AttestationFailureClass {
+	// WR-02: a permanently lost identity (matched by name + one of the three permanent reasons,
+	// never by message) can never succeed on retry — in release as in __DEV__.
+	if (isReplaceableIdentityError(err)) {
+		return 'identity-lost'
+	}
 	// No election on this phone (named error thrown by ConfirmationScreen before any ceremony
 	// step): retrying cannot help and the device is not at fault.
 	if ((err as {name?: unknown} | null | undefined)?.name === 'NoElectionConfiguredError') {

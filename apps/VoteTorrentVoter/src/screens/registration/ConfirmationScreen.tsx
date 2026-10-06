@@ -49,8 +49,9 @@
  * On any thrown step, `classifyAttestationFailure(err)` (D-09) drives the failure UX exactly as
  * before: `'recoverable-action'` renders a setup prompt + retry reusing the same `registrantId`
  * (WR-02); `'recoverable-transient'` renders a generic retry; `'terminal'` (release-only) renders a
- * terminal message with no retry. Classified copy is generic by design — raw reject codes / internal
- * error messages never reach the UI.
+ * terminal message with no retry; `'identity-lost'` (WR-02, a permanently unrecoverable identity)
+ * renders the identity recovery view with no retry. Classified copy is generic by design — raw
+ * reject codes / internal error messages never reach the UI.
  *
  * Plan 28 (D-45) addition: on the P2P route only, step (1) also mints the registration code
  * (`mintRegistrationCodeForSubmit`, the registering device's own identity-key signer — never a raw
@@ -89,6 +90,7 @@ import {resolveVoterRequestTransports} from './attach-voter-request-transport';
 import {RegistrationConfirmationCodeCard} from './RegistrationConfirmationCodeCard';
 import {globalStyles} from '../../theme/styles';
 import {errorClassName} from '../../utils/errorClassName';
+import {IdentityRecoveryView} from '../../components/IdentityRecoveryView';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
 type ConfirmationNavigationProp = NativeStackNavigationProp<RegistrationStackParamList, 'Confirmation'>;
@@ -140,7 +142,9 @@ async function pollForNotice<T extends DecisionNoticeLike>(
 }
 
 export default function ConfirmationScreen() {
-	const {seededElectionId, getEngine} = useVoterApp();
+	// WR-02: `createNewIdentity` is the provider's explicit, user-confirmed identity replacement —
+	// reached ONLY from the recovery view's confirm step below (never the officer signer).
+	const {seededElectionId, getEngine, createNewIdentity} = useVoterApp();
 	const {draft, clearDraft} = useRegistrationDraft();
 	const navigation = useNavigation<ConfirmationNavigationProp>();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
@@ -415,6 +419,19 @@ export default function ConfirmationScreen() {
 	const captionCopy = isIos ? t('confirmation.caption') : t('confirmation.caption.android');
 	const ctaCopy = isIos ? t('confirmation.cta') : t('confirmation.cta.android');
 
+	// WR-02: a permanently lost identity can never succeed on retry. In release the boot never
+	// reads the identity (only the __DEV__ seed does), so registration is where the voter meets
+	// it: offer the same recovery view as the boot, in place of the confirm screen. The provider's
+	// createNewIdentity re-runs the boot (re-mounting the app tree), so no navigation is needed;
+	// the view's Try Again (shown only after a failed create) re-runs this screen's ceremony.
+	if (failureClass === 'identity-lost' && !isPending) {
+		return (
+			<View testID="confirmation-identity-lost" style={[styles.screen, {backgroundColor: colors.background}]}>
+				<IdentityRecoveryView onCreateNewIdentity={createNewIdentity} onRetry={onConfirm} />
+			</View>
+		);
+	}
+
 	const errorCopy =
 		failureClass === 'recoverable-action'
 			? t('confirmation.error.biometricNotEnrolled')
@@ -426,7 +443,7 @@ export default function ConfirmationScreen() {
 						? t('confirmation.error.intakeUnavailable')
 						: failureClass === 'no-election'
 							? t('confirmation.error.noElection')
-							: null;
+							: null; // includes 'identity-lost': IdentityRecoveryView above, never error copy
 
 	return (
 		<ScrollView
@@ -529,7 +546,7 @@ export default function ConfirmationScreen() {
 							{errorCopy}
 						</Text>
 					) : null}
-					{failureClass === 'terminal' || failureClass === 'no-election' ? null : failureClass === 'recoverable-action' ? (
+					{failureClass === 'terminal' || failureClass === 'no-election' || failureClass === 'identity-lost' ? null : failureClass === 'recoverable-action' ? (
 						<>
 							<Pressable
 								testID="confirmation-setup-cta"

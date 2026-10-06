@@ -48,6 +48,7 @@ import type {IdentityFallbackInput, ReassociationCeremonyDeps, ReassociationEvid
 import type {AssociationRequestInit} from '@votetorrent/vote-core';
 import {globalStyles} from '../../theme/styles';
 import {errorClassName} from '../../utils/errorClassName';
+import {IdentityRecoveryView} from '../../components/IdentityRecoveryView';
 import type {RegistrationStackParamList} from '../../navigation/types';
 
 type ContinueNavigationProp = NativeStackNavigationProp<RegistrationStackParamList, 'ContinueOnAnotherDevice'>;
@@ -86,7 +87,8 @@ export function revealOffsetFor({
 const REVEAL_MARGIN = 16;
 
 export default function ContinueOnAnotherDeviceScreen() {
-	const {getEngine, seededElectionId} = useVoterApp();
+	// WR-02: `createNewIdentity` is reached ONLY from the recovery view's confirm step below.
+	const {getEngine, seededElectionId, createNewIdentity} = useVoterApp();
 	const navigation = useNavigation<ContinueNavigationProp>();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('continuity');
@@ -314,6 +316,12 @@ export default function ContinueOnAnotherDeviceScreen() {
 			setBranch('pending');
 		} catch (err) {
 			console.error('ContinueOnAnotherDeviceScreen: submit failed:', errorClassName(err));
+			// WR-02: a permanently lost identity gets the recovery view, not a resubmit that can
+			// never succeed. Every other submit failure keeps the generic submit error.
+			if (classifyAttestationFailure(err) === 'identity-lost') {
+				setFailureClass('identity-lost');
+				return;
+			}
 			setSubmitError(t('newDevice.submitError'));
 		}
 	}
@@ -375,6 +383,17 @@ export default function ContinueOnAnotherDeviceScreen() {
 		return (
 			<View style={[styles.screen, {backgroundColor: colors.background}, globalStyles.container]}>
 				<ActivityIndicator testID="continue-device-resolving" color={colors.primary} />
+			</View>
+		);
+	}
+
+	// WR-02: same recovery as the boot and the registration Confirm screen. createNewIdentity
+	// re-runs the boot (re-mounting the app tree), so no navigation is needed; the view's Try Again
+	// (shown only after a failed create) clears the failure and re-runs the pending advance.
+	if (failureClass === 'identity-lost') {
+		return (
+			<View testID="continue-device-identity-lost" style={[styles.screen, {backgroundColor: colors.background}]}>
+				<IdentityRecoveryView onCreateNewIdentity={createNewIdentity} onRetry={retryAdvance} />
 			</View>
 		);
 	}
