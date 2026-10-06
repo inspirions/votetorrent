@@ -28,8 +28,8 @@ import type { Ballot, BallotSignatureTask, RegisterInit, Signature } from '@vote
 import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, IntakeEngine, SignatureTasksEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import type { EngineContext } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
-import { seedDevNetwork, confirmDevBallot, DEV_SEED_NETWORK_NAME } from '../dev-seed'
-import { readVoterBallot, readVoterElection } from '../election-read'
+import { seedDevNetwork, confirmDevBallot, DEV_SEED_NETWORK_NAME, DEV_SEED_BALLOT_QUESTIONS } from '../dev-seed'
+import { readVoteContext, readVoterBallot, readVoterElection, toVoterBallot } from '../election-read'
 import { resolveAttestationProducer } from '../attestation-producer'
 import { setDeviceKeyWrapProviderForTests } from '../device-key-wrap'
 import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
@@ -369,6 +369,69 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		])
 		const senate = releaseRead.offices.find(o => o.title === 'U.S. Senate')!
 		expect(senate.candidates[0]).toMatchObject({ name: 'Diana Foster', party: 'Democratic Party' })
+	})
+
+	it('readVoteContext over the seeded dev election: confirmed ballot, real revision, window from the timeline (D-01/D-03/D-04/D-05)', async () => {
+		const { seeded, ctx, authorityId } = await setup()
+		const deps = {
+			getEngine: async <T,>() => new ElectionsEngine(ctx) as unknown as T,
+			fallbackElectionId: seeded.electionId,
+		}
+		const details = await (await new ElectionsEngine(ctx).openElection(seeded.electionId)).getElectionDetails()
+
+		const live = await readVoteContext(deps, Date.now())
+		expect(live.electionId).toBe(seeded.electionId)
+		expect(live.authorityId).toBe(authorityId)
+		expect(live.revision).toBe(details.current.revision)
+		expect(typeof live.revision).toBe('number')
+		expect(live.open).toBe(false)
+		expect(live.lifecycleState).toBe('Upcoming')
+
+		const openAt = details.current.timeline.votingStarts + 60_000
+		const openCtx = await readVoteContext(deps, openAt)
+		expect(openCtx.open).toBe(true)
+		expect(openCtx.lifecycleState).toBe('Open')
+		expect(openCtx.ballots).toHaveLength(1)
+		expect(openCtx.unconfirmedBallotIds).toEqual([])
+		expect(openCtx.unsupportedQuestionCount).toBe(0)
+
+		// Sorted sets, never sequences: a confirmed read comes back in Code order (63-04 finding).
+		const byCode = new Map(openCtx.ballots[0]!.questions.map((q) => [q.code, q]))
+		expect([...byCode.keys()].sort()).toEqual(DEV_SEED_BALLOT_QUESTIONS.map((q) => q.code).sort())
+
+		const offices = toVoterBallot(openCtx.electionId, openCtx.ballots).offices
+		expect(Object.fromEntries(offices.map((o) => [o.questionCode, o.required]))).toEqual({
+			'us-senate': true,
+			'us-house': false,
+			governor: true,
+			'state-board-education': true,
+			'state-senate': false,
+		})
+		for (const o of offices) {
+			expect(o.hasDependsOn).toBe(false)
+			expect(o.ballotId).toBe(openCtx.ballots[0]!.id)
+			const codes = byCode.get(o.questionCode)!.options.map((x) => x.code)
+			for (const c of o.candidates) expect(codes).toContain(c.optionCode)
+		}
+	})
+
+	it('readVoteContext survives a re-attach seed: still one confirmed ballot and the same revision', async () => {
+		const networksEngine = new NetworksEngine(new LocalStorageReact())
+		const first = await seedDevNetwork(networksEngine)
+		const ctx = networksEngine.getEstablishedContext(first.networkReference.hash)!
+		const deps = {
+			getEngine: async <T,>() => new ElectionsEngine(ctx) as unknown as T,
+			fallbackElectionId: first.electionId,
+		}
+		const details = await (await new ElectionsEngine(ctx).openElection(first.electionId)).getElectionDetails()
+		const openAt = details.current.timeline.votingStarts + 60_000
+		const before = await readVoteContext(deps, openAt)
+
+		await seedDevNetwork(networksEngine)
+		const after = await readVoteContext(deps, openAt)
+		expect(after.ballots).toHaveLength(1)
+		expect(after.unconfirmedBallotIds).toEqual([])
+		expect(after.revision).toBe(before.revision)
 	})
 
 	it('D-03: a fresh seed leaves every ballot confirmed; D-04: two questions read back required:false', async () => {
