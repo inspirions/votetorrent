@@ -435,6 +435,39 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		)
 	}
 
+	/** Plan 62-75: write a sanitized cache file; resolves `{ uri }`. Rejects INVALID_NAME / WRITE_FAILED. */
+	override fun writeShareFile(fileName: String, contents: String, promise: Promise) {
+		Thread {
+			try {
+				val uri = FileShareHelper.writeShareFile(reactApplicationContext, fileName, contents)
+				promise.resolve(Arguments.createMap().apply { putString("uri", uri.toString()) })
+			} catch (e: FileShareException) {
+				promise.reject(e.code, e.message, e)
+			} catch (e: Exception) {
+				promise.reject("WRITE_FAILED", e)
+			}
+		}.start()
+	}
+
+	/** Plan 62-75: share a vt-share cache file as a file (never EXTRA_TEXT). Rejects SHARE_FAILED. */
+	override fun shareFile(uri: String, mimeType: String, subject: String, dialogTitle: String, promise: Promise) {
+		try {
+			FileShareHelper.shareFile(
+				reactApplicationContext.currentActivity,
+				reactApplicationContext,
+				uri,
+				mimeType,
+				subject,
+				dialogTitle,
+			)
+			promise.resolve(Arguments.createMap().apply { putBoolean("launched", true) })
+		} catch (e: FileShareException) {
+			promise.reject(e.code, e.message, e)
+		} catch (e: Exception) {
+			promise.reject("SHARE_FAILED", e)
+		}
+	}
+
 	companion object {
 		const val NAME = "AttestationNative"
 	}

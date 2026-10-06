@@ -247,6 +247,24 @@ export interface Spec extends TurboModule {
 		promptSubtitle: string,
 		promptNegativeButton: string,
 	): Promise<Object>
+
+	/**
+	 * Writes UTF-8 `contents` to a per-app cache file named `fileName` inside a private `vt-share`
+	 * directory (Android `cacheDir/vt-share`, iOS `NSTemporaryDirectory()/vt-share`), emptying that
+	 * directory first so only the newest export lingers. Resolves `{ uri }` (a `file://` URI).
+	 *
+	 * `fileName` must match `^[A-Za-z0-9._-]{1,100}$` and must not contain `..`. Reject codes:
+	 * `INVALID_NAME`, `WRITE_FAILED`.
+	 */
+	writeShareFile(fileName: string, contents: string): Promise<Object>
+
+	/**
+	 * Android only: shares the cache file at `uri` (a `file://` URI inside `vt-share`) AS A FILE via
+	 * `ACTION_SEND` + `EXTRA_STREAM` (a `content://` URI from a private FileProvider, read grant
+	 * only). Resolves `{ launched: true }`. Reject codes: `SHARE_FAILED`, `UNSUPPORTED` (always on
+	 * iOS, which shares through RN `Share.share({ url })` instead).
+	 */
+	shareFile(uri: string, mimeType: string, subject: string, dialogTitle: string): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')
