@@ -120,6 +120,9 @@ export function useCadreNode(): CadreNodeContextType {
 // ---------------------------------------------------------------------------
 const PARTY_ID = 'votetorrent';
 
+/** Strand-address re-ask interval (ms); see the `controlCohort` comment in the CadreNode config. */
+const STRAND_ADDR_REFRESH_MS = 30_000;
+
 const bootstrapConfig = readBootstrapConfig(bootstrapConfigDoc);
 
 /**
@@ -329,9 +332,12 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
           network: {
-            // No `controlCohort.strandAddrRefreshMs` override, matching the drone
-            // (packages/p2p-probe-host/drone.mjs): cadre-core now tracks the strand-addr
-            // refresh per (sibling, strand) (sereus#21), so the 15 s workaround is gone.
+            // cadre-core 1.13.0 stamps the strand-addr refresh per (sibling, strand) from the
+            // sibling's OUTCOME: an answer, even an empty one, waits the full default (10 min).
+            // A sibling that answered before it held the strand's addresses therefore blinds this
+            // phone (round-3 UAT test 15: no strand socket for >60 s after Connect). Re-ask every
+            // 30 s until the upstream fix lands; see the strand-addr-refresh-throttle todo.
+            controlCohort: { strandAddrRefreshMs: STRAND_ADDR_REFRESH_MS },
             transports: [
               webSockets(),
               // D-10: cast by the global transportSymbol, not structural type — the

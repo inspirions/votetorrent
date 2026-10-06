@@ -207,6 +207,16 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
     expect(node.start).toHaveBeenCalledTimes(1);
   });
 
+  it('configures network.controlCohort.strandAddrRefreshMs = 30000 and leaves other network fields', async () => {
+    renderProvider();
+    await flushBoot();
+    const opts = mockConstructedNodes[0].receivedOptions as {
+      network: Record<string, unknown>;
+    };
+    expect(opts.network.controlCohort).toEqual({ strandAddrRefreshMs: 30000 });
+    expect(Array.isArray(opts.network.transports)).toBe(true);
+  });
+
   it('does NOT call setInterval anywhere (no polling — D-10)', async () => {
     const setIntervalSpy = jest.spyOn(globalThis, 'setInterval');
     renderProvider();

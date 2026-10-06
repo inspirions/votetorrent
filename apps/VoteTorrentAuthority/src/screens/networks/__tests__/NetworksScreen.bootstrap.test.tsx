@@ -136,9 +136,18 @@ let mockControl: { dial: jest.Mock; getConnections: jest.Mock } | null = {
   dial: mockDial,
   getConnections: mockGetConnections,
 };
-let mockNode: { addStrand: jest.Mock; getControlNode: () => typeof mockControl } | null = {
+const mockReconcile = jest.fn(async () => ({}));
+const mockGetStrands = jest.fn(() => new Map());
+let mockNode: {
+  addStrand: jest.Mock;
+  getControlNode: () => typeof mockControl;
+  reconcileControlCohort: jest.Mock;
+  getStrands: jest.Mock;
+} | null = {
   addStrand: mockAddStrand,
   getControlNode: () => mockControl,
+  reconcileControlCohort: mockReconcile,
+  getStrands: mockGetStrands,
 };
 jest.mock('../../../providers/CadreNodeProvider', () => ({
   useCadreNode: () => ({ node: mockNode, syncState: 'offline', connectedPeers: jest.fn() }),
@@ -198,7 +207,13 @@ function hasErrorText(tr: renderer.ReactTestRenderer, key: string) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockControl = { dial: mockDial, getConnections: mockGetConnections };
-  mockNode = { addStrand: mockAddStrand, getControlNode: () => mockControl };
+  mockNode = {
+    addStrand: mockAddStrand,
+    getControlNode: () => mockControl,
+    reconcileControlCohort: mockReconcile,
+    getStrands: mockGetStrands,
+  };
+  jest.spyOn(console, 'info').mockImplementation(() => undefined);
 });
 
 describe('NetworksScreen bootstrap Connect — D-39: dial only, never addStrand', () => {
@@ -301,5 +316,38 @@ describe('NetworksScreen bootstrap Connect — D-39: dial only, never addStrand'
 
     expect(mockDial).not.toHaveBeenCalled();
     expect(hasErrorText(tr, 'invalidBootstrapAddress')).toBe(true);
+  });
+
+  it('A: a successful dial triggers exactly one control-cohort re-probe', async () => {
+    const tr = await renderScreen();
+    await renderer.act(async () => {
+      getBootstrapInput(tr).props.onChangeText('/ip4/127.0.0.1/tcp/4001/ws/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X');
+    });
+    await renderer.act(async () => {
+      await getConnectButton(tr).props.onPress();
+    });
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+    expect(hasErrorText(tr, 'joinFailed')).toBe(false);
+  });
+
+  it('B: an invalid address or a rejected dial never triggers the re-probe', async () => {
+    const tr = await renderScreen();
+    await renderer.act(async () => {
+      getBootstrapInput(tr).props.onChangeText('garbage');
+    });
+    await renderer.act(async () => {
+      await getConnectButton(tr).props.onPress();
+    });
+    expect(mockReconcile).not.toHaveBeenCalled();
+
+    mockDial.mockRejectedValueOnce(new Error('refused'));
+    await renderer.act(async () => {
+      getBootstrapInput(tr).props.onChangeText('/ip4/127.0.0.1/tcp/4001/ws/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X');
+    });
+    await renderer.act(async () => {
+      await getConnectButton(tr).props.onPress();
+    });
+    expect(mockReconcile).not.toHaveBeenCalled();
+    expect(hasErrorText(tr, 'joinFailed')).toBe(true);
   });
 });

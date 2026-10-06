@@ -17,6 +17,7 @@ import { CustomTextInput } from "../../components/CustomTextInput";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
+import { reprobeAfterConnect } from "./reprobeAfterConnect";
 
 export default function NetworksScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -67,6 +68,13 @@ export default function NetworksScreen() {
 			await control.dial(parsed);
 		} catch {
 			setJoinError(t("joinFailed"));
+			return;
+		}
+		// Success only: ask cadre-core for an immediate cohort pass so already-running strands
+		// refresh their peer addresses now rather than on the next periodic pass. Fire and
+		// forget; no UI state or copy changes. Never opens a strand (D-39).
+		if (node) {
+			void reprobeAfterConnect(node);
 		}
 	}, [bootstrapAddr, node, t]);
 
