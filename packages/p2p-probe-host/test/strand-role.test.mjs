@@ -30,3 +30,13 @@ test('explicit join -> founder:false', () => {
 test('explicit found -> founder:true', () => {
   assert.deepEqual(strandFounderOption({ role: 'found', explicit: true }), { founder: true });
 });
+test('explicit STRAND_ID with no role throws naming both roles', () => {
+  assert.throws(() => resolveStrandRole({ STRAND_ID: 'abc' }, true), /DRONE_STRAND_ROLE.*found or join/);
+  assert.throws(() => resolveStrandRole({ STRAND_ID: 'abc', DRONE_STRAND_ROLE: '' }, false), /DRONE_STRAND_ROLE/);
+});
+test('explicit STRAND_ID with an explicit role resolves', () => {
+  assert.deepEqual(resolveStrandRole({ STRAND_ID: 'abc', DRONE_STRAND_ROLE: 'join' }, true), { role: 'join', explicit: true });
+});
+test('empty STRAND_ID keeps the inferred default', () => {
+  assert.deepEqual(resolveStrandRole({ STRAND_ID: '' }, false), { role: 'join', explicit: false });
+});

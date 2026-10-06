@@ -13,6 +13,11 @@ const ROLES = ['found', 'join'];
 export function resolveStrandRole(env, isControlFounder) {
   const raw = env.DRONE_STRAND_ROLE;
   if (raw === undefined || raw === '') {
+    // An explicit STRAND_ID names a strand that may already exist (a device-founded network), so
+    // guessing the role there can fork it. Only the no-STRAND_ID dev default may infer the role.
+    if (env.STRAND_ID !== undefined && env.STRAND_ID !== '') {
+      throw new Error(`STRAND_ID=${JSON.stringify(env.STRAND_ID)} needs an explicit DRONE_STRAND_ROLE (${ROLES.join(' or ')}); use join when a device created the network`);
+    }
     return { role: isControlFounder ? 'found' : 'join', explicit: false };
   }
   if (!ROLES.includes(raw)) {

@@ -447,10 +447,11 @@ await node.addStrand({
   // machine joined" and every write fails with "no active strand database" -- which reads exactly
   // like a peer-reachability failure. An explicit value wins over the derivation. Left undefined
   // on a joiner drone, so its gating is the real thing.
-  // founder:true only when this drone founds the strand. An unset DRONE_STRAND_ROLE keeps today's
-  // options (control founder -> founder:true, joiner drone -> no founder key). An explicit
-  // DRONE_STRAND_ROLE=join (founder:false) is REQUIRED when STRAND_ID is a network a device
-  // created, else two histories share one id (round-3 test 15).
+  // founder:true only when this drone founds the strand. With no STRAND_ID set, an unset
+  // DRONE_STRAND_ROLE keeps the inferred options (control founder -> founder:true, joiner drone ->
+  // no founder key). With an explicit STRAND_ID, resolveStrandRole refuses to start unless
+  // DRONE_STRAND_ROLE is given; use join (founder:false) when a device created the network, else
+  // two histories share one id (round-3 test 15).
   ...strandFounderOption(STRAND_ROLE),
   // Belt and braces for the joiner drone: `awaitFirstSync: false` returns as soon as the runtime
   // is launched (possibly 'syncing' with no database) instead of blocking the whole rig's start-up

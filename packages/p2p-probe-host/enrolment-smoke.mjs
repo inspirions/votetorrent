@@ -77,7 +77,7 @@ async function main() {
   L('starting drone.mjs as founder ...');
   drone = spawn(process.execPath, ['drone.mjs'], {
     cwd: import.meta.dirname,
-    env: { ...process.env, STRAND_ID, DRONE_ENROL_DIR: enrolDir },
+    env: { ...process.env, STRAND_ID, DRONE_STRAND_ROLE: 'found', DRONE_ENROL_DIR: enrolDir },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   drone.stdout.on('data', (d) => { droneOut += d.toString(); });
@@ -140,6 +140,7 @@ async function main() {
     env: {
       ...process.env,
       STRAND_ID,
+      DRONE_STRAND_ROLE: 'join',
       DRONE_BOOTSTRAP_CONTROL_ADDR: droneAddr,
       DRONE_INVITE: encodedInvite,
     },
