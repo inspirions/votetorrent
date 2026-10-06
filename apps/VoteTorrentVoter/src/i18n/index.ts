@@ -208,6 +208,9 @@ const resources = {
 			'submit.failure.storeFailed': "Your vote was not saved. This phone couldn't store it. Try again.",
 			'submit.failure.storeUnreadable': "Your vote was not saved. A vote already on this phone can't be read, so a new one can't replace it.",
 			'submit.failure.unexpected': "Your vote was not saved. Something went wrong. Try again.",
+			// Saved-vote status on Home and Timeline (saved on this phone, not sent).
+			'savedVote.status': 'Vote saved — not sent',
+			'savedVote.viewCta': 'View saved vote',
 		},
 		registration: {
 			headerTitle: 'Registration',
@@ -383,7 +386,8 @@ const resources = {
 			'registration.editCta': 'Edit registration',
 			'voting.previewBallotCta': 'Preview ballot',
 			'voting.voteNowCta': 'Vote now',
-			'voting.viewSubmissionCta': 'View submission',
+			// Opens the saved-vote receipt; offered only when a vote is saved on this phone.
+			'voting.viewSubmissionCta': 'View saved vote',
 			'row.detailsCta': 'See details',
 			'keyholders.viewCta': 'View Keyholders',
 			'keyholders.screenTitle': 'Keyholders',
@@ -631,6 +635,9 @@ const resources = {
 			'submit.failure.storeFailed': "Tu voto no se guardó. Este teléfono no pudo almacenarlo. Inténtalo de nuevo.",
 			'submit.failure.storeUnreadable': "Tu voto no se guardó. Un voto que ya está en este teléfono no se puede leer, así que no se puede reemplazar.",
 			'submit.failure.unexpected': "Tu voto no se guardó. Algo salió mal. Inténtalo de nuevo.",
+			// Saved-vote status on Home and Timeline (saved on this phone, not sent).
+			'savedVote.status': 'Voto guardado — no enviado',
+			'savedVote.viewCta': 'Ver voto guardado',
 		},
 		registration: {
 			headerTitle: 'Registro',
@@ -757,7 +764,7 @@ const resources = {
 			'registration.editCta': 'Editar registro',
 			'voting.previewBallotCta': 'Vista previa de la boleta',
 			'voting.voteNowCta': 'Votar ahora',
-			'voting.viewSubmissionCta': 'Ver mi envío',
+			'voting.viewSubmissionCta': 'Ver voto guardado',
 			'row.detailsCta': 'Ver detalles',
 			'keyholders.viewCta': 'Ver Custodios de Claves',
 			'keyholders.screenTitle': 'Custodios de Claves',
