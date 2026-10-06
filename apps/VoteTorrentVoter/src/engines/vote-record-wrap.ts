@@ -15,11 +15,24 @@
  * the windowed policy.
  *
  * Never reuse the identity alias or its provider.
+ *
+ * Phase 63 review WR-04: on Android below API 30 the effective window is 0 (per-use, biometric
+ * CryptoObject), because the only pre-30 time-bound key is satisfied by a PIN and survives biometric
+ * re-enrollment. Native downgrades a window there too (defence in depth).
+ *
+ * Phase 63 review CR-02: a biometric enrollment change invalidates this alias for good. When sealing a
+ * NEW record reports the key invalidated (`KEY_INVALIDATED`, or iOS's `NO_WRAP_KEY` for an item it can
+ * no longer read), the provider deletes the vote-record key and wraps exactly once more under a fresh
+ * one. Records sealed under the old key were already unreadable and stay so (the receipt maps that to
+ * its unreadable state). Only the vote-record alias can ever be deleted (JS and native both refuse any
+ * other alias), and the read path never deletes.
  */
 
+import { Platform } from 'react-native'
 import {
 	createNativeSecretWrapper,
 	SecretWrapError,
+	type ReplaceableSecretWrapper,
 	type SecretWrapOptions,
 	type SecretWrapPrompt,
 	type SecretWrapper,
@@ -56,18 +69,85 @@ export interface VoteRecordWrapProvider {
  */
 export const VOTE_RECORD_AUTH_WINDOW_SECONDS = 10
 
+/** WR-04: the lowest Android API level whose time-bound key is BIOMETRIC_STRONG-only. */
+export const MIN_ANDROID_API_FOR_AUTH_WINDOW = 30
+
+export interface PlatformInfo {
+	OS: string
+	Version: number | string
+}
+
+/**
+ * WR-04: the window this platform may actually use. Android below API 30 gets 0 (per-use): the
+ * pre-30 time-bound key admits a device PIN and is not invalidated by biometric re-enrollment, which
+ * would break D-13. Every other platform gets `VOTE_RECORD_AUTH_WINDOW_SECONDS` (iOS ignores it).
+ */
+export function voteRecordAuthWindowSeconds(platform: PlatformInfo = Platform): number {
+	if (platform.OS === 'android') {
+		const level = typeof platform.Version === 'number' ? platform.Version : Number.parseInt(String(platform.Version), 10)
+		// An unreadable level is treated as old: per-use is the strictly stronger policy.
+		if (!Number.isFinite(level) || level < MIN_ANDROID_API_FOR_AUTH_WINDOW) return 0
+	}
+	return VOTE_RECORD_AUTH_WINDOW_SECONDS
+}
+
 /**
  * The ONLY place the vote alias's wrap options are built. Every vote-record wrap and unwrap is
- * auth-required, with the D-14 window.
+ * auth-required, with the platform's effective D-14 window (WR-04) unless a caller passes one.
  */
-export function voteRecordWrapOptions(aad: Uint8Array, prompt: SecretWrapPrompt): SecretWrapOptions {
-	return { requireAuth: true, aad, prompt, authWindowSeconds: VOTE_RECORD_AUTH_WINDOW_SECONDS }
+export function voteRecordWrapOptions(
+	aad: Uint8Array,
+	prompt: SecretWrapPrompt,
+	authWindowSeconds: number = voteRecordAuthWindowSeconds(),
+): SecretWrapOptions {
+	return { requireAuth: true, aad, prompt, authWindowSeconds }
+}
+
+function codeOf(err: unknown): string | undefined {
+	return err instanceof SecretWrapError ? err.code : undefined
+}
+
+/** CR-02: seal-time codes that mean "this alias's key can never be used again". */
+const REPLACEABLE_ON_SEAL: ReadonlySet<string> = new Set(['KEY_INVALIDATED', 'NO_WRAP_KEY'])
+
+function canDelete(wrapper: SecretWrapper): wrapper is ReplaceableSecretWrapper {
+	return typeof (wrapper as Partial<ReplaceableSecretWrapper>).deleteWrapKey === 'function'
 }
 
 export function createVoteRecordWrapProvider(wrapper: SecretWrapper): VoteRecordWrapProvider {
 	return {
 		async wrap(plaintext, aad, prompt) {
-			return wrapper.wrapSecret(VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1, plaintext, voteRecordWrapOptions(aad, prompt))
+			let window = voteRecordAuthWindowSeconds()
+			let fellBackToPerUse = false
+			let replaced = false
+			// Bounded: at most one per-use fallback and one key replacement, so at most three native
+			// calls. A failure after a replacement propagates; it never loops.
+			for (;;) {
+				try {
+					return await wrapper.wrapSecret(VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1, plaintext, voteRecordWrapOptions(aad, prompt, window))
+				} catch (err) {
+					const code = codeOf(err)
+					// WR-04 coherence: an existing per-use key (created below API 30, then the OS was
+					// upgraded) is a STRICTER policy than the window asked for, so use it as per-use.
+					if (code === 'WRAP_KEY_POLICY_MISMATCH' && window > 0 && !fellBackToPerUse) {
+						fellBackToPerUse = true
+						window = 0
+						continue
+					}
+					if (code !== undefined && REPLACEABLE_ON_SEAL.has(code) && !replaced && canDelete(wrapper)) {
+						replaced = true
+						try {
+							await wrapper.deleteWrapKey(VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1)
+						} catch {
+							// The key could not be replaced: report what actually happened to the seal.
+							throw err
+						}
+						window = voteRecordAuthWindowSeconds()
+						continue
+					}
+					throw err
+				}
+			}
 		},
 		async unwrap(wrapped, aad, prompt) {
 			// Downgrade guard: a tampered envelope must never steer the unwrap to another alias
@@ -75,7 +155,16 @@ export function createVoteRecordWrapProvider(wrapper: SecretWrapper): VoteRecord
 			if (wrapped.keyAlias !== VOTETORRENT_VOTE_RECORD_WRAP_KEY_V1) {
 				throw new SecretWrapError('INVALID_ARGUMENT', 'vote record wrapped key names an unexpected alias')
 			}
-			return wrapper.unwrapSecret(wrapped, voteRecordWrapOptions(aad, prompt))
+			const window = voteRecordAuthWindowSeconds()
+			try {
+				return await wrapper.unwrapSecret(wrapped, voteRecordWrapOptions(aad, prompt, window))
+			} catch (err) {
+				// WR-04 coherence, as in wrap. The read path NEVER deletes a key (CR-02).
+				if (codeOf(err) === 'WRAP_KEY_POLICY_MISMATCH' && window > 0) {
+					return wrapper.unwrapSecret(wrapped, voteRecordWrapOptions(aad, prompt, 0))
+				}
+				throw err
+			}
 		},
 	}
 }
