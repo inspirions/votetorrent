@@ -28,7 +28,7 @@ import type { Ballot, BallotSignatureTask, RegisterInit, Signature } from '@vote
 import { NetworksEngine, RegistrationEngine, AssociationEngine, ElectionsEngine, IntakeEngine, SignatureTasksEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
 import type { EngineContext } from '@votetorrent/vote-engine/rn'
 import { FieldPolicyViolationError } from '@votetorrent/vote-engine'
-import { seedDevNetwork, DEV_SEED_NETWORK_NAME } from '../dev-seed'
+import { seedDevNetwork, confirmDevBallot, DEV_SEED_NETWORK_NAME } from '../dev-seed'
 import { readVoterBallot, readVoterElection } from '../election-read'
 import { resolveAttestationProducer } from '../attestation-producer'
 import { setDeviceKeyWrapProviderForTests } from '../device-key-wrap'
@@ -339,20 +339,140 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect(election).toMatchObject({ id: seeded.electionId, title: 'Dev Voter Registration Election', lifecycleState: 'Upcoming' })
 		expect(election.countdownTarget).toEqual(expect.any(String))
 
-		const devBallot = await readVoterBallot(deps, { includeProposed: true })
-		expect(devBallot.unsupportedQuestionCount).toBe(0)
-		expect(devBallot.offices.map(o => [o.group, o.title, o.voteFor])).toEqual([
+		const proposedRead = await readVoterBallot(deps, { includeProposed: true })
+		const releaseRead = await readVoterBallot(deps, { includeProposed: false })
+		// B7: the seed now confirms its ballot, so the release read offers it too.
+		expect(releaseRead.offices).toEqual(proposedRead.offices)
+		expect(releaseRead.offices).toHaveLength(5)
+		expect(releaseRead.unsupportedQuestionCount).toBe(0)
+		expect(proposedRead.unsupportedQuestionCount).toBe(0)
+
+		const tuples = releaseRead.offices.map(o => [o.group, o.title, o.voteFor])
+		const expected = [
 			['Federal', 'U.S. Senate', 1],
 			['Federal', 'U.S. House of Representatives, District 2', 1],
 			['State (UT)', 'Governor', 1],
 			['State (UT)', 'State Board of Education', 2],
 			['State (UT)', 'State Senate, District 8', 1],
+		]
+		// No office may be lost, whatever the order.
+		expect([...tuples].sort()).toEqual([...expected].sort())
+		// ORDER PIN: a confirmed ballot's questions read in Question PK (BallotId, Code) order, not
+		// proposal order — todo 2026-10-05-confirmed-ballot-read-orders-questions-by-code. This pin
+		// flips to the `expected` order when that todo is fixed.
+		expect(tuples).toEqual([
+			['State (UT)', 'Governor', 1],
+			['State (UT)', 'State Board of Education', 2],
+			['State (UT)', 'State Senate, District 8', 1],
+			['Federal', 'U.S. Senate', 1],
+			['Federal', 'U.S. House of Representatives, District 2', 1],
 		])
-		expect(devBallot.offices[0].candidates[0]).toMatchObject({ name: 'Diana Foster', party: 'Democratic Party' })
+		const senate = releaseRead.offices.find(o => o.title === 'U.S. Senate')!
+		expect(senate.candidates[0]).toMatchObject({ name: 'Diana Foster', party: 'Democratic Party' })
+	})
 
-		// The seed only PROPOSES the ballot (no officer confirmation), so a release-build read —
-		// confirmed ballots only — must not offer it to a voter.
-		expect((await readVoterBallot(deps, { includeProposed: false })).offices).toEqual([])
+	it('D-03: a fresh seed leaves every ballot confirmed; D-04: two questions read back required:false', async () => {
+		const { seeded, ctx } = await setup()
+		const electionEngine = await new ElectionsEngine(ctx).openElection(seeded.electionId)
+		const ballots = await electionEngine.getBallots()
+		expect(ballots).toHaveLength(1)
+		for (const b of ballots) {
+			expect(await electionEngine.getBallotConfirmationState(b.id)).toEqual({ locked: false, confirmed: true })
+		}
+		const details = await electionEngine.getBallotDetails(ballots[0]!.id)
+		const required = Object.fromEntries(details.ballot.questions.map((q) => [q.code, q.required]))
+		expect(required).toEqual({
+			'us-senate': true,
+			'us-house': false,
+			governor: true,
+			'state-board-education': true,
+			'state-senate': false,
+		})
+	})
+
+	it('D-03: re-attach seed is idempotent — still confirmed, no duplicate Ballot/ProposedBallot/Task/AdminSigning rows', async () => {
+		const networksEngine = new NetworksEngine(new LocalStorageReact())
+		const first = await seedDevNetwork(networksEngine)
+		const ctx = networksEngine.getEstablishedContext(first.networkReference.hash)!
+		const count = async (sql: string, p: Record<string, unknown> = {}) =>
+			Number((await ctx.db.prepare(sql).get(p))!.n)
+		const e = { e: first.electionId }
+		const signingBefore = await count('select count(*) as n from AdminSigning')
+
+		const second = await seedDevNetwork(networksEngine)
+		expect(second.electionId).toBe(first.electionId)
+
+		const electionEngine = await new ElectionsEngine(ctx).openElection(second.electionId)
+		const [only] = await electionEngine.getBallots()
+		expect(await electionEngine.getBallotConfirmationState(only!.id)).toEqual({ locked: false, confirmed: true })
+		expect(await count('select count(*) as n from Ballot where ElectionId = :e', e)).toBe(1)
+		expect(await count('select count(*) as n from ProposedBallot where ElectionId = :e', e)).toBe(1)
+		expect(await count("select count(*) as n from Task where SignatureType = 'ballot'")).toBe(1)
+		expect(await count('select count(*) as n from AdminSigning')).toBe(signingBefore)
+	})
+
+	function extraBallot(seeded: { electionId: string }, authorityId: string): Ballot {
+		return {
+			id: (globalThis as any).crypto.randomUUID(),
+			electionId: seeded.electionId,
+			authorityId,
+			description: 'extra proposed-only ballot',
+			districts: [],
+			questions: [
+				{
+					code: 'x-q',
+					title: 'X question',
+					instructions: '',
+					type: 'select',
+					optionRange: { min: 1, max: 1 },
+					group: 'X',
+					sequence: 0,
+					required: true,
+					options: [
+						{ code: 'x-a', title: 'A', details: '' },
+						{ code: 'x-b', title: 'B', details: '' },
+					],
+				},
+			],
+		}
+	}
+
+	it('D-03: a legacy proposed-only ballot is confirmed on the next seedDevNetwork boot', async () => {
+		const networksEngine = new NetworksEngine(new LocalStorageReact())
+		const first = await seedDevNetwork(networksEngine)
+		const ctx = networksEngine.getEstablishedContext(first.networkReference.hash)!
+		const authorityId = (await ctx.db.prepare('select AuthorityId from Election where Id = :e').get({ e: first.electionId }))!.AuthorityId as string
+		const electionEngine = await new ElectionsEngine(ctx).openElection(first.electionId)
+		const extra = extraBallot(first, authorityId)
+		await electionEngine.proposeBallot(extra)
+		expect((await electionEngine.getBallotConfirmationState(extra.id)).confirmed).toBe(false)
+
+		await seedDevNetwork(networksEngine)
+		expect(await electionEngine.getBallotConfirmationState(extra.id)).toEqual({ locked: false, confirmed: true })
+	})
+
+	it('D-03: confirmDevBallot confirms a proposed ballot, is idempotent, and resumes a submitted-but-unconfirmed one', async () => {
+		const { seeded, ctx, authorityId } = await setup()
+		const electionEngine = await new ElectionsEngine(ctx).openElection(seeded.electionId)
+
+		const proposedOnly = extraBallot(seeded, authorityId)
+		await electionEngine.proposeBallot(proposedOnly)
+		await confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, proposedOnly.id, seeded.sign)
+		expect(await electionEngine.getBallotConfirmationState(proposedOnly.id)).toEqual({ locked: false, confirmed: true })
+		await expect(
+			confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, proposedOnly.id, seeded.sign),
+		).resolves.toBeUndefined()
+		const taskCount = async () =>
+			Number((await ctx.db.prepare("select count(*) as n from Task where SignatureType = 'ballot'").get({}))!.n)
+		expect(await taskCount()).toBe(2) // dev ballot + this one
+
+		const resumed = extraBallot(seeded, authorityId)
+		await electionEngine.proposeBallot(resumed)
+		await electionEngine.submitBallotForConfirmation(resumed.id)
+		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: true, confirmed: false })
+		await confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, resumed.id, seeded.sign)
+		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: false, confirmed: true })
+		expect(await taskCount()).toBe(3)
 	})
 
 	it('62-51: default re-attach run also binds nothing to the stub device key', async () => {

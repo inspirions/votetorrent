@@ -27,7 +27,8 @@
  * Do NOT hand-roll any signing-ceremony SQL here — every mutation below goes
  * through a real `vote-engine` method (`NetworksEngine.create`, `ElectionsEngine.
  * seedElectionSigning`/`seedElectionRevisionSigning`/`createElection`,
- * `RegistrationEngine.addElectionRegistrationField`, `ElectionEngine.proposeBallot`)
+ * `RegistrationEngine.addElectionRegistrationField`, `ElectionEngine.proposeBallot`/`submitBallotForConfirmation`,
+`SignatureTasksEngine.completeSignature`)
  * that owns its own Digest/AdminSigning/AdminSignature ceremony internally. The app layer only ever
  * supplies a `SignCallback` — never a raw private key, never a raw AdminSigning
  * INSERT, and never a schema-CHECK-context signature bypass flag.
@@ -45,6 +46,7 @@ import {
 	type ElectionCoreInit,
 	type ElectionRevisionInit,
 	type Ballot,
+	type BallotSignatureTask,
 	type NetworkInit,
 	type NetworkReference,
 	type Question,
@@ -55,6 +57,7 @@ import {
 	ElectionsEngine,
 	NetworksEngine,
 	RegistrationEngine,
+	SignatureTasksEngine,
 	peekNextElectionTid,
 	type EngineContext,
 } from '@votetorrent/vote-engine/rn'
@@ -162,6 +165,7 @@ function devSelectQuestion(
 	sequence: number,
 	voteFor: number,
 	options: Array<[code: string, title: string, party: string]>,
+	required: boolean,
 ): Question {
 	return {
 		code,
@@ -171,58 +175,103 @@ function devSelectQuestion(
 		optionRange: { min: 1, max: voteFor },
 		group,
 		sequence,
+		required,
 		options: options.map(([optionCode, optionTitle, party]) => ({ code: optionCode, title: optionTitle, details: party })),
 	}
 }
 
 /** The dev election's ballot content (the voter app's former in-memory mock ballot, now real rows). */
-const DEV_SEED_BALLOT_QUESTIONS: Question[] = [
+export const DEV_SEED_BALLOT_QUESTIONS: Question[] = [
 	devSelectQuestion('us-senate', 'U.S. Senate', 'Federal', 0, 1, [
 		['diana', 'Diana Foster', 'Democratic Party'],
 		['marcus', 'Marcus Whitfield', 'Republican Party'],
 		['elena', 'Elena Vasquez', 'Independent'],
-	]),
+	], true),
 	devSelectQuestion('us-house', 'U.S. House of Representatives, District 2', 'Federal', 1, 1, [
 		['james', 'James Okafor', 'Democratic Party'],
 		['laura', 'Laura Bennett', 'Republican Party'],
-	]),
+	], false),
 	devSelectQuestion('governor', 'Governor', 'State (UT)', 0, 1, [
 		['priya', 'Priya Nandan', 'Democratic Party'],
 		['robert', 'Robert Kessler', 'Republican Party'],
-	]),
+	], true),
 	// voteFor 2 — the capped-checkbox CandidateSelector variant.
 	devSelectQuestion('state-board-education', 'State Board of Education', 'State (UT)', 1, 2, [
 		['angela', 'Angela Torres', 'Nonpartisan'],
 		['brian', 'Brian Michaels', 'Nonpartisan'],
 		['cynthia', 'Cynthia Park', 'Nonpartisan'],
 		['david', 'David Nguyen', 'Nonpartisan'],
-	]),
+	], true),
 	devSelectQuestion('state-senate', 'State Senate, District 8', 'State (UT)', 2, 1, [
 		['maria', 'Maria Gutierrez', 'Democratic Party'],
 		['thomas', 'Thomas Reyes', 'Republican Party'],
-	]),
+	], false),
 ]
 
 /**
- * Proposes the dev election's ballot through the real `ElectionEngine.proposeBallot` (an
- * unsigned `ProposedBallot` row — the officer confirmation ceremony that would finalize it is
- * not run here, so only a `__DEV__` voter read, which admits proposed ballots, will show it).
- * Idempotent: skipped when the election already has any ballot, so a re-attach never duplicates
- * it — and a network seeded before this step existed gains its ballot on the next dev boot.
+ * D-03: runs the real single-officer, threshold-1 ballot confirmation for `ballotId` — the
+ * production `ElectionEngine.submitBallotForConfirmation` followed by
+ * `SignatureTasksEngine.completeSignature` with the device signer (software key: no biometric
+ * prompt). Idempotent and resumable: a confirmed ballot returns immediately; a ballot already
+ * submitted (locked, not yet confirmed) skips the submit and just completes its open task.
  */
-async function seedDevBallot(ctx: EngineContext, electionId: string, authorityId: string): Promise<void> {
+export async function confirmDevBallot(
+	ctx: EngineContext,
+	ref: NetworkReference,
+	electionId: string,
+	ballotId: string,
+	sign: SignCallback,
+): Promise<void> {
 	const electionEngine = await new ElectionsEngine(ctx).openElection(electionId)
-	if ((await electionEngine.getBallots()).length > 0) return
+	const state = await electionEngine.getBallotConfirmationState(ballotId)
+	if (state.confirmed) return
+	if (!state.locked) await electionEngine.submitBallotForConfirmation(ballotId)
 
-	const ballot: Ballot = {
-		id: (globalThis as any).crypto.randomUUID(),
-		electionId,
-		authorityId,
-		description: 'Dev-seeded ballot for local voter testing.',
-		districts: [],
-		questions: DEV_SEED_BALLOT_QUESTIONS,
+	const tasks = new SignatureTasksEngine(ref, ctx)
+	const task = (await tasks.getRequestedSignatures(true)).find(
+		(t) => t.signatureType === 'ballot' && (t as BallotSignatureTask).ballot?.proposed?.id === ballotId,
+	)
+	if (!task) throw new Error('confirmDevBallot: no pending ballot task for ' + ballotId)
+
+	const digest = await tasks.getSignatureDigest(task)
+	await tasks.completeSignature(task, { isAccepted: true, signature: await sign(digest), sign })
+}
+
+/**
+ * Proposes the dev election's ballot through the real `ElectionEngine.proposeBallot` if the
+ * election has none, then confirms it through the real threshold-1 single-officer ceremony
+ * (`confirmDevBallot`, D-03) so the confirmed-only Submit gate is reachable in dev exactly as in
+ * release. Idempotent: an existing ballot is never re-proposed, and a confirmed one is left
+ * alone — an install seeded before this change confirms its existing ballot on the next dev boot.
+ *
+ * LONG-LIVED INSTALL NOTE: once a ballot is confirmed, `proposeBallot` refuses to overwrite it, so
+ * the `required: false` seed data (D-04) reaches only a fresh DB. An existing dev install keeps its
+ * old, all-required content until Start Fresh or `pm clear`.
+ */
+async function seedDevBallot(
+	ctx: EngineContext,
+	ref: NetworkReference,
+	electionId: string,
+	authorityId: string,
+	sign: SignCallback,
+): Promise<void> {
+	const electionEngine = await new ElectionsEngine(ctx).openElection(electionId)
+	if ((await electionEngine.getBallots()).length === 0) {
+		const ballot: Ballot = {
+			id: (globalThis as any).crypto.randomUUID(),
+			electionId,
+			authorityId,
+			description: 'Dev-seeded ballot for local voter testing.',
+			districts: [],
+			questions: DEV_SEED_BALLOT_QUESTIONS,
+		}
+		await electionEngine.proposeBallot(ballot)
 	}
-	await electionEngine.proposeBallot(ballot)
+
+	// Sequential on purpose: concurrent Quereus cursors deadlock on one handle.
+	for (const summary of await electionEngine.getBallots()) {
+		await confirmDevBallot(ctx, ref, electionId, summary.id, sign)
+	}
 }
 
 /** Result handed to the composition root / ConfirmationScreen (D-05/D-07/D-08). */
@@ -285,7 +334,7 @@ export async function seedDevNetwork(
 		// than duplicating them), and a re-opened network must not silently lose the
 		// registered state a PRIOR boot already seeded.
 		if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
-		await seedDevBallot(ctx, electionId, authorityId)
+		await seedDevBallot(ctx, existingRef, electionId, authorityId, sign)
 
 		return { networkReference: existingRef, electionId, deviceUser, sign }
 	}
@@ -465,7 +514,7 @@ export async function seedDevNetwork(
 	if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
 
 	// (5) The election's ballot (see seedDevBallot).
-	await seedDevBallot(ctx, electionId, authorityId)
+	await seedDevBallot(ctx, ref, electionId, authorityId, sign)
 
 	return { networkReference: ref, electionId, deviceUser, sign }
 }
