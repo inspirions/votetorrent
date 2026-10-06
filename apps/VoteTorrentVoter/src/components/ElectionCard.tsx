@@ -6,7 +6,8 @@
  * Pure presentational (`election: VoterElection` prop + optional navigation CALLBACK props) — does
  * NOT call `useVoterApp()` or `useNavigation()` (RESEARCH.md Anti-Patterns / SHELL-03 spirit), so
  * every state is unit-testable directly with a fixture election, no provider/navigator required.
- * `HomeScreen` owns the provider read and maps these callbacks to real navigation.
+ * `HomeScreen` owns the provider read and maps these callbacks to real navigation. The `__DEV__`
+ * shared-clock offset (D-02) likewise arrives by the `nowOffsetMs` prop, matching `CountdownTimer`.
  */
 import React from 'react';
 import {Pressable, StyleSheet, Text, View} from 'react-native';
@@ -124,9 +125,14 @@ export interface ElectionCardProps {
 	onViewValidationDetails?: () => void;
 	onLearnAboutElection?: () => void;
 	hasVoted?: boolean;
+	/**
+	 * The `__DEV__` shared-clock offset (D-02), passed by the screen and never read from a provider.
+	 * 0 by default.
+	 */
+	nowOffsetMs?: number;
 }
 
-export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLearnAboutElection, hasVoted}: ElectionCardProps) {
+export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLearnAboutElection, hasVoted, nowOffsetMs = 0}: ElectionCardProps) {
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('home');
 
@@ -201,7 +207,7 @@ export function ElectionCard({election, onVoteNow, onViewValidationDetails, onLe
 
 			{display.showCountdown && election.countdownTarget ? (
 				<View style={styles.countdown}>
-					<CountdownTimer targetIso={election.countdownTarget} />
+					<CountdownTimer targetIso={election.countdownTarget} nowOffsetMs={nowOffsetMs} />
 				</View>
 			) : null}
 

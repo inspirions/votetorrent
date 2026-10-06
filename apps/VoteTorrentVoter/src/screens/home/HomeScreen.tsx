@@ -39,7 +39,7 @@ type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
 
 export default function HomeScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, lifecycleOverride, setLifecycleOverride, getElection, getEngine, seededElectionId} = useVoterApp();
+	const {isInitialized, lifecycleOverride, setLifecycleOverride, clockOffsetMs, getElection, getEngine, seededElectionId} = useVoterApp();
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t, i18n} = useTranslation('home');
 	const {t: tCommon} = useTranslation('common');
@@ -59,7 +59,7 @@ export default function HomeScreen() {
 
 	// Fetch on mount and re-fetch whenever the override changes — getElection's identity changes
 	// with lifecycleOverride (VoterAppProvider's useCallback deps), so this effect naturally
-	// re-runs on every cycler step. A rejected read (no election on this network, or an
+	// re-runs on every cycler step (and on a shared dev-clock shift, D-02). A rejected read (no election on this network, or an
 	// indeterminate timeline) renders the unavailable message, never a stale or guessed card.
 	useEffect(() => {
 		let live = true;
@@ -103,6 +103,7 @@ export default function HomeScreen() {
 						onViewValidationDetails={() => navigation.navigate('ValidationDetails')}
 						onLearnAboutElection={() => setElectionInfoVisible(true)}
 						hasVoted={hasVoted}
+						nowOffsetMs={clockOffsetMs}
 					/>
 				) : null}
 

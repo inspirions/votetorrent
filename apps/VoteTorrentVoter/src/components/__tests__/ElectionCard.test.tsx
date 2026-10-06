@@ -316,3 +316,24 @@ describe('ElectionCard (HOME-01/02/03)', () => {
 		);
 	});
 });
+
+describe('ElectionCard — shared dev clock offset (D-02)', () => {
+	function renderOpen(nowOffsetMs?: number) {
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(withTheme(<ElectionCard election={electionFor('Open')} nowOffsetMs={nowOffsetMs} />));
+		});
+		activeRenderers.push(tr);
+		return tr;
+	}
+
+	it('forwards nowOffsetMs to the CountdownTimer', () => {
+		const tr = renderOpen(86_400_000);
+		expect(tr.root.findByType(CountdownTimer).props.nowOffsetMs).toBe(86_400_000);
+	});
+
+	it('defaults the CountdownTimer offset to 0 without the prop', () => {
+		const tr = renderOpen();
+		expect(tr.root.findByType(CountdownTimer).props.nowOffsetMs).toBe(0);
+	});
+});
