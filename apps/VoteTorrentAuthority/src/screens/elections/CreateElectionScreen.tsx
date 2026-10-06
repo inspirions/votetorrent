@@ -22,6 +22,7 @@ import { mapElectionError } from "./election-error-messages";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { findAuthorityName } from "../../utils/findAuthorityName";
+import { KEYHOLDER_POLICY_ERROR_KEY, validateKeyholderPolicy } from "./keyholder-policy";
 import {
 	resolveElectionTimeline,
 	findTimelineOrderViolation,
@@ -135,6 +136,12 @@ export function CreateElectionScreen() {
 			.filter(Boolean);
 		if (cleanKeyholders.length === 0) {
 			setErrorMessage(t("atLeastOneKeyholderRequired"));
+			return;
+		}
+
+		const policy = validateKeyholderPolicy(cleanKeyholders, Math.trunc(revision.threshold));
+		if (!policy.ok) {
+			setErrorMessage(t(KEYHOLDER_POLICY_ERROR_KEY[policy.reason]));
 			return;
 		}
 

@@ -58,8 +58,8 @@ const mockElectionEngine = {
         certificationStarts: ms(16),
         closed: ms(17),
       },
-      keyholders: [{ invite: { name: "Alice" } }],
-      keyholderThreshold: 1,
+      keyholders: [{ invite: { name: "Alice" } }, { invite: { name: "Bob" } }],
+      keyholderThreshold: 2,
       tags: [],
       instructions: "",
     },
@@ -203,6 +203,14 @@ describe("EditElectionScreen — timeline ordering guard (WR-02)", () => {
     const tree = await renderAndPropose((form) => ({ ...form, validation: iso(13.5) }));
 
     expect(tree.root.findByType(CustomButton).props.disabled).toBe(false);
+  });
+
+  it("refuses a keyholder policy below 2-of-2 before any engine call", async () => {
+    const tree = await renderAndPropose((form) => ({ ...form, threshold: 1 }));
+
+    expect(inlineErrors(tree)).toEqual(["keyholderPolicyThresholdTooLow"]);
+    expect(mockGetEngine).not.toHaveBeenCalledWith("elections");
+    expect(mockElectionsEngine.adjustElection).not.toHaveBeenCalled();
   });
 
   it("control: the seeded, ordered timeline reaches adjustElection", async () => {

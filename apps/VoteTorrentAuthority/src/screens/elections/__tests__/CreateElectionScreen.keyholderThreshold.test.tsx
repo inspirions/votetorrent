@@ -1,32 +1,13 @@
 /**
- * CreateElectionScreen — WR-02 (59-REVIEW-2): the screen's FIRST test file.
- *
- * Scope is deliberately the timeline ordering guard, not the whole screen.
- * That guard is the only defense between an officer and a signed, IMMUTABLE
- * out-of-order `ElectionRevision.Timeline` (`votetorrent.qsql` carries no
- * CHECK on the column at all), and CR-02 proved it can drift silently: every
- * ordering site in the repo had skipped `validation` for as long as that
- * member existed.
- *
- * WHY A SCREEN TEST AND NOT ONLY `timeline-order-guard.test.ts`: this screen
- * validates INLINE and returns early, well before any builder is constructed,
- * so the three vote-engine builder suites are no proxy for it — they are
- * unreachable from here. A unit test of `findTimelineOrderViolation` proves
- * the helper; only this file proves the screen actually calls it and refuses
- * to write.
- *
- * The accept-path control (last test) is load-bearing: without it, a screen
- * that rejected EVERY timeline would pass the two rejection tests.
- *
- * PATTERN SOURCE: RegistrationPolicyScreen.test.tsx — react-test-renderer,
- * module-scope jest.mock of every native / cross-cutting dep, an
- * interpolation-echoing `t()`. The testing-library packages are not
- * dependencies of this app.
+ * CreateElectionScreen - the keyholder policy guard. A policy below 2-of-2 can never generate a
+ * key (and a threshold of 1 lets one keyholder unlock results alone), so it is refused before
+ * any engine call or device-signer resolution.
  */
 
 import React from "react";
 import renderer, { act } from "react-test-renderer";
 import { ElectionEvent } from "@votetorrent/vote-core";
+import { createDeviceSigner } from "../../../engines/device-signer";
 import { InlineError } from "../../../components/InlineError";
 import { CustomButton } from "../../../components/CustomButton";
 import { CustomTextInput } from "../../../components/CustomTextInput";
@@ -228,86 +209,43 @@ function inlineErrors(tree: renderer.ReactTestRenderer): string[] {
     .filter((message: string) => Boolean(message));
 }
 
-describe("CreateElectionScreen — timeline ordering guard (WR-02)", () => {
+describe("CreateElectionScreen - keyholder policy guard", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.spyOn(Date, "now").mockReturnValue(NOW);
   });
-
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  it("CR-02: refuses to build when validation precedes tallyingStarts", async () => {
-    const form = orderedForm();
-    form[ElectionEvent.validation] = iso(13.5); // before tallyingStarts (day 14)
-
-    const tree = await renderAndSubmit(form);
-
-    expect(inlineErrors(tree)).toEqual(["errTimelineOrder"]);
-    expect(mockBuilderCtor).not.toHaveBeenCalled();
-    expect(mockElectionsEngine.seedElectionSigning).not.toHaveBeenCalled();
-    expect(mockElectionsEngine.createElection).not.toHaveBeenCalled();
-    expect(mockGoBack).not.toHaveBeenCalled();
-  });
-
-  it("CR-02: refuses to build when closed precedes certificationStarts", async () => {
-    const form = orderedForm();
-    form[ElectionEvent.closed] = iso(15.5); // before certificationStarts (day 16)
-
-    const tree = await renderAndSubmit(form);
-
-    expect(inlineErrors(tree)).toEqual(["errTimelineOrder"]);
+  function expectNoWrite() {
+    expect(mockGetEngine).not.toHaveBeenCalledWith("elections");
     expect(mockBuilderCtor).not.toHaveBeenCalled();
     expect(mockElectionsEngine.createElection).not.toHaveBeenCalled();
-  });
-
-  it("refuses to build when two chained events share an instant (>= semantics)", async () => {
-    const form = orderedForm();
-    form[ElectionEvent.hashingVotes] = form[ElectionEvent.accruingVotes];
-
-    const tree = await renderAndSubmit(form);
-
-    expect(inlineErrors(tree)).toEqual(["errTimelineOrder"]);
-    expect(mockBuilderCtor).not.toHaveBeenCalled();
-  });
-
-  it("control: an ordered timeline reaches the builder and createElection", async () => {
-    const tree = await renderAndSubmit(orderedForm());
-
-    expect(inlineErrors(tree)).toEqual([]);
-    expect(mockBuilderCtor).toHaveBeenCalledTimes(1);
-    expect(mockElectionsEngine.createElection).toHaveBeenCalledTimes(1);
-    // The signed payload carries the full ten-event map, in chain order.
-    const signedTimeline = mockBuilderInstance.setRevision.mock.calls[0]![0]
-      .timeline as Record<ElectionEvent, number>;
-    expect(signedTimeline[ElectionEvent.validation]).toBe(NOW + 15 * DAY_MS);
-    expect(signedTimeline[ElectionEvent.closed]).toBe(NOW + 17 * DAY_MS);
-  });
-});
-
-// UAT 62 N: the header read "Authority: <network name>". It names the AUTHORITY, falling back to
-// its id only when the authority row cannot be read.
-describe("CreateElectionScreen — authority header", () => {
-  function authorityText(tree: renderer.ReactTestRenderer): string {
-    return tree.root.findByProps({ testID: "create-election-authority" }).props.children;
+    expect(createDeviceSigner).not.toHaveBeenCalled();
   }
 
-  it("shows the primary authority's name, not the network name", async () => {
-    let tree!: renderer.ReactTestRenderer;
-    await act(async () => {
-      tree = renderer.create(<CreateElectionScreen />);
-    });
-    expect(authorityText(tree)).toBe("Lab Auth");
-    expect(JSON.stringify(tree.toJSON())).not.toContain("Test Network");
+  it("refuses one keyholder at 1-of-1 before any engine call", async () => {
+    const tree = await renderAndSubmit({ ...orderedForm(), keyholders: ["Alice"], threshold: 1 });
+    expect(inlineErrors(tree)).toEqual(["keyholderPolicyTooFewKeyholders"]);
+    expectNoWrite();
   });
 
-  it("falls back to the authority id when the authority lookup fails", async () => {
-    mockNetworkEngine.getAuthoritiesByName.mockRejectedValueOnce(new Error("offline"));
-    let tree!: renderer.ReactTestRenderer;
-    await act(async () => {
-      tree = renderer.create(<CreateElectionScreen />);
-    });
-    expect(authorityText(tree)).toBe("auth-1");
+  it("refuses two keyholders at 1-of-2", async () => {
+    const tree = await renderAndSubmit({ ...orderedForm(), threshold: 1 });
+    expect(inlineErrors(tree)).toEqual(["keyholderPolicyThresholdTooLow"]);
+    expectNoWrite();
+  });
+
+  it("refuses a threshold above the count", async () => {
+    const tree = await renderAndSubmit({ ...orderedForm(), threshold: 3 });
+    expect(inlineErrors(tree)).toEqual(["keyholderPolicyThresholdAboveCount"]);
+    expectNoWrite();
+  });
+
+  it("control: 2-of-2 reaches the engine", async () => {
+    const tree = await renderAndSubmit(orderedForm());
+    expect(inlineErrors(tree)).toEqual([]);
+    expect(mockElectionsEngine.createElection).toHaveBeenCalledTimes(1);
   });
 });

@@ -16,6 +16,7 @@ import { ElectionType } from "@votetorrent/vote-core";
 import type { IElectionEngine, IElectionsEngine, ElectionInit, ElectionDetails } from "@votetorrent/vote-core";
 import { mapElectionError } from "./election-error-messages";
 import { InlineError } from "../../components/InlineError";
+import { KEYHOLDER_POLICY_ERROR_KEY, validateKeyholderPolicy } from "./keyholder-policy";
 import {
 	resolveElectionTimeline,
 	findTimelineOrderViolation,
@@ -128,6 +129,12 @@ export default function EditElectionScreen() {
 			.filter(Boolean);
 		if (cleanKeyholders.length === 0) {
 			setErrorMessage(t("atLeastOneKeyholderRequired"));
+			return;
+		}
+
+		const policy = validateKeyholderPolicy(cleanKeyholders, Math.trunc(revision.threshold));
+		if (!policy.ok) {
+			setErrorMessage(t(KEYHOLDER_POLICY_ERROR_KEY[policy.reason]));
 			return;
 		}
 

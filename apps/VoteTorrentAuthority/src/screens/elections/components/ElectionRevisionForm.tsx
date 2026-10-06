@@ -90,7 +90,9 @@ export function ElectionRevisionForm({
 		const next = [...value.keyholders, ""];
 		// WR-04: keep threshold consistent with the count — once at least one keyholder
 		// exists the threshold must be at least 1 (it can be 0 only when count is 0).
-		const threshold = Math.max(value.threshold, 1);
+		// Once two or more keyholders exist the threshold is at least 2 (no single person may
+		// unlock the results alone).
+		const threshold = Math.max(value.threshold, next.length >= 2 ? 2 : 1);
 		set({ keyholders: next, threshold });
 	};
 
@@ -227,7 +229,7 @@ export function ElectionRevisionForm({
 							label={t("thresholdPolicy")}
 							value={value.threshold}
 							onChange={(n) => set({ threshold: n })}
-							min={value.keyholders.length === 0 ? 0 : 1}
+							min={value.keyholders.length === 0 ? 0 : value.keyholders.length >= 2 ? 2 : 1}
 							max={value.keyholders.length}
 						/>
 					</View>
