@@ -39,7 +39,7 @@ import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
 	const keyboardInset = useKeyboardInset();
-	const { electionEngine } = useRoute().params as { electionEngine: IElectionEngine };
+	const { electionEngine, authorityName } = useRoute().params as { electionEngine: IElectionEngine; authorityName?: string };
 	const [electionDetails, setElectionDetails] = useState<ElectionDetails | null>(null);
 	const [ballots, setBallots] = useState<BallotSummary[]>([]);
 	// D-09: confirmation state per ballot — { locked, confirmed } keyed by ballot id
@@ -141,7 +141,7 @@ export default function ElectionDetailsScreen() {
 
 			{/* 1. Immutable core block (title + Authority/Type/Date + Core Signature) */}
 			<View style={styles.section}>
-				<ElectionDetailsBlock electionDetails={electionDetails} />
+				<ElectionDetailsBlock electionDetails={electionDetails} authorityName={authorityName} />
 			</View>
 
 			{/* 2. Current revision section — rendered ONCE here */}

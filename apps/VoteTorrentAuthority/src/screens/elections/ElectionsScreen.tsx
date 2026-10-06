@@ -104,11 +104,14 @@ export const ElectionsScreen = () => {
 		return <NoNetwork />;
 	}
 
-	const navigateToElectionDetails = async (electionId: string) => {
+	const navigateToElectionDetails = async (electionId: string, authorityName?: string) => {
 		const engine = await electionsEngine?.openElection(electionId);
 		if (engine) {
 			navigation.navigate("ElectionDetails", {
 				electionEngine: engine,
+				// The list row already knows the authority's display name; the details header used to
+				// fall back to the raw authority id.
+				authorityName,
 			});
 		}
 	};
@@ -124,7 +127,7 @@ export const ElectionsScreen = () => {
 							key={election.id}
 							election={election}
 							onPress={() => {
-								navigateToElectionDetails(election.id);
+								navigateToElectionDetails(election.id, election.authorityName);
 							}}
 						/>
 					))
@@ -166,7 +169,7 @@ export const ElectionsScreen = () => {
 							key={historyItem.id}
 							election={historyItem}
 							onPress={() => {
-								navigateToElectionDetails(historyItem.id);
+								navigateToElectionDetails(historyItem.id, historyItem.authorityName);
 							}}
 						/>
 					))

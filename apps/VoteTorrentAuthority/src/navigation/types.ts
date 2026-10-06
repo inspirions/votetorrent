@@ -71,7 +71,7 @@ export type RootStackParamList = {
 	ProposedRevision: { name: string; revision: number; taskId?: string };
 	// Dev-entry route per D-12 — temporary; replaced by real callers in phases 8–10 (renamed by 07-08)
 	ScreenScaffoldsDebug: undefined;
-	ElectionDetails: { electionEngine: IElectionEngine };
+	ElectionDetails: { electionEngine: IElectionEngine; authorityName?: string };
 	// Phase 46 (D-01) — the single RegistrationPolicy route; all three params are
 	// required (not optional) since the screen destructures them unconditionally, and
 	// electionId/authorityId are passed to avoid a redundant getElectionDetails()
