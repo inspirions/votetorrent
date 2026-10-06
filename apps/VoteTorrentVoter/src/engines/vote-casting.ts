@@ -406,11 +406,12 @@ export async function castVote (deps: CastVoteDeps): Promise<CastVoteResult> {
 	let digest: string
 	let digestBytes: Uint8Array
 	try {
-		votes = eligibility.context.ballots.map(ballot => buildVoteEntry({
+		const nonces = eligibility.context.ballots.map(() => freshVoteNonce())
+		votes = eligibility.context.ballots.map((ballot, i) => buildVoteEntry({
 			ballot,
 			electionRevision: revision,
 			selections: eligibility.selections[ballot.id] ?? {},
-			nonce: freshVoteNonce(),
+			nonce: nonces[i] as string,
 		}))
 		unsigned = {
 			v: 1,
