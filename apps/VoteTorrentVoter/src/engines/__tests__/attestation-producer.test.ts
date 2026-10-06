@@ -30,13 +30,19 @@ import type { AttestationChallenge } from '@votetorrent/vote-core'
 const mockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }) => ({
 	provisionDeviceKey: jest.fn(),
 	produce: jest.fn(),
+	signDeviceKeyDigest: jest.fn(),
 }))
 
 jest.mock('@votetorrent/attestation-native', () => ({
 	createRealAttestationProducer: (opts: { enablePlayIntegrity: boolean }) => mockCreateRealAttestationProducer(opts),
 }))
 
-import { StubAttestationProducer, resolveAttestationProducer, type AttestationProducer } from '../attestation-producer'
+import {
+	StubAttestationProducer,
+	resolveAttestationProducer,
+	resolveVoteSigningProducer,
+	type AttestationProducer,
+} from '../attestation-producer'
 
 describe('attestation-producer — D-03/D-11 producer seam', () => {
 	const originalDev = (globalThis as { __DEV__?: boolean }).__DEV__
@@ -146,12 +152,14 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 
 		function loadIsolated(flags: { useRealAttestationProducer: boolean; useStubPlayIntegrity: boolean }): {
 			resolveAttestationProducer: typeof resolveAttestationProducer
+			resolveVoteSigningProducer: typeof resolveVoteSigningProducer
 			resolveRealProducerForced: () => boolean
 			StubAttestationProducer: AttestationProducer
 			mockCreateRealAttestationProducer: jest.Mock
 		} {
 			let result!: {
 				resolveAttestationProducer: typeof resolveAttestationProducer
+				resolveVoteSigningProducer: typeof resolveVoteSigningProducer
 				resolveRealProducerForced: () => boolean
 				StubAttestationProducer: AttestationProducer
 				mockCreateRealAttestationProducer: jest.Mock
@@ -172,6 +180,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 				const localMockCreateRealAttestationProducer = jest.fn((_opts: { enablePlayIntegrity: boolean }) => ({
 					provisionDeviceKey: jest.fn(),
 					produce: jest.fn(),
+					signDeviceKeyDigest: jest.fn(),
 				}))
 
 				jest.doMock('../proof-flags.generated', () => ({
@@ -189,6 +198,7 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 
 				result = {
 					resolveAttestationProducer: mod.resolveAttestationProducer,
+					resolveVoteSigningProducer: mod.resolveVoteSigningProducer,
 					resolveRealProducerForced: mod.resolveRealProducerForced,
 					StubAttestationProducer: mod.StubAttestationProducer,
 					mockCreateRealAttestationProducer: localMockCreateRealAttestationProducer,
@@ -353,6 +363,82 @@ describe('attestation-producer — D-03/D-11 producer seam', () => {
 		// inventing a parallel harness.
 		it('reuses the outer-scope challenge fixture (no parallel harness)', () => {
 			expect(rowChallenge.nonce).toBe(challenge.nonce)
+		})
+
+		function stripComments(src: string): string {
+			return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+		}
+		const setDev = (v: boolean) => {
+			;(globalThis as { __DEV__?: boolean }).__DEV__ = v
+		}
+		const VOTE_PROMPT = {
+			title: 'Confirm your vote',
+			subtitle: 'Sign your vote with your device key',
+			negativeButton: 'Cancel',
+		}
+
+		describe('resolveVoteSigningProducer \u2014 D-08 real-only', () => {
+			it.each([true, false])('returns the real producer with __DEV__=%s and default flags', (dev) => {
+				setDev(dev)
+				const out = resolveVoteSigningProducer()
+				expect(mockCreateRealAttestationProducer).toHaveBeenCalledTimes(1)
+				expect(mockCreateRealAttestationProducer).toHaveBeenCalledWith({ enablePlayIntegrity: true })
+				expect(out).toBe(mockCreateRealAttestationProducer.mock.results[0].value)
+				expect(out).not.toBe(StubAttestationProducer)
+			})
+
+			it('stub-PI tier (D-12) is honoured and the result is still never the stub', () => {
+				setDev(true)
+				const iso = loadIsolated({ useRealAttestationProducer: false, useStubPlayIntegrity: true })
+				const out = iso.resolveVoteSigningProducer()
+				expect(iso.mockCreateRealAttestationProducer).toHaveBeenCalledWith({ enablePlayIntegrity: false })
+				expect(out).not.toBe(iso.StubAttestationProducer)
+			})
+
+			it('resolveAttestationProducer still returns the stub in dev while the vote resolver returns real', () => {
+				setDev(true)
+				const iso = loadIsolated({ useRealAttestationProducer: false, useStubPlayIntegrity: false })
+				expect(iso.resolveAttestationProducer()).toBe(iso.StubAttestationProducer)
+				const out = iso.resolveVoteSigningProducer()
+				expect(out).not.toBe(iso.StubAttestationProducer)
+				expect(iso.mockCreateRealAttestationProducer).toHaveBeenCalledTimes(1)
+			})
+
+			it('returns a capable override by identity without building a real producer', () => {
+				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), produce: jest.fn(), signDeviceKeyDigest: jest.fn() }
+				expect(resolveVoteSigningProducer(override)).toBe(override)
+				expect(mockCreateRealAttestationProducer).not.toHaveBeenCalled()
+			})
+
+			it('throws on an override that cannot sign, without building a real producer', () => {
+				const override: AttestationProducer = { provisionDeviceKey: jest.fn(), produce: jest.fn() }
+				expect(() => resolveVoteSigningProducer(override)).toThrow(
+					'resolveVoteSigningProducer: the supplied producer cannot sign (signDeviceKeyDigest missing)',
+				)
+				expect(mockCreateRealAttestationProducer).not.toHaveBeenCalled()
+			})
+
+			it('pins that the stub passed as override is returned by identity (rejecting it is the source gate job)', () => {
+				expect(resolveVoteSigningProducer(StubAttestationProducer)).toBe(StubAttestationProducer)
+			})
+
+			it('body references no stub-routing identifier (comment-stripped scan, with positive control)', () => {
+				const voteBody = stripComments(resolveVoteSigningProducer.toString())
+				for (const banned of ['StubAttestationProducer', 'resolveAttestationProducer', 'resolveRealProducerForced', '__DEV__']) {
+					expect(voteBody).not.toContain(banned)
+				}
+				// Positive control: the same stripper sees identifiers through the jest transform.
+				expect(stripComments(resolveAttestationProducer.toString())).toMatch(/StubAttestationProducer/)
+			})
+		})
+
+		describe('StubAttestationProducer.signDeviceKeyDigest ignores options (D-09)', () => {
+			it('deep-equals the no-options result', async () => {
+				const digest = new Uint8Array(32)
+				const plain = await StubAttestationProducer.signDeviceKeyDigest!(digest)
+				const withPrompt = await StubAttestationProducer.signDeviceKeyDigest!(digest, { prompt: VOTE_PROMPT })
+				expect(withPrompt).toEqual(plain)
+			})
 		})
 	})
 })
