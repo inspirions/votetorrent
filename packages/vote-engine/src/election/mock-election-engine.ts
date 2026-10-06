@@ -70,6 +70,12 @@ export class MockElectionEngine implements IElectionEngine {
 	// can call markBallotConfirmed on the same state object.
 	private confirmationState: MockBallotConfirmationState;
 
+	// 62-76: keyholder invitations received via inviteKeyholder, name -> expiration. Feeds the
+	// `sent` field of the keyholder projection with the same three-state rule as the real engine
+	// (an invitee that has a result is 'answered', else an expired invite is 'no-longer-valid',
+	// else 'live'; never-invited invitees carry no `sent`).
+	private sentKeyholderInvites = new Map<string, string>();
+
 	constructor(confirmationState?: MockBallotConfirmationState) {
 		this.confirmationState = confirmationState ?? new MockBallotConfirmationState();
 	}
@@ -163,14 +169,22 @@ export class MockElectionEngine implements IElectionEngine {
 		// revised, so the Proposed-Revision UI must stay hidden until a real
 		// proposed revision exists. (The blanket demo seed added in 09-15 made every
 		// election show a phantom revision — removed per UAT.)
+		mockElection.current.keyholders = mockElection.current.keyholders.map((k) => {
+			const expiration = this.sentKeyholderInvites.get(k.invite.name);
+			if (expiration === undefined) return k;
+			const expired = !(Date.parse(expiration.endsWith('Z') || /[+-]\d\d:\d\d$/.test(expiration) ? expiration : `${expiration}Z`) > Date.now());
+			const state = k.result ? 'answered' : expired ? 'no-longer-valid' : 'live';
+			return { ...k, sent: { state, expiration } };
+		});
 		return Promise.resolve(mockElection);
 	}
 
 	async inviteKeyholder(
-		_keyholder: KeyholderInvite,
+		keyholder: KeyholderInvite,
 		_electionId: string,
 		_signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>),
 	): Promise<void> {
+		this.sentKeyholderInvites.set(keyholder.name, keyholder.expiration);
 		return Promise.resolve();
 	}
 
