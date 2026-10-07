@@ -173,13 +173,15 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
 			const result = await resolveRegistrationCodeAvailability(makeContinuityDeps({association, registration}));
-			expect(result).toEqual({kind: 'unavailable'});
+			// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+			expect(result).toEqual({kind: 'unavailable', reason: 'holder-key-missing', registrantKnown: true});
 			expect(warn).toHaveBeenCalledTimes(1);
 			expect(warn.mock.calls[0]).toEqual(['continuity: registration code holder key not found']);
 
 			warn.mockClear();
 			const failing = {getAssociationsByDeviceKey: jest.fn(async () => { throw new Error('boom'); })};
-			expect(await resolveRegistrationCodeAvailability(makeContinuityDeps({association: failing}))).toEqual({kind: 'unavailable'});
+			// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+			expect(await resolveRegistrationCodeAvailability(makeContinuityDeps({association: failing}))).toEqual({kind: 'unavailable', reason: 'read-failed', registrantKnown: false});
 			expect(warn.mock.calls[0]![0]).toBe('continuity: code availability read failed');
 		} finally {
 			warn.mockRestore();
@@ -263,7 +265,8 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 		};
 		const registration = {getRegistrant: jest.fn(async () => ({id: 'R1', authorityId: AUTHORITY_ID, status: 'a'}))};
 		const result = await resolveRegistrationCodeAvailability(makeContinuityDeps({association, registration}));
-		expect(result).toEqual({kind: 'unavailable'});
+		// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+		expect(result).toEqual({kind: 'unavailable', reason: 'holder-key-missing', registrantKnown: true});
 	});
 
 	test('unavailable: any engine read rejecting never throws, resolves unavailable', async () => {
@@ -276,7 +279,8 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 			deriveRegistrationCode: jest.fn(),
 		};
 		const result = await resolveRegistrationCodeAvailability(makeContinuityDeps({association}));
-		expect(result).toEqual({kind: 'unavailable'});
+		// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+		expect(result).toEqual({kind: 'unavailable', reason: 'read-failed', registrantKnown: false});
 		expect(warnSpy).toHaveBeenCalled();
 		// The fixed log string never contains the real error's own message.
 		expect(warnSpy.mock.calls.some(c => c.some(a => String(a).includes('simulated read failure')))).toBe(false);
@@ -299,7 +303,8 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 		const result = await resolveRegistrationCodeAvailability(
 			makeContinuityDeps({association, registration, resolveTransports}),
 		);
-		expect(result).toEqual({kind: 'unavailable'});
+		// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+		expect(result).toEqual({kind: 'unavailable', reason: 'read-failed', registrantKnown: true});
 		warnSpy.mockRestore();
 	});
 
@@ -319,7 +324,8 @@ describe('resolveRegistrationCodeAvailability (D-45)', () => {
 			}),
 		);
 		const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-		expect(Object.keys(unavailable)).toEqual(['kind']);
+		// gap6/WR-07: 'unavailable' now carries the fixed-vocabulary reason and registrantKnown flag (no id/key/error text).
+		expect(Object.keys(unavailable).sort()).toEqual(['kind', 'reason', 'registrantKnown']);
 		warnSpy.mockRestore();
 	});
 });
@@ -692,7 +698,8 @@ describe('63-18: lookups never create a device key', () => {
 		const deps = makeContinuityDeps({
 			getCurrentDeviceKey: async () => { throw Object.assign(new Error('invalid'), {code: 'DEVICE_KEY_INVALIDATED'}); },
 		});
-		expect(await resolveRegistrationCodeAvailability(deps)).toEqual({kind: 'unavailable'});
+		// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+		expect(await resolveRegistrationCodeAvailability(deps)).toEqual({kind: 'unavailable', reason: 'read-failed', registrantKnown: false});
 	});
 
 	test('reassociation resume and retired notice fail soft on an absent key (fresh / false)', async () => {

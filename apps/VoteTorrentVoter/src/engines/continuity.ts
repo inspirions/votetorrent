@@ -73,7 +73,12 @@ export type RegistrationCodeAvailability =
 	| {kind: 'not-registered'}
 	| {kind: 'not-holder'}
 	| {kind: 'not-sent'}
-	| {kind: 'unavailable'};
+	| {kind: 'unavailable'; reason: 'holder-key-missing' | 'read-failed'; registrantKnown: boolean};
+// 'holder-key-missing' is the permanent "not available on this device" (it implies registrantKnown).
+// 'read-failed' is a retryable read failure (network not ready, read error, signer/biometric cancel);
+// registrantKnown tells the caller whether the device's registration was resolved before the failure
+// (false: a never-registered voter must still be offered "continue on another device"). No id, key or
+// error text ever rides on the result.
 
 /**
  * Re-showable (D-45, Claude's discretion): reads fresh every call, never cached. Four conditions,
@@ -84,13 +89,14 @@ export type RegistrationCodeAvailability =
  *   3. This device staged that registration over P2P (`ownStagedRegistrationRequestIds` contains
  *      the registration request id, which equals the registrantId).
  *   4. `deriveRegistrationCode` succeeds.
- * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'`. Two
+ * Never throws — every failure (including an engine read rejecting) resolves `'unavailable'` with a reason. Two
  * fixed-string warns tell the cases apart: 'continuity: registration code holder key not found'
  * (silent-looking holder-key miss) and 'continuity: code availability read failed' (a read threw).
  */
 export async function resolveRegistrationCodeAvailability(
 	deps: ContinuityDeps,
 ): Promise<RegistrationCodeAvailability> {
+	let registrantKnown = false;
 	try {
 		let p256DeviceKey: string;
 		try {
@@ -122,6 +128,7 @@ export async function resolveRegistrationCodeAvailability(
 		if (registrantId === undefined) {
 			return {kind: 'not-registered'};
 		}
+		registrantKnown = true;
 
 		// Only now: the identity key, the holder-key comparison and the own-staging/derive reads —
 		// none of these run for a device that was never registered.
@@ -132,7 +139,7 @@ export async function resolveRegistrationCodeAvailability(
 		if (holderKey === undefined) {
 			// Fixed string only (T-62-28-01 / T-62-51-01): no registrant id, key or error text.
 			console.warn('continuity: registration code holder key not found');
-			return {kind: 'unavailable'};
+			return {kind: 'unavailable', reason: 'holder-key-missing', registrantKnown: true};
 		}
 		if (holderKey !== identityKey) {
 			return {kind: 'not-holder'};
@@ -154,7 +161,7 @@ export async function resolveRegistrationCodeAvailability(
 	} catch {
 		// Fixed string only — never the error's own message/code/id (T-62-28-01 disclosure posture).
 		console.warn('continuity: code availability read failed');
-		return {kind: 'unavailable'};
+		return {kind: 'unavailable', reason: 'read-failed', registrantKnown};
 	}
 }
 
@@ -301,34 +308,41 @@ export async function advanceReassociation(
 ): Promise<ReassociationProgress> {
 	let cursor: string | undefined;
 	let isAnswered = answered;
+	// A rejection is remembered while later pages are read looking for an approval.
+	let sawRejection = false;
 
 	for (let round = 0; round < REASSOCIATION_MAX_POLL_ROUNDS; round++) {
 		const forwarded = cursor;
-		const notices = await deps.transports.associationTransport.pollDecisions(cursor);
+		const notices = (await deps.transports.associationTransport.pollDecisions(cursor)) ?? [];
 		if (notices.length === 0) {
-			return {kind: 'pending', answered: isAnswered};
+			return sawRejection ? {kind: 'rejected'} : {kind: 'pending', answered: isAnswered};
 		}
 
 		let latest: (typeof notices)[number] | undefined;
 		for (const notice of notices) {
 			cursor = notice.cursor;
 			if (notice.requestId === requestId) {
-				latest = notice;
+				// Approval wins over everything else on the page: two officers can decide one request on
+				// two devices before syncing, and the approval is the decision that retires the old device
+				// key, so reporting 'rejected' would strand the voter. The schema CHECK that forbids the
+				// pair is deferred with the other re-attach-sensitive amendments (gap G5 WR-04).
+				if (notice.status === 'a') {
+					return {kind: 'approved'};
+				}
+				if (notice.status === 'r') {
+					sawRejection = true;
+				} else {
+					latest = notice;
+				}
 			}
 		}
 		if (!latest) {
 			if (cursor === forwarded) {
-				return {kind: 'pending', answered: isAnswered};
+				return sawRejection ? {kind: 'rejected'} : {kind: 'pending', answered: isAnswered};
 			}
 			continue;
 		}
 
-		if (latest.status === 'a') {
-			return {kind: 'approved'};
-		}
-		if (latest.status === 'r') {
-			return {kind: 'rejected'};
-		}
 		if (latest.status === 'c' && latest.challengeNonce && !isAnswered) {
 			const challenge: AttestationChallenge = {
 				nonce: latest.challengeNonce,
@@ -365,11 +379,11 @@ export async function advanceReassociation(
 		// A 'c' notice already answered, or any other status, just keeps polling — unless the resume
 		// cursor did not move, in which case another round would re-read the same rows.
 		if (cursor === forwarded) {
-			return {kind: 'pending', answered: isAnswered};
+			return sawRejection ? {kind: 'rejected'} : {kind: 'pending', answered: isAnswered};
 		}
 	}
 
-	return {kind: 'pending', answered: isAnswered};
+	return sawRejection ? {kind: 'rejected'} : {kind: 'pending', answered: isAnswered};
 }
 
 export type ReassociationResume =

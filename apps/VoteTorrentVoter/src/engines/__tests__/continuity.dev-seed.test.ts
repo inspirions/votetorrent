@@ -63,7 +63,8 @@ describe('continuity availability over a real dev seed (UAT 62 test 14)', () => 
 	test('registeredStateFixture opted in: the old device symptom, now loud (unavailable + fixed warn)', async () => {
 		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {})
 		try {
-			expect(await resolveAfterSeed({registeredStateFixture: true})).toEqual({kind: 'unavailable'})
+			// gap6/WR-07: the reason now tells a retryable read failure from a missing holder key.
+			expect(await resolveAfterSeed({registeredStateFixture: true})).toEqual({kind: 'unavailable', reason: 'holder-key-missing', registrantKnown: true})
 			expect(warn).toHaveBeenCalledWith('continuity: registration code holder key not found')
 		} finally {
 			warn.mockRestore()
