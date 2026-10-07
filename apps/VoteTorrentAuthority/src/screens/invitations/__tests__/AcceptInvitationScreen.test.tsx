@@ -149,7 +149,7 @@ describe('AcceptInvitationScreen', () => {
     await paste(tr, text);
     const json = JSON.stringify(tr.toJSON());
     expect(json).toContain('invitationPastedSummary');
-    const inputs = tr.root.findAll((n) => n.type === 'TextInput');
+    const inputs = tr.root.findAll((n) => String(n.type) === 'TextInput');
     expect(inputs.length).toBe(0);
     expect(json).not.toContain(invitePrivate);
     await renderer.act(async () => {
