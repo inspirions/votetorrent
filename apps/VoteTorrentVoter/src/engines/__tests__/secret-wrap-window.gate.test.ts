@@ -336,3 +336,148 @@ describe('secret-wrap-window gate (D-14, 63-17)', () => {
 		})
 	})
 })
+
+/**
+ * T-63-17-05: log hygiene for the wrap-window and key-policy tags. Every `Log.*(` call whose tag is
+ * TAG_WRAP_WINDOW or TAG_WRAP_KEY_POLICY is a tag plus ONE string literal (no Throwable argument, so
+ * no stack trace reaches logcat), and its interpolations are limited to the allowlist of non-secret
+ * diagnostics below (never an exception, key bytes, plaintext or AAD).
+ *
+ * Out of scope on purpose: the TAG_WRAP_KEY_RUNG StrongBox-rejected line (`Log.w(TAG_WRAP_KEY_RUNG, ..., e)`)
+ * deliberately passes the Throwable; it is a different tag and a different threat row, so this gate
+ * does not assert on it (a test below pins that it exists and is NOT scanned).
+ */
+const SCOPED_TAGS = ['TAG_WRAP_WINDOW', 'TAG_WRAP_KEY_POLICY']
+const ALLOWED_INTERPOLATIONS = ['alias', 'raw', 'observed', 'authWindowSeconds', 'keyInfo.isUserAuthenticationRequired']
+const FORBIDDEN_LOG_TEXT = /\$e\b|\$\{\s*e\b|\.message|stackTrace|getStackTraceString|plaintext|\baad\b|keyBytes|\.encoded/i
+
+/** Top-level comma split that respects double-quoted string literals and nested brackets. */
+function splitArgs(argText: string): string[] {
+	const args: string[] = []
+	let depth = 0
+	let inStr = false
+	let cur = ''
+	for (let i = 0; i < argText.length; i++) {
+		const ch = argText[i]!
+		if (inStr) {
+			cur += ch
+			if (ch === '\\') cur += argText[++i] ?? ''
+			else if (ch === '"') inStr = false
+			continue
+		}
+		if (ch === '"') inStr = true
+		else if (ch === '(' || ch === '{' || ch === '[') depth++
+		else if (ch === ')' || ch === '}' || ch === ']') depth--
+		if (ch === ',' && depth === 0) {
+			args.push(cur.trim())
+			cur = ''
+		} else cur += ch
+	}
+	if (cur.trim().length > 0) args.push(cur.trim())
+	return args
+}
+
+/** Every `Log.<level>(<tag>, ...)` call as { tag, args }, found by a paren-balanced, string-aware walk. */
+function logCalls(stripped: string): Array<{ tag: string; args: string[] }> {
+	const calls: Array<{ tag: string; args: string[] }> = []
+	const head = /\bLog\.[a-z]\(/g
+	let m: RegExpExecArray | null
+	while ((m = head.exec(stripped)) !== null) {
+		const start = m.index + m[0].length
+		let depth = 1
+		let inStr = false
+		let i = start
+		for (; i < stripped.length && depth > 0; i++) {
+			const ch = stripped[i]!
+			if (inStr) {
+				if (ch === '\\') i++
+				else if (ch === '"') inStr = false
+			} else if (ch === '"') inStr = true
+			else if (ch === '(') depth++
+			else if (ch === ')') depth--
+		}
+		const args = splitArgs(stripped.slice(start, i - 1))
+		calls.push({ tag: args[0] ?? '', args })
+	}
+	return calls
+}
+
+/** Pure checker: readable violation strings, empty when every scoped Log call is hygienic. */
+export function checkWrapLogHygiene(kotlinText: string): string[] {
+	const violations: string[] = []
+	const stripped = stripCommentsPreservingLines(kotlinText)
+	for (const call of logCalls(stripped)) {
+		if (!SCOPED_TAGS.includes(call.tag)) continue
+		const label = `${call.tag} ${call.args[1] ?? '(none)'}`
+		if (call.args.length !== 2) violations.push(`L1: ${label} has ${call.args.length} arguments, expected tag plus one string`)
+		const msg = call.args[1] ?? ''
+		if (!(msg.startsWith('"') && msg.endsWith('"') && msg.length >= 2)) violations.push(`L1: ${label} message is not a single string literal`)
+		if (FORBIDDEN_LOG_TEXT.test(call.args.join(',')) ) violations.push(`L2: ${label} references an exception, key material or plaintext`)
+		for (const interp of msg.matchAll(/\$\{([^}]*)\}|\$([A-Za-z_]\w*)/g)) {
+			const expr = (interp[1] ?? interp[2] ?? '').trim()
+			if (!ALLOWED_INTERPOLATIONS.includes(expr)) violations.push(`L2: ${label} interpolates "${expr}", not in the diagnostics allowlist`)
+		}
+	}
+	return violations
+}
+
+describe('wrap-window log hygiene (T-63-17-05, 63-17)', () => {
+	const realKt = existsSync(HELPER) ? readFileSync(HELPER, 'utf8') : ''
+
+	it('every TAG_WRAP_WINDOW / TAG_WRAP_KEY_POLICY log call is one string with no exception or secret', () => {
+		expect(checkWrapLogHygiene(realKt)).toEqual([])
+	})
+
+	it('the scan is not vacuous: it sees the scoped calls and nothing but diagnostics is interpolated', () => {
+		const scoped = logCalls(stripCommentsPreservingLines(realKt)).filter((c) => SCOPED_TAGS.includes(c.tag))
+		expect(scoped.length).toBeGreaterThanOrEqual(9)
+		expect(scoped.some((c) => c.tag === 'TAG_WRAP_WINDOW')).toBe(true)
+		expect(scoped.some((c) => c.tag === 'TAG_WRAP_KEY_POLICY')).toBe(true)
+		expect(scoped.every((c) => c.args.length === 2)).toBe(true)
+	})
+
+	it('documents the exclusion: the TAG_WRAP_KEY_RUNG StrongBox-rejected call passes a Throwable and is not scanned', () => {
+		const rung = logCalls(stripCommentsPreservingLines(realKt)).filter((c) => c.tag === 'TAG_WRAP_KEY_RUNG')
+		expect(rung.length).toBeGreaterThan(0)
+		expect(rung.some((c) => c.args.length === 3)).toBe(true)
+		expect(SCOPED_TAGS).not.toContain('TAG_WRAP_KEY_RUNG')
+		const planted = realKt + '\nfun x() { Log.w(TAG_WRAP_KEY_RUNG, "StrongBox rejected", e) }\n'
+		expect(checkWrapLogHygiene(planted)).toEqual([])
+	})
+
+	describe('planted self-tests (the checker can fail)', () => {
+		const plant = (line: string): string[] => checkWrapLogHygiene(realKt + `\nfun x() { ${line} }\n`)
+
+		it('L-P1: a Throwable third argument on TAG_WRAP_WINDOW reports L1', () => {
+			expect(plant('Log.w(TAG_WRAP_WINDOW, "alias=$alias op=wrap", e)').some((v) => v.startsWith('L1'))).toBe(true)
+		})
+
+		it('L-P2: a Throwable third argument on TAG_WRAP_KEY_POLICY reports L1', () => {
+			expect(plant('Log.i(TAG_WRAP_KEY_POLICY, "alias=$alias", e)').some((v) => v.startsWith('L1'))).toBe(true)
+		})
+
+		it('L-P3: interpolating ${e.message} reports L2', () => {
+			const v = plant('Log.w(TAG_WRAP_WINDOW, "alias=$alias failed ${e.message}")')
+			expect(v.some((x) => x.startsWith('L2'))).toBe(true)
+		})
+
+		it.each(['$e', '${e}', '${e.stackTraceToString()}', '${e.cause}', '$plaintext', '${aad}', '${keyBytes.size}'])(
+			'L-P4: interpolating %s reports L2',
+			(interp) => {
+				expect(plant(`Log.i(TAG_WRAP_WINDOW, "x=${interp}")`).some((x) => x.startsWith('L2'))).toBe(true)
+			},
+		)
+
+		it('L-P5: a comma inside the string literal does not fake a third argument', () => {
+			expect(plant('Log.i(TAG_WRAP_WINDOW, "alias=$alias a, b, c")')).toEqual([])
+		})
+
+		it('L-P6: a bad call only inside a // comment is not reported', () => {
+			expect(plant('// Log.w(TAG_WRAP_WINDOW, "x", e)')).toEqual([])
+		})
+
+		it('L-P7: a non-literal message (concatenation helper) reports L1', () => {
+			expect(plant('Log.i(TAG_WRAP_WINDOW, describe(alias))').some((x) => x.startsWith('L1'))).toBe(true)
+		})
+	})
+})

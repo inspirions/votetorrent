@@ -560,6 +560,40 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
 		})
 
+		// T-63-06-06: the rejection names the FIELDS, never the supplied values. Each bad prompt carries
+		// distinctive needles in its non-empty fields, so an error that echoed them would fail here.
+		const NEEDLE_TITLE = 'NEEDLE-TITLE-7f3a91'
+		const NEEDLE_SUBTITLE = 'NEEDLE-SUBTITLE-c2d84e'
+		const NEEDLE_BUTTON = 'NEEDLE-BUTTON-90be15'
+		const needles = [NEEDLE_TITLE, NEEDLE_SUBTITLE, NEEDLE_BUTTON]
+		const echoedNeedles = (e: Error): string[] => needles.filter((n) => `${e.message}\n${e.stack ?? ''}`.includes(n))
+		const leaky: Array<[string, unknown]> = [
+			['empty title', { title: '', subtitle: NEEDLE_SUBTITLE, negativeButton: NEEDLE_BUTTON }],
+			['blank subtitle', { title: NEEDLE_TITLE, subtitle: '   ', negativeButton: NEEDLE_BUTTON }],
+			['empty negativeButton', { title: NEEDLE_TITLE, subtitle: NEEDLE_SUBTITLE, negativeButton: '' }],
+			['non-string title', { title: 7, subtitle: NEEDLE_SUBTITLE, negativeButton: NEEDLE_BUTTON }],
+			['missing negativeButton', { title: NEEDLE_TITLE, subtitle: NEEDLE_SUBTITLE }],
+		]
+		it.each(leaky)('rejection for %s echoes none of the supplied prompt values', async (_name, prompt) => {
+			platformState.OS = 'android'
+			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
+			const err = await producer
+				.signDeviceKeyDigest(digest, { prompt } as unknown as Parameters<typeof producer.signDeviceKeyDigest>[1])
+				.then(
+					() => undefined,
+					(e: unknown) => e,
+				)
+			expect(err).toBeInstanceOf(Error)
+			expect(echoedNeedles(err as Error)).toEqual([])
+			const reached = needles.filter((n) => JSON.stringify(prompt).includes(n))
+			expect(reached.length).toBeGreaterThanOrEqual(2)
+		})
+
+		it('negative control: the echo detector flags an error that interpolates a supplied value', () => {
+			expect(echoedNeedles(new Error(`prompt.subtitle "${NEEDLE_SUBTITLE}" must be a non-empty string`))).toEqual([NEEDLE_SUBTITLE])
+			expect(echoedNeedles(new Error(`bad prompt ${JSON.stringify({ title: NEEDLE_TITLE })}`))).toEqual([NEEDLE_TITLE])
+		})
+
 		it('DEFAULT_DEVICE_KEY_SIGN_PROMPT is frozen and holds the legacy strings', () => {
 			expect(DEFAULT_DEVICE_KEY_SIGN_PROMPT).toEqual({
 				title: 'Confirm this request',
