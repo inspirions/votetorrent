@@ -412,3 +412,23 @@ All must pass; a single passing half never authorizes association (D-01's spirit
 - Assertion use **after** association (ongoing request integrity). This document covers the
   association ceremony only; the counter rule in §8.10 is written so that a later per-request
   assertion scheme can extend it without a format change.
+
+## 10. Device-key alias → Keychain tag (62-127)
+
+`provisionDeviceKey`, `getCurrentDeviceKey`, `produceAttestation` and `signWithDeviceKey` resolve the
+Secure Enclave key's Keychain tag from the `keyAlias` argument through one mapping,
+`deviceKeyTag(for:)` in `AttestationNativeModule.swift`, as Android does:
+
+| `keyAlias` | Keychain tag |
+|---|---|
+| `VOTETORRENT_DEVICE_KEY_V1` (Voter) | `org.votetorrent.voter.VOTE_KEY_V1` (the original tag) |
+| `VOTETORRENT_AUTHORITY_SIGNING_KEY_V1` (Authority) | `org.votetorrent.voter.VOTE_KEY_V1` (the original tag) |
+| any other `^[A-Z0-9_]{1,64}$` | `org.votetorrent.devicekey.<alias>` |
+| anything else | rejected `INVALID_ARGUMENT` before any Keychain call; the alias is not echoed |
+
+The two aliases in use keep the original tag deliberately: before this change every alias used that
+tag, so every installed key lives under it, and re-tagging would orphan the voter's and the
+officer's device identity. The two apps' Keychains are separate sandboxes, so sharing the tag
+across the two legacy aliases cannot make them collide. `provisionRecoveryKey` and
+`signWithRecoveryKey` still use the fixed recovery tag and ignore their alias (same defect,
+not changed here; only one recovery alias exists).

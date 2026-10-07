@@ -47,6 +47,24 @@ class AttestationNativeModule: NSObject {
 
   // Distinct from the Android aliases by design (D-07: different apps, different threat surfaces).
   private static let voteKeyTag = "org.votetorrent.voter.VOTE_KEY_V1"
+  // The two device-key aliases in use today (Voter real-attestation-producer.ts, Authority
+  // device-signer.ts). They keep the original tag so no installed Keychain key is orphaned (62-127).
+  private static let legacyDeviceKeyAliases: Set<String> = [
+    "VOTETORRENT_DEVICE_KEY_V1",
+    "VOTETORRENT_AUTHORITY_SIGNING_KEY_V1"
+  ]
+  private static let deviceKeyAliasPattern = try! NSRegularExpression(pattern: "^[A-Z0-9_]{1,64}$")
+
+  /// The single alias -> Keychain tag mapping for the device-key methods. A legacy alias maps to
+  /// `voteKeyTag`; any other valid alias gets its own tag; an invalid alias yields nil (the caller
+  /// rejects INVALID_ARGUMENT before touching the Keychain).
+  private static func deviceKeyTag(for alias: String) -> String? {
+    if legacyDeviceKeyAliases.contains(alias) { return Self.voteKeyTag }
+    let range = NSRange(alias.startIndex..<alias.endIndex, in: alias)
+    guard deviceKeyAliasPattern.firstMatch(in: alias, range: range) != nil else { return nil }
+    return "org.votetorrent.devicekey." + alias
+  }
+
   private static let recoveryKeyTag = "org.votetorrent.voter.RECOVERY_KEY_V1"
   private static let appAttestKeyIdDefaultsKey = "org.votetorrent.voter.APPATTEST_KEY_ID"
 
@@ -219,6 +237,10 @@ class AttestationNativeModule: NSObject {
   func provisionDeviceKey(_ keyAlias: String,
                           resolver resolve: @escaping RCTPromiseResolveBlock,
                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
     let service = DCAppAttestService.shared
     // Simulator and unsupported hardware land here. This is the ONLY honest place to fail — do not
     // fall back to a software key: an unattestable device must not silently become attestable.
@@ -242,20 +264,20 @@ class AttestationNativeModule: NSObject {
         // Recover from a destroyed vote key instead of handing it back forever. Only a POSITIVE
         // invalidation signal deletes; `.indeterminate` keeps the existing key, because wrongly
         // deleting a live one destroys the voter's device identity.
-        var existing = self.loadKey(tag: Self.voteKeyTag)
+        var existing = self.loadKey(tag: deviceTag)
         var reprovisioned = false
         var probeDetail = "no-existing-key"
         if existing != nil {
-          let probe = self.probeKeyLiveness(tag: Self.voteKeyTag)
+          let probe = self.probeKeyLiveness(tag: deviceTag)
           probeDetail = probe.detail
           if probe.liveness == .invalidated {
-            self.deleteKey(tag: Self.voteKeyTag)
+            self.deleteKey(tag: deviceTag)
             existing = nil
             reprovisioned = true
           }
         }
         let voteKey = try existing
-          ?? self.createSecureEnclaveKey(tag: Self.voteKeyTag, requireBiometry: true)
+          ?? self.createSecureEnclaveKey(tag: deviceTag, requireBiometry: true)
         guard let pub = SecKeyCopyPublicKey(voteKey) else {
           reject("KEY_ERROR", "could not derive the vote key's public key", nil); return
         }
@@ -286,11 +308,15 @@ class AttestationNativeModule: NSObject {
   func getCurrentDeviceKey(_ keyAlias: String,
                            resolver resolve: @escaping RCTPromiseResolveBlock,
                            rejecter reject: @escaping RCTPromiseRejectBlock) {
-    guard let voteKey = self.loadKey(tag: Self.voteKeyTag) else {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
+    guard let voteKey = self.loadKey(tag: deviceTag) else {
       reject("DEVICE_KEY_ABSENT", "no device key exists (read-only lookup — nothing was generated)", nil)
       return
     }
-    let probe = self.probeKeyLiveness(tag: Self.voteKeyTag)
+    let probe = self.probeKeyLiveness(tag: deviceTag)
     if probe.liveness == .invalidated {
       reject("DEVICE_KEY_INVALIDATED", "device key is permanently invalidated (\(probe.detail))", nil)
       return
@@ -346,6 +372,10 @@ class AttestationNativeModule: NSObject {
                           enableDeviceCheck: Bool,
                           resolver resolve: @escaping RCTPromiseResolveBlock,
                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
     let service = DCAppAttestService.shared
     guard service.isSupported else {
       reject("ATTESTATION_UNSUPPORTED", "App Attest is not supported on this device", nil); return
@@ -353,7 +383,7 @@ class AttestationNativeModule: NSObject {
     guard let keyId = UserDefaults.standard.string(forKey: Self.appAttestKeyIdDefaultsKey) else {
       reject("NO_KEY_PROVISIONED", "provisionDeviceKey has not run", nil); return
     }
-    guard let voteKey = self.loadKey(tag: Self.voteKeyTag), let votePub = SecKeyCopyPublicKey(voteKey) else {
+    guard let voteKey = self.loadKey(tag: deviceTag), let votePub = SecKeyCopyPublicKey(voteKey) else {
       reject("NO_KEY_PROVISIONED", "no vote key present", nil); return
     }
 
@@ -412,7 +442,11 @@ class AttestationNativeModule: NSObject {
                          promptNegativeButton: String,
                          resolver resolve: @escaping RCTPromiseResolveBlock,
                          rejecter reject: @escaping RCTPromiseRejectBlock) {
-    signWith(tag: Self.voteKeyTag, digestBase64: digestBase64, reason: promptSubtitle,
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
+    signWith(tag: deviceTag, digestBase64: digestBase64, reason: promptSubtitle,
              resolve: resolve, reject: reject)
   }
 
