@@ -8,6 +8,7 @@ import {
 	isDeviceSigningError,
 	mapDeviceSigningError,
 } from '../utils/deviceSigningError';
+import { peerUnavailableMessage } from '../utils/peerUnavailableMessage';
 
 /**
  * useDeviceSigningErrorHandler — the single catch-block contract (49-11)
@@ -30,6 +31,16 @@ import {
  *     setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
  *   }
  *
+ * Peer-unavailable writes: a joiner's first write after a cold start can reach
+ * a silent restored cohort (allocateTid's TidHighWater read, or any unheld
+ * table header) and fail `Block ... is unavailable (cohort-unreachable)`. The
+ * engine writes nothing in that case, so retrying with the same button is
+ * safe. In the "not mine" branch such a failure returns
+ * `{ handled: false, message: t('peerWriteUnavailable') }`, so every screen
+ * using the caller shape above shows translated copy with no change of its own.
+ * Signing codes are checked FIRST; a peer failure is never relabelled as a
+ * biometric failure and vice versa.
+ *
  * This hook owns the ENTIRE mapping from a `signWithDeviceKey` native reject
  * code to a UI outcome — no call site re-derives any part of it. See
  * `deviceSigningError.ts` for the underlying D-13 taxonomy this hook
@@ -51,6 +62,11 @@ export function useDeviceSigningErrorHandler(): (err: unknown) => DeviceSigningE
 			// what keeps a real engine/network/validation failure from ever
 			// being relabeled as a biometric failure (T-49-USER-7).
 			if (!isDeviceSigningError(err)) {
+				const peer = peerUnavailableMessage(err, t, 'write');
+				if (peer) {
+					console.warn('[signing] write peer unavailable');
+					return { handled: false, message: peer };
+				}
 				return { handled: false, message: undefined };
 			}
 
