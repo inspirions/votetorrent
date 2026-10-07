@@ -93,12 +93,21 @@ async function stagingCursorBounds (port: StagingSqlPort, table: StagingCursorTa
     `select count(*) as RowCount from ${table} where StrandId = :strandId`,
     { strandId }
   )
+  // An EMPTY result (no row, or a null/undefined RowCount) honestly means 0 rows: real Quereus
+  // `count(*)` always returns one row, so `[]` and null come only from port doubles and adapters
+  // over an empty strand. A value that is PRESENT but is not a non-negative integer is a loud
+  // 'count-unreadable' error, never a silent 0 (a silent 0 would mis-bound the walk and the ceiling).
   const raw = rows[0]?.RowCount
   let count = BigInt(0)
-  try {
-    count = raw === null || raw === undefined ? BigInt(0) : BigInt(raw)
-  } catch {
-    count = BigInt(0)
+  if (raw !== null && raw !== undefined) {
+    let parsed: bigint | undefined
+    if (typeof raw === 'bigint') parsed = raw
+    else if (typeof raw === 'number') parsed = Number.isSafeInteger(raw) ? BigInt(raw) : undefined
+    else if (typeof raw === 'string' && /^[0-9]+$/.test(raw)) parsed = BigInt(raw)
+    if (parsed === undefined || parsed < BigInt(0)) {
+      throw new P2pStagingError('count-unreadable', `staging cursor bounds (${table}): the strand row count was not a non-negative integer`)
+    }
+    count = parsed
   }
   let ceiling = count + BigInt(STAGING_CURSOR_MAX_STEP)
   if (ceiling > STAGING_CURSOR_CAP) ceiling = STAGING_CURSOR_CAP
@@ -236,7 +245,7 @@ export interface StagingDecisionSigner {
 export type P2pStagingErrorCode =
   | 'no-sealer' | 'no-opener' | 'no-decision-signer' | 'sealer-authority-mismatch'
   | 'duplicate-request-id' | 'duplicate-decision' | 'cursor-exhausted' | 'rejected' | 'digest-unavailable'
-  | 'code-binding-requires-signer'
+  | 'code-binding-requires-signer' | 'count-unreadable'
 
 /**
  * Every message is built from a code and a call-site label only — never a payload, plaintext,
@@ -358,9 +367,14 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
 
   let lastError: unknown
   let floor = BigInt(0)
+  let overranAtCount: bigint | undefined
 
-  for (let attempt = 1; attempt <= STAGING_CURSOR_MAX_ATTEMPTS; attempt++) {
+  attemptLoop: for (let attempt = 1; attempt <= STAGING_CURSOR_MAX_ATTEMPTS; attempt++) {
     const { ceiling, rowCount } = await stagingCursorBounds(port, table, strandId)
+    // A previous attempt overran its bound. Retrying with an unchanged count would give the same
+    // bound and the same overrun, so it is only worth another attempt when the count GREW; otherwise
+    // surface the overrun now (bounded work against a strand that really never ends).
+    if (overranAtCount !== undefined && rowCount <= overranAtCount) throw lastError
     const maxWalkPages = rowCount / BigInt(64) + BigInt(2)
     let walkPages = BigInt(0)
     // Greatest CONFORMING cursor at or below the ceiling; non-conforming rows are skipped.
@@ -386,17 +400,22 @@ export async function insertWithCursorRetry (port: StagingSqlPort, args: {
     // conforming range (`Cursor <= STAGING_CURSOR_MAX_TEXT`), so above-cap rows are never paged
     // (non-digit and wrong-width rows at or below the cap ARE paged and skipped) and every query
     // starts strictly after the previous page. The progress guard compares by code point, as SQL
-    // orders (CR-01). A page that fails to advance, or a walk past `rowCount / 64 + 2` pages,
-    // throws `cursor-exhausted`. Cost: one query per 64 planted in-range rows (IN-05).
+    // orders (CR-01). A page that fails to advance throws `cursor-exhausted` at once; a walk past
+    // `rowCount / 64 + 2` pages is retried within the same call (count re-read), and throws
+    // `cursor-exhausted` only when every attempt overruns. Cost: one query per 64 planted in-range rows (IN-05).
     let afterCursor = (nextValue - BigInt(1)).toString().padStart(STAGING_CURSOR_WIDTH, '0')
     for (; nextValue <= STAGING_CURSOR_CAP;) {
       walkPages += BigInt(1)
       if (walkPages > maxWalkPages) {
-        throw new P2pStagingError(
+        // The strand grew past the count this attempt read: retry within the same call (the next
+        // attempt re-reads the count; rows are never deleted, so the bound only grows).
+        lastError = new P2pStagingError(
           'cursor-exhausted',
           `${where}: the cursor walk read more pages than the strand holds rows`,
           { cause: lastError }
         )
+        overranAtCount = rowCount
+        continue attemptLoop
       }
       const page = await port.query<{ Cursor: unknown }>(walkPageSql, { strandId, afterCursor, capCursor: STAGING_CURSOR_MAX_TEXT })
       let free = false
