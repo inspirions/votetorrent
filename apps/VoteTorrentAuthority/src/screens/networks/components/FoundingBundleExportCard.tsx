@@ -96,6 +96,10 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 	const [fileName, setFileName] = useState<string | undefined>(undefined);
 	const [usedTextFallback, setUsedTextFallback] = useState(false);
 	const [savedNotice, setSavedNotice] = useState(false);
+	// The network fingerprint the exporter reads out to the importing officer (D-36).
+	const [fingerprint, setFingerprint] = useState<string | undefined>(undefined);
+	// A share or save failure AFTER the file was written: the card stays ready and the same file is retried.
+	const [fileActionError, setFileActionError] = useState<"share" | "save" | undefined>(undefined);
 	const fileRef = useRef<{ uri: string; fileName: string } | undefined>(undefined);
 	const mountedRef = useRef(true);
 	const inFlightRef = useRef(false);
@@ -112,6 +116,7 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 		inFlightRef.current = true;
 		if (mountedRef.current) {
 			setErrorMessage(undefined);
+			setFileActionError(undefined);
 			setState("generating");
 		}
 		try {
@@ -140,6 +145,8 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 			// no-op for the already-active network; the timeout guards a first-sync wait on a
 			// non-active one.
 			await withTimeout(networksEngine.open(networkRef, user, false), EXPORT_OPEN_TIMEOUT_MS);
+			// A card that unmounted while its network was opening must not prompt, export or share.
+			if (!mountedRef.current) return;
 
 			const exported = await networksEngine.exportFoundingBundle(networkRef.hash, {
 				userId: user.id,
@@ -147,13 +154,16 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 				sign,
 			});
 
-			if (mountedRef.current) setState("sharing");
+			if (!mountedRef.current) return;
+			setFingerprint(exported.fingerprint);
+			setState("sharing");
 			let uri: string;
 			try {
 				uri = await writeShareFile(exported.fileName, exported.text);
 			} catch (writeErr) {
 				if (writeErr instanceof FileShareError && writeErr.code === "unavailable") {
 					// An older binary without the native file seam: share the text, with a visible notice.
+					if (!mountedRef.current) return;
 					await Share.share(
 						{ message: exported.text, title: exported.fileName },
 						{ subject: exported.fileName, dialogTitle: t("networkFoundingExportShareButton") },
@@ -176,7 +186,7 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) {
-				onClose();
+				if (mountedRef.current) onClose();
 				return;
 			}
 			logExportFailure(err);
@@ -193,6 +203,7 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 		const file = fileRef.current;
 		if (!file) return;
 		setSavedNotice(false);
+		setFileActionError(undefined);
 		try {
 			if (Platform.OS === "android") {
 				await shareFileAndroid(file.uri, {
@@ -207,18 +218,17 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 			// RN's Share.share resolves on dismissal ({ action: "dismissedAction" }) and never rejects
 			// for it, and the Android file share resolves once the chooser launches, so every
 			// rejection here is a real failure (a FileShareError or not) and must reach the error
-			// state rather than leave the tap doing nothing (WR-05).
+			// inline failure (WR-05). The written file is kept: the card stays ready and a retry
+			// shares the same file without a new signature (IN-09).
 			logExportFailure(err);
-			if (mountedRef.current) {
-				setErrorMessage(undefined);
-				setState("error");
-			}
+			if (mountedRef.current) setFileActionError("share");
 		}
 	}, [t]);
 
 	const saveFile = useCallback(async () => {
 		const file = fileRef.current;
 		if (!file) return;
+		setFileActionError(undefined);
 		try {
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const picker = require("@react-native-documents/picker") as typeof import("@react-native-documents/picker");
@@ -231,18 +241,14 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 			if (results[0]?.error) {
 				logExportFailure(undefined);
 				setSavedNotice(false);
-				setErrorMessage(undefined);
-				setState("error");
+				setFileActionError("save");
 				return;
 			}
 			setSavedNotice(true);
 		} catch (err) {
 			if (isUserCancelSafe(err)) return;
 			logExportFailure(err);
-			if (mountedRef.current) {
-				setErrorMessage(undefined);
-				setState("error");
-			}
+			if (mountedRef.current) setFileActionError("save");
 		}
 	}, []);
 
@@ -276,11 +282,29 @@ export function FoundingBundleExportCard({ networkRef, onClose }: FoundingBundle
 									onPress={saveFile}
 								/>
 							)}
+							{fileActionError !== undefined && (
+								<ThemedText type="small" testID="founding-export-file-error" style={{ color: colors.error }}>
+									{fileActionError === "share"
+										? t("networkFoundingExportShareFailed")
+										: t("networkFoundingExportSaveFailed")}
+								</ThemedText>
+							)}
 							{savedNotice && (
 								<ThemedText type="small" testID="founding-export-saved" style={{ color: colors.textSecondary }}>
 									{t("networkFoundingExportSaved")}
 								</ThemedText>
 							)}
+						</>
+					)}
+					{fingerprint !== undefined && (
+						<>
+							<ThemedText type="defaultSemiBold">{t("networkFoundingExportFingerprintLabel")}</ThemedText>
+							<ThemedText type="default" testID="founding-export-fingerprint" selectable>
+								{fingerprint}
+							</ThemedText>
+							<ThemedText type="small" style={{ color: colors.textSecondary }}>
+								{t("networkFoundingExportFingerprintHelp")}
+							</ThemedText>
 						</>
 					)}
 					<CustomButton

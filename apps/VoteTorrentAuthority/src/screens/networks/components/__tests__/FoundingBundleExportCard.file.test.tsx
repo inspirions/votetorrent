@@ -88,6 +88,7 @@ const REF = { hash: "hashA", name: "Network A", primaryAuthorityDomainName: "a.e
 const URI = "file:///cache/founding-bundle.json";
 const FILE = "founding-bundle.json";
 const TEXT = "BUNDLE-TEXT-SECRET";
+const FP = "a1b2 c3d4 e5f6 0718";
 
 function setOS(os: "android" | "ios") {
 	Object.defineProperty(Platform, "OS", { configurable: true, get: () => os });
@@ -136,7 +137,7 @@ beforeEach(() => {
 	setOS("android");
 	shareSpy = jest.spyOn(Share, "share").mockResolvedValue({ action: "sharedAction" });
 	mockCreateSigner.mockImplementation(async () => jest.fn());
-	mockExport.mockImplementation(async () => ({ bundle: {}, text: TEXT, fileName: FILE }));
+	mockExport.mockImplementation(async () => ({ bundle: {}, text: TEXT, fileName: FILE, fingerprint: FP }));
 	mockWrite.mockImplementation(async () => URI);
 	mockShareAndroid.mockImplementation(async () => undefined);
 	mockSave.mockImplementation(async () => [{ uri: "content://x", name: FILE, error: null }]);
@@ -149,7 +150,7 @@ afterEach(() => {
 
 // Declared first on purpose: see the picker mock above (the first successful load is cached).
 describe("IN-07: Save to this phone when the picker module cannot load", () => {
-	it("shows the error state with no unhandled rejection", async () => {
+	it("stays ready with an inline error and no unhandled rejection", async () => {
 		const info = jest.spyOn(console, "info").mockImplementation(() => {});
 		const unhandled: unknown[] = [];
 		const onUnhandled = (reason: unknown) => {
@@ -169,7 +170,10 @@ describe("IN-07: Save to this phone when the picker module cannot load", () => {
 			// Both the save prologue's require and the catch's cancel check hit the failing load.
 			expect(mockPickerState.loadThrows).toBe(2);
 			expect(mockSave).not.toHaveBeenCalled();
-			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			// A save failure keeps the written file: still ready, with an inline error.
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(exists(tr, "founding-export-body-error")).toBe(false);
+			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportSaveFailed);
 			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
 			expect(unhandled).toEqual([]);
 		} finally {
@@ -269,7 +273,7 @@ describe("FoundingBundleExportCard file handoff", () => {
 		expect(json).toContain(FILE);
 	});
 
-	describe("WR-05: every share rejection reaches the error state", () => {
+	describe("WR-05: every share rejection is reported inline and keeps the file", () => {
 		let info: jest.SpyInstance;
 		beforeEach(() => {
 			info = jest.spyOn(console, "info").mockImplementation(() => {});
@@ -278,13 +282,14 @@ describe("FoundingBundleExportCard file handoff", () => {
 			info.mockRestore();
 		});
 
-		it("ios: a Share.share rejection shows the error state and is logged", async () => {
+		it("ios: a Share.share rejection stays ready with an inline error and is logged", async () => {
 			setOS("ios");
 			const { tr } = await renderReady();
 			shareSpy.mockRejectedValue(new Error("cannot present"));
 			await press(tr, "founding-export-share-file");
-			expect(exists(tr, "founding-export-body-error")).toBe(true);
-			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportError);
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(exists(tr, "founding-export-body-error")).toBe(false);
+			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportShareFailed);
 			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
 		});
 
@@ -298,23 +303,25 @@ describe("FoundingBundleExportCard file handoff", () => {
 			expect(exists(tr, "founding-export-body-error")).toBe(false);
 		});
 
-		it("android: a share-failed FileShareError shows the error state", async () => {
+		it("android: a share-failed FileShareError stays ready with an inline error", async () => {
 			const { tr } = await renderReady();
 			mockShareAndroid.mockImplementation(async () => {
 				throw new FileShareError("share-failed", "no activity");
 			});
 			await press(tr, "founding-export-share-file");
-			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportShareFailed);
 			expect(info).toHaveBeenCalledWith("[founding-bundle] export: share-failed");
 		});
 
-		it("android: a plain Error from the file share shows the error state", async () => {
+		it("android: a plain Error from the file share stays ready with an inline error", async () => {
 			const { tr } = await renderReady();
 			mockShareAndroid.mockImplementation(async () => {
 				throw new Error("bridge exploded");
 			});
 			await press(tr, "founding-export-share-file");
-			expect(exists(tr, "founding-export-body-error")).toBe(true);
+			expect(exists(tr, "founding-export-body-ready")).toBe(true);
+			expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportShareFailed);
 			expect(info).toHaveBeenCalledWith("[founding-bundle] export: failed");
 		});
 
@@ -377,7 +384,7 @@ describe("signer codes raised inside sign() during export", () => {
 		);
 		mockExport.mockImplementation(async (_hash: string, opts: { sign: (d: Uint8Array) => Promise<unknown> }) => {
 			await opts.sign(new Uint8Array(32));
-			return { bundle: {}, text: TEXT, fileName: FILE };
+			return { bundle: {}, text: TEXT, fileName: FILE, fingerprint: FP };
 		});
 	};
 
@@ -394,5 +401,157 @@ describe("signer codes raised inside sign() during export", () => {
 		const { onClose } = await renderReady();
 		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "invalidated" });
 		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("the exporter reads the fingerprint out", () => {
+	it("ready shows the label, the fingerprint and the help (file path)", async () => {
+		const { tr } = await renderReady();
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain(T.networkFoundingExportFingerprintLabel);
+		expect(json).toContain(T.networkFoundingExportFingerprintHelp);
+		const node = tr.root.findAll((n) => n.props.testID === "founding-export-fingerprint" && typeof n.type === "string");
+		expect(node).toHaveLength(1);
+		expect(JSON.stringify(node[0].props.children)).toContain(FP);
+	});
+
+	it("the text-fallback ready body shows them too", async () => {
+		mockWrite.mockImplementation(async () => {
+			throw new FileShareError("unavailable", "no native");
+		});
+		const { tr } = await renderReady();
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain(T.networkFoundingExportTextFallback);
+		expect(json).toContain(T.networkFoundingExportFingerprintLabel);
+		expect(json).toContain(FP);
+	});
+});
+
+describe("REVIEW/IN-09: a share or save failure keeps the written file", () => {
+	let info: jest.SpyInstance;
+	beforeEach(() => {
+		info = jest.spyOn(console, "info").mockImplementation(() => {});
+	});
+	afterEach(() => {
+		info.mockRestore();
+	});
+
+	it("android: a failed share stays ready; the retry shares the SAME uri with no new signature or export", async () => {
+		const { tr } = await renderReady();
+		mockShareAndroid.mockImplementationOnce(async () => {
+			throw new FileShareError("share-failed", "no activity");
+		});
+		await press(tr, "founding-export-share-file");
+		expect(exists(tr, "founding-export-body-ready")).toBe(true);
+		expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportShareFailed);
+
+		await press(tr, "founding-export-share-file");
+		expect(mockShareAndroid).toHaveBeenCalledTimes(2);
+		expect(mockShareAndroid.mock.calls[1][0]).toBe(URI);
+		expect(mockCreateSigner).toHaveBeenCalledTimes(1);
+		expect(mockExport).toHaveBeenCalledTimes(1);
+		expect(mockWrite).toHaveBeenCalledTimes(1);
+		expect(JSON.stringify(tr.toJSON())).not.toContain(T.networkFoundingExportShareFailed);
+	});
+
+	it("a save failure (per-file error result) stays ready with the save-failed copy", async () => {
+		const { tr } = await renderReady();
+		mockSave.mockImplementation(async () => [{ uri: "content://x", name: FILE, error: "disk full" }]);
+		await press(tr, "founding-export-save-file");
+		expect(exists(tr, "founding-export-body-ready")).toBe(true);
+		expect(exists(tr, "founding-export-body-error")).toBe(false);
+		expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportSaveFailed);
+		expect(JSON.stringify(tr.toJSON())).not.toContain(T.networkFoundingExportSaved);
+	});
+
+	it("a saved file clears an earlier inline failure", async () => {
+		const { tr } = await renderReady();
+		mockSave.mockImplementationOnce(async () => {
+			throw new Error("boom");
+		});
+		await press(tr, "founding-export-save-file");
+		expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportSaveFailed);
+		await press(tr, "founding-export-save-file");
+		expect(JSON.stringify(tr.toJSON())).not.toContain(T.networkFoundingExportSaveFailed);
+		expect(JSON.stringify(tr.toJSON())).toContain(T.networkFoundingExportSaved);
+	});
+});
+
+describe("initial/G3 WR-09: a card that unmounted while its network was opening does nothing", () => {
+	async function startExport(onClose: jest.Mock) {
+		let tr!: renderer.ReactTestRenderer;
+		await act(async () => {
+			tr = renderer.create(<FoundingBundleExportCard networkRef={REF} onClose={onClose} />);
+		});
+		const confirm = tr.root.findAll(
+			(n) => n.props.title === T.networkFoundingExportShareButton && typeof n.props.onPress === "function",
+		);
+		await act(async () => {
+			(confirm[0].props as any).onPress();
+		});
+		return tr;
+	}
+
+	it("open resolves after unmount: no export, no share, no onClose; the other card stays", async () => {
+		let resolveOpen!: (v: unknown) => void;
+		mockNetworksEngine.open.mockImplementationOnce(() => new Promise((resolve) => (resolveOpen = resolve)) as any);
+		const closeA = jest.fn();
+		const trA = await startExport(closeA);
+		await flush();
+		expect(mockCreateSigner).toHaveBeenCalledTimes(1);
+
+		await act(async () => {
+			trA.unmount();
+		});
+		let trB!: renderer.ReactTestRenderer;
+		await act(async () => {
+			trB = renderer.create(<FoundingBundleExportCard networkRef={REF} onClose={jest.fn()} />);
+		});
+
+		await act(async () => {
+			resolveOpen({});
+		});
+		await flush();
+		expect(mockExport).not.toHaveBeenCalled();
+		expect(shareSpy).not.toHaveBeenCalled();
+		expect(mockWrite).not.toHaveBeenCalled();
+		expect(closeA).not.toHaveBeenCalled();
+		expect(exists(trB, "founding-export-body-ready")).toBe(false);
+		expect(JSON.stringify(trB.toJSON())).toContain(T.networkFoundingExportConfirmHeading);
+	});
+
+	it("a handled signing error after unmount does not close another card", async () => {
+		let rejectOpen!: (e: unknown) => void;
+		mockNetworksEngine.open.mockImplementationOnce(
+			() => new Promise((_resolve, reject) => (rejectOpen = reject)) as any,
+		);
+		const closeA = jest.fn();
+		const trA = await startExport(closeA);
+		await flush();
+		await act(async () => {
+			trA.unmount();
+		});
+		await act(async () => {
+			rejectOpen(Object.assign(new Error("CANCELED"), { code: "CANCELED" }));
+		});
+		await flush();
+		expect(closeA).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	it("the text fallback never shares after an unmount during the file write", async () => {
+		let rejectWrite!: (e: unknown) => void;
+		mockWrite.mockImplementation(() => new Promise((_resolve, reject) => (rejectWrite = reject)));
+		const trA = await startExport(jest.fn());
+		await flush();
+		expect(mockExport).toHaveBeenCalledTimes(1);
+		await act(async () => {
+			trA.unmount();
+		});
+		await act(async () => {
+			rejectWrite(new FileShareError("unavailable", "no native"));
+		});
+		await flush();
+		expect(shareSpy).not.toHaveBeenCalled();
 	});
 });
