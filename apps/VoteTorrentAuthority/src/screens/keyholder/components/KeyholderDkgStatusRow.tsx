@@ -9,10 +9,13 @@ import type { KeyholderDkgRowState } from "../keyholder-dkg-driver";
 /**
  * KeyholderDkgStatusRow — Phase 62 Plan 26, Surface 6. Renders 62-10's `keyholderDkg*` copy for
  * pending/inProgress/complete/complaint, plus an EXPLICIT `failed` variant this plan adds because
- * the UI-SPEC has no copy for the terminal DKG `failed` phase or a self-disqualification (open
- * question, SUMMARY). `failed` renders the existing `closed` catalog string, never the complaint
- * copy — mapping it to "Generation will restart" would promise a restart that will never happen
- * for a terminal failure (T-62-26-09).
+ * the UI-SPEC has no copy for the terminal DKG `failed` phase or a self-disqualification.
+ * `failed` renders `keyholderDkgStatusFailed`, never the complaint copy — mapping it to
+ * "Generation will restart" would promise a restart that will never happen for a terminal failure
+ * (T-62-26-09). The copy is deliberately cause-agnostic: the row maps attempts-exhausted,
+ * threshold-unreachable, an election key inconsistent with round 4 (the key may still be
+ * releasable) and a self-disqualified keyholder (the others may still finish) to `failed` and
+ * never sees which, so it names no failure, loss or restart.
  *
  * No prop reaches color or copy selection other than `state` — informational only, no touchable
  * control of any kind (the officer cannot force a DKG restart from here).
@@ -63,7 +66,7 @@ export function KeyholderDkgStatusRow({ state }: KeyholderDkgStatusRowProps) {
 			glyph = 'circle-xmark';
 			glyphColor = colors.warning;
 			textColor = colors.warning;
-			text = t('closed');
+			text = t('keyholderDkgStatusFailed');
 			break;
 	}
 

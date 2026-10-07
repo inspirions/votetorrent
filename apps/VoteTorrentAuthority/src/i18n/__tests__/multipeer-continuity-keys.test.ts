@@ -176,6 +176,8 @@ const GROUPS: readonly Group[] = [
 			// KeyholderScreen row: load failure and driver failure copy.
 			"keyholderDkgLoadError",
 			"keyholderDkgError",
+			// Terminal DKG failed state: cause-agnostic copy.
+			"keyholderDkgStatusFailed",
 		],
 	],
 	[
@@ -201,6 +203,8 @@ const GROUPS: readonly Group[] = [
 			"officerIntakeKeyError",
 			// OfficerIntakeKey screen: another officer published the same key.
 			"officerIntakeKeyContestedWarning",
+			// Another device of the same officer published a newer usable key.
+			"officerIntakeKeySupersededBody",
 		],
 	],
 	[
@@ -270,8 +274,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		});
 	});
 
-	test("the total catalog is 114 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62, + 5 founding-export file-handoff keys, + 14 invitation/security keys)", () => {
-		expect(ALL_CATALOG_KEYS).toHaveLength(114);
+	test("the total catalog is 116 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62, + 5 founding-export file-handoff keys, + 14 invitation/security keys, + keyholderDkgStatusFailed, + officerIntakeKeySupersededBody)", () => {
+		expect(ALL_CATALOG_KEYS).toHaveLength(116);
 	});
 
 	test.each(ALL_CATALOG_KEYS)("%s: non-empty value in both locales, EN !== ES", (key) => {

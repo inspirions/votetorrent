@@ -1217,6 +1217,11 @@ const resources = {
 			registrantSelectiveUnreadable: 'These selective-disclosure details could not be read on this device.',
 			registrantSelectiveTampered:
 				"These selective-disclosure details do not match the registrant's signed record. Do not rely on them.",
+			keyholderDkgStatusFailed: 'Needs attention. An officer should review this key generation.',
+			officerIntakeKeySupersededBody:
+				'Encrypted intake is turned on for your account on another of your devices. New registrations are sealed to that device.',
+			officerIntakeRenewalFailedBody:
+				'Your new signing key is ready, but encrypted intake was not renewed. Turn it on again in Bulk Import / Sync.',
 		},
 	},
 	es: {
@@ -2402,6 +2407,11 @@ const resources = {
 			registrantSelectiveUnreadable: 'No se pudieron leer estos datos de divulgación selectiva en este dispositivo.',
 			registrantSelectiveTampered:
 				'Estos datos de divulgación selectiva no coinciden con el registro firmado del registrante. No confíes en ellos.',
+			keyholderDkgStatusFailed: 'Requiere atención. Un funcionario debe revisar esta generación de clave.',
+			officerIntakeKeySupersededBody:
+				'La recepción cifrada está activada para tu cuenta en otro de tus dispositivos. Las nuevas solicitudes se sellan para ese dispositivo.',
+			officerIntakeRenewalFailedBody:
+				'Tu nueva clave de firma está lista, pero la recepción cifrada no se renovó. Vuelve a activarla en Importación Masiva / Sincronizar.',
 		},
 	},
 };

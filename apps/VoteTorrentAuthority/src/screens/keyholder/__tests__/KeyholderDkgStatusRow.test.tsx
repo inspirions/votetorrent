@@ -104,10 +104,11 @@ describe('KeyholderDkgStatusRow (Surface 6)', () => {
     expect(icon.props.name).toBe('triangle-exclamation');
   });
 
-  it('W1e: failed renders the closed string, circle-xmark glyph, warning color (never colors.error)', () => {
+  it('W1e: failed renders its own cause-agnostic copy (not Closed), circle-xmark glyph, warning color (never colors.error)', () => {
     const tr = render('failed');
     const node = findByTestID(tr, 'keyholder-dkg-status-failed');
-    expect(node.props.children).toBe(resources.en.translation.closed);
+    expect(node.props.children).toBe(resources.en.translation.keyholderDkgStatusFailed);
+    expect(node.props.children).not.toBe(resources.en.translation.closed);
     expect(StyleSheet.flatten(node.props.style).color).toBe(SENTINEL_COLORS.warning);
     const icon = tr.root.findByType(require('react-native-vector-icons/FontAwesome6'));
     expect(icon.props.name).toBe('circle-xmark');
