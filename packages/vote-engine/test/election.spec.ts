@@ -32,6 +32,7 @@ import type {
   KeyholderInvite,
   Question
 } from '@votetorrent/vote-core'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 // Shared ElectionSubject fixture for real-engine tests
 const testElectionSubject: ElectionSubject = { id: 'election-1', authorityId: 'authority-1' }
@@ -112,7 +113,7 @@ function makeKeyholderInvite (overrides?: Partial<KeyholderInvite>): KeyholderIn
     // row, so Expiration must satisfy ExpirationValid (Expiration > context.now) — the
     // pre-fix placeholder '0' is no longer schema-legal now that this path is exercised.
     expiration: new Date(Date.now() + 3_600_000).toISOString(),
-    inviteKey: 'k'.repeat(66),
+    inviteKey: mintInviteKeyPair().inviteKey,
     // Empty inviteSignature hits the documented send-side carve-out (no
     // createKeyholderInvite factory yet — see keyholderInviteSignedBytes doc comment)
     // rather than tripping real secp256k1 verification against fixture-garbage hex.
@@ -551,7 +552,7 @@ describe('ElectionRevokeKeyholderBuilder', () => {
     const slotRow = await elec.ctx.db
       .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
       .get({ name: kh.name })
-    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await new InvitationEngine(inviteeContext(elec.ctx)).respondToInvite(slotRow!.Cid as string, true, await invitePrivateForSlot(elec.ctx, slotRow!.Cid as string), undefined, undefined, makeKeyholderProvisioning())
 
     const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
     const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })
@@ -582,7 +583,7 @@ describe('ElectionRevokeKeyholderBuilder', () => {
     const slotRow = await elec.ctx.db
       .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
       .get({ name: kh.name })
-    await new InvitationEngine(elec.ctx).respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await new InvitationEngine(inviteeContext(elec.ctx)).respondToInvite(slotRow!.Cid as string, true, await invitePrivateForSlot(elec.ctx, slotRow!.Cid as string), undefined, undefined, makeKeyholderProvisioning())
 
     const engine = new ElectionEngine({ id: 'election-1', authorityId: auth.authority.id }, elec.ctx)
     const b = new ElectionRevokeKeyholderBuilder(engine).fromPayload({ keyholder: kh, electionId: 'election-1' })
@@ -664,7 +665,7 @@ describe('ElectionEngine — inviteKeyholder real-path (INV-03)', () => {
       name: 'Test Keyholder',
       type: 'k',
       expiration: new Date(Date.now() + 86_400_000).toISOString(),
-      inviteKey: 'k'.repeat(66),
+      inviteKey: mintInviteKeyPair().inviteKey,
       // Empty inviteSignature hits the documented send-side carve-out (see
       // keyholderInviteSignedBytes doc comment) rather than tripping real
       // secp256k1 verification against fixture-garbage hex.

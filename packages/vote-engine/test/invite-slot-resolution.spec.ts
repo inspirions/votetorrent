@@ -13,6 +13,7 @@ import { MockInvitationEngine } from '../src/invite/mock-invitation-engine.js'
 import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 import { makeChainFixture, sendInvite, insertExpiredSlot, writeRawMarker, resendTime, dayAfter, markerRows, resultRows, insertRawChainRow, countRows } from './fixtures/invite-chain.js'
 import { createTestNetwork, addTestAuthority, addTestElection, makeTestSignCallback } from './fixtures/test-context.js'
+import { inviteeContext } from './fixtures/invite-keys.js'
 
 function makeKeypair () {
   const priv = secp256k1.utils.randomSecretKey()
@@ -31,7 +32,7 @@ async function seed (name: string) {
   const electionId = (await electionEngine.getElectionDetails()).election.id
   await electionEngine.inviteKeyholder(invite, electionId, makeTestSignCallback(auth.user))
   const row = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
-  return { auth, kp, cid: row!.Cid as string, engine: new InvitationEngine(auth.ctx) }
+  return { auth, kp, cid: row!.Cid as string, engine: new InvitationEngine(auth.ctx), inviteeEngine: new InvitationEngine(inviteeContext(auth.ctx)) }
 }
 
 describe('resolveInviteSlotCid', () => {
@@ -56,7 +57,7 @@ describe('resolveInviteSlotCid', () => {
     expect(cid).to.equal(s.cid)
     const provisioning = makeKeyholderProvisioning()
     const userId = crypto.randomUUID()
-    await s.engine.respondToInvite(cid!, true, s.kp.invitePrivate, undefined, userId, provisioning)
+    await s.inviteeEngine.respondToInvite(cid!, true, s.kp.invitePrivate, undefined, userId, provisioning)
     const ir = await s.auth.ctx.db.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid })
     expect(ir?.InvokedId).to.equal(userId)
   })

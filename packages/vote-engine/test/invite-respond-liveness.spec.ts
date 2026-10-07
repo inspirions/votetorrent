@@ -85,7 +85,7 @@ describe('respondToInvite liveness (CR-02)', () => {
     await fx.authority.cancelInvite(s.cid)
     const { provisioning, counter } = countingProvisioning()
     const userId = crypto.randomUUID()
-    await expectRefusal(fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning), WITHDRAWN)
+    await expectRefusal(fx.inviteeInvitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning), WITHDRAWN)
     expect(counter.calls).to.equal(0)
     expect(await countRows(fx, 'InviteResult', 'SlotCid', s.cid)).to.equal(0)
     expect(await countRows(fx, 'User', 'Id', userId)).to.equal(0)
@@ -99,7 +99,7 @@ describe('respondToInvite liveness (CR-02)', () => {
     const s = await seedKeyholder(fx, 'Live Keyholder')
     const { provisioning, counter } = countingProvisioning()
     const userId = crypto.randomUUID()
-    await fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning)
+    await fx.inviteeInvitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning)
     expect(counter.calls).to.equal(1)
     expect(await countRows(fx, 'User', 'Id', userId)).to.equal(1)
     expect(await countRows(fx, 'KeyholderDkgBinding', 'UserId', userId)).to.equal(1)
@@ -180,7 +180,7 @@ describe('respondToInvite liveness (CR-02)', () => {
       },
     }
     const userId = crypto.randomUUID()
-    await expectRefusal(fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning), WITHDRAWN)
+    await expectRefusal(fx.inviteeInvitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning), WITHDRAWN)
     expect(counter.calls).to.equal(1)
     expect(await countRows(fx, 'InviteCancellation', 'SlotCid', s.cid)).to.equal(1)
     expect(await countRows(fx, 'InviteResult', 'SlotCid', s.cid)).to.equal(0)
@@ -202,7 +202,7 @@ describe('respondToInvite liveness (CR-02)', () => {
       },
     }
     const userId = crypto.randomUUID()
-    await fx.invitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning)
+    await fx.inviteeInvitation.respondToInvite(s.cid, true, s.invitePrivate, undefined, userId, provisioning)
     expect(await countRows(fx, 'User', 'Id', userId)).to.equal(1)
     expect(await countRows(fx, 'KeyholderDkgBinding', 'UserId', userId)).to.equal(1)
   })

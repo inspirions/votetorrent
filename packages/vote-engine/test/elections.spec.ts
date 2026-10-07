@@ -44,6 +44,7 @@ import type {
   SignatureTask,
   User
 } from '@votetorrent/vote-core'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -639,7 +640,7 @@ describe('ElectionEngine', () => {
         name: 'KH1',
         type: 'k',
         expiration: new Date(Date.now() + 3_600_000).toISOString(),
-        inviteKey: 'k'.repeat(66),
+        inviteKey: mintInviteKeyPair().inviteKey,
         // Empty inviteSignature hits the documented send-side carve-out.
         inviteSignature: '',
       }
@@ -670,7 +671,7 @@ describe('ElectionEngine', () => {
         name: 'KH1',
         type: 'k',
         expiration: new Date(Date.now() + 3_600_000).toISOString(),
-        inviteKey: 'k'.repeat(66),
+        inviteKey: mintInviteKeyPair().inviteKey,
         // Empty inviteSignature hits the documented send-side carve-out.
         inviteSignature: '',
       }
@@ -678,8 +679,8 @@ describe('ElectionEngine', () => {
       const slotRow = await elec.ctx.db
         .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
         .get({ name: 'KH1' })
-      const invitationEngine = new InvitationEngine(elec.ctx)
-      await invitationEngine.respondToInvite(slotRow!.Cid as string, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+      const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+      await invitationEngine.respondToInvite(slotRow!.Cid as string, true, await invitePrivateForSlot(elec.ctx, slotRow!.Cid as string), undefined, undefined, makeKeyholderProvisioning())
 
       const before = await elec.ctx.db
         .prepare('select UserId from Keyholder where ElectionId = :id')

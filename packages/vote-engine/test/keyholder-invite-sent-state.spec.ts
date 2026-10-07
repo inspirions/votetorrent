@@ -37,9 +37,10 @@ import {
   makeElectionInit,
 } from './fixtures/test-context.js'
 import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 function freshInviteKey (): string {
-  return bytesToHex(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey()))
+  return mintInviteKeyPair().inviteKey
 }
 
 function futureIso (ms = 3_600_000): string {
@@ -151,7 +152,7 @@ describe('keyholder invite sent state (62-76)', () => {
   it('S2: an accepted keyholder keeps result.isAccepted true and reports sent answered', async () => {
     const fx = await createElectionWithInvitees(['Kay', 'Lee'])
     const cid = await send(fx, makeInvite('Kay'))
-    await new InvitationEngine(fx.auth.ctx).respondToInvite(cid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await new InvitationEngine(inviteeContext(fx.auth.ctx)).respondToInvite(cid, true, await invitePrivateForSlot(fx.auth.ctx, cid), undefined, undefined, makeKeyholderProvisioning())
     const kh = await projection(fx)
     expect(kh[0]!.result?.isAccepted).to.equal(true)
     expect(kh[0]!.sent?.state).to.equal('answered')
@@ -311,7 +312,7 @@ describe('keyholder invite sent state - every chain of a name is ranked (62-84)'
     it('S7b: an answered chain A outranks a live chain B (' + order.label + ')', async () => {
       const fx = await createElectionWithInvitees(['Kay', 'Lee'])
       const cidA = await send(fx, makeInvite('Kay'))
-      await new InvitationEngine(fx.auth.ctx).respondToInvite(cidA, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+      await new InvitationEngine(inviteeContext(fx.auth.ctx)).respondToInvite(cidA, true, await invitePrivateForSlot(fx.auth.ctx, cidA), undefined, undefined, makeKeyholderProvisioning())
       const b = await sendOrdered(fx, 'Kay', cidA, order.otherFirst)
       expect(cidA < b.cid).to.equal(order.otherFirst)
       const kh = await projection(fx)
@@ -336,7 +337,7 @@ describe('keyholder invite sent state - every chain of a name is ranked (62-84)'
 describe('keyholder invite sent state - a decline reads declined, and a newer live resend wins (62 CR-01)', () => {
   /** Kay declines through the real path: respondToInvite(accept=false) writes InviteResult(IsAccepted=false) and no Keyholder row. */
   async function decline (fx: Fixture, cid: string): Promise<void> {
-    await new InvitationEngine(fx.auth.ctx).respondToInvite(cid, false)
+    await new InvitationEngine(inviteeContext(fx.auth.ctx)).respondToInvite(cid, false, await invitePrivateForSlot(fx.auth.ctx, cid))
   }
 
   it('S10: a declined chain alone reads declined (never answered, so the label cannot read Sent)', async () => {
@@ -445,7 +446,7 @@ describe('keyholder invite sent state - an unreadable invitation table degrades 
   it('S9: a BlockUnavailableError on the slot read still returns the election; every keyholder reads unknown', async () => {
     const fx = await createElectionWithInvitees(['Kay', 'Lee'])
     const cid = await send(fx, makeInvite('Kay'))
-    await new InvitationEngine(fx.auth.ctx).respondToInvite(cid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await new InvitationEngine(inviteeContext(fx.auth.ctx)).respondToInvite(cid, true, await invitePrivateForSlot(fx.auth.ctx, cid), undefined, undefined, makeKeyholderProvisioning())
     const details = await withFailingSlotRead(fx, peerUnavailable(), () => fx.electionEngine.getElectionDetails())
     const kh = details.current.keyholders
     expect(details.election.id).to.equal(fx.electionId)
@@ -465,6 +466,33 @@ describe('keyholder invite sent state - an unreadable invitation table degrades 
       const kh = (await withFailingSlotRead(fx, err, () => fx.electionEngine.getElectionDetails())).current.keyholders
       for (const k of kh) expect(k.sent?.state).to.equal('unknown')
     }
+  })
+
+  it('S9d: a peer-unavailable error thrown from db.prepare for the InviteCancellation read degrades every keyholder to unknown', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    await send(fx, makeInvite('Kay'))
+    const db = fx.auth.ctx.db
+    const original = db.prepare
+    let calls = 0
+    const stub = function (this: typeof db, sql: string, ...rest: unknown[]) {
+      if (/InviteCancellation/.test(sql)) {
+        calls += 1
+        throw peerUnavailable()
+      }
+      return (original as (...a: unknown[]) => unknown).call(this, sql, ...rest)
+    }
+    db.prepare = stub as unknown as typeof db.prepare
+    let details
+    try {
+      details = await fx.electionEngine.getElectionDetails()
+    } finally {
+      db.prepare = original
+    }
+    expect(calls, 'the InviteCancellation prepare stub must actually have been hit').to.be.greaterThan(0)
+    expect(details.election.id).to.equal(fx.electionId)
+    const kh = details.current.keyholders
+    expect(kh).to.have.length(2)
+    for (const k of kh) expect(k.sent?.state).to.equal('unknown')
   })
 
   it('S9: any other error from the same read still rejects getElectionDetails (not masked)', async () => {

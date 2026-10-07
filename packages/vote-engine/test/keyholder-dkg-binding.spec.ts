@@ -32,6 +32,7 @@ import {
 } from './fixtures/test-context.js'
 import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
 import type { EngineContext } from '../src/types.js'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 // ---------------------------------------------------------------------------
 // Shared helpers (duplicated, not shared with keyholder-dkg-schema.spec.ts, per plan)
@@ -42,7 +43,7 @@ function makeKeyholderInvite (name: string, overrides?: Partial<KeyholderInvite>
     name,
     type: 'k',
     expiration: new Date(Date.now() + 3_600_000).toISOString(),
-    inviteKey: 'k'.repeat(66),
+    inviteKey: mintInviteKeyPair().inviteKey,
     inviteSignature: '',
     ...overrides,
   }
@@ -339,8 +340,8 @@ describe('KeyholderDkgBinding (D-26) — schema proofs', () => {
     const seeded = await seedElectionWithThreshold()
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Jack Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Jack Keyholder')
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
-    await invitationEngine.respondToInvite(slot.cid, false)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    await invitationEngine.respondToInvite(slot.cid, false, await invitePrivateForSlot(seeded.auth.ctx, slot.cid))
     const { publicHex, privateHex } = randomTestKeyPair()
     const fakeKh: TestKeyholder = { userId: crypto.randomUUID(), publicHex, privateHex, slotCid: slot.cid, curve: 'secp256k1' }
     // No Keyholder/UserKey exist for fakeKh; expect InviteAccepted to fire first regardless.
@@ -440,8 +441,8 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Quinn Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Quinn Keyholder')
     const provisioning = makeKeyholderProvisioning()
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
-    await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, undefined, provisioning)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, provisioning)
 
     const irRow = await seeded.auth.ctx.db.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid: slot.cid })
     const userId = irRow!.InvokedId as string
@@ -464,10 +465,10 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     const seeded = await seedElectionWithThreshold()
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Randy Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Randy Keyholder')
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true)
+      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid))
     } catch (err) {
       caught = err
     }
@@ -485,10 +486,10 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
       const real = await provisioning.sign(digest)
       return { ...real, signerKey: randomTestKeyPair().publicHex }
     } }
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, undefined, tampered)
+      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, tampered)
     } catch (err) {
       caught = err
     }
@@ -502,10 +503,10 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Tina Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Tina Keyholder')
     const provisioning = { ...makeKeyholderProvisioning(), dkgPublicKey: '02'.repeat(32) }
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, undefined, provisioning)
+      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, provisioning)
     } catch (err) {
       caught = err
     }
@@ -519,10 +520,10 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Uma Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Uma Keyholder')
     const provisioning = makeKeyholderProvisioning()
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, seeded.auth.user.id, provisioning)
+      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, seeded.auth.user.id, provisioning)
     } catch (err) {
       caught = err
     }
@@ -537,8 +538,8 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     const seeded = await seedElectionWithThreshold()
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Victor Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Victor Keyholder')
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
-    await invitationEngine.respondToInvite(slot.cid, false)
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    await invitationEngine.respondToInvite(slot.cid, false, await invitePrivateForSlot(seeded.auth.ctx, slot.cid))
     const irRow = await seeded.auth.ctx.db.prepare('select IsAccepted from InviteResult where SlotCid = :cid').get({ cid: slot.cid })
     expect(irRow, 'a decline still writes InviteResult').to.not.be.undefined
   })
@@ -547,12 +548,12 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     const seeded = await seedElectionWithThreshold()
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Wendy Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Wendy Keyholder')
-    const invitationEngine = new InvitationEngine(seeded.auth.ctx)
-    await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, makeKeyholderProvisioning())
     const countBefore = (await seeded.auth.ctx.db.prepare('select count(*) as c from User').get())!.c as number
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, makeKeyholderProvisioning())
     } catch (err) {
       caught = err
     }

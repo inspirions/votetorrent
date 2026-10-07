@@ -40,6 +40,7 @@ import {
 } from './fixtures/test-context.js'
 import type { EngineContext } from '../src/types.js'
 import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 const ELECTION_ID = 'election-1' // addTestElection's / makeElectionInit's default election id
 
@@ -52,7 +53,7 @@ function makeKeyholderInvite (name: string, overrides?: Partial<KeyholderInvite>
     name,
     type: 'k',
     expiration: new Date(Date.now() + 3_600_000).toISOString(),
-    inviteKey: 'k'.repeat(66),
+    inviteKey: mintInviteKeyPair().inviteKey,
     // Empty inviteSignature hits the documented send-side carve-out (no
     // createKeyholderInvite factory yet) rather than real secp256k1
     // verification against fixture-garbage hex — same as invitation.spec.ts.
@@ -187,9 +188,9 @@ describe('D-21: fresh User per keyholder accept', () => {
     const aliceCid = await keyholderSlotCid(elec.ctx, 'Alice Keyholder')
     const bobCid = await keyholderSlotCid(elec.ctx, 'Bob Keyholder')
 
-    const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
-    await invitationEngine.respondToInvite(bobCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+    await invitationEngine.respondToInvite(aliceCid, true, await invitePrivateForSlot(elec.ctx, aliceCid), undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(bobCid, true, await invitePrivateForSlot(elec.ctx, bobCid), undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(elec.ctx, aliceCid)
     const bob = await readAcceptedKeyholder(elec.ctx, bobCid)
@@ -213,11 +214,11 @@ describe('D-21: fresh User per keyholder accept', () => {
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Eve Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const eveCid = await keyholderSlotCid(elec.ctx, 'Eve Keyholder')
 
-    const invitationEngine = new InvitationEngine(elec.ctx)
+    const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
     let caught: unknown
     try {
       // Reuse-attempt: pass the officer's own id as the accept-time invokedId.
-      await invitationEngine.respondToInvite(eveCid, true, undefined, undefined, auth.user.id, makeKeyholderProvisioning())
+      await invitationEngine.respondToInvite(eveCid, true, await invitePrivateForSlot(elec.ctx, eveCid), undefined, auth.user.id, makeKeyholderProvisioning())
     } catch (err) {
       caught = err
     }
@@ -242,8 +243,8 @@ describe('D-27: engine reads join the Keyholder table', () => {
 
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Carol Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const carolCid = await keyholderSlotCid(elec.ctx, 'Carol Keyholder')
-    const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(carolCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+    await invitationEngine.respondToInvite(carolCid, true, await invitePrivateForSlot(elec.ctx, carolCid), undefined, undefined, makeKeyholderProvisioning())
 
     const carol = await readAcceptedKeyholder(elec.ctx, carolCid)
     const irRow = await elec.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: carolCid })
@@ -271,8 +272,8 @@ describe('D-27: engine reads join the Keyholder table', () => {
 
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), electionId, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(auth.ctx, 'Alice Keyholder')
-    const invitationEngine = new InvitationEngine(auth.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(auth.ctx))
+    await invitationEngine.respondToInvite(aliceCid, true, await invitePrivateForSlot(auth.ctx, aliceCid), undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(auth.ctx, aliceCid)
     const irRow = await auth.ctx.db.prepare('select InviteSignature from InviteResult where SlotCid = :cid').get({ cid: aliceCid })
@@ -295,12 +296,12 @@ describe('D-27: engine reads join the Keyholder table', () => {
 
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), electionId, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(auth.ctx, 'Alice Keyholder')
-    const invitationEngine = new InvitationEngine(auth.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(auth.ctx))
+    await invitationEngine.respondToInvite(aliceCid, true, await invitePrivateForSlot(auth.ctx, aliceCid), undefined, undefined, makeKeyholderProvisioning())
 
     await electionEngine.inviteKeyholder(makeKeyholderInvite('Dave Keyholder'), electionId, makeTestSignCallback(auth.user))
     const daveCid = await keyholderSlotCid(auth.ctx, 'Dave Keyholder')
-    await invitationEngine.respondToInvite(daveCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(daveCid, true, await invitePrivateForSlot(auth.ctx, daveCid), undefined, undefined, makeKeyholderProvisioning())
     const dave = await readAcceptedKeyholder(auth.ctx, daveCid)
 
     const details = await electionEngine.getElectionDetails()
@@ -325,9 +326,9 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Bob Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(elec.ctx, 'Alice Keyholder')
     const bobCid = await keyholderSlotCid(elec.ctx, 'Bob Keyholder')
-    const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
-    await invitationEngine.respondToInvite(bobCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+    await invitationEngine.respondToInvite(aliceCid, true, await invitePrivateForSlot(elec.ctx, aliceCid), undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(bobCid, true, await invitePrivateForSlot(elec.ctx, bobCid), undefined, undefined, makeKeyholderProvisioning())
 
     const alice = await readAcceptedKeyholder(elec.ctx, aliceCid)
     const bob = await readAcceptedKeyholder(elec.ctx, bobCid)
@@ -348,15 +349,15 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     const auth = await addTestAuthority(net)
     const elec = await addTestElection(auth)
 
-    const keyA = 'a'.repeat(66)
-    const keyB = 'b'.repeat(66)
+    const keyA = mintInviteKeyPair().inviteKey
+    const keyB = mintInviteKeyPair().inviteKey
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Dup Keyholder', { inviteKey: keyA }), ELECTION_ID, makeTestSignCallback(auth.user))
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Dup Keyholder', { inviteKey: keyB }), ELECTION_ID, makeTestSignCallback(auth.user))
     const cidA = await keyholderSlotCid(elec.ctx, 'Dup Keyholder', keyA)
     const cidB = await keyholderSlotCid(elec.ctx, 'Dup Keyholder', keyB)
-    const invitationEngine = new InvitationEngine(elec.ctx)
-    await invitationEngine.respondToInvite(cidA, true, undefined, undefined, undefined, makeKeyholderProvisioning())
-    await invitationEngine.respondToInvite(cidB, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+    await invitationEngine.respondToInvite(cidA, true, await invitePrivateForSlot(elec.ctx, cidA), undefined, undefined, makeKeyholderProvisioning())
+    await invitationEngine.respondToInvite(cidB, true, await invitePrivateForSlot(elec.ctx, cidB), undefined, undefined, makeKeyholderProvisioning())
 
     const dupA = await readAcceptedKeyholder(elec.ctx, cidA)
     const dupB = await readAcceptedKeyholder(elec.ctx, cidB)
@@ -393,7 +394,7 @@ describe('revokeKeyholder deletes the target, not the caller', () => {
     const elec = await addTestElection(auth)
     await elec.electionEngine.inviteKeyholder(makeKeyholderInvite('Alice Keyholder'), ELECTION_ID, makeTestSignCallback(auth.user))
     const aliceCid = await keyholderSlotCid(elec.ctx, 'Alice Keyholder')
-    await new InvitationEngine(elec.ctx).respondToInvite(aliceCid, true, undefined, undefined, undefined, makeKeyholderProvisioning())
+    await new InvitationEngine(inviteeContext(elec.ctx)).respondToInvite(aliceCid, true, await invitePrivateForSlot(elec.ctx, aliceCid), undefined, undefined, makeKeyholderProvisioning())
 
     const countBefore = (await elec.ctx.db.prepare('select count(*) as c from Keyholder').get())!.c as number
 
