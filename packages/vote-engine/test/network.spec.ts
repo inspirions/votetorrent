@@ -1303,86 +1303,142 @@ describe('NetworkEngine', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// 7. Pinned Authorities (local storage) — pure LocalStorage tests
+	// 7. Pinned Authorities (local storage) — 62-91: per network, filtered to
+	// the network's own Authority rows. The previous tests pinned FAKE ids on a
+	// schema-only db; with the Authority-table filter those would read empty, so
+	// they are deliberately rewritten on real networks (real primaryAuthorityId).
 	// -----------------------------------------------------------------------
 	describe('pinAuthority / unpinAuthority', () => {
-		it('should start with an empty list of pinned authorities', async () => {
-			await AsyncStorage.clear();
-			const { engine } = await makeDbOnlyNetworkEngine();
-			const pinned = await engine.getPinnedAuthorities();
-			expect(pinned).to.deep.equal([]);
-		});
-
-		it('should add an authority to pinned list via pinAuthority', async () => {
-			await AsyncStorage.clear();
-			const { engine } = await makeDbOnlyNetworkEngine();
-			const auth: Authority = {
-				id: 'aid-1',
-				name: 'AuthorityOne',
-				domainName: 'one.example.com',
+		type Net = { engine: INetworkEngine; ref: NetworkReference; authority: Authority };
+		async function makeNet(): Promise<Net> {
+			const { engine, ref } = await createNetworkEngine();
+			const details = await engine.getDetails();
+			const authority: Authority = {
+				id: details.network.primaryAuthorityId,
+				name: 'Stale Name',
+				domainName: 'stale.example.com',
 			};
-			await engine.pinAuthority(auth);
-			const pinned = await engine.getPinnedAuthorities();
-			expect(pinned).to.have.length(1);
-			expect(pinned[0]?.id).to.equal('aid-1');
-		});
+			return { engine, ref, authority };
+		}
+		/** Two real networks sharing ONE localStorage (createNetworkEngine clears it, so pin AFTER both exist). */
+		async function twoNets(): Promise<{ a: Net; b: Net }> {
+			const a = await makeNet();
+			const b = await makeNet();
+			return { a, b };
+		}
+		const scopedKey = (ref: NetworkReference): string => `pinnedAuthorities:${ref.hash}`;
 
-		it('should deduplicate when pinning the same authority twice', async () => {
-			await AsyncStorage.clear();
-			const { engine } = await makeDbOnlyNetworkEngine();
-			const auth: Authority = {
-				id: 'aid-dup',
-				name: 'Dup',
-				domainName: 'dup.example.com',
-			};
-			await engine.pinAuthority(auth);
-			await engine.pinAuthority(auth);
+		it('P-6: starts empty, pins, dedupes by id, unpin of unknown id is a no-op', async () => {
+			const { engine, authority } = await makeNet();
+			expect(await engine.getPinnedAuthorities()).to.deep.equal([]);
+			await engine.pinAuthority(authority);
+			await engine.pinAuthority(authority);
 			const pinned = await engine.getPinnedAuthorities();
 			expect(pinned).to.have.length(1);
-		});
-
-		it('should remove an authority from pinned list via unpinAuthority', async () => {
-			await AsyncStorage.clear();
-			const { engine } = await makeDbOnlyNetworkEngine();
-			const auth: Authority = {
-				id: 'aid-rm',
-				name: 'Removable',
-				domainName: 'rm.example.com',
-			};
-			await engine.pinAuthority(auth);
-			await engine.unpinAuthority(auth.id);
-			const pinned = await engine.getPinnedAuthorities();
-			expect(pinned).to.deep.equal([]);
-		});
-
-		it('should be a no-op when unpinning an authority that is not pinned', async () => {
-			await AsyncStorage.clear();
-			const { engine } = await makeDbOnlyNetworkEngine();
-			const auth: Authority = {
-				id: 'aid-real',
-				name: 'Real',
-				domainName: 'real.example.com',
-			};
-			await engine.pinAuthority(auth);
+			expect(pinned[0]?.id).to.equal(authority.id);
 			await engine.unpinAuthority('aid-ghost');
-			const pinned = await engine.getPinnedAuthorities();
-			expect(pinned).to.have.length(1);
-			expect(pinned[0]?.id).to.equal('aid-real');
+			expect(await engine.getPinnedAuthorities()).to.have.length(1);
+			await engine.unpinAuthority(authority.id);
+			expect(await engine.getPinnedAuthorities()).to.deep.equal([]);
 		});
 
-		it('should persist pinned authorities across engine instances via localStorage', async () => {
-			await AsyncStorage.clear();
-			const first = await makeDbOnlyNetworkEngine();
-			const auth: Authority = {
-				id: 'aid-persist',
-				name: 'Persistent',
-				domainName: 'p.example.com',
-			};
-			await first.engine.pinAuthority(auth);
-			const second = await makeDbOnlyNetworkEngine();
-			const pinned = await second.engine.getPinnedAuthorities();
-			expect(pinned).to.have.length(1);
-			expect(pinned[0]?.id).to.equal('aid-persist');
+		it('P-6: pin order is preserved and pins persist across engine instances', async () => {
+			const { engine, ref, authority } = await makeNet();
+			await engine.pinAuthority(authority);
+			const again = new NetworkEngine(ref, AsyncStorage, (engine as unknown as { ctx: EngineContext }).ctx);
+			const pinned = await again.getPinnedAuthorities();
+			expect(pinned.map((p) => p.id)).to.deep.equal([authority.id]);
+		});
+
+		it('P-1: a pin made on network A is not listed on network B (shared localStorage)', async () => {
+			const { a, b } = await twoNets();
+			expect(a.ref.hash).to.not.equal(b.ref.hash);
+			await a.engine.pinAuthority(a.authority);
+			expect((await a.engine.getPinnedAuthorities()).map((p) => p.id)).to.deep.equal([a.authority.id]);
+			expect(await b.engine.getPinnedAuthorities()).to.deep.equal([]);
+		});
+
+		it("P-2: an entry for a foreign authority written into B's scoped key is not returned by B", async () => {
+			const { a, b } = await twoNets();
+			await AsyncStorage.setItem(scopedKey(b.ref), [a.authority]);
+			expect(await b.engine.getPinnedAuthorities()).to.deep.equal([]);
+		});
+
+		it('P-2: a pinned authority that vanished from the network is not listed (real engine, fresh db)', async () => {
+			const { engine, ref, authority } = await makeNet();
+			await engine.pinAuthority(authority);
+			const db = new Database();
+			await prepareDb(db);
+			const second = new NetworkEngine(ref, AsyncStorage, { db, user: makeUser() });
+			expect(await second.getPinnedAuthorities()).to.deep.equal([]);
+			// a getter must not destroy data: the stored entry is still there
+			expect(await AsyncStorage.getItem<Authority[]>(scopedKey(ref))).to.have.length(1);
+		});
+
+		it("P-3: a returned pin carries the row's CURRENT name/domain, not the stored snapshot", async () => {
+			const { engine, authority } = await makeNet();
+			await engine.pinAuthority(authority);
+			const pinned = await engine.getPinnedAuthorities();
+			expect(pinned[0]?.name).to.not.equal('Stale Name');
+			expect(pinned[0]?.domainName).to.not.equal('stale.example.com');
+			expect(pinned[0]?.name).to.be.a('string').with.length.greaterThan(0);
+		});
+
+		it('P-4: a failing Authority lookup returns the stored snapshot and writes nothing', async () => {
+			const { engine, ref, authority } = await makeNet();
+			await engine.pinAuthority(authority);
+			const realCtx = (engine as unknown as { ctx: EngineContext }).ctx;
+			const failingDb = new Proxy(realCtx.db, {
+				get(target, prop) {
+					const v = Reflect.get(target, prop, target) as unknown;
+					if (prop === 'prepare') {
+						return (sql: string, ...rest: unknown[]) => {
+							if (/from Authority where Id = :id/.test(sql)) throw new Error('lookup boom');
+							return (v as (...a: unknown[]) => unknown).call(target, sql, ...rest);
+						};
+					}
+					return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+				},
+			});
+			const before = JSON.stringify(await AsyncStorage.getItem(scopedKey(ref)));
+			const flaky = new NetworkEngine(ref, AsyncStorage, { db: failingDb, user: realCtx.user });
+			const pinned = await flaky.getPinnedAuthorities();
+			expect(pinned.map((p) => p.id)).to.deep.equal([authority.id]);
+			expect(pinned[0]?.name).to.equal('Stale Name');
+			expect(JSON.stringify(await AsyncStorage.getItem(scopedKey(ref)))).to.equal(before);
+		});
+
+		it('P-5: legacy device-wide pins migrate lazily into the network that owns them', async () => {
+			const { a, b } = await twoNets();
+			await AsyncStorage.setItem('pinnedAuthorities', [a.authority, b.authority]);
+			expect((await a.engine.getPinnedAuthorities()).map((p) => p.id)).to.deep.equal([a.authority.id]);
+			expect((await AsyncStorage.getItem<Authority[]>(scopedKey(a.ref)))?.map((p) => p.id)).to.deep.equal([a.authority.id]);
+			expect((await AsyncStorage.getItem<Authority[]>('pinnedAuthorities'))?.map((p) => p.id)).to.deep.equal([b.authority.id]);
+			expect((await b.engine.getPinnedAuthorities()).map((p) => p.id)).to.deep.equal([b.authority.id]);
+			expect(await AsyncStorage.getItem('pinnedAuthorities')).to.equal(undefined);
+		});
+
+		it('P-5: a lookup error during migration leaves the legacy key exactly as it was', async () => {
+			const { engine, ref, authority } = await makeNet();
+			const legacy = [authority];
+			await AsyncStorage.setItem('pinnedAuthorities', legacy);
+			const realCtx = (engine as unknown as { ctx: EngineContext }).ctx;
+			const failingDb = new Proxy(realCtx.db, {
+				get(target, prop) {
+					const v = Reflect.get(target, prop, target) as unknown;
+					if (prop === 'prepare') {
+						return (sql: string, ...rest: unknown[]) => {
+							if (/from Authority where Id = :id/.test(sql)) throw new Error('lookup boom');
+							return (v as (...a: unknown[]) => unknown).call(target, sql, ...rest);
+						};
+					}
+					return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+				},
+			});
+			const flaky = new NetworkEngine(ref, AsyncStorage, { db: failingDb, user: realCtx.user });
+			await flaky.getPinnedAuthorities();
+			expect(await AsyncStorage.getItem('pinnedAuthorities')).to.deep.equal(legacy);
+			expect(await AsyncStorage.getItem(scopedKey(ref))).to.equal(undefined);
 		});
 	});
 
@@ -1412,6 +1468,33 @@ describe('NetworkEngine', () => {
 				caught = err;
 			}
 			expect((caught as Error)?.message).to.include('Authority not found');
+		});
+
+		it('O-1: a missing authority rejects with exactly "Authority not found" and code authority-not-found', async () => {
+			const { engine } = await makeDbOnlyNetworkEngine();
+			let caught: unknown;
+			try {
+				await engine.openAuthority('never-existed-authority');
+			} catch (err) {
+				caught = err;
+			}
+			expect((caught as Error)?.message).to.equal('Authority not found');
+			expect((caught as { code?: string }).code).to.equal('authority-not-found');
+		});
+
+		it('O-2: other failures keep the generic wrapping', async () => {
+			const { engine, ctx } = await makeDbOnlyNetworkEngine();
+			(engine as unknown as { ctx: unknown }).ctx = {
+				...ctx,
+				db: { prepare: () => { throw new Error('weird'); } },
+			};
+			let caught: unknown;
+			try {
+				await engine.openAuthority('x');
+			} catch (err) {
+				caught = err;
+			}
+			expect((caught as Error)?.message).to.include('Unknown error opening authority');
 		});
 
 		it('should return an AuthorityEngine when given a valid authorityId', async () => {

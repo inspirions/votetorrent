@@ -565,10 +565,83 @@ export class NetworkEngine implements INetworkEngine {
     }
   }
 
+  /** Legacy device-wide pin key (before pins were per network). Read only to migrate. */
+  private static readonly LEGACY_PINS_KEY = 'pinnedAuthorities'
+
+  private get pinsKey (): string {
+    return `pinnedAuthorities:${this.init.hash}`
+  }
+
+  /** Map an Authority row exactly as openAuthority does, so the two cannot drift. */
+  private static mapAuthorityRow (row: Record<string, unknown>): Authority {
+    return {
+      id: row.Id as string,
+      name: row.Name as string,
+      domainName: asText(row.DomainName, 'Authority.DomainName'),
+      imageRef: toImageRef(parseJsonOr<unknown>(row.ImageRef, undefined, 'Authority.ImageRef'))
+    }
+  }
+
+  /** Point lookup of one authority in THIS network; undefined when the row is absent. */
+  private async lookupAuthority (id: string): Promise<Authority | undefined> {
+    const row = await this.ctx.db
+      .prepare('select Id, Name, DomainName, ImageRef from Authority where Id = :id')
+      .get({ id })
+    return row ? NetworkEngine.mapAuthorityRow(row as Record<string, unknown>) : undefined
+  }
+
+  /**
+   * The raw stored pin list for this network, after claiming any legacy device-wide
+   * entries whose authority exists in this network. Any lookup error aborts the
+   * migration without writing. Scoped key is written first, then the shrunken legacy
+   * list, so a crash between the two can only duplicate a pin, never lose one.
+   */
+  private async readScopedPins (): Promise<Authority[]> {
+    const scoped = (await this.localStorage.getItem<Authority[]>(this.pinsKey)) ?? []
+    const legacy = (await this.localStorage.getItem<Authority[]>(NetworkEngine.LEGACY_PINS_KEY)) ?? []
+    if (legacy.length === 0) return scoped
+    const claimed: Authority[] = []
+    const remaining: Authority[] = []
+    try {
+      for (const entry of legacy) {
+        if ((await this.lookupAuthority(entry.id)) !== undefined) claimed.push(entry)
+        else remaining.push(entry)
+      }
+    } catch {
+      return scoped
+    }
+    if (claimed.length === 0) return scoped
+    const byId = new Map(scoped.map((a) => [a.id, a]))
+    for (const entry of claimed) if (!byId.has(entry.id)) byId.set(entry.id, entry)
+    const merged = Array.from(byId.values())
+    await this.localStorage.setItem(this.pinsKey, merged)
+    if (remaining.length === 0) await this.localStorage.removeItem(NetworkEngine.LEGACY_PINS_KEY)
+    else await this.localStorage.setItem(NetworkEngine.LEGACY_PINS_KEY, remaining)
+    return merged
+  }
+
+  /**
+   * Pinned authorities of THIS network. Pins are stored per network (key
+   * `pinnedAuthorities:<hash>`); entries saved under the old device-wide key are
+   * claimed on first read by the network whose Authority table holds them. Each pin
+   * is resolved against the Authority table: a present authority is returned with its
+   * CURRENT name/domain/image, an absent one is omitted (not deleted: a getter must
+   * not destroy data), and a lookup error returns the stored snapshot (UAT 62 test
+   * 19: a pin made on one network was listed on another and opened as "Authority
+   * not found"). Never throws because of a lookup.
+   */
   async getPinnedAuthorities (): Promise<Authority[]> {
-    return (
-      (await this.localStorage.getItem<Authority[]>('pinnedAuthorities')) ?? []
+    const stored = await this.readScopedPins()
+    const resolved = await Promise.all(
+      stored.map(async (pin): Promise<Authority | undefined> => {
+        try {
+          return await this.lookupAuthority(pin.id)
+        } catch {
+          return pin
+        }
+      })
     )
+    return resolved.filter((a): a is Authority => a !== undefined)
   }
 
   async getProposedElections (): Promise<Array<Proposal<ElectionInit>>> {
@@ -753,24 +826,14 @@ export class NetworkEngine implements INetworkEngine {
       return new AuthorityEngine(authority, this.ctx)
     }
     try {
-      const authorityDB = await this.ctx.db
-        .prepare(
-          'select Id, Name, DomainName, ImageRef from Authority where Id = :id'
-        )
-        .get({ id: authorityId })
-      if (!authorityDB) throw new Error('Authority not found')
-      const authority: Authority = {
-        id: authorityDB.Id as string,
-        name: authorityDB.Name as string,
-        domainName: asText(authorityDB.DomainName, 'Authority.DomainName'),
-        imageRef: toImageRef(parseJsonOr<unknown>(
-          authorityDB.ImageRef,
-          undefined,
-          'Authority.ImageRef'
-        ))
+      const found = await this.lookupAuthority(authorityId)
+      if (!found) {
+        throw Object.assign(new Error('Authority not found'), { code: 'authority-not-found' })
       }
+      const authority: Authority = found
       return new AuthorityEngine(authority, this.ctx)
     } catch (err) {
+      if ((err as { code?: unknown } | null)?.code === 'authority-not-found') throw err
       if (err instanceof QuereusError) {
         throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
       } else if (err instanceof MisuseError) {
@@ -782,13 +845,13 @@ export class NetworkEngine implements INetworkEngine {
   }
 
   async pinAuthority (authority: Authority): Promise<void> {
-    const pinnedAuthorities = await this.getPinnedAuthorities()
+    const pinnedAuthorities = await this.readScopedPins()
     const unique = Object.fromEntries(
       pinnedAuthorities.map((authority) => [authority.id, authority])
     )
     const appended = { ...unique, [authority.id]: authority }
     await this.localStorage.setItem(
-      'pinnedAuthorities',
+      this.pinsKey,
       Object.values(appended)
     )
   }
@@ -1268,11 +1331,11 @@ export class NetworkEngine implements INetworkEngine {
   }
 
   async unpinAuthority (authorityId: string): Promise<void> {
-    const pinnedAuthorities = await this.getPinnedAuthorities()
+    const pinnedAuthorities = await this.readScopedPins()
     const filtered = pinnedAuthorities.filter(
       (authority) => authority.id !== authorityId
     )
-    await this.localStorage.setItem('pinnedAuthorities', filtered)
+    await this.localStorage.setItem(this.pinsKey, filtered)
   }
 
   // ---- Builder factories (FACT-01 / FACT-04) ----

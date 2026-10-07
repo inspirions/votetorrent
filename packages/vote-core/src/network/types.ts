@@ -83,6 +83,11 @@ export interface INetworkEngine {
    * return static values; real engines compute from live network telemetry.
    */
   getStatistics(): Promise<{ estimatedNodes: number; serverCount: number }>
+  /**
+   * Pinned authorities of THIS network only (62-91). Pins are stored per network and
+   * filtered to authorities present in the network's Authority table; legacy device-wide
+   * pins are claimed lazily by the network that holds the authority.
+   */
   getPinnedAuthorities(): Promise<Authority[]>
   getProposedElections(): Promise<Array<Proposal<ElectionInit>>>
   getUser(userId: string): Promise<IUserEngine | undefined>
@@ -90,10 +95,15 @@ export interface INetworkEngine {
     cursor: Cursor<Authority>,
     forward: boolean
   ): Promise<Cursor<Authority>>
+  /**
+   * Open an authority of this network. A missing authority rejects with message
+   * 'Authority not found' and `code === 'authority-not-found'`.
+   */
   openAuthority(
     authorityId: string,
     authority?: Authority
   ): Promise<IAuthorityEngine>
+  /** Pin an authority for this network (per-network storage; dedupes by id). */
   pinAuthority(authority: Authority): Promise<void>
   proposeRevision(revision: NetworkRevision): Promise<void>
   /**
@@ -118,6 +128,7 @@ export interface INetworkEngine {
   respondToInvite<TInvokes>(
     invite: InviteAction<TInvokes>
   ): Promise<string>
+  /** Unpin an authority for this network; a no-op when it is not pinned. */
   unpinAuthority(authorityId: string): Promise<void>
   buildCreateAuthority(): INetworkCreateAuthorityBuilder
   buildPinAuthority(): INetworkPinAuthorityBuilder
