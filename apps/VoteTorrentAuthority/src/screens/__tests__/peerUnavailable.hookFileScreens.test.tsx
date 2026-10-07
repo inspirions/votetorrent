@@ -141,9 +141,10 @@ describe("H-2 ReviseUserScreen save", () => {
 		expect(text).toContain("peerWriteUnavailable");
 		expect(text).not.toContain("cohort-unreachable");
 	});
-	it("negative control: a generic error renders as before", async () => {
+	it("negative control: a generic error renders translated copy, never its raw message", async () => {
 		const text = allText(await run(new Error("disk corrupt")));
-		expect(text).toContain("disk corrupt");
+		expect(text).toContain("errorActionFailedGeneric");
+		expect(text).not.toContain("disk corrupt");
 		expect(text).not.toContain("peerWriteUnavailable");
 	});
 });

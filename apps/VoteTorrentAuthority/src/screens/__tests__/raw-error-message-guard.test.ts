@@ -21,11 +21,6 @@ const ALLOWED_MARKERS = ['peerUnavailable' + 'Message(', 'outcome.' + 'message ?
 /** file (relative to src, posix) + trimmed line text -> reason. */
 export const EXCEPTIONS: ReadonlyArray<{ file: string; text: string; reason: string }> = [
 	{
-		file: 'screens/users/DefaultUserScreen.tsx',
-		text: 'setErrorMessage(error instanceof Error ? error.message : String(error));',
-		reason: 'device-local AsyncStorage save, no engine involved',
-	},
-	{
 		file: 'screens/elections/election-error-messages.ts',
 		text: 'const raw = err instanceof Error ? err.message : String(err);',
 		reason: 'regex-matched to classify, never rendered',
@@ -83,7 +78,7 @@ describe('raw error message guard', () => {
 		const { used } = scan(allFiles());
 		const stale = EXCEPTIONS.filter((_, i) => !used.has(i)).map((x) => `${x.file}: ${x.text}`);
 		expect(stale).toEqual([]);
-		expect(EXCEPTIONS).toHaveLength(2);
+		expect(EXCEPTIONS).toHaveLength(1);
 		for (const x of EXCEPTIONS) expect(x.reason.length).toBeGreaterThan(0);
 	});
 });
@@ -307,9 +302,6 @@ export const EXEMPT_LINES: ExemptLine[] = [
 	{ file: 'services/bootstrap-upload.ts', key: '4262eefed532b800', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
 ];
 export const RESIDUE: ResidueEntry[] = [
-	{ file: 'screens/admin/EditOfficerScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/admin/EditOfficerScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/admin/OfficerDetailsScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-133', site: 'officer or user screen' },
 	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
 	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
 	{ file: 'screens/authorities/PollingDevicesScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
@@ -325,12 +317,6 @@ export const RESIDUE: ResidueEntry[] = [
 	{ file: 'screens/networks/NetworkStatisticsScreen.tsx', key: '3eff87169296d4e6', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
 	{ file: 'screens/tasks/ProposedRevisionScreen.tsx', key: '8a2232b1d2c1f7f1', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
 	{ file: 'screens/tasks/SignatureTaskScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/users/AddKeyScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/users/DefaultUserScreen.tsx', key: '8f950021f2963255', count: 1, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/users/ReviseUserScreen.tsx', key: '5fd03c278f354719', count: 1, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/users/ReviseUserScreen.tsx', key: 'dee1930e51647b92', count: 1, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/users/RevokeKeyScreen.tsx', key: 'dee1930e51647b92', count: 2, owner: '62-133', site: 'officer or user screen' },
-	{ file: 'screens/users/UserDetailsScreen.tsx', key: '3eff87169296d4e6', count: 2, owner: '62-133', site: 'officer or user screen' },
 ];
 
 describe('strict: no raw error text anywhere in the Authority app', () => {

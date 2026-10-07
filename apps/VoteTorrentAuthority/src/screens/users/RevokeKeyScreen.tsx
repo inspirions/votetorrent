@@ -18,6 +18,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { errorCopy } from "../../utils/errorCopy";
 
 export function RevokeKeyScreen() {
 	const { user, userEngine } = useRoute().params as { user: User; userEngine: IUserEngine };
@@ -100,7 +101,7 @@ export function RevokeKeyScreen() {
 		} catch (error) {
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? errorCopy(error, t, "write"));
 		} finally {
 			setIsSigning(false);
 		}
@@ -136,15 +137,15 @@ export function RevokeKeyScreen() {
 			// device-signing handler: a schema CHECK rejection carries no native `code`, so
 			// isDeviceSigningError would classify it as "not mine" and the handler would pass
 			// it through regardless — but keeping the ordering explicit here avoids a future
-			// reader reversing it. Every other revokeKey failure mode keeps the existing
-			// raw-message fallback via the shared handler below.
+			// reader reversing it. Every other revokeKey failure mode goes through the
+			// shared handler below and then errorCopy: translated copy, never the raw message.
 			if (error instanceof Error && error.message.includes("DeleteValid")) {
 				setErrorMessage(t("revokeKeySignatureInvalid"));
 				return;
 			}
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? errorCopy(error, t, "write"));
 		} finally {
 			setIsRevoking(false);
 		}

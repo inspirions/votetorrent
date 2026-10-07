@@ -22,7 +22,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 
 export default function EditOfficerScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -78,7 +78,7 @@ export default function EditOfficerScreen() {
 				}
 			} catch (error) {
 				console.warn("Error loading officer:", error);
-				setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
+				setErrorMessage(errorCopy(error, t, "read"));
 			}
 		}
 		loadOfficer();
@@ -155,7 +155,7 @@ export default function EditOfficerScreen() {
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 		} finally {
 			setIsRemoving(false);
 		}
@@ -237,7 +237,7 @@ export default function EditOfficerScreen() {
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 		} finally {
 			setIsSaving(false);
 		}

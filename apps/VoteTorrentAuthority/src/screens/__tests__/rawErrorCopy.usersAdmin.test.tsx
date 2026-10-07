@@ -87,7 +87,7 @@ function byTitle(tr: renderer.ReactTestRenderer, title: string) {
 	return n;
 }
 
-async function press(node: { props: { onPress: () => any } }) {
+async function press(node: { props: Record<string, any> }) {
 	await renderer.act(async () => {
 		await node.props.onPress();
 	});
