@@ -2,6 +2,13 @@ import type { InviteSlotResolution, InviteStatus, InviteType, KeyholderAcceptPro
 import type { SentOfficerInvite, SentAuthorityInvite } from '../authority/models.js';
 import type { SentKeyholderInvite } from '../election/models.js';
 
+/** Facts about a keyholder ('k') invitation slot's seat, for the app's pre-prompt checks. */
+export interface KeyholderSlotSeat {
+	electionId: string;
+	/** True when the calling officer is the one who sent the invitation (cannot accept it). */
+	selfInvite: boolean;
+}
+
 /**
  * Engine for reading pending invitations and responding to them.
  * Implemented by MockInvitationEngine (vote-engine) for v1.1 mocks-only mode.
@@ -54,4 +61,10 @@ export interface IInvitationEngine {
 		invokedId?: string,
 		keyholder?: KeyholderAcceptProvisioning,
 	): Promise<void>;
+	/**
+	 * Seat facts for a keyholder ('k') slot: its election and whether the calling officer sent it.
+	 * Lets the app refuse a self-accept before any biometric prompt; `respondToInvite` is the
+	 * authority (it throws code `self-invite`). Undefined for any other slot type or an unknown cid.
+	 */
+	getKeyholderSlotSeat(slotCid: string): Promise<KeyholderSlotSeat | undefined>;
 }

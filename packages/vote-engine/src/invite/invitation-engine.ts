@@ -15,6 +15,7 @@ import type {
   SentAuthorityInvite,
   SentKeyholderInvite,
   KeyholderAcceptProvisioning,
+  KeyholderSlotSeat,
   InviteType,
 } from '@votetorrent/vote-core'
 
@@ -289,7 +290,11 @@ export class InvitationEngine implements IInvitationEngine {
    * leaves no orphan row behind (the 62-09 crossnote's non-atomicity is fixed). `keyholder.sign` is
    * called BEFORE the transaction opens (never hold a transaction open across a signing prompt);
    * the returned `signerKey` is verified against `keyholder.signingKey.key` before anything is
-   * written. Decline and every non-'k' accept are UNCHANGED (single InviteResult write, no
+   * written. gap6/WR-09: a 'k' ACCEPT whose inviting officer (AdminSigning.UserId for the slot's
+   * SigningNonce) is ctx.user is refused with code `self-invite`, before the binding signature and
+   * again inside the transaction (user decision 8b: no override). Residuals - a colluding officer
+   * with a second device, and co-signing officers (only the initiator is checked) - are recorded in
+   * 62-SECURITY.md. Decline and every non-'k' accept are UNCHANGED (single InviteResult write, no
    * transaction). INTERIM STATE: the Authority keyholder-accept screen does not yet pass
    * provisioning (62-26 wires it), so a real keyholder accept in the app fails closed with the
    * message thrown below — by design, not a bug.
@@ -337,6 +342,10 @@ export class InvitationEngine implements IInvitationEngine {
       // chain. Checked here, before the keyholder provisioning is validated or signed and before
       // any write, with the same rule resolveInviteSlot uses.
       await this.assertSlotIsLiveHead(slotRow)
+
+      // gap6/WR-09 (user decision 8b: no override): the officer who sent a keyholder invitation
+      // cannot take its seat on their own device. Refused before the binding signature.
+      if (accept && slotRow.Type === 'k') await this.assertNotSelfInvite(slotRow.SigningNonce)
 
       // second-keyholder-invite-unique fix: an accepted keyholder ('k') invite mints a
       // NEW User (there is no existing identity for a name-only invitee pre-acceptance)
@@ -519,6 +528,8 @@ export class InvitationEngine implements IInvitationEngine {
           // another device are not re-validated against cancellation (P2P concern, tier-2 engine
           // control, not schema).
           await this.assertSlotIsLiveHead(slotRow)
+          // The identity can change while the signing prompt is open: check again inside the transaction.
+          await this.assertNotSelfInvite(slotRow.SigningNonce)
           await this.ctx.db.exec(inviteResultSql, inviteResultParams)
 
             await this.ctx.db.exec(
@@ -609,7 +620,44 @@ export class InvitationEngine implements IInvitationEngine {
     }
   }
 
+  /**
+   * Seat facts for a keyholder ('k') slot, so the app can refuse before any biometric prompt:
+   * the election the seat belongs to and whether the caller's officer sent it (selfInvite).
+   * undefined for any other slot type, a slot without an election, or an unknown cid. The engine's
+   * respondToInvite remains the authority.
+   */
+  async getKeyholderSlotSeat (slotCid: string): Promise<KeyholderSlotSeat | undefined> {
+    try {
+      const row = await this.ctx.db
+        .prepare('SELECT Type, ElectionId, SigningNonce FROM InviteSlot WHERE Cid = :slotCid')
+        .get({ slotCid }) as { Type: string, ElectionId: string | null, SigningNonce: string } | undefined
+      if (!row || row.Type !== 'k' || !row.ElectionId) return undefined
+      const invitedBy = await this.invitedBy(row.SigningNonce)
+      const me = this.ctx.user?.id
+      return { electionId: row.ElectionId, selfInvite: me !== undefined && invitedBy !== undefined && me === invitedBy }
+    } catch (err) {
+      this.rethrow(err, 'getKeyholderSlotSeat')
+    }
+  }
+
   // ---------- helpers ----------
+
+  /** The officer who started the signing session behind a slot (AdminSigning.UserId), if known. */
+  private async invitedBy (signingNonce: string): Promise<string | undefined> {
+    const row = await this.ctx.db
+      .prepare('SELECT UserId FROM AdminSigning WHERE Nonce = :nonce')
+      .get({ nonce: signingNonce }) as { UserId: string } | undefined
+    return row?.UserId
+  }
+
+  /** gap6/WR-09: throws code `self-invite` when ctx.user is the officer who sent the slot. */
+  private async assertNotSelfInvite (signingNonce: string): Promise<void> {
+    const me = this.ctx.user?.id
+    if (me === undefined) return
+    if (me === await this.invitedBy(signingNonce)) {
+      throw coded('The officer who sent a keyholder invitation cannot accept it', 'self-invite')
+    }
+  }
 
   /** Throws a fixed, identifier-free message unless `slot` is the live head of its invitation's chain. */
   private async assertSlotIsLiveHead (slot: { Cid: string, InviteKey: string, Type: string, SigningNonce: string }): Promise<void> {

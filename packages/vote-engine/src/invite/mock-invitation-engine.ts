@@ -5,7 +5,8 @@ import type {
   SentOfficerInvite,
   SentAuthorityInvite,
   SentKeyholderInvite,
-  InviteType
+  InviteType,
+  KeyholderSlotSeat
 } from '@votetorrent/vote-core'
 
 /**
@@ -75,6 +76,10 @@ export class MockInvitationEngine implements IInvitationEngine {
   async getKeyholderInvite (_id: string): Promise<InviteStatus<SentKeyholderInvite> | undefined> {
     // Simplest mock — return a seeded keyholder invite regardless of id (compile-time parity).
     return { invite: { name: 'Some Keyholder' } }
+  }
+
+  async getKeyholderSlotSeat (_slotCid: string): Promise<KeyholderSlotSeat | undefined> {
+    return undefined
   }
 
   async respondToInvite (invitationId: string, accept: boolean, invitePrivate: string, _digest?: string, _invokedId?: string): Promise<void> {
