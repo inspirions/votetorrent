@@ -6,6 +6,9 @@
 // Spike 002 scaffold — see polyfills.bootstrap.js.
 import './polyfills.bootstrap';
 
+// Before App: see rnscreens-flags.js (keyboard open/close must not reset Screen sizes).
+import './rnscreens-flags';
+
 // Dev-only arming of the `debug` namespace filter, so Optimystic's diagnostic markers
 // (cluster-tx:read-repair-triggered / cluster-fetch:solo-self-skip / commit:solo-cohort)
 // actually reach logcat. Nothing else enables `debug` on React Native: its browser build

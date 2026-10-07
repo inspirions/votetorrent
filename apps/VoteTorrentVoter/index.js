@@ -7,6 +7,9 @@
 // polyfills.bootstrap.js.
 import './polyfills.bootstrap';
 
+// Before App: see rnscreens-flags.js (keyboard open/close must not reset Screen sizes).
+import './rnscreens-flags';
+
 import {AppRegistry} from 'react-native';
 import App from './App';
 import {name as appName} from './app.json';
