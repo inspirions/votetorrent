@@ -38,14 +38,25 @@ import { useKeyboardInset } from "../../hooks/useKeyboardInset";
  *   8.  Registrants entry (InfoCard -> RegistrantsList, election filter pre-applied) — Phase 47 plan 47-21 (D-07/D-08)
  *   9.  More section (collapsible) + filter-authorities input
  */
+type BallotConfirmationState = { locked: boolean; confirmed: boolean };
+
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
 	const keyboardInset = useKeyboardInset();
 	const { electionEngine, authorityName } = useRoute().params as { electionEngine: IElectionEngine; authorityName?: string };
 	const [electionDetails, setElectionDetails] = useState<ElectionDetails | null>(null);
 	const [ballots, setBallots] = useState<BallotSummary[]>([]);
-	// D-09: confirmation state per ballot — { locked, confirmed } keyed by ballot id
-	const [ballotConfirmationStates, setBallotConfirmationStates] = useState<Record<string, { locked: boolean; confirmed: boolean }>>({});
+	// D-09: confirmation state per ballot — { locked, confirmed } keyed by ballot id. An entry is
+	// undefined when the state could not be read from the network and was never read before
+	// (WR-01): that ballot shows no badge, never "Proposed".
+	const [ballotConfirmationStates, setBallotConfirmationStates] = useState<Record<string, BallotConfirmationState | undefined>>({});
+	const ballotConfirmationStatesRef = useRef(ballotConfirmationStates);
+	ballotConfirmationStatesRef.current = ballotConfirmationStates;
+	// WR-01: the ballots read goes through the same peer-read classifier as the details read.
+	// ballotsRead: a ballots read has succeeded at least once (the notice variant is 'stale' then,
+	// 'unavailable' before).
+	const [ballotsRead, setBallotsRead] = useState(false);
+	const [ballotsPeerUnavailable, setBallotsPeerUnavailable] = useState(false);
 	const [moreOpen, setMoreOpen] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
 	// Gap 7: a details read that could not reach the other devices. Kept apart from errorMessage so
@@ -113,35 +124,71 @@ export default function ElectionDetailsScreen() {
 	// immediately on return from CreateBallot/EditBallot.
 	// D-09: Also refresh confirmation states on focus so Proposed/Confirmed badge
 	// updates when the user returns from the Tasks inbox after signing.
+	const loadBallots = useCallback(
+		async (isActive: () => boolean) => {
+			setErrorMessage(""); // clear stale error before reload so transient failures don't persist
+			try {
+				if (electionEngine) {
+					const summaries = await electionEngine.getBallots();
+					if (!isActive()) return;
+					setBallots(summaries);
+					setBallotsRead(true);
+					// D-09: fetch confirmation state for each ballot to drive the badge.
+					// WR-01: a state the network could not answer keeps the badge this device last
+					// read (or none), never the { locked: false, confirmed: false } "Proposed" default.
+					const lastRead = ballotConfirmationStatesRef.current;
+					let peerReason: string | undefined;
+					const stateEntries = await Promise.all(
+						summaries.map(async (b) => {
+							try {
+								const cs = await electionEngine.getBallotConfirmationState(b.id);
+								return [b.id, cs] as const;
+							} catch (e) {
+								const peerFailure = classifyPeerReadFailure(e);
+								if (peerFailure) {
+									peerReason = peerFailure.reason;
+									return [b.id, lastRead[b.id]] as const;
+								}
+								return [b.id, { locked: false, confirmed: false }] as const;
+							}
+						})
+					);
+					if (!isActive()) return;
+					setBallotConfirmationStates(Object.fromEntries(stateEntries));
+					if (peerReason) {
+						console.warn("[election-details] ballots peer read unavailable:", peerReason);
+					}
+					setBallotsPeerUnavailable(peerReason !== undefined);
+				}
+			} catch (error) {
+				const peerFailure = classifyPeerReadFailure(error);
+				if (peerFailure) {
+					// WR-01: keep the ballots this device already read; never surface the engine
+					// message (it names block ids). Reason token only in the log.
+					console.warn("[election-details] ballots peer read unavailable:", peerFailure.reason);
+					if (isActive()) setBallotsPeerUnavailable(true);
+					return;
+				}
+				console.warn("Error loading ballots:", error);
+				if (isActive()) setErrorMessage(error instanceof Error ? error.message : String(error));
+			}
+		},
+		[electionEngine]
+	);
+
 	useFocusEffect(
 		useCallback(() => {
-			const loadBallots = async () => {
-				setErrorMessage(""); // clear stale error before reload so transient failures don't persist
-				try {
-					if (electionEngine) {
-						const summaries = await electionEngine.getBallots();
-						setBallots(summaries);
-						// D-09: fetch confirmation state for each ballot to drive the badge.
-						const stateEntries = await Promise.all(
-							summaries.map(async (b) => {
-								try {
-									const cs = await electionEngine.getBallotConfirmationState(b.id);
-									return [b.id, cs] as const;
-								} catch {
-									return [b.id, { locked: false, confirmed: false }] as const;
-								}
-							})
-						);
-						setBallotConfirmationStates(Object.fromEntries(stateEntries));
-					}
-				} catch (error) {
-					console.warn("Error loading ballots:", error);
-					setErrorMessage(error instanceof Error ? error.message : String(error));
-				}
+			let active = true;
+			loadBallots(() => active);
+			return () => {
+				active = false;
 			};
-			loadBallots();
-		}, [electionEngine])
+		}, [loadBallots])
 	);
+
+	const retryBallots = useCallback(() => {
+		loadBallots(() => mountedRef.current);
+	}, [loadBallots]);
 
 	const handleShare = async (election: ElectionDetails["election"], proposed: ElectionDetails["proposed"], current: ElectionDetails["current"]) => {
 		try {
@@ -374,15 +421,22 @@ export default function ElectionDetailsScreen() {
 			{/* 6. Ballot Templates section */}
 			<View style={styles.section}>
 				<ThemedText type="title">{t("ballotTemplates")}</ThemedText>
-				{ballots.length > 0 ? (
+				{/* WR-01: a ballots read the network could not answer is not "no ballot yet". */}
+				{ballotsPeerUnavailable ? (
+					<PeerReadUnavailableNotice variant={ballotsRead ? "stale" : "unavailable"} onRetry={retryBallots} />
+				) : null}
+				{ballotsPeerUnavailable && !ballotsRead ? null : ballots.length > 0 ? (
 					ballots.map((ballot) => {
 						// D-09: render a Proposed/Confirmed status badge driven by getBallotConfirmationState.
+						// WR-01: no badge while the state is unknown (not read, network unreachable).
 						const cs = ballotConfirmationStates[ballot.id];
-						const statusLabel = cs?.confirmed
-							? t("statusConfirmed")
-							: cs?.locked
-								? t("statusAwaitingConfirmation")
-								: t("statusProposed");
+						const statusLabel = !cs
+							? undefined
+							: cs.confirmed
+								? t("statusConfirmed")
+								: cs.locked
+									? t("statusAwaitingConfirmation")
+									: t("statusProposed");
 						return (
 							<InfoCard
 								key={ballot.id}
