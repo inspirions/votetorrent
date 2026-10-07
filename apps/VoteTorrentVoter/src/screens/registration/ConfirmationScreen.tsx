@@ -405,15 +405,21 @@ export default function ConfirmationScreen() {
 
 	// Plan 28 (D-45): re-resolved on every focus while pending — never cached beyond this render
 	// (59 D-23). Inert before the ceremony reaches the pending state.
+	const readCodeAvailability = useCallback(
+		() =>
+			resolveRegistrationCodeAvailability({
+				getEngine,
+				getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+			}),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[],
+	);
 	useFocusEffect(
 		useCallback(() => {
 			if (!isPending) return;
 			let cancelled = false;
 			(async () => {
-				const result = await resolveRegistrationCodeAvailability({
-					getEngine,
-					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
-				});
+				const result = await readCodeAvailability();
 				if (!cancelled) setCodeAvailability(result);
 			})();
 			return () => {
@@ -422,6 +428,19 @@ export default function ConfirmationScreen() {
 			// eslint-disable-next-line react-hooks/exhaustive-deps
 		}, [isPending]),
 	);
+
+	// gap6/WR-07 (same dead end on this screen): Try Again re-reads fresh (nothing is stored — 59
+	// D-23) and is busy-guarded against double taps.
+	const codeRetryInFlightRef = useRef(false);
+	async function onRetryCodeRead() {
+		if (codeRetryInFlightRef.current) return;
+		codeRetryInFlightRef.current = true;
+		try {
+			setCodeAvailability(await readCodeAvailability());
+		} finally {
+			codeRetryInFlightRef.current = false;
+		}
+	}
 
 	// The confirm copy names the platform's own biometric: Face ID on iOS, the BIOMETRIC_STRONG
 	// prompt (fingerprint / face unlock) on Android. Literal keys per branch keep the i18n parity
@@ -523,7 +542,32 @@ export default function ConfirmationScreen() {
 					    content above (D-45). */}
 					{codeAvailability?.kind === 'available' ? (
 						<RegistrationConfirmationCodeCard state={{kind: 'code', code: codeAvailability.code}} />
-					) : codeAvailability?.kind === 'not-sent' || codeAvailability?.kind === 'not-holder' ? (
+					) : codeAvailability?.kind === 'unavailable' && codeAvailability.reason === 'read-failed' ? (
+						<>
+							<Text
+								testID="confirmation-code-unavailable"
+								style={[
+									styles.body,
+									{
+										color: colors.textSecondary,
+										fontFamily: fonts.regular.fontFamily,
+										fontWeight: fonts.regular.fontWeight,
+										fontSize: typeScale.body.fontSize,
+										lineHeight: typeScale.body.lineHeight,
+									},
+								]}>
+								{tContinuity('code.unavailable')}
+							</Text>
+							<Pressable
+								testID="confirmation-code-retry"
+								onPress={onRetryCodeRead}
+								style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
+								<Text style={[styles.ctaLabel, {color: colors.primary}]}>{tContinuity('code.retryButton')}</Text>
+							</Pressable>
+						</>
+					) : codeAvailability?.kind === 'not-sent' ||
+					  codeAvailability?.kind === 'not-holder' ||
+					  (codeAvailability?.kind === 'unavailable' && codeAvailability.reason === 'holder-key-missing') ? (
 						<Text
 							testID="confirmation-code-not-available"
 							style={[
