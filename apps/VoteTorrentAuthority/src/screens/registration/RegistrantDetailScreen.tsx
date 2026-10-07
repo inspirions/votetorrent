@@ -57,6 +57,7 @@ import { AttestationChallengesSection } from "./components/AttestationChallenges
 import { AccessHistorySection } from "./components/AccessHistorySection";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /**
  * RegistrantDetailScreen — the phase's integration seam, and the only
@@ -182,7 +183,7 @@ export default function RegistrantDetailScreen() {
 			// The caught message is engine-authored (a `rethrow`d
 			// "RegistrationEngine.<method>: ..." string) — no field name, no
 			// field value and no viewer id is ever interpolated into it.
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
 		}
@@ -217,7 +218,7 @@ export default function RegistrantDetailScreen() {
 			}
 		} catch (err) {
 			// Set from the engine message only — never from the tier data itself.
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 		}
 	}, [canViewPrivate, getEngine, registrantId]);
 
@@ -348,7 +349,7 @@ export default function RegistrantDetailScreen() {
 				// fetch, since annotating every row Not-disclosed after a failure
 				// would be a false claim about the disclosure policy.
 				if (!unmountedRef.current)
-					setErrorMessage(err instanceof Error ? err.message : String(err));
+					setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 			}
 		},
 		[getEngine, registrantId]

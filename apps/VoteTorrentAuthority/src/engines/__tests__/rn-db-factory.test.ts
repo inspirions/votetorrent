@@ -232,6 +232,21 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
     expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
   });
 
+  it('F-1: logs one closed-token attach marker with the founder flag and connection count, never the strand id', async () => {
+    const info = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      await createStrandDbFactory(makeFakeNode({ connections: 0 }))('networkhash123');
+      await createStrandDbFactory(makeFakeNode({ connections: 1 }))('networkhash123');
+      const marks = info.mock.calls.filter((c) => c[0] === '[strand-factory] attach');
+      expect(marks.length).toBe(2);
+      expect(marks[0][1]).toEqual({ founder: true, controlConnections: 0 });
+      expect(marks[1][1]).toEqual({ founder: false, controlConnections: 1 });
+      expect(JSON.stringify(info.mock.calls)).not.toContain('networkhash123');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('never passes the retired `mode` key (cadre-core 0.11.0 deleted it)', async () => {
     const node = makeFakeNode({ connections: 0 });
     const factory = createStrandDbFactory(node);

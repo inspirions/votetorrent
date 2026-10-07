@@ -16,6 +16,7 @@ import { useDeviceSigningErrorHandler } from "../../../hooks/useDeviceSigningErr
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
 import { latestVerdictByDeviceKey } from "./verdicts";
+import { peerUnavailableMessage } from "../../../utils/peerUnavailableMessage";
 
 /**
  * AssociationsSection — the default-open "Associated Devices" collapsible on
@@ -151,7 +152,7 @@ export function AssociationsSection({
 			if (!unmountedRef.current) {
 				setAssociations([]);
 				setVerdictMap(undefined);
-				setErrorMessage(err instanceof Error ? err.message : String(err));
+				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 				setDataLoading(false);
 			}
 			return;
@@ -168,7 +169,7 @@ export function AssociationsSection({
 		} catch (err) {
 			if (!unmountedRef.current) {
 				setAssociations([]);
-				setErrorMessage(err instanceof Error ? err.message : String(err));
+				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 				setVerdictMap(undefined);
 				setDataLoading(false);
 			}
@@ -188,7 +189,7 @@ export function AssociationsSection({
 		} catch (err) {
 			if (!unmountedRef.current) {
 				setVerdictMap(undefined);
-				setErrorMessage(err instanceof Error ? err.message : String(err));
+				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 			}
 		}
 

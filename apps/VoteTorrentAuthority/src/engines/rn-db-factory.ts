@@ -156,7 +156,12 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 		const strandId = networkHash;
 
 		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
-		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
+		const controlConnections = node.getControlNode()?.getConnections().length ?? 0;
+		const hasPeers = controlConnections > 0;
+		// Closed tokens only (never the strand id / network hash). This line exists so a device
+		// run can read which founder flag a cold start or an import attached with (O-02); the
+		// founder semantics themselves are decided in a later round.
+		console.info("[strand-factory] attach", { founder: controlConnections === 0, controlConnections });
 
 		let strand: StrandInstance;
 		try {

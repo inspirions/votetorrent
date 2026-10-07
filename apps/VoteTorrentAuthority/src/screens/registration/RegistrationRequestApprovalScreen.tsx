@@ -53,6 +53,7 @@ import { VerificationChecklist } from "./components/VerificationChecklist";
 import { RejectReasonCard } from "./components/RejectReasonCard";
 import { pillStyles, tintPill } from "./components/pill";
 import type { RootStackParamList } from "../../navigation/types";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /**
  * RegistrationRequestApprovalScreen — the ceremony where an authority
@@ -354,7 +355,7 @@ export default function RegistrationRequestApprovalScreen() {
 					// under it is not.
 					if (!unmountedRef.current) {
 						setPriorRejectionsUnavailable(true);
-						setErrorMessage(err instanceof Error ? err.message : String(err));
+						setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 					}
 				}
 
@@ -404,7 +405,7 @@ export default function RegistrationRequestApprovalScreen() {
 					}
 				}
 			} catch (err) {
-				if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+				if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 			} finally {
 				if (!unmountedRef.current) setLoading(false);
 			}
