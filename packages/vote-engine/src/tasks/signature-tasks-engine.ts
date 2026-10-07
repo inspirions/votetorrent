@@ -7,7 +7,7 @@ import { fanOutSignatureTasks } from '../signing/fan-out.js'
 import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
 import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
-import { digestToBytes, formatPgRange, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
+import { digestToBytes, formatPgRange, formatScoreRange, nowCanonicalDatetime, parseJsonOr } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import { verificationCid, isChecklistGateMet, RegistrantAlreadyExistsError, AdminPromotionError, RegistrationDuplicateError, RegistrationContentAccessError, RequesterSignatureUnverifiableError } from '@votetorrent/vote-core'
 import { openRegistrationPayload } from '../registration/sealed-registration-content.js'
@@ -1173,7 +1173,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
       // getBallotDetails reads them with parsePgRange. The Digest and the INSERT bind
       // these same variables (Question.MutationValid recompute).
       const optionRange = q.optionRange ? formatPgRange(q.optionRange) : '{1, 1}'
-      const scoreRange = q.scoreRange ? formatPgRange(q.scoreRange) : null
+      const scoreRange = q.scoreRange ? formatScoreRange(q.scoreRange) : null
       const grouping = q.group ?? null
       const sequence = q.sequence ?? null
       // Required is now `integer default 1` (37-04 / D-05b re-attach fix — was

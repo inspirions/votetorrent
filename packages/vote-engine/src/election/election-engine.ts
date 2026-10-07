@@ -1,6 +1,6 @@
 import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import type { SqlValue } from '@quereus/quereus'
-import { digestToBytes, formatPgRange, fromCanonicalDatetime, keyholderInviteSignedBytes, nowCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus, parsePgRange, verifyAdHocInviteSignature } from '../utils.js'
+import { digestToBytes, formatPgRange, fromCanonicalDatetime, keyholderInviteSignedBytes, nowCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus, parsePgRange, parseScoreRange, formatScoreRange, verifyAdHocInviteSignature } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import type {
   Ballot,
@@ -261,7 +261,7 @@ export class ElectionEngine implements IElectionEngine {
             // OptionRange and ScoreRange are stored in PostgreSQL range notation
             // `{min, max}`, NOT as JSON — use parsePgRange, not parseJsonOr.
             optionRange: parsePgRange(q.OptionRange, 'Question.OptionRange'),
-            scoreRange: parsePgRange(q.ScoreRange, 'Question.ScoreRange') as { min: number; max: number; step: number } | undefined,
+            scoreRange: parseScoreRange(q.ScoreRange, 'Question.ScoreRange'),
             group: (q.Grouping as string | undefined) ?? undefined,
             sequence: (q.Sequence as number | undefined) ?? undefined,
             // Required is now `integer default 1` (37-04 / D-05b re-attach fix —
@@ -698,7 +698,7 @@ export class ElectionEngine implements IElectionEngine {
           type: question.type,
           // pg range notation via formatPgRange, not JSON (matches the OptionRange write above).
           scoreRange: question.scoreRange
-            ? formatPgRange(question.scoreRange)
+            ? formatScoreRange(question.scoreRange)
             : null,
           grouping: question.group ?? null,
           sequence: question.sequence ?? null,
