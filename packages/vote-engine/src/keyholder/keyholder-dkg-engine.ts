@@ -992,6 +992,11 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     const shareAlias = keyholderDkgShareAlias(electionId, revision, signer.userId)
     const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, signer.userId)
     const existingShareBytes = await this.deps.vault.getSecret(shareAlias)
+    // Order on EVERY branch that puts a share: delete the stale attempt marker FIRST, then store the
+    // share, then put the marker. A crash after the marker delete and before the share put leaves no
+    // share; a crash after the share put and before the marker put leaves a marker-less share, which
+    // the sweep never deletes. (The old order stored the fresh share next to a stale marker naming an
+    // aborted attempt, which the sweep WOULD delete.) `putSecret` refuses an existing alias.
     if (existingShareBytes !== null) {
       const stillValid = validateReleasedShare(evaluation.threshold!, evaluation.roster.length, material.groupCommitments, {
         identifier: myIdentifier,
@@ -1001,14 +1006,16 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         await this.deps.vault.deleteSecret(markerAlias)
         await this.deps.vault.deleteSecret(shareAlias)
         await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
+        await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
+      } else {
+        await this.deps.vault.deleteSecret(markerAlias)
+        await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
       }
     } else {
+      await this.deps.vault.deleteSecret(markerAlias)
       await this.deps.vault.putSecret(shareAlias, material.signingShare, KEYHOLDER_SHARE_POLICY)
+      await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
     }
-    // Record the producing attempt AFTER the share is in the vault on every branch (a crash between the two
-    // leaves a marker-less share, which the sweep never deletes). `putSecret` refuses an existing alias.
-    await this.deps.vault.deleteSecret(markerAlias)
-    await this.deps.vault.putSecret(markerAlias, new TextEncoder().encode(String(attempt)), KEYHOLDER_SHARE_ATTEMPT_POLICY)
 
     const payload = serializeRound4Payload({ groupPublicKey: material.groupPublicKey, groupCommitments: material.groupCommitments })
     await this.postMessage(electionId, revision, attempt, 4, material.groupPublicKey, payload, signer)
