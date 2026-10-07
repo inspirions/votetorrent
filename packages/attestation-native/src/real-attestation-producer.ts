@@ -25,6 +25,7 @@ import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails, Si
 import type { Spec as NativeAttestationSpec } from './specs/NativeAttestation'
 // Type-only: no runtime import edge, so module purity is preserved.
 import type { SecretWrapPrompt } from './secret-wrap'
+import { nativeSignInputBase64 } from './native-sign-input'
 
 // Resolved ONCE at module scope — must match packages/vote-engine/ATTESTATION-CONTRACT.md §1 and
 // database/initialize.ts's registered SQL Digest() config exactly, or the producer's digest
@@ -322,7 +323,9 @@ async function produceIos(
 	}
 
 	// §4 proof of possession — signWithDeviceKey takes PLAIN base64 of the RAW 32 digest bytes,
-	// never base64url and never UTF-8-of-a-string (its byte contract is identical on both platforms).
+	// never base64url and never UTF-8-of-a-string. The base64 ENCODING is identical on both platforms,
+	// but the signing DOMAIN is not: this PoP deliberately pre-hashes utf8(POP_DIGEST) for a
+	// prehash:false verifier (ATTESTATION-CONTRACT-IOS.md §4) and is NOT routed through nativeSignInput*.
 	const popDigest = computePopDigest(boundDigest)
 	const popInput = base64FromBytes(hasher(new TextEncoderCtor().encode(popDigest)))
 	const pop = (await native.signWithDeviceKey(
@@ -575,27 +578,11 @@ export function createRealAttestationProducer(opts: {
 		 * deliberately never does that itself (module doc comment above, `:88`), and this method
 		 * never calls `produceAttestation`.
 		 *
-		 * PLATFORM ASYMMETRY — load-bearing, do NOT collapse to one code path (found while writing
-		 * this method's own test, plan 51-14 Task 1/2):
-		 *   - `verifySigP256`/`SignatureValid` (the eventual verifier, `initialize.ts`) call
-		 *     `@noble/curves`' `verify()` with its DEFAULT `prehash: true` — i.e. it treats the
-		 *     caller-supplied `digest` as a MESSAGE and hashes it ONCE (sha256) internally before
-		 *     checking. The produced signature must equal `ECDSA_sign(sha256(digest), privateKey)`.
-		 *   - ANDROID's native `signWithDeviceKey` uses `Signature.getInstance("SHA256withECDSA")`
-		 *     (`device-signer.ts`'s "WR-10 prehash contract" comment) — it HASHES INTERNALLY, so the
-		 *     caller passes `digest` AS-IS (`base64FromBytes(digest)`) and native's own internal hash
-		 *     produces exactly `ECDSA_sign(sha256(digest), privateKey)`. This matches `produceIos`'s
-		 *     sibling call for §4 POP on Android's side of that flow (there is none — POP is iOS-only).
-		 *   - iOS's native `signWithDeviceKey` uses `.ecdsaSignatureDigestX962SHA256`
-		 *     (`AttestationNativeModule.swift`'s `signWith`), which signs an ALREADY-HASHED 32-byte
-		 *     value with NO internal hash — passing `digest` AS-IS there would sign
-		 *     `ECDSA_sign(digest, privateKey)` (missing the sha256 step), silently failing
-		 *     verification only opaquely at the authority (both are 32 bytes, so nothing type-level
-		 *     catches it). `produceIos`'s own POP call (`:274-276` above) already compensates for this
-		 *     by pre-hashing (`base64FromBytes(hasher(...))`) before calling native — this method must
-		 *     do the SAME for its own caller-supplied `digest`.
-		 * Digest contract otherwise unchanged: PLAIN standard-alphabet base64 (NOT base64url, NOT
-		 * UTF-8-of-a-string) of whichever 32 raw bytes are actually being signed.
+		 * PLATFORM ASYMMETRY — load-bearing, defined once in `native-sign-input.ts`
+		 * (`nativeSignInputBase64`): the schema verifier (`verifySigP256`, noble default prehash:true)
+		 * checks ECDSA(sha256(digest)); Android native hashes internally (pass the digest as-is) while
+		 * iOS native signs its input as the final hash (pass sha256(digest)). Digest contract
+		 * otherwise unchanged: PLAIN standard-alphabet base64 of whichever 32 raw bytes are signed.
 		 *
 		 * `options.prompt` is display copy only: it never enters the signed bytes, and iOS shows only
 		 * the subtitle (as the LAContext reason). An invalid prompt is refused before any native call.
@@ -614,8 +601,7 @@ export function createRealAttestationProducer(opts: {
 			}
 
 			// See this method's platform-asymmetry doc comment above — iOS must pre-hash, Android must not.
-			const bytesToSign = getPlatformOS() === 'ios' ? hasher(digest) : digest
-			const digestBase64 = base64FromBytes(bytesToSign)
+			const digestBase64 = nativeSignInputBase64(digest, getPlatformOS())
 			const result = (await native.signWithDeviceKey(
 				KEY_ALIAS,
 				digestBase64,

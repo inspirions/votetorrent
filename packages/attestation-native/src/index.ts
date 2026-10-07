@@ -64,3 +64,7 @@ export type { FileShareErrorCode } from './file-share'
 // only; `secure-surface.ts` requires the TurboModule lazily and never throws.
 export { setSecureScreen, copySensitiveText } from './secure-surface'
 export type { SensitiveCopyResult } from './secure-surface'
+
+// Phase 62 plan 90 (gap 2): the single definition of the bytes native signs for verifySigP256-checked
+// signatures. Pure module (no TurboModule), safe in the barrel.
+export { nativeSignInputBytes, nativeSignInputBase64 } from './native-sign-input'
