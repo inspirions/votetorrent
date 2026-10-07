@@ -20,9 +20,13 @@ interface InfoCardProps {
 	 *  section heading above them. */
 	titleType?: "cardTitle" | "defaultSemiBold";
 	onPress?: () => void;
+	/** When set, the icon is its own 44pt button: pressing it calls this and NOT `onPress`
+	 *  (a Find card opens on a body tap and pins only on the labelled thumbtack). */
+	onIconPress?: () => void;
+	iconAccessibilityLabel?: string;
 }
 
-export function InfoCard({ image, title, subtitle, additionalInfo, icon, titleType = "cardTitle", onPress }: InfoCardProps) {
+export function InfoCard({ image, title, subtitle, additionalInfo, icon, titleType = "cardTitle", onPress, onIconPress, iconAccessibilityLabel }: InfoCardProps) {
 	const { colors } = useTheme() as ExtendedTheme;
 
 	return (
@@ -66,7 +70,18 @@ export function InfoCard({ image, title, subtitle, additionalInfo, icon, titleTy
 						</View>
 					))}
 			</View>
-			{icon && <FontAwesome6 name={icon} size={20} color={colors.text} style={styles.icon} />}
+			{icon && onIconPress ? (
+				<TouchableOpacity
+					onPress={onIconPress}
+					accessibilityRole="button"
+					accessibilityLabel={iconAccessibilityLabel}
+					style={styles.iconButton}
+				>
+					<FontAwesome6 name={icon} size={20} color={colors.text} />
+				</TouchableOpacity>
+			) : icon ? (
+				<FontAwesome6 name={icon} size={20} color={colors.text} style={styles.icon} />
+			) : null}
 		</TouchableOpacity>
 	);
 }
@@ -126,5 +141,12 @@ const styles = StyleSheet.create({
 	},
 	icon: {
 		marginLeft: 8,
+	},
+	iconButton: {
+		marginLeft: 8,
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: "center",
+		justifyContent: "center",
 	},
 });

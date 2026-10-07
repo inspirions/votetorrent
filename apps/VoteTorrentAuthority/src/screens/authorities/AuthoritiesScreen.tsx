@@ -13,6 +13,8 @@ import { NoNetwork } from "../../components/NoNetwork";
 import { useApp } from "../../providers/AppProvider";
 import { globalStyles } from "../../theme/styles";
 import { InlineError } from "../../components/InlineError";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 
 export default function AuthoritiesScreen() {
 	const { t } = useTranslation();
@@ -26,10 +28,13 @@ export default function AuthoritiesScreen() {
 	const [pinnedAuthorities, setPinnedAuthorities] = useState<Authority[]>([]);
 	const [networkEngine, setNetworkEngine] = useState<INetworkEngine | null>(null);
 	const [errorMessage, setErrorMessage] = useState("");
+	// A read that could not reach the other devices: translated notice, never the engine message.
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
 
 	const loadAuthorities = useCallback(async () => {
 		if (!networkEngine) return;
 		setErrorMessage("");
+		setPeerUnavailable(false);
 		try {
 			setIsLoading(true);
 			const pinned = await networkEngine.getPinnedAuthorities();
@@ -42,12 +47,18 @@ export default function AuthoritiesScreen() {
 				)
 			);
 		} catch (error) {
-			console.warn("Error loading authorities:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			const peerFailure = classifyPeerReadFailure(error);
+			if (peerFailure) {
+				console.warn("[authorities] peer read unavailable:", peerFailure.reason);
+				setPeerUnavailable(true);
+			} else {
+				console.warn("Error loading authorities:", error);
+				setErrorMessage(t("authoritiesLoadFailed"));
+			}
 		} finally {
 			setIsLoading(false);
 		}
-	}, [networkEngine, searchText]);
+	}, [networkEngine, searchText, t]);
 
 	useEffect(() => {
 		async function initializeNetworkEngine() {
@@ -58,11 +69,11 @@ export default function AuthoritiesScreen() {
 				setNetworkEngine(engine);
 			} catch (error) {
 				console.warn("Failed to initialize network engine:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(t("authoritiesLoadFailed"));
 			}
 		}
 		initializeNetworkEngine();
-	}, [hasNetwork, getEngine]);
+	}, [hasNetwork, getEngine, t]);
 
 	// Header right intentionally NOT overridden — the Authorities tab inherits
 	// the global circle-user account avatar from useTabHeaderOptions() to match
@@ -101,11 +112,20 @@ export default function AuthoritiesScreen() {
 				);
 			} catch (error) {
 				console.warn("Error toggling authority pin:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(t("authorityPinFailed"));
 			}
 		},
-		[networkEngine, pinnedAuthorities, searchText]
+		[networkEngine, pinnedAuthorities, searchText, t]
 	);
+
+	if (hasNetwork && !networkEngine && errorMessage) {
+		// The network engine could not be opened: say so (translated) instead of the no-network state.
+		return (
+			<ScrollView style={styles.container}>
+				<InlineError message={errorMessage} />
+			</ScrollView>
+		);
+	}
 
 	if (!hasNetwork || !networkEngine) {
 		return <NoNetwork />;
@@ -119,8 +139,24 @@ export default function AuthoritiesScreen() {
 		);
 	}
 
+	const notice = peerUnavailable ? (
+		<PeerReadUnavailableNotice
+			variant={pinnedAuthorities.length === 0 && unpinnedAuthorities.length === 0 ? "unavailable" : "stale"}
+			onRetry={loadAuthorities}
+		/>
+	) : null;
+
 	const bothListsEmpty =
 		pinnedAuthorities.length === 0 && unpinnedAuthorities.length === 0;
+
+	if (bothListsEmpty && (peerUnavailable || errorMessage)) {
+		return (
+			<ScrollView style={styles.container}>
+				<InlineError message={errorMessage} />
+				{notice}
+			</ScrollView>
+		);
+	}
 
 	if (bothListsEmpty) {
 		return (
@@ -141,6 +177,7 @@ export default function AuthoritiesScreen() {
 	return (
 		<ScrollView style={styles.container}>
 			<InlineError message={errorMessage} />
+			{notice}
 			{pinnedAuthorities.length > 0 ? (
 				pinnedAuthorities.map((authority: Authority) => (
 					<InfoCard
@@ -180,7 +217,13 @@ export default function AuthoritiesScreen() {
 								{ label: t("domain"), value: authority.domainName },
 							]}
 							icon={"thumbtack"}
-							onPress={() => handlePinToggle(authority)}
+							onPress={() => {
+								navigation.navigate("AuthorityDetails", {
+									authority: authority,
+								});
+							}}
+							onIconPress={() => handlePinToggle(authority)}
+							iconAccessibilityLabel={t("pin")}
 						/>
 					))
 				) : (
