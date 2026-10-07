@@ -19,8 +19,9 @@ import { peerUnavailableMessage } from '../utils/peerUnavailableMessage';
  * `outcome.handled` is true, `return` immediately — the handler has already
  * done everything the UI needs (a navigation, or a deliberate no-op for a
  * cancellation). Otherwise, call your screen's existing `setErrorMessage`
- * with `outcome.message`, falling back to the caught error's own message
- * when `outcome.message` is `undefined` (the "not mine" pass-through case):
+ * with `outcome.message`. The "not mine" case returns `message` undefined, so a
+ * caller keeps its own screen-specific key or uses `errorCopy` (utils/errorCopy);
+ * never render the caught error's own message:
  *
  *   const handleDeviceSigningError = useDeviceSigningErrorHandler();
  *   try {
@@ -28,7 +29,7 @@ import { peerUnavailableMessage } from '../utils/peerUnavailableMessage';
  *   } catch (err) {
  *     const outcome = handleDeviceSigningError(err);
  *     if (outcome.handled) return;
- *     setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+ *     setErrorMessage(outcome.message ?? errorCopy(err, t, 'write'));
  *   }
  *
  * Peer-unavailable writes: a joiner's first write after a cold start can reach

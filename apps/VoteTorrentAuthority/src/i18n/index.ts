@@ -1222,6 +1222,10 @@ const resources = {
 				'Encrypted intake is turned on for your account on another of your devices. New registrations are sealed to that device.',
 			officerIntakeRenewalFailedBody:
 				'Your new signing key is ready, but encrypted intake was not renewed. Turn it on again in Bulk Import / Sync.',
+			errorLoadFailedGeneric: "This couldn't be loaded. Please try again.",
+			errorActionFailedGeneric: "That didn't work. Please try again.",
+			validationRequired: 'A required field is empty. Fill it in and try again.',
+			validationInvalid: "One of the values isn't valid. Check the form and try again.",
 		},
 	},
 	es: {
@@ -2412,6 +2416,10 @@ const resources = {
 				'La recepción cifrada está activada para tu cuenta en otro de tus dispositivos. Las nuevas solicitudes se sellan para ese dispositivo.',
 			officerIntakeRenewalFailedBody:
 				'Tu nueva clave de firma está lista, pero la recepción cifrada no se renovó. Vuelve a activarla en Importación Masiva / Sincronizar.',
+			errorLoadFailedGeneric: 'No se pudo cargar. Inténtalo de nuevo.',
+			errorActionFailedGeneric: 'No se pudo completar. Inténtalo de nuevo.',
+			validationRequired: 'Falta un campo obligatorio. Complétalo e inténtalo de nuevo.',
+			validationInvalid: 'Uno de los valores no es válido. Revisa el formulario e inténtalo de nuevo.',
 		},
 	},
 };
