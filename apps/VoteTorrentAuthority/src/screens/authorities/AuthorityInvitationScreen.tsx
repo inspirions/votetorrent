@@ -85,7 +85,7 @@ export default function AuthorityInvitationScreen() {
 				const details = await engine?.getDetails();
 				if (details?.network?.name) setNetworkName(details.network.name);
 			} catch (error) {
-				console.error("Error loading network for invitation:", error);
+				console.error("Error loading network for invitation:", error instanceof Error ? error.name : "unknown");
 			}
 		}
 		loadNetwork();
@@ -167,12 +167,12 @@ export default function AuthorityInvitationScreen() {
 			// Re-open the network via networksEngine.open(ref, user) directly so the
 			// returned NetworkEngine has ctx.user set (bypasses the factory cache).
 			if (!networksEngine) {
-				setErrorMessage("Networks engine not yet initialized — please wait and try again.");
+				setErrorMessage(t("invitationNetworkStarting"));
 				return;
 			}
 			const recentRefs = await (networksEngine as INetworksEngine).getRecentNetworks();
 			if (!recentRefs || recentRefs.length === 0) {
-				setErrorMessage("No network found — create a network first.");
+				setErrorMessage(t("invitationNoNetwork"));
 				return;
 			}
 			const networkRef = recentRefs[0];
@@ -185,7 +185,7 @@ export default function AuthorityInvitationScreen() {
 			const details = await networkEngine.getDetails();
 			const newAuthorityId = details.network.primaryAuthorityId;
 			if (!newAuthorityId) {
-				setErrorMessage("Could not resolve the network's authority — invite not created.");
+				setErrorMessage(t("invitationAuthorityUnresolved"));
 				return;
 			}
 			const authorityEngine = await networkEngine.openAuthority(newAuthorityId);
@@ -218,10 +218,10 @@ export default function AuthorityInvitationScreen() {
 			setShareText(sharePayload);
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
-			console.warn("AuthorityInvitationScreen send failed:", error);
+			console.warn("AuthorityInvitationScreen send failed:", error instanceof Error ? error.name : "unknown");
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
 			return;
 		} finally {
 			setIsSending(false);

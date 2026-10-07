@@ -84,7 +84,7 @@ export default function AdministratorInvitationScreen() {
 				const details = await engine?.getDetails();
 				if (details?.network?.name) setNetworkName(details.network.name);
 			} catch (error) {
-				console.warn("Error loading network for invitation:", error);
+				console.warn("Error loading network for invitation:", error instanceof Error ? error.name : "unknown");
 			}
 		}
 		loadNetwork();
@@ -143,7 +143,7 @@ export default function AdministratorInvitationScreen() {
 		setIsSending(true);
 		try {
 			if (!authority?.id) {
-				setErrorMessage("Authority not available — navigate from an authority context.");
+				setErrorMessage(t("invitationNeedsAuthority"));
 				return;
 			}
 
@@ -185,10 +185,10 @@ export default function AdministratorInvitationScreen() {
 			setShareText(sharePayload);
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
-			console.warn("onSend error:", error);
+			console.warn("onSend error:", error instanceof Error ? error.name : "unknown");
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
 		} finally {
 			setIsSending(false);
 		}

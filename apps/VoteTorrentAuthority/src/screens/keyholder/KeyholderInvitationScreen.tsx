@@ -82,7 +82,7 @@ export function KeyholderInvitationScreen() {
 		setIsSending(true);
 		try {
 			if (!electionEngine) {
-				setErrorMessage("Election engine not available — navigate from an election context.");
+				setErrorMessage(t("invitationNeedsElection"));
 				return;
 			}
 
@@ -144,10 +144,10 @@ export function KeyholderInvitationScreen() {
 			setShareText(sharePayload);
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
-			console.warn("onSend error:", error);
+			console.warn("onSend error:", error instanceof Error ? error.name : "unknown");
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
 		} finally {
 			setIsSending(false);
 		}
