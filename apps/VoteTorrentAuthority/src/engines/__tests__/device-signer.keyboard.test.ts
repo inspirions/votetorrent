@@ -21,9 +21,20 @@ jest.mock('react-native', () => {
 			return Reflect.get(target, prop, receiver)
 		},
 	})
+	// Platform.OS is set per test via __setPlatformOS (never inherited from the jest preset's 'ios').
+	let platformOS = 'ios'
+	const actualPlatform = actual.Platform as Record<string, unknown>
+	const platformProxy = new Proxy(actualPlatform, {
+		get(target, prop, receiver) {
+			if (prop === 'OS') return platformOS
+			return Reflect.get(target, prop, receiver)
+		},
+	})
 	return new Proxy(actual, {
 		get(target, prop, receiver) {
 			if (prop === 'TurboModuleRegistry') return turboModuleRegistryProxy
+			if (prop === 'Platform') return platformProxy
+			if (prop === '__setPlatformOS') return (os: string) => { platformOS = os }
 			if (prop === '__attestationNativeFake') return attestationNativeFake
 			return Reflect.get(target, prop, receiver)
 		},
@@ -45,14 +56,16 @@ import { Keyboard } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import type { SecretWrapper } from '@votetorrent/attestation-native'
 import { createDeviceSigner } from '../device-signer'
+import { makeFakeNativeP256Signer, type NativeSignPlatform } from '../__fixtures__/fake-native-p256-signer'
 import { createAuthorityKeyVault } from '../key-vault'
 import { createFakeSecretWrapper } from '../__fixtures__/fake-secret-wrapper'
 import { getDeviceUser } from '../device-user'
 import { dismissKeyboardForSystemPrompt, KEYBOARD_HIDE_WAIT_MS } from '../../utils/dismissKeyboardForSystemPrompt'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
-const { __attestationNativeFake: nativeFake } = require('react-native') as {
+const { __attestationNativeFake: nativeFake, __setPlatformOS: setPlatformOS } = require('react-native') as {
 	__attestationNativeFake: { signWithDeviceKey: jest.Mock }
+	__setPlatformOS: (os: string) => void
 }
 
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
@@ -119,9 +132,13 @@ describe('dismissKeyboardForSystemPrompt', () => {
 	})
 })
 
-describe('device-signer: the keyboard is dismissed before the native BiometricPrompt starts', () => {
+describe.each<NativeSignPlatform>(['ios', 'android'])('device-signer: the keyboard is dismissed before the native BiometricPrompt starts on %s', platform => {
+	beforeEach(() => {
+		setPlatformOS(platform)
+		nativeFake.signWithDeviceKey.mockImplementation(makeFakeNativeP256Signer(priv, platform).signWithDeviceKey)
+	})
+
 	it('Keyboard.dismiss is called before signWithDeviceKey', async () => {
-		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: hex(p256.sign(DIGEST, priv, { lowS: true })) })
 		const signer = await createDeviceSigner('x')
 		expect(dismissSpy).not.toHaveBeenCalled() // creating the signer prompts nothing
 		await signer(DIGEST)
@@ -132,7 +149,6 @@ describe('device-signer: the keyboard is dismissed before the native BiometricPr
 
 	it('with the keyboard open, the native call waits for keyboardDidHide', async () => {
 		isVisibleSpy.mockReturnValue(true)
-		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: hex(p256.sign(DIGEST, priv, { lowS: true })) })
 		const signer = await createDeviceSigner('x')
 		const pending = signer(DIGEST)
 		for (let i = 0; i < 5; i++) await Promise.resolve()

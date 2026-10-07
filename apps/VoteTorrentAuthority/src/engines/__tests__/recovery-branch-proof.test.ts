@@ -27,6 +27,10 @@ jest.mock('../device-user', () => ({
 
 import { classifyRecoveryFailure, runRecoveryBranchProof } from '../recovery-branch-proof';
 import { getDeviceProvisioningRecord } from '../device-user';
+import { p256 } from '@noble/curves/nist.js';
+import { createHash } from 'crypto';
+import { makeFakeNativeP256Signer } from '../__fixtures__/fake-native-p256-signer';
+import { verifySigP256 } from '@votetorrent/vote-engine/rn';
 
 const mockGetRecord = getDeviceProvisioningRecord as jest.MockedFunction<
 	typeof getDeviceProvisioningRecord
@@ -34,6 +38,11 @@ const mockGetRecord = getDeviceProvisioningRecord as jest.MockedFunction<
 
 const RECOVERY_PUB_HEX =
 	'030a52df56ee0151548b4f6922774d5ca70ef5d9a50a212583b71cc02da0622243';
+
+// A real keypair for the cases that use the REAL schema verifier.
+const REAL_PRIV = p256.utils.randomSecretKey();
+const REAL_PUB = Array.from(p256.getPublicKey(REAL_PRIV, true), (x) => x.toString(16).padStart(2, '0')).join('');
+const PROOF_DIGEST = new Uint8Array(32).fill(0x5a);
 
 const PROMPTS = { title: 'Recovery signing proof', subtitle: 'Confirm', negative: 'Cancel' };
 
@@ -62,7 +71,7 @@ describe('runRecoveryBranchProof — D-26a RESCOPED error classification', () =>
 		});
 		const native = fakeNative(jest.fn().mockRejectedValue(err));
 
-		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 29, PROMPTS);
+		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 29, PROMPTS, 'android');
 
 		expect(result).toEqual({
 			passed: false,
@@ -76,7 +85,7 @@ describe('runRecoveryBranchProof — D-26a RESCOPED error classification', () =>
 		const err = new Error('recovery key invalidated — re-association required');
 		const native = fakeNative(jest.fn().mockRejectedValue(err));
 
-		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 30, PROMPTS);
+		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 30, PROMPTS, 'android');
 
 		expect(result).toEqual({
 			passed: false,
@@ -95,7 +104,7 @@ describe('runRecoveryBranchProof — D-26a RESCOPED error classification', () =>
 		);
 		const native = fakeNative(jest.fn().mockRejectedValue(err));
 
-		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 29, PROMPTS);
+		const result = await runRecoveryBranchProof(native, 'recovery-key-alias', 29, PROMPTS, 'android');
 
 		expect(result).toEqual({
 			passed: false,
@@ -103,6 +112,55 @@ describe('runRecoveryBranchProof — D-26a RESCOPED error classification', () =>
 			sdkInt: 29,
 			branch: 'unsupported-below-api-30',
 		});
+	});
+});
+
+describe.each(['ios', 'android'] as const)('runRecoveryBranchProof signing domain on %s', (platform) => {
+	beforeEach(() => {
+		jest.resetAllMocks();
+		mockGetRecord.mockResolvedValue({
+			recoveryPublicKeyCompressedHex: REAL_PUB,
+			attestedPublicKeyCompressedHex: REAL_PUB,
+			signingKeyAlias: 'signing-key',
+			certificateChainBase64: [],
+			capturedAt: Date.now(),
+		});
+		// The module under test verifies with the REAL schema verifier in these cases.
+		const real = jest.requireActual('@votetorrent/vote-engine/rn') as { verifySigP256: typeof verifySigP256 };
+		(verifySigP256 as jest.Mock).mockImplementation(real.verifySigP256);
+	});
+
+	it('hands native the platform input and the real verifier accepts the result (pass)', async () => {
+		const model = makeFakeNativeP256Signer(REAL_PRIV, platform);
+		const signWithRecoveryKey = jest.fn(model.signWithRecoveryKey);
+		const result = await runRecoveryBranchProof(
+			{ provisionRecoveryKey: jest.fn(), signWithRecoveryKey },
+			'recovery-key-alias',
+			30,
+			PROMPTS,
+			platform,
+		);
+		const expected =
+			platform === 'ios'
+				? createHash('sha256').update(PROOF_DIGEST).digest()
+				: Buffer.from(PROOF_DIGEST);
+		expect(signWithRecoveryKey.mock.calls[0]![1]).toBe(expected.toString('base64'));
+		expect(result.outcome).toBe('pass');
+	});
+
+	it('negative control: a native that signs the RAW digest on iOS is not schema-valid (fail)', async () => {
+		if (platform !== 'ios') return;
+		// The ios model fed the raw digest is what the pre-fix call site did.
+		const model = makeFakeNativeP256Signer(REAL_PRIV, 'ios');
+		const rawNative = {
+			provisionRecoveryKey: jest.fn(),
+			signWithRecoveryKey: jest.fn(async (alias: string) =>
+				model.signWithRecoveryKey(alias, Buffer.from(PROOF_DIGEST).toString('base64')),
+			),
+		};
+		// Bypass the helper by pretending to be android (raw input) on an iOS-faithful native.
+		const result = await runRecoveryBranchProof(rawNative, 'recovery-key-alias', 30, PROMPTS, 'android');
+		expect(result.outcome).toBe('fail');
 	});
 });
 

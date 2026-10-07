@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ScrollView, StyleSheet, View } from "react-native";
+import { Platform, ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import type { NavigationProp } from "../../navigation/types";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -8,6 +8,7 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import type { IDefaultUserEngine, INetworkEngine, IUserEngine, Signature } from "@votetorrent/vote-core";
 import { UserKeyType } from "@votetorrent/vote-core";
 import type { Spec as NativeAttestationSpec } from "@votetorrent/attestation-native/src/specs/NativeAttestation";
+import { nativeSignInputBase64 } from "@votetorrent/attestation-native/src/native-sign-input";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
@@ -69,19 +70,6 @@ type ProvisionReason = "first-run" | "invalidated";
 
 /** Ten years in milliseconds — expiration epoch for every key this screen registers. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
-
-/**
- * Plain base64 (`Base64.NO_WRAP` equivalent) of RAW digest bytes — never base64url. Mirrors
- * `device-signer.ts`'s identical `signWithDeviceKey`/`signWithRecoveryKey` `digestBase64`
- * contract. Duplicated locally (not imported) because that file's own helper is private, and
- * widening its exported surface for one shared 6-line helper is not worth the coupling.
- */
-function base64FromDigestBytes(digest: Uint8Array): string {
-	let binary = "";
-	for (let i = 0; i < digest.length; i++) binary += String.fromCharCode(digest[i]!);
-	const { btoa: btoaFn } = globalThis as unknown as { btoa: (data: string) => string };
-	return btoaFn(binary);
-}
 
 /**
  * Base64 of the UTF-8 bytes of a string — mirrors `real-attestation-producer.ts`'s identical
@@ -384,7 +372,7 @@ export default function ProvisionSigningKeyScreen() {
 					async (digest: Uint8Array): Promise<Signature> => {
 						const result = (await native.signWithDeviceKey(
 							SIGNING_KEY_ALIAS,
-							base64FromDigestBytes(digest),
+							nativeSignInputBase64(digest, Platform.OS),
 							t("deviceSigningPromptTitle"),
 							t("signingKeyProvisioningPromptSubtitle"),
 							t("deviceSigningPromptNegativeButton"),
@@ -524,7 +512,7 @@ export default function ProvisionSigningKeyScreen() {
 				const revokeDigest = await before.getRevokeKeyDigest(oldKey);
 				const revokeResult = (await native.signWithRecoveryKey(
 					RECOVERY_KEY_ALIAS,
-					base64FromDigestBytes(revokeDigest),
+					nativeSignInputBase64(revokeDigest, Platform.OS),
 					t("deviceSigningPromptTitle"),
 					t("signingKeyRecoveryPromptSubtitle"),
 					t("deviceSigningPromptNegativeButton"),
@@ -551,7 +539,7 @@ export default function ProvisionSigningKeyScreen() {
 				async (digest: Uint8Array): Promise<Signature> => {
 					const result = (await native.signWithRecoveryKey(
 						RECOVERY_KEY_ALIAS,
-						base64FromDigestBytes(digest),
+						nativeSignInputBase64(digest, Platform.OS),
 						t("deviceSigningPromptTitle"),
 						t("signingKeyRecoveryPromptSubtitle"),
 						t("deviceSigningPromptNegativeButton"),

@@ -10,11 +10,16 @@
  *     bridge and receives back a signature. No vote-engine method, and no JS code in this app,
  *     ever sees a private-key byte.
  *
- *   WR-10 (prehash contract): the native side signs via
- *     `Signature.getInstance("SHA256withECDSA")` against the AndroidKeyStore-resident P-256 key
- *     — the Keystore/JCA equivalent of `@noble/curves` v2's `prehash: true` default (signed
- *     domain = sha256(digest)). The returned signature is already compact, low-S hex
- *     (`derToCompactLowS`, 49-04) — this module does NOT re-normalize it.
+ *   WR-10 (prehash contract): the schema verifier (`verifySigP256` / `SignatureValidP256`) checks
+ *     ECDSA(sha256(digest)) — `@noble/curves` v2's `prehash: true` default. On Android the native side
+ *     signs via `Signature.getInstance("SHA256withECDSA")`, which hashes once itself, so the digest is
+ *     passed as-is. iOS native signs its input as the FINAL ECDSA hash, so the digest must be
+ *     pre-hashed first. `nativeSignInputBase64(digest, Platform.OS)` (packages/attestation-native,
+ *     `native-sign-input.ts`) is the one definition of that platform asymmetry; both platforms
+ *     therefore produce ECDSA(sha256(digest)). A self-check failure now means a genuine key/metadata
+ *     desync on either platform (before this fix it fired for every iOS signature, which is how UAT 62
+ *     test 22 surfaced). The returned signature is already compact, low-S hex — this module does NOT
+ *     re-normalize it.
  *
  *   D-01/D-06/D-17 (key storage — MIGRATED, this is the discharge of the old "v1.3 hardening
  *     task" deferral): the device signing key is hardware-backed (StrongBox/TEE) and
@@ -33,6 +38,7 @@
  */
 
 import type { Signature } from '@votetorrent/vote-core'
+import { nativeSignInputBase64 } from '@votetorrent/attestation-native/src/native-sign-input'
 import { UserKeyType } from '@votetorrent/vote-core'
 import i18n from '../i18n'
 import { getDeviceUser, isRecoveryInProgress } from './device-user'
@@ -165,6 +171,14 @@ function base64urlFromDigestBytes(digest: Uint8Array): string {
 	return base64FromDigestBytes(digest).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/**
+ * Platform.OS read lazily (top level stays free of a runtime react-native import, like getNative()).
+ */
+function currentPlatformOS(): string {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires -- deliberate lazy require, see getNative().
+	return (require('react-native') as { Platform: { OS: string } }).Platform.OS
+}
+
 function keyInvalidated(message: string): Error & { code: string } {
 	const err = new Error(message) as Error & { code: string }
 	err.code = 'KEY_INVALIDATED_REASSOCIATE'
@@ -252,7 +266,7 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 				'device-signer: the recorded signer key is not a P-256 key, so it cannot match the hardware signing key. Re-run key recovery.',
 			)
 		}
-		const digestBase64 = base64FromDigestBytes(digest)
+		const nativeInputBase64 = nativeSignInputBase64(digest, currentPlatformOS())
 
 		// Every officer signature funnels through this closure, so this is the one place the IME is
 		// closed before the native BiometricPrompt starts. On MIUI/Android 10 a prompt started over an
@@ -265,7 +279,7 @@ export async function createDeviceSigner (displayName: string): Promise<SignCall
 		// `real-attestation-producer.ts` uses relative to `attestation-failure.ts`.
 		const result = (await native.signWithDeviceKey(
 			SIGNING_KEY_ALIAS,
-			digestBase64,
+			nativeInputBase64,
 			i18n.t('deviceSigningPromptTitle'),
 			i18n.t('deviceSigningPromptSubtitle'),
 			i18n.t('deviceSigningPromptNegativeButton'),

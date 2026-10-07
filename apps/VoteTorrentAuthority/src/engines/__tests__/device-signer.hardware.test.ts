@@ -33,9 +33,20 @@ jest.mock('react-native', () => {
 			return Reflect.get(target, prop, receiver)
 		},
 	})
+	// Platform.OS is set per test via __setPlatformOS (never inherited from the jest preset's 'ios').
+	let platformOS = 'ios'
+	const actualPlatform = actual.Platform as Record<string, unknown>
+	const platformProxy = new Proxy(actualPlatform, {
+		get(target, prop, receiver) {
+			if (prop === 'OS') return platformOS
+			return Reflect.get(target, prop, receiver)
+		},
+	})
 	return new Proxy(actual, {
 		get(target, prop, receiver) {
 			if (prop === 'TurboModuleRegistry') return turboModuleRegistryProxy
+			if (prop === 'Platform') return platformProxy
+			if (prop === '__setPlatformOS') return (os: string) => { platformOS = os }
 			if (prop === '__attestationNativeFake') return attestationNativeFake
 			return Reflect.get(target, prop, receiver)
 		},
@@ -54,11 +65,14 @@ import type { User } from '@votetorrent/vote-core'
 import { UserKeyType } from '@votetorrent/vote-core'
 import { p256 } from '@noble/curves/nist.js'
 import { createDeviceSigner } from '../device-signer'
+import { makeFakeNativeP256Signer, type NativeSignPlatform } from '../__fixtures__/fake-native-p256-signer'
 import { getDeviceUser, isRecoveryInProgress } from '../device-user'
+import { createHash } from 'crypto'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
-const { __attestationNativeFake: nativeFake } = require('react-native') as {
+const { __attestationNativeFake: nativeFake, __setPlatformOS: setPlatformOS } = require('react-native') as {
 	__attestationNativeFake: { signWithDeviceKey: jest.Mock }
+	__setPlatformOS: (os: string) => void
 }
 
 const mockGetDeviceUser = getDeviceUser as jest.MockedFunction<typeof getDeviceUser>
@@ -68,7 +82,11 @@ const mockIsRecoveryInProgress = isRecoveryInProgress as jest.MockedFunction<typ
 // real P-256 key pair and a real signature (a fake hex string is correctly refused as a desync).
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
 const SIGNING_PRIV = p256.utils.randomSecretKey()
-const signDigest = (d: Uint8Array) => hex(p256.sign(d, SIGNING_PRIV, { lowS: true }))
+// Installs the platform-faithful native model and returns the signature it will produce for `d`.
+const installNative = (platform: NativeSignPlatform) => {
+	setPlatformOS(platform)
+	nativeFake.signWithDeviceKey.mockImplementation(makeFakeNativeP256Signer(SIGNING_PRIV, platform).signWithDeviceKey)
+}
 
 const PROVISIONED_USER: User = {
 	id: 'user-1',
@@ -76,8 +94,9 @@ const PROVISIONED_USER: User = {
 	activeKeys: [{ key: hex(p256.getPublicKey(SIGNING_PRIV, true)), type: UserKeyType.p256, expiration: Date.now() + 1000 }],
 }
 
-describe('device-signer.ts — hardware rewrite (49-07)', () => {
+describe.each<NativeSignPlatform>(['ios', 'android'])('device-signer.ts — hardware rewrite (49-07) on %s', platform => {
 	beforeEach(() => {
+		setPlatformOS(platform)
 		nativeFake.signWithDeviceKey.mockReset()
 		mockGetDeviceUser.mockReset()
 		mockIsRecoveryInProgress.mockReset()
@@ -87,11 +106,11 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 	it('(a) base64-encodes the digest and passes the alias + three prompt strings through unchanged', async () => {
 		mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
 		const digest = new Uint8Array([1, 2, 3, 4])
-		const goodSig = signDigest(digest)
-		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: goodSig })
+		installNative(platform)
 
 		const sign = await createDeviceSigner('Officer One')
 		const signature = await sign(digest)
+		const goodSig = signature.signature
 
 		expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
 		const [alias, digestBase64, title, subtitle, negativeButton] = nativeFake.signWithDeviceKey.mock.calls[0] as [
@@ -102,8 +121,10 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 			string,
 		]
 		expect(alias).toBe('VOTETORRENT_AUTHORITY_SIGNING_KEY_V1')
-		// Plain (standard-alphabet) base64 of the RAW digest bytes — never base64url.
-		expect(digestBase64).toBe(Buffer.from(digest).toString('base64'))
+		// Plain (standard-alphabet) base64 — never base64url. iOS native signs its input as the final
+		// hash, so it gets sha256(digest); Android's SHA256withECDSA hashes itself, so it gets the digest.
+		const expected = platform === 'ios' ? createHash('sha256').update(digest).digest() : Buffer.from(digest)
+		expect(digestBase64).toBe(expected.toString('base64'))
 		expect(typeof title).toBe('string')
 		expect(typeof subtitle).toBe('string')
 		expect(typeof negativeButton).toBe('string')
@@ -150,11 +171,10 @@ describe('device-signer.ts — hardware rewrite (49-07)', () => {
 			mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
 			mockIsRecoveryInProgress.mockResolvedValue(false)
 			const digest = new Uint8Array([1, 2, 3])
-			const goodSig = signDigest(digest)
-			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: goodSig })
+			installNative(platform)
 
 			const sign = await createDeviceSigner('Officer One')
-			await expect(sign(digest)).resolves.toMatchObject({ signature: goodSig })
+			await expect(sign(digest)).resolves.toMatchObject({ signerKey: PROVISIONED_USER.activeKeys[0]!.key })
 			expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
 		})
 
