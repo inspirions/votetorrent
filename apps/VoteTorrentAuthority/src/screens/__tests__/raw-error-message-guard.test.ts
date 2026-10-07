@@ -92,11 +92,9 @@ import * as crypto from 'crypto';
 export type Hit = { file: string; line: number; key: string; text: string };
 export type ExemptFile = { file: string; reason: string };
 export type ExemptLine = { file: string; key: string; count: number; reason: string };
-export type ResidueEntry = { file: string; key: string; count: number; owner: string; site: string };
 export type Lists = {
 	EXEMPT_FILES?: ExemptFile[];
 	EXEMPT_LINES?: ExemptLine[];
-	RESIDUE?: ResidueEntry[];
 };
 
 const MSG = 'mess' + 'age';
@@ -218,15 +216,11 @@ export function classify(hits: Hit[], lists: Lists, scannedFileCount: number): s
 	const failures: string[] = [];
 	const exemptFiles = lists.EXEMPT_FILES ?? [];
 	const exemptLines = lists.EXEMPT_LINES ?? [];
-	const residue = lists.RESIDUE ?? [];
 	if (scannedFileCount <= 0) failures.push('zero files scanned');
 	for (const x of exemptFiles) {
 		if (!hits.some((h) => h.file === x.file)) failures.push(`stale EXEMPT_FILES entry (no hits): ${x.file}`);
 	}
-	const listed = (f: string, k: string) => [
-		...exemptLines.filter((x) => x.file === f && x.key === k),
-		...residue.filter((x) => x.file === f && x.key === k),
-	];
+	const listed = (f: string, k: string) => exemptLines.filter((x) => x.file === f && x.key === k);
 	const actual = new Map<string, Hit[]>();
 	for (const h of hits) {
 		if (exemptFiles.some((x) => x.file === h.file)) continue;
@@ -242,16 +236,11 @@ export function classify(hits: Hit[], lists: Lists, scannedFileCount: number): s
 			failures.push(`count mismatch ${f} key=${k}: ${hs.length} hits, listed ${entries.map((e) => e.count).join('+')}`);
 		}
 	}
-	for (const e of [...exemptLines, ...residue]) {
+	for (const e of exemptLines) {
 		if (!actual.has(e.file + '\u0000' + e.key)) failures.push(`stale entry ${e.file} key=${e.key}`);
 	}
 	for (const x of [...exemptFiles, ...exemptLines]) {
 		if (C12_FILES.includes(x.file)) failures.push(`C12 file must not be exempt: ${x.file}`);
-	}
-	for (const r of residue) {
-		if (C12_FILES.includes(r.file) && !(r.file.endsWith('AddNetworkScreen.tsx') && r.owner === '62-135')) {
-			failures.push(`C12 file not allowed in RESIDUE: ${r.file}`);
-		}
 	}
 	return failures;
 }
@@ -301,12 +290,10 @@ export const EXEMPT_LINES: ExemptLine[] = [
 	{ file: 'screens/users/RevokeKeyScreen.tsx', key: '1e730b284ab023c7', count: 1, reason: 'substring classification of the failure, never rendered' },
 	{ file: 'services/bootstrap-upload.ts', key: '4262eefed532b800', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
 ];
-export const RESIDUE: ResidueEntry[] = [
-];
 
 describe('strict: no raw error text anywhere in the Authority app', () => {
 	it('has no unlisted, stale or miscounted raw error render', () => {
-		const r = scanTree(SRC, { EXEMPT_FILES, EXEMPT_LINES, RESIDUE });
+		const r = scanTree(SRC, { EXEMPT_FILES, EXEMPT_LINES });
 		expect(r.files).toBeGreaterThan(0);
 		expect(r.failures).toEqual([]);
 	});
