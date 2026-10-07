@@ -16,7 +16,7 @@ import { useDeviceSigningErrorHandler } from "../../../hooks/useDeviceSigningErr
 import { LifecycleConfirmCard } from "./LifecycleConfirmCard";
 import { VerdictBadge } from "./VerdictBadge";
 import { latestVerdictByDeviceKey } from "./verdicts";
-import { peerUnavailableMessage } from "../../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../../utils/errorCopy";
 
 /**
  * AssociationsSection — the default-open "Associated Devices" collapsible on
@@ -152,7 +152,7 @@ export function AssociationsSection({
 			if (!unmountedRef.current) {
 				setAssociations([]);
 				setVerdictMap(undefined);
-				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(errorCopy(err, t, "read", { log: false }));
 				setDataLoading(false);
 			}
 			return;
@@ -169,7 +169,7 @@ export function AssociationsSection({
 		} catch (err) {
 			if (!unmountedRef.current) {
 				setAssociations([]);
-				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(errorCopy(err, t, "read", { log: false }));
 				setVerdictMap(undefined);
 				setDataLoading(false);
 			}
@@ -189,7 +189,7 @@ export function AssociationsSection({
 		} catch (err) {
 			if (!unmountedRef.current) {
 				setVerdictMap(undefined);
-				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(errorCopy(err, t, "read", { log: false }));
 			}
 		}
 
@@ -220,7 +220,7 @@ export function AssociationsSection({
 				? { handled: false, message: undefined }
 				: handleDeviceSigningError(err);
 			if (!unmountedRef.current && !outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(outcome.message ?? errorCopy(err, t, "write", { log: false }));
 			}
 			throw err;
 		}

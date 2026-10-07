@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { errorCopy } from "../../../utils/errorCopy";
 import { StyleSheet, View } from "react-native";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
@@ -180,7 +181,7 @@ export function AttestationChallengesSection({
 				? { handled: false, message: undefined }
 				: handleDeviceSigningError(err);
 			if (!unmountedRef.current && !outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(outcome.message ?? errorCopy(err, t, "read", { log: false }));
 			}
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
@@ -224,7 +225,7 @@ export function AttestationChallengesSection({
 				? { handled: false, message: undefined }
 				: handleDeviceSigningError(err);
 			if (!unmountedRef.current && !outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(outcome.message ?? errorCopy(err, t, "write", { log: false }));
 			}
 			throw err;
 		}

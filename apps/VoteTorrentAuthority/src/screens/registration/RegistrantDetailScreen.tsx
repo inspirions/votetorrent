@@ -57,7 +57,7 @@ import { AttestationChallengesSection } from "./components/AttestationChallenges
 import { AccessHistorySection } from "./components/AccessHistorySection";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 
 /**
  * RegistrantDetailScreen — the phase's integration seam, and the only
@@ -183,7 +183,7 @@ export default function RegistrantDetailScreen() {
 			// The caught message is engine-authored (a `rethrow`d
 			// "RegistrationEngine.<method>: ..." string) — no field name, no
 			// field value and no viewer id is ever interpolated into it.
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read", { log: false }));
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
 		}
@@ -218,7 +218,7 @@ export default function RegistrantDetailScreen() {
 			}
 		} catch (err) {
 			// Set from the engine message only — never from the tier data itself.
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read", { log: false }));
 		}
 	}, [canViewPrivate, getEngine, registrantId]);
 
@@ -349,7 +349,7 @@ export default function RegistrantDetailScreen() {
 				// fetch, since annotating every row Not-disclosed after a failure
 				// would be a false claim about the disclosure policy.
 				if (!unmountedRef.current)
-					setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+					setErrorMessage(errorCopy(err, t, "read", { log: false }));
 			}
 		},
 		[getEngine, registrantId]
@@ -380,7 +380,7 @@ export default function RegistrantDetailScreen() {
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (!unmountedRef.current && !outcome.handled) {
-				setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+				setErrorMessage(outcome.message ?? errorCopy(err, t, "write", { log: false }));
 			}
 			// Re-thrown so 47-10's LifecycleConfirmCard sees a REJECTED
 			// onConfirm and returns to idle (its latch contract) — this is what

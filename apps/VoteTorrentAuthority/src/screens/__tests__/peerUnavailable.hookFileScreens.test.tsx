@@ -213,9 +213,10 @@ describe("H-5 registration reads", () => {
 		expect(text).toContain("peerReadUnavailableBody");
 		expect(text).not.toContain("cohort-unreachable");
 	});
-	it("AssociationsSection negative control: generic error as before", async () => {
+	it("AssociationsSection negative control: generic error renders the generic key and not the raw text", async () => {
 		const text = allText(await runAssociations(new Error("disk corrupt")));
-		expect(text).toContain("disk corrupt");
+		expect(text).toContain("errorLoadFailedGeneric");
+		expect(text).not.toContain("disk corrupt");
 		expect(text).not.toContain("peerReadUnavailableBody");
 	});
 
@@ -237,9 +238,10 @@ describe("H-5 registration reads", () => {
 		expect(text).toContain("peerReadUnavailableBody");
 		expect(text).not.toContain("cohort-unreachable");
 	});
-	it("RegistrantDetailScreen negative control: generic error as before", async () => {
+	it("RegistrantDetailScreen negative control: generic error renders the generic key and not the raw text", async () => {
 		const text = allText(await runDetail(new Error("disk corrupt")));
-		expect(text).toContain("disk corrupt");
+		expect(text).toContain("errorLoadFailedGeneric");
+		expect(text).not.toContain("disk corrupt");
 		expect(text).not.toContain("peerReadUnavailableBody");
 	});
 });
