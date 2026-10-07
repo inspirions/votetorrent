@@ -238,7 +238,7 @@ describe("ElectionDetailsScreen — a ballots read the network could not answer 
 		expect(text).not.toContain("is unavailable");
 	});
 
-	it("a non-peer ballots failure keeps today's InlineError path and shows no notice", async () => {
+	it("a non-peer ballots failure shows the translated ballots copy, never its text, and no notice", async () => {
 		mockElectionEngine = {
 			getElectionDetails: jest.fn(async () => makeDetails()),
 			getBallots: jest.fn().mockRejectedValue(new Error("boom")),
@@ -248,7 +248,8 @@ describe("ElectionDetailsScreen — a ballots read the network could not answer 
 
 		expect(notices(tr)).toHaveLength(0);
 		const text = allText(tr);
-		expect(text).toContain("boom");
+		expect(text).toContain("electionBallotsLoadFailed");
+		expect(text).not.toContain("boom");
 		expect(text).not.toContain("peerReadUnavailable");
 	});
 });

@@ -21,11 +21,6 @@ const ALLOWED_MARKERS = ['peerUnavailable' + 'Message(', 'outcome.' + 'message ?
 /** file (relative to src, posix) + trimmed line text -> reason. */
 export const EXCEPTIONS: ReadonlyArray<{ file: string; text: string; reason: string }> = [
 	{
-		file: 'screens/elections/ElectionDetailsScreen.tsx',
-		text: 'setErrorMessage(err instanceof Error ? err.message : String(err));',
-		reason: 'rejection from the OS share sheet, not engine text',
-	},
-	{
 		file: 'screens/users/DefaultUserScreen.tsx',
 		text: 'setErrorMessage(error instanceof Error ? error.message : String(error));',
 		reason: 'device-local AsyncStorage save, no engine involved',
@@ -93,7 +88,7 @@ describe('raw error message guard', () => {
 		const { used } = scan(allFiles());
 		const stale = EXCEPTIONS.filter((_, i) => !used.has(i)).map((x) => `${x.file}: ${x.text}`);
 		expect(stale).toEqual([]);
-		expect(EXCEPTIONS).toHaveLength(4);
+		expect(EXCEPTIONS).toHaveLength(3);
 		for (const x of EXCEPTIONS) expect(x.reason.length).toBeGreaterThan(0);
 	});
 });

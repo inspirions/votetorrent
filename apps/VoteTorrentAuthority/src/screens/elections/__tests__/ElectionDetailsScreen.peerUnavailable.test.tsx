@@ -246,7 +246,7 @@ describe("ElectionDetailsScreen — a read the network could not answer is not a
 		expect(tr.root.findAll((n) => n.props?.electionDetails?.election?.title === "Spring Election").length).toBeGreaterThan(0);
 	});
 
-	it("a non-peer error keeps today's InlineError path and shows no notice", async () => {
+	it("a non-peer error shows the translated details copy, never its text, and no notice", async () => {
 		const getElectionDetails = jest.fn().mockResolvedValueOnce(makeDetails());
 		mockElectionEngine = makeEngine(getElectionDetails);
 		const tr = await renderScreen();
@@ -256,7 +256,8 @@ describe("ElectionDetailsScreen — a read the network could not answer is not a
 
 		expect(noticeShown(tr)).toBe(false);
 		const text = allText(tr);
-		expect(text).toContain("boom");
+		expect(text).toContain("electionDetailsLoadFailed");
+		expect(text).not.toContain("boom");
 		expect(text).not.toContain("peerReadUnavailable");
 	});
 

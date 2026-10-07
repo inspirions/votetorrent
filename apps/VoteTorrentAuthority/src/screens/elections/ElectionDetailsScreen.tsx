@@ -43,6 +43,10 @@ type BallotConfirmationState = { locked: boolean; confirmed: boolean };
 
 export default function ElectionDetailsScreen() {
 	const { t } = useTranslation();
+	// Read through a ref inside the load callbacks: a `t` that changes identity every render must
+	// not become a dependency (it would re-create the callbacks and re-fire the focus effects).
+	const tRef = useRef(t);
+	tRef.current = t;
 	const keyboardInset = useKeyboardInset();
 	const { electionEngine, authorityName } = useRoute().params as { electionEngine: IElectionEngine; authorityName?: string };
 	const [electionDetails, setElectionDetails] = useState<ElectionDetails | null>(null);
@@ -60,11 +64,32 @@ export default function ElectionDetailsScreen() {
 	const [ballotsPeerUnavailable, setBallotsPeerUnavailable] = useState(false);
 	const [moreOpen, setMoreOpen] = useState(false);
 	const [errorMessage, setErrorMessage] = useState("");
+	// REVIEW/IN-11: the details read's own failure. Separate from errorMessage because the ballots
+	// reload clears errorMessage at its start and would otherwise erase it, leaving a first-open
+	// failure spinning on Loading with no way out. Cleared only by a successful details read or a
+	// Try Again start.
+	const [detailsError, setDetailsError] = useState("");
 	// Gap 7: a details read that could not reach the other devices. Kept apart from errorMessage so
 	// the ballots focus effect (which clears errorMessage) cannot erase it. The notice variant is
 	// derived at render: 'stale' while the details this device last read are still shown,
 	// 'unavailable' when nothing has been read yet.
 	const [peerUnavailable, setPeerUnavailable] = useState(false);
+	// REVIEW/IN-05: everything below is the last read FOR one election. When the route moves to a
+	// different election (a different engine), the previous election's reads are dropped in the
+	// same render, so they can never show under the new one. (The route carries the election
+	// engine, not an election id; the engine is the subject.)
+	const [readSubject, setReadSubject] = useState(electionEngine);
+	if (readSubject !== electionEngine) {
+		setReadSubject(electionEngine);
+		setElectionDetails(null);
+		setBallots([]);
+		setBallotConfirmationStates({});
+		setBallotsRead(false);
+		setBallotsPeerUnavailable(false);
+		setPeerUnavailable(false);
+		setErrorMessage("");
+		setDetailsError("");
+	}
 	const mountedRef = useRef(true);
 	useEffect(() => {
 		mountedRef.current = true;
@@ -96,6 +121,7 @@ export default function ElectionDetailsScreen() {
 					if (isActive()) {
 						setElectionDetails(details);
 						setPeerUnavailable(false);
+						setDetailsError("");
 					}
 				}
 			} catch (error) {
@@ -108,8 +134,8 @@ export default function ElectionDetailsScreen() {
 					if (isActive()) setPeerUnavailable(true);
 					return;
 				}
-				console.warn("Error loading election details:", error);
-				if (isActive()) setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
+				console.warn("Error loading election details:", error instanceof Error ? error.name : typeof error);
+				if (isActive()) setDetailsError(peerUnavailableMessage(error, tRef.current, "read") ?? tRef.current("electionDetailsLoadFailed"));
 			}
 		},
 		[electionEngine]
@@ -126,6 +152,7 @@ export default function ElectionDetailsScreen() {
 	);
 
 	const retryElectionDetails = useCallback(() => {
+		setDetailsError("");
 		loadElectionDetails(() => mountedRef.current);
 	}, [loadElectionDetails]);
 
@@ -180,8 +207,8 @@ export default function ElectionDetailsScreen() {
 					if (isActive()) setBallotsPeerUnavailable(true);
 					return;
 				}
-				console.warn("Error loading ballots:", error);
-				if (isActive()) setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
+				console.warn("Error loading ballots:", error instanceof Error ? error.name : typeof error);
+				if (isActive()) setErrorMessage(peerUnavailableMessage(error, tRef.current, "read") ?? tRef.current("electionBallotsLoadFailed"));
 			}
 		},
 		[electionEngine]
@@ -211,7 +238,8 @@ export default function ElectionDetailsScreen() {
 			].join("\n");
 			await Share.share({ message });
 		} catch (err) {
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			// The OS share-sheet rejection text is not ours to render.
+			setErrorMessage(tRef.current("electionShareFailed"));
 		}
 	};
 
@@ -220,6 +248,17 @@ export default function ElectionDetailsScreen() {
 			<View style={styles.container}>
 				{peerUnavailable ? (
 					<PeerReadUnavailableNotice variant="unavailable" onRetry={retryElectionDetails} />
+				) : detailsError ? (
+					<View testID="election-details-load-error">
+						<InlineError message={detailsError} />
+						<CustomButton
+							testID="election-details-retry"
+							title={t("loadRetryButton")}
+							icon="rotate"
+							size="thin"
+							onPress={retryElectionDetails}
+						/>
+					</View>
 				) : (
 					<ThemedText>{t("loading")}</ThemedText>
 				)}
@@ -241,6 +280,7 @@ export default function ElectionDetailsScreen() {
 			{/* SC6 error state — surfaces load failures inline (D-19) */}
 			<View style={styles.section}>
 				<InlineError message={errorMessage} />
+				<InlineError message={detailsError} />
 				{peerUnavailable ? <PeerReadUnavailableNotice variant="stale" onRetry={retryElectionDetails} /> : null}
 			</View>
 
