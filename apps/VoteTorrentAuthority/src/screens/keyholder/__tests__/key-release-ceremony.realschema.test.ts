@@ -19,7 +19,7 @@ import { createAuthorityKeyVault } from '../../../engines/key-vault';
 import type { KeyVaultStorage } from '../../../engines/key-vault';
 import { VOTETORRENT_AUTHORITY_KEYHOLDER_SHARE_WRAP_KEY_V1, keyholderVaultPrompt } from '../../../engines/keyholder-vault';
 import { createFakeSecretWrapper, createMapStorage } from '../../../engines/__fixtures__/fake-secret-wrapper';
-import { getKeyholderIdentity } from '../../../engines/keyholder-identity';
+import { getKeyholderIdentity, listKeyholderIdentities } from '../../../engines/keyholder-identity';
 import { acceptKeyholderInvitation } from '../keyholder-accept';
 import { driveKeyholderDkg } from '../keyholder-dkg-driver';
 import { releaseKeyholderShare } from '../key-release-ceremony';
@@ -98,7 +98,11 @@ interface Device {
 	wrapper: ReturnType<typeof createFakeSecretWrapper>;
 }
 
-async function acceptOnDevice(seeded: Awaited<ReturnType<typeof seedElectionWithThreshold>>, name: string): Promise<Device> {
+async function acceptOnDevice(
+	seeded: Awaited<ReturnType<typeof seedElectionWithThreshold>>,
+	name: string,
+	reuse?: Device
+): Promise<Device> {
 	const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 	const privBytes = secp256k1.utils.randomSecretKey();
 	const invitePrivate = bytesToHex(privBytes);
@@ -106,13 +110,16 @@ async function acceptOnDevice(seeded: Awaited<ReturnType<typeof seedElectionWith
 	await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite(name, inviteKey), seeded.electionId, makeTestSignCallback(seeded.auth.user));
 	const shareText = JSON.stringify({ invitePrivate, inviteKey, expiration: 'x', type: 'k', name });
 
-	const wrapper = createFakeSecretWrapper();
-	const vault = createAuthorityKeyVault({
-		wrapper,
-		storage: createMapStorage() as unknown as KeyVaultStorage,
-		authRequiredWrap: { keyAlias: VOTETORRENT_AUTHORITY_KEYHOLDER_SHARE_WRAP_KEY_V1, prompt: keyholderVaultPrompt },
-	});
-	const storage = createMapStorage();
+	// Each simulated keyholder device owns its vault and storage (one seat per device per election).
+	const wrapper = reuse?.wrapper ?? createFakeSecretWrapper();
+	const vault =
+		reuse?.vault ??
+		createAuthorityKeyVault({
+			wrapper,
+			storage: createMapStorage() as unknown as KeyVaultStorage,
+			authRequiredWrap: { keyAlias: VOTETORRENT_AUTHORITY_KEYHOLDER_SHARE_WRAP_KEY_V1, prompt: keyholderVaultPrompt },
+		});
+	const storage = reuse?.storage ?? createMapStorage();
 	const { userId } = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 	return { userId, vault, storage, wrapper };
 }
@@ -232,5 +239,12 @@ describe('key release ceremony over the REAL schema (RS1-RS5)', () => {
 		expect(await countRows(seeded.auth.ctx.db, 'select count(*) as c from KeyholderShareRelease')).toBe(2);
 		// eslint-disable-next-line no-console
 		console.info(`RS setup (accept + 2-of-2 DKG) duration: ${setupMs}ms`);
+	});
+
+	it('RS6 negative control: a third accept on device A\'s own storage is refused seat-already-held, with no extra wrap', async () => {
+		const wrapsBefore = deviceA.wrapper.authWraps;
+		await expect(acceptOnDevice(seeded, 'Cleo', deviceA)).rejects.toMatchObject({ code: 'seat-already-held' });
+		expect(deviceA.wrapper.authWraps).toBe(wrapsBefore);
+		expect(await listKeyholderIdentities(deviceA.storage)).toHaveLength(1);
 	});
 });

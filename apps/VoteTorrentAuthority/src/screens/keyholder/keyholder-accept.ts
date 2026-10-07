@@ -24,13 +24,22 @@
  *  5. The slot Cid is resolved from the pasted share (by InviteKey + Type) BEFORE provisioning, so an
  *     unknown, malformed or wrong-type invite costs zero auth wraps (zero biometric prompts) and
  *     leaves zero identities (UAT 62 test 10).
+ *  6. One seat per device per election, and never the inviter's own (gap6/WR-09, user decision 8b, no
+ *     override): after the slot resolves and BEFORE provisioning, the slot's seat facts are read
+ *     (`getKeyholderSlotSeat`). A self-invite is refused ('self-invite'); so is a device that already holds a
+ *     keyholder identity whose slot belongs to the same election ('seat-already-held'). Both cost zero auth
+ *     wraps. The engine refuses a self-invite too (62-103); this check spares the biometric prompts.
  */
 
 import type { IInvitationEngine } from '@votetorrent/vote-core';
 import type { IKeyVault } from '@votetorrent/vote-engine/rn';
-import { discardKeyholderIdentity, provisionKeyholderIdentity } from '../../engines/keyholder-identity';
+import { discardKeyholderIdentity, listKeyholderIdentities, provisionKeyholderIdentity } from '../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../engines/key-vault';
-import { resolveInviteFromShare } from '../invitations/invite-share';
+import { InviteShareError, resolveInviteFromShare } from '../invitations/invite-share';
+
+function keyholderAcceptError(message: string, code: 'self-invite' | 'seat-already-held'): Error {
+	return Object.assign(new Error(message), { name: 'KeyholderAcceptError', code });
+}
 
 export interface KeyholderAcceptDeps {
 	invitationEngine: IInvitationEngine;
@@ -44,6 +53,17 @@ export async function acceptKeyholderInvitation(
 ): Promise<{ userId: string; slotCid: string }> {
 	// Step 0: resolve and validate the slot BEFORE any identity is provisioned (zero prompts on failure).
 	const { slotCid, invitePrivate } = await resolveInviteFromShare(deps.invitationEngine, shareText, 'k');
+	const seat = await deps.invitationEngine.getKeyholderSlotSeat(slotCid);
+	if (!seat) throw new InviteShareError('not-found');
+	if (seat.selfInvite) {
+		throw keyholderAcceptError('The officer who sent this keyholder invitation cannot accept it', 'self-invite');
+	}
+	for (const held of await listKeyholderIdentities(deps.storage)) {
+		const heldSeat = await deps.invitationEngine.getKeyholderSlotSeat(held.inviteSlotCid);
+		if (heldSeat && heldSeat.electionId === seat.electionId) {
+			throw keyholderAcceptError('This device already holds a keyholder seat for this election', 'seat-already-held');
+		}
+	}
 	const identity = await provisionKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, slotCid);
 
 	try {

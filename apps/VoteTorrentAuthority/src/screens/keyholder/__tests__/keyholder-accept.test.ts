@@ -101,24 +101,119 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		expect(bindingRow.InviteSlotCid).toBe(slotCid);
 	});
 
-	it('A2: the minted userId and signing key differ from the officer; two accepts on one device/storage are fully distinct', async () => {
+	it('A2: two devices take two distinct seats of one election; a second seat on the same device is refused before any prompt', async () => {
 		const seeded = await seedElection();
 		const Alice = await inviteKeyholder(seeded, 'Alice');
 		const Carol = await inviteKeyholder(seeded, 'Carol');
-		const { vault, storage } = makeVaultHarness();
+		const Dana = await inviteKeyholder(seeded, 'Dana');
+		const h1 = makeVaultHarness();
+		const h2 = makeVaultHarness();
 		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
-		const alice = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Alice.shareText);
-		const carol = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Carol.shareText);
+		const alice = await acceptKeyholderInvitation({ invitationEngine, vault: h1.vault, storage: h1.storage }, Alice.shareText);
+		const carol = await acceptKeyholderInvitation({ invitationEngine, vault: h2.vault, storage: h2.storage }, Carol.shareText);
 
 		expect(alice.userId).not.toBe(seeded.auth.user.id);
 		expect(alice.userId).not.toBe(carol.userId);
-		const identities = await listKeyholderIdentities(storage);
-		expect(identities).toHaveLength(2);
 		const officerKeys = seeded.auth.user.activeKeys.map((k: { key: string }) => k.key);
-		for (const identity of identities) {
-			expect(officerKeys).not.toContain(identity.signingPublicKey);
+		for (const storage of [h1.storage, h2.storage]) {
+			const identities = await listKeyholderIdentities(storage);
+			expect(identities).toHaveLength(1);
+			expect(officerKeys).not.toContain(identities[0]!.signingPublicKey);
 		}
+
+		const before = h1.wrapper.authWraps;
+		await expect(
+			acceptKeyholderInvitation({ invitationEngine, vault: h1.vault, storage: h1.storage }, Dana.shareText)
+		).rejects.toMatchObject({ code: 'seat-already-held' });
+		expect(h1.wrapper.authWraps).toBe(before);
+		expect(await listKeyholderIdentities(h1.storage)).toHaveLength(1);
+	});
+
+	describe('one seat per device per election, never the inviter (seat pre-checks)', () => {
+		const stubEngine = (seats: Record<string, { electionId: string; selfInvite: boolean } | undefined>) => {
+			const respondToInvite = jest.fn(async () => undefined);
+			return {
+				respondToInvite,
+				engine: {
+					resolveInviteSlot: jest.fn(async () => ({ status: 'live', cid: 'new-slot' })),
+					respondToInvite,
+					getKeyholderInvite: jest.fn(async () => undefined),
+					getKeyholderSlotSeat: jest.fn(async (cid: string) => seats[cid]),
+				},
+			};
+		};
+
+		it('refuses self-invite before provisioning', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			const { engine, respondToInvite } = stubEngine({ 'new-slot': { electionId: 'e1', selfInvite: true } });
+			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toMatchObject({
+				code: 'self-invite',
+			});
+			expect(wrapper.authWraps).toBe(0);
+			expect(await listKeyholderIdentities(storage)).toHaveLength(0);
+			expect(respondToInvite).not.toHaveBeenCalled();
+		});
+
+		it('refuses a second seat of the same election with 0 wraps', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			await storage.setItem(
+				'vt.keyholder-identities.v1',
+				JSON.stringify({ v: 1, identities: [{ userId: 'u-held', inviteSlotCid: 'held-slot' }] })
+			);
+			const { engine, respondToInvite } = stubEngine({
+				'new-slot': { electionId: 'e1', selfInvite: false },
+				'held-slot': { electionId: 'e1', selfInvite: false },
+			});
+			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toMatchObject({
+				code: 'seat-already-held',
+			});
+			expect(wrapper.authWraps).toBe(0);
+			expect(respondToInvite).not.toHaveBeenCalled();
+		});
+
+		it('a held seat of another election, or of an unknown slot, does not block', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			await storage.setItem(
+				'vt.keyholder-identities.v1',
+				JSON.stringify({
+					v: 1,
+					identities: [
+						{ userId: 'u-a', inviteSlotCid: 'other-election' },
+						{ userId: 'u-b', inviteSlotCid: 'other-network' },
+					],
+				})
+			);
+			const { engine, respondToInvite } = stubEngine({
+				'new-slot': { electionId: 'e1', selfInvite: false },
+				'other-election': { electionId: 'e2', selfInvite: false },
+				'other-network': undefined,
+			});
+			await acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text);
+			expect(respondToInvite).toHaveBeenCalledTimes(1);
+			expect(wrapper.authWraps).toBe(2);
+		});
+
+		it('an unreadable new slot rejects not-found before provisioning', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			const { engine } = stubEngine({});
+			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toMatchObject({
+				code: 'not-found',
+			});
+			expect(wrapper.authWraps).toBe(0);
+		});
+
+		it('a seat-lookup rejection propagates without provisioning', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			const { engine } = stubEngine({});
+			engine.getKeyholderSlotSeat = jest.fn(async (_cid: string): Promise<{ electionId: string; selfInvite: boolean } | undefined> => {
+				throw new Error('seat lookup down');
+			});
+			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toThrow(
+				'seat lookup down'
+			);
+			expect(wrapper.authWraps).toBe(0);
+		});
 	});
 
 	it('A3: a failure before any write rejects with the original error and leaves nothing behind', async () => {
