@@ -35,6 +35,13 @@ describe("keyholderInviteState", () => {
 		const s = { invite: inv, result: { isAccepted: false }, sent: { state: "unknown", expiration: "" } } as unknown as S;
 		expect(keyholderInviteState(s)).toBe("declined");
 	});
+	it("accepted-earlier-revision without a result -> accept-again (M1); a present result still wins", () => {
+		const s = { invite: inv, sent: { state: "accepted-earlier-revision", expiration: exp } } as unknown as S;
+		expect(keyholderInviteState(s)).toBe("accept-again");
+		expect(KEYHOLDER_INVITE_STATE_META["accept-again"]).toEqual({ labelKey: "keyholderStatusAcceptAgain", colorKey: "warning" });
+		expect(keyholderInviteState({ ...s, result: { isAccepted: true } } as unknown as S)).toBe("accepted");
+		expect(keyholderInviteState({ ...s, result: { isAccepted: false } } as unknown as S)).toBe("declined");
+	});
 	it("no sent -> not-sent", () => {
 		expect(keyholderInviteState({ invite: inv } as S)).toBe("not-sent");
 	});
@@ -43,7 +50,7 @@ describe("keyholderInviteState", () => {
 		expect(KEYHOLDER_INVITE_STATE_META["no-longer-valid"]).toEqual({ labelKey: "keyholderStatusNoLongerValid", colorKey: "error" });
 		expect(KEYHOLDER_INVITE_STATE_META.unknown).toEqual({ labelKey: "keyholderStatusUnknown", colorKey: "warning" });
 		expect(Object.keys(KEYHOLDER_INVITE_STATE_META).sort()).toEqual(
-			["accepted", "declined", "no-longer-valid", "not-sent", "sent", "unknown"],
+			["accept-again", "accepted", "declined", "no-longer-valid", "not-sent", "sent", "unknown"],
 		);
 		expect(KEYHOLDER_INVITE_STATE_META["not-sent"]).toEqual({ labelKey: "keyholderStatusNotSent", colorKey: "warning" });
 		expect(KEYHOLDER_INVITE_STATE_META.accepted.colorKey).toBe("success");

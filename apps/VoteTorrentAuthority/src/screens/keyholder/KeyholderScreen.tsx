@@ -137,6 +137,9 @@ export function KeyholderScreen() {
 					<ThemedText type="defaultSemiBold">{t("keyholderStatusLabel")}: </ThemedText>
 					<ThemedText testID="keyholder-invite-status">{t(KEYHOLDER_INVITE_STATE_META[keyholderInviteState(keyholder)].labelKey)}</ThemedText>
 				</View>
+				{keyholderInviteState(keyholder) === "accept-again" ? (
+					<ThemedText testID="keyholder-reaccept-officer-note">{t("keyholderReacceptOfficerNote")}</ThemedText>
+				) : null}
 				{dkgRowState !== null ? <KeyholderDkgStatusRow state={dkgRowState} /> : null}
 				<KeyholderDkgOverdueNotice labels={overdueLabels} hours={DKG_ROUND_DEADLINE_MS / 3600000} />
 				<InlineError message={dkgErrorMessage} />
