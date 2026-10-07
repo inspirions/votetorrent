@@ -1226,6 +1226,20 @@ const resources = {
 			errorActionFailedGeneric: "That didn't work. Please try again.",
 			validationRequired: 'A required field is empty. Fill it in and try again.',
 			validationInvalid: "One of the values isn't valid. Check the form and try again.",
+			dkgOverdueNotice: 'No response in about {{hours}} hours from: {{names}}.',
+			dkgOverdueHelp:
+				"Key generation continues only when every keyholder takes part, and nothing happens automatically. Ask them to open this election's keyholder screen in the app on their own device.",
+			dkgOverdueUnnamed: "a keyholder who is not on this election's list",
+			keyholderStatusAcceptAgain: 'Must accept again',
+			keyholderReacceptOfficerNote:
+				'This keyholder accepted an earlier version of this election. The election has changed since then, and keyholders accept each version separately, so the election key is made only by keyholders who agreed to the current version. Send a new invitation and ask them to accept it.',
+			keyholderReacceptAcceptNote:
+				'Keyholders accept one version of an election. If the election changes after you accept, an officer sends you a new invitation and you accept again, so the election key always matches the version you agreed to.',
+			reassociationReviewAuthorityWide: 'This setting applies to every election of this authority.',
+			reassociationReviewNoteCurrent: 'Current setting: {{value}}',
+			reassociationReviewNoteWhere: 'To change it, open {{screen}} for this authority.',
+			sealedBeforeOfficerExplanation:
+				"Sealed details can be read only by the officers who could read them when they were sealed. Officers added later, or who turned on encrypted intake later, never get access to them. This is on purpose: no one can widen who reads a voter's details after the fact. An officer who could read them at the time handles this record.",
 		},
 	},
 	es: {
@@ -2420,6 +2434,20 @@ const resources = {
 			errorActionFailedGeneric: 'No se pudo completar. Inténtalo de nuevo.',
 			validationRequired: 'Falta un campo obligatorio. Complétalo e inténtalo de nuevo.',
 			validationInvalid: 'Uno de los valores no es válido. Revisa el formulario e inténtalo de nuevo.',
+			dkgOverdueNotice: 'Sin respuesta en unas {{hours}} horas de: {{names}}.',
+			dkgOverdueHelp:
+				'La generación de clave solo continúa cuando todos los custodios participan, y no ocurre nada automáticamente. Pídeles que abran la pantalla de custodio de esta elección en la aplicación de su propio dispositivo.',
+			dkgOverdueUnnamed: 'un custodio que no está en la lista de esta elección',
+			keyholderStatusAcceptAgain: 'Debe aceptar de nuevo',
+			keyholderReacceptOfficerNote:
+				'Este custodio aceptó una versión anterior de esta elección. La elección cambió desde entonces y los custodios aceptan cada versión por separado, para que la clave de la elección la generen solo custodios que aceptaron la versión actual. Envía una nueva invitación y pídele que la acepte.',
+			keyholderReacceptAcceptNote:
+				'Los custodios aceptan una versión de una elección. Si la elección cambia después de que aceptes, un funcionario te envía una nueva invitación y vuelves a aceptar, para que la clave de la elección siempre corresponda a la versión que aceptaste.',
+			reassociationReviewAuthorityWide: 'Esta configuración se aplica a todas las elecciones de esta autoridad.',
+			reassociationReviewNoteCurrent: 'Configuración actual: {{value}}',
+			reassociationReviewNoteWhere: 'Para cambiarla, abre {{screen}} de esta autoridad.',
+			sealedBeforeOfficerExplanation:
+				'Los datos sellados solo pueden leerlos los funcionarios que podían leerlos cuando se sellaron. Los funcionarios añadidos después, o que activaron la recepción cifrada después, nunca obtienen acceso. Es intencional: nadie puede ampliar después quién lee los datos de un votante. Un funcionario que podía leerlos en ese momento se encarga de este registro.',
 		},
 	},
 };
