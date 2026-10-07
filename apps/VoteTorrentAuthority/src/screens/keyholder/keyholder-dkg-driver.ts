@@ -18,6 +18,7 @@ import type { KeyholderDkgStatus, DkgActionTaken, IKeyholderDkgEngine } from '@v
 import type { IKeyVault } from '@votetorrent/vote-engine/rn';
 import { getKeyholderIdentity, keyholderSigningKeyAlias, createKeyholderSigner } from '../../engines/keyholder-identity';
 import type { KeyVaultStorage } from '../../engines/key-vault';
+import { classifyPeerReadFailure } from '../../engines/peer-read-unavailable';
 
 export type KeyholderDkgRowState = 'loading' | 'pending' | 'thresholdTooLow' | 'inProgress' | 'complete' | 'complaint' | 'failed';
 
@@ -67,16 +68,15 @@ export interface KeyholderDkgDriverOutcome {
 	status: KeyholderDkgStatus | null;
 	advanced: boolean;
 	actions: DkgActionTaken[];
-	error?: { code: string; authDenied: boolean; message: string };
+	error?: { code: string; authDenied: boolean };
 }
 
 function codeOf(err: unknown): string {
 	const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
-	return typeof code === 'string' ? code : 'unknown';
-}
-
-function messageOf(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+	if (typeof code === 'string') return code;
+	// A cohort-unreachable / possibly-stale read has no code of its own; classify it here so the
+	// screen can word it without ever seeing the engine's message (which carries block ids).
+	return classifyPeerReadFailure(err) ? 'peer-unavailable' : 'unknown';
 }
 
 /**
@@ -119,12 +119,12 @@ export async function driveKeyholderDkg(
 				status,
 				advanced: false,
 				actions: [],
-				error: { code, authDenied: code === 'auth-denied', message: messageOf(advanceErr) },
+				error: { code, authDenied: code === 'auth-denied' },
 			};
 		}
 	} catch (err) {
 		// getEngine or getDkgStatus itself failed — no reliable status to report.
 		const code = codeOf(err);
-		return { status: null, advanced: false, actions: [], error: { code, authDenied: code === 'auth-denied', message: messageOf(err) } };
+		return { status: null, advanced: false, actions: [], error: { code, authDenied: code === 'auth-denied' } };
 	}
 }

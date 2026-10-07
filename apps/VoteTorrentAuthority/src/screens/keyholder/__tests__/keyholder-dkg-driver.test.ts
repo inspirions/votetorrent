@@ -224,8 +224,30 @@ describe('driveKeyholderDkg with fakes (D1-D4)', () => {
 		const outcome = await driveKeyholderDkg({ getEngine, vault, storage }, 'election-1', undefined);
 
 		expect(outcome.status).toBeNull();
-		expect(outcome.error?.message).toBe('engine unavailable');
-		expect(outcome.error?.message).not.toMatch(/[0-9a-f]{40,}/);
+		expect(outcome.error).toBeDefined();
+		expect(Object.keys(outcome.error!).sort()).toEqual(['authDenied', 'code']);
+		expect(JSON.stringify(outcome)).not.toContain('engine unavailable');
+	});
+
+	it('D4c: a getEngine failure and an advanceDkg failure carry no message text either; a peer-unavailable failure classifies by code', async () => {
+		const { vault, storage } = makeVaultHarness();
+		const failing = asGetEngine(
+			jest.fn(async () => {
+				throw new Error('vault alias foo');
+			})
+		);
+		const a = await driveKeyholderDkg({ getEngine: failing, vault, storage }, 'election-1', undefined);
+		expect(Object.keys(a.error!).sort()).toEqual(['authDenied', 'code']);
+		expect(JSON.stringify(a)).not.toContain('vault alias foo');
+
+		const peer = makeFakeDkgEngine({
+			getDkgStatus: jest.fn(async () => {
+				throw new Error('Block abc is unavailable (cohort-unreachable)');
+			}),
+		});
+		const b = await driveKeyholderDkg({ getEngine: asGetEngine(jest.fn(async () => peer)), vault, storage }, 'election-1', undefined);
+		expect(b.error).toEqual({ code: 'peer-unavailable', authDenied: false });
+		expect(JSON.stringify(b)).not.toContain('abc');
 	});
 });
 

@@ -34,7 +34,7 @@ export function KeyholderCard({ invitationStatus, onPress }: KeyholderCardParams
 		<TouchableOpacity onPress={onPress} style={[styles.card, { backgroundColor: colors.card }]}>
 			<View style={styles.cardContent}>
 				<ThemedText type="cardTitle" numberOfLines={1}>
-					{invitationStatus.invite?.name ?? "(unnamed)"}
+					{invitationStatus.invite?.name ?? t("keyholderUnnamed")}
 				</ThemedText>
 				{determineStatus(invitationStatus)}
 			</View>

@@ -1,4 +1,4 @@
-import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useFocusEffect, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
@@ -9,7 +9,6 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import type { NavigationProp } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { driveKeyholderDkg, keyholderDkgRowState, type KeyholderDkgRowState } from "./keyholder-dkg-driver";
 import { KeyholderDkgStatusRow } from "./components/KeyholderDkgStatusRow";
@@ -52,10 +51,21 @@ export function KeyholderScreen() {
 	const [dkgRowState, setDkgRowState] = useState<KeyholderDkgRowState | null>("loading");
 	const [dkgErrorMessage, setDkgErrorMessage] = useState<string>("");
 	const inFlight = useRef(false);
+	// Results apply while the screen is mounted, not only while the focus that started the drive is
+	// still current: a blur and re-focus mid-drive must not strand the row on "loading".
+	const mounted = useRef(true);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+		};
+	}, []);
+	// Read `t` through a ref so a language change does not re-run the focus effect.
+	const tRef = useRef(t);
+	tRef.current = t;
 
 	useFocusEffect(
 		useCallback(() => {
-			let active = true;
 			if (!inFlight.current) {
 				inFlight.current = true;
 				(async () => {
@@ -64,32 +74,44 @@ export function KeyholderScreen() {
 						const electionId = details.election.id;
 						const fresh = details.current?.keyholders?.find((k) => k.invite?.name === routeKeyholder.invite?.name);
 						const current = fresh ?? routeKeyholder;
-						if (active && fresh) setKeyholder(fresh);
+						if (mounted.current && fresh) setKeyholder(fresh);
 						const outcome = await driveKeyholderDkg(
 							{ getEngine, vault: resolveKeyholderKeyVault() },
 							electionId,
 							current.result?.invokedId
 						);
-						if (!active) return;
+						if (!mounted.current) return;
 						// Per this screen's own contract: when the status is unknown (null) AND an
 						// error occurred, render no row at all — the InlineError alone carries the
 						// message. Any other outcome (including a null status with NO error, which
 						// never happens, and every successful read) renders the row.
 						setDkgRowState(outcome.status === null && outcome.error ? null : keyholderDkgRowState(outcome.status));
 						if (outcome.error) {
-							setDkgErrorMessage(outcome.error.authDenied ? t("deviceSigningErrorGeneric") : (peerUnavailableMessage({ message: outcome.error.message }, t, "write") ?? outcome.error.message));
+							const tt = tRef.current;
+							setDkgErrorMessage(
+								outcome.error.authDenied
+									? tt("deviceSigningErrorGeneric")
+									: outcome.error.code === "peer-unavailable"
+										? tt("peerWriteUnavailable")
+										: tt("keyholderDkgError")
+							);
 						} else {
 							setDkgErrorMessage("");
+						}
+					} catch (err) {
+						// The election read (or the drive itself) rejected: leave "loading" and say so in
+						// catalog copy. Only the error name is logged; the message can carry engine text.
+						console.warn("KeyholderScreen: DKG status read failed", err instanceof Error ? err.name : "unknown");
+						if (mounted.current) {
+							setDkgRowState(null);
+							setDkgErrorMessage(tRef.current("keyholderDkgLoadError"));
 						}
 					} finally {
 						inFlight.current = false;
 					}
 				})();
 			}
-			return () => {
-				active = false;
-			};
-		}, [electionEngine, getEngine, routeKeyholder, t])
+		}, [electionEngine, getEngine, routeKeyholder])
 	);
 
 	return (
@@ -97,7 +119,7 @@ export function KeyholderScreen() {
 			<View style={styles.section}>
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
-					<ThemedText>{seedInvite?.name ?? "(unnamed)"}</ThemedText>
+					<ThemedText>{seedInvite?.name ?? t("keyholderUnnamed")}</ThemedText>
 				</View>
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("keyholderStatusLabel")}: </ThemedText>

@@ -9,6 +9,8 @@ import React from 'react';
 import renderer from 'react-test-renderer';
 
 const mockDriveKeyholderDkg = jest.fn();
+const focusCallbacks: Array<() => void | (() => void)> = [];
+const focusCleanups: Array<void | (() => void)> = [];
 
 jest.mock('../keyholder-dkg-driver', () => {
   const actual = jest.requireActual('../keyholder-dkg-driver');
@@ -50,7 +52,12 @@ jest.mock('@react-navigation/native', () => ({
   useNavigation: () => ({ navigate: mockNavigate, setOptions: mockSetOptions }),
   useFocusEffect: (callback: () => void | (() => void)) => {
     const React = require('react');
-    React.useEffect(() => callback(), []);
+    React.useEffect(() => {
+      focusCallbacks.push(callback);
+      const c = callback();
+      focusCleanups.push(c);
+      return c;
+    }, []);
   },
 }));
 
@@ -86,6 +93,8 @@ function nearestViewAncestor(instance: renderer.ReactTestInstance): renderer.Rea
 
 beforeEach(() => {
   jest.clearAllMocks();
+  focusCallbacks.length = 0;
+  focusCleanups.length = 0;
   mockGetElectionDetails.mockResolvedValue({ election: { id: 'election-1' } });
   mockRouteParams = {
     keyholder: { invite: { name: 'Alice' }, result: { invokedId: 'user-1' } },
@@ -135,7 +144,7 @@ describe('KeyholderScreen — DKG status wiring (62-26)', () => {
       status: { phase: 'in-progress', self: { isDisqualified: false } },
       advanced: false,
       actions: [],
-      error: { code: 'auth-denied', authDenied: true, message: 'denied' },
+      error: { code: 'auth-denied', authDenied: true },
     });
     const tr = await render();
 
@@ -143,17 +152,58 @@ describe('KeyholderScreen — DKG status wiring (62-26)', () => {
     expect(hasTestID(tr, 'keyholder-dkg-status-inProgress')).toBe(true);
   });
 
-  it('K3b: a non-auth driver error renders its own message', async () => {
+  it('K3b: a non-auth driver error renders catalog copy, never engine or vault text', async () => {
     mockDriveKeyholderDkg.mockResolvedValue({
       status: null,
       advanced: false,
       actions: [],
-      error: { code: 'unknown', authDenied: false, message: 'engine unavailable' },
+      error: { code: 'x', authDenied: false, message: 'vault alias foo' },
     });
     const tr = await render();
 
-    expect(JSON.stringify(tr.toJSON())).toContain('engine unavailable');
+    expect(JSON.stringify(tr.toJSON())).not.toContain('vault alias foo');
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderDkgError');
     expect(hasTestID(tr, 'keyholder-dkg-status-row')).toBe(false);
+  });
+
+  it('K3c: a peer-unavailable code renders the peer write copy', async () => {
+    mockDriveKeyholderDkg.mockResolvedValue({ status: null, advanced: false, actions: [], error: { code: 'peer-unavailable', authDenied: false } });
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('peerWriteUnavailable');
+  });
+
+  it('K6: a rejected election read leaves loading and shows keyholderDkgLoadError', async () => {
+    mockGetElectionDetails.mockRejectedValue(new Error('vault alias foo'));
+    const tr = await render();
+    expect(hasTestID(tr, 'keyholder-dkg-status-row')).toBe(false);
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain('keyholderDkgLoadError');
+    expect(json).not.toContain('vault alias foo');
+  });
+
+  it('K7: a drive result that completes after a blur and re-focus is applied', async () => {
+    let resolveDriver!: (value: unknown) => void;
+    mockDriveKeyholderDkg.mockImplementationOnce(() => new Promise((resolve) => { resolveDriver = resolve; }));
+    const tr = await render();
+    expect(hasTestID(tr, 'keyholder-dkg-status-loading')).toBe(true);
+    // simulate blur (cleanup) + re-focus while the first drive is still in flight
+    await renderer.act(async () => {
+      focusCleanups.forEach((c) => c && c());
+      focusCallbacks.forEach((cb) => cb());
+    });
+    await renderer.act(async () => {
+      resolveDriver({ status: { phase: 'complete', self: { isDisqualified: false } }, advanced: false, actions: [] });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hasTestID(tr, 'keyholder-dkg-status-complete')).toBe(true);
+  });
+
+  it('a keyholder with no name reads the catalog name, not a literal', async () => {
+    mockRouteParams.keyholder = { invite: undefined } as never;
+    mockDriveKeyholderDkg.mockResolvedValue({ status: { phase: 'blocked', self: undefined }, advanced: false, actions: [] });
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderUnnamed');
   });
 
   it('K4 unmount: unmounting before the driver settles produces no post-unmount state update', async () => {

@@ -30,11 +30,6 @@ export const EXCEPTIONS: ReadonlyArray<{ file: string; text: string; reason: str
 		text: 'const raw = err instanceof Error ? err.message : String(err);',
 		reason: 'regex-matched to classify, never rendered',
 	},
-	{
-		file: 'screens/keyholder/keyholder-dkg-driver.ts',
-		text: 'return err instanceof Error ? err.message : String(err);',
-		reason: 'messageOf; classified where rendered (KeyholderScreen)',
-	},
 ];
 
 function walk(dir: string, out: string[]): void {
