@@ -717,11 +717,13 @@ export class NetworksEngine implements INetworksEngine {
 		const isStrandDb = db.declaredSchemaManager.hasDeclaredSchema('App');
 		if (isStrandDb) {
 			// Strand re-attach: schema already applied under `App`. Do NOT run initDB.
-			// ensureTidSequence is INSERT OR IGNORE — idempotent, safe on an established store.
+			// Do NOT touch TidHighWater either: the strand store's TidHighWater is read lazily by the
+			// first allocateTid. A joiner that imported a founding bundle never holds that header block,
+			// and reading it here made every cold start depend on a block only reachable through the
+			// cohort (UAT 62 test 19: BlockUnavailableError cohort-unreachable at open()).
 			// markSchemaInitialized is deliberately NOT called here: planting the marker is the
 			// CREATE path's job, so a genuinely uninitialized strand store still fails the D-05
 			// gate below rather than being silently promoted to "initialized".
-			await ensureTidSequence(db);
 		} else if (!db.declaredSchemaManager.hasDeclaredSchema('main')) {
 			await initDB(db);           // declare schema main {...} + apply: creates vtab bindings, binds LevelDB data.
 			// initDB also declares the SchemaInit catalog (NO row) — 14-03 on-device fix: a fresh Quereus
@@ -814,11 +816,11 @@ export class NetworksEngine implements INetworksEngine {
 
 		if (isStrandDb) {
 			// Strand path: App schema already applied — skip initDB (no second main declaration).
-			// Plant only the idempotent markers so isSchemaInitialized and readTidCounter work.
-			// Both ensureTidSequence and markSchemaInitialized use INSERT OR IGNORE — fully
-			// idempotent, so a second createContext() on an already-initialized strand store
-			// (CR-01 fix) does not throw a PK-uniqueness violation.
-			await ensureTidSequence(db);                 // D-12: create TidSequence table (idempotent)
+			// Plant only the idempotent SchemaInit marker so isSchemaInitialized works. It uses
+			// INSERT OR IGNORE — fully idempotent, so a second createContext() on an already-initialized
+			// strand store (CR-01 fix) does not throw a PK-uniqueness violation.
+			// No ensureTidSequence here: it peeks TidHighWater, a header block a bundle-importing joiner
+			// never holds (UAT 62 test 19); allocateTid creates/reads it lazily on the first real write.
 			await markSchemaInitialized(db);             // D-08: plant the SchemaInit flag (idempotent)
 			// STRAND-VIEWS fix: cadre-core applies the schema under `App`, so all views
 			// live in App. Quereus resolves UNQUALIFIED views only against the current
