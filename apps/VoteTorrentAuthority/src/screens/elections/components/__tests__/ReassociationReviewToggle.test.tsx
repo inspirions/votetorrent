@@ -268,3 +268,47 @@ describe("ReassociationReviewToggle (D-46)", () => {
 		expect(src).toMatch(/canWrite=\{canWriteIntakePolicy\}/);
 	});
 });
+
+describe("ReassociationReviewToggle — read recovery (IN-01)", () => {
+	function pressRetry(tr: renderer.ReactTestRenderer) {
+		return act(async () => {
+			tr.root.findByProps({ testID: `${PREFIX}-retry` }).findAll((n) => typeof n.props.onPress === "function")[0].props.onPress();
+		});
+	}
+
+	test("T-1: Retry (shown only while unreadable) clears the load error and enables the options", async () => {
+		mockReadIntakePolicy.mockRejectedValueOnce(new Error("boom"));
+		const tr = await mount();
+		await flush();
+		expect(allText(tr)).toContain(EN.registrationPolicyReassociationLoadError);
+		expect(option(tr, "manual").props.accessibilityState.disabled).toBe(true);
+
+		await pressRetry(tr);
+		await flush();
+		expect(allText(tr)).not.toContain(EN.registrationPolicyReassociationLoadError);
+		expect(option(tr, "manual").props.accessibilityState.disabled).toBe(false);
+		expect(tr.root.findAllByProps({ testID: `${PREFIX}-retry` })).toHaveLength(0);
+	});
+
+	test("T-2: a conflict whose re-read fails shows load-error with Retry; a conflict whose re-read succeeds shows save-error", async () => {
+		mockSetIntakePolicy.mockRejectedValue({ name: "IntakeError", code: "policy-revision-conflict" });
+		let tr = await mount();
+		await flush();
+		mockReadIntakePolicy.mockRejectedValueOnce(new Error("reread failed"));
+		await act(async () => {
+			option(tr, "automatic").props.onPress();
+		});
+		await flush();
+		expect(allText(tr)).toContain(EN.registrationPolicyReassociationLoadError);
+		expect(allText(tr)).not.toContain(EN.registrationPolicyReassociationSaveError);
+		expect(tr.root.findAllByProps({ testID: `${PREFIX}-retry` }).length).toBeGreaterThan(0);
+
+		tr = await mount();
+		await flush();
+		await act(async () => {
+			option(tr, "automatic").props.onPress();
+		});
+		await flush();
+		expect(allText(tr)).toContain(EN.registrationPolicyReassociationSaveError);
+	});
+});

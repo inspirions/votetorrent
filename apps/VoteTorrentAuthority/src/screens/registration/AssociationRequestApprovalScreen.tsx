@@ -95,6 +95,9 @@ export default function AssociationRequestApprovalScreen() {
 
 	const unmountedRef = useRef(false);
 	const sessionPromiseRef = useRef<Promise<PeerReviewSession> | undefined>(undefined);
+	// Incremented at the start of every load; a read that is no longer the latest never sets state,
+	// so Approve (which reads `review.resolvedRegistrantId`) always acts on the request shown.
+	const loadSeqRef = useRef(0);
 	useEffect(() => {
 		unmountedRef.current = false;
 		return () => {
@@ -111,6 +114,7 @@ export default function AssociationRequestApprovalScreen() {
 
 	useEffect(() => {
 		async function load() {
+			const seq = ++loadSeqRef.current;
 			try {
 				sessionPromiseRef.current ??= openPeerReviewSession({
 					getEngine,
@@ -126,7 +130,7 @@ export default function AssociationRequestApprovalScreen() {
 					session.opener,
 					selectedRegistrantId ? { registrantId: selectedRegistrantId } : undefined
 				);
-				if (unmountedRef.current) return;
+				if (unmountedRef.current || seq !== loadSeqRef.current) return;
 				if (next === undefined) {
 					setLoadFailed(true);
 					setNotice("load-error");
@@ -137,7 +141,9 @@ export default function AssociationRequestApprovalScreen() {
 				setNotice((n) => (n === "load-error" ? "none" : n));
 			} catch {
 				// Never the engine message: an unavailable session and a failed read share one key.
-				if (unmountedRef.current) return;
+				// A rejected session must never be reused: Retry opens a fresh one.
+				if (seq === loadSeqRef.current) sessionPromiseRef.current = undefined;
+				if (unmountedRef.current || seq !== loadSeqRef.current) return;
 				setLoadFailed(true);
 				setNotice("load-error");
 			}
@@ -217,6 +223,14 @@ export default function AssociationRequestApprovalScreen() {
 					<View testID="association-approval-error">
 						<InlineError message={t(NOTICE_KEY[notice])} />
 					</View>
+				) : null}
+				{notice === "load-error" ? (
+					<CustomButton
+						testID="association-approval-retry"
+						size="thin"
+						title={t("loadRetryButton")}
+						onPress={() => setReloadNonce((n) => n + 1)}
+					/>
 				) : null}
 
 				{bannerKey ? (

@@ -5,6 +5,7 @@ import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
 import type { AuthorityIntakePolicyView, IntakeEngine } from "@votetorrent/vote-engine/rn";
 import { ThemedText } from "../../../components/ThemedText";
+import { CustomButton } from "../../../components/CustomButton";
 import { InlineError } from "../../../components/InlineError";
 import { useApp } from "../../../providers/AppProvider";
 import { createDeviceSigner } from "../../../engines/device-signer";
@@ -72,19 +73,34 @@ export function ReassociationReviewToggle({
 		};
 	}, []);
 
-	const read = useCallback(async () => {
+	/** Resolves true when the policy was read; a good read clears a stale load-error notice. */
+	const read = useCallback(async (): Promise<boolean> => {
 		try {
 			const intake = await getEngine<IntakeEngine>("intake");
 			const next = await intake.readIntakePolicy(authorityId);
-			if (unmountedRef.current) return;
+			if (unmountedRef.current) return false;
 			setView(next);
 			setPhase("ready");
+			setNotice((n) => (n === "load-error" ? "none" : n));
+			return true;
 		} catch {
-			if (unmountedRef.current) return;
+			if (unmountedRef.current) return false;
 			setPhase("unreadable");
 			setNotice("load-error");
+			return false;
 		}
 	}, [getEngine, authorityId]);
+
+	const retryingRef = useRef(false);
+	async function retry() {
+		if (retryingRef.current) return;
+		retryingRef.current = true;
+		try {
+			await read();
+		} finally {
+			retryingRef.current = false;
+		}
+	}
 
 	useEffect(() => {
 		void read();
@@ -114,8 +130,9 @@ export function ReassociationReviewToggle({
 				setRefused(true);
 				setNotice("co-sign");
 			} else if ((err as { code?: unknown } | null)?.code === "policy-revision-conflict") {
-				await read();
-				if (!unmountedRef.current) setNotice("save-error");
+				// save-error only when the re-read succeeded; a failed re-read leaves load-error + Retry.
+				const reread = await read();
+				if (reread && !unmountedRef.current) setNotice("save-error");
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) setNotice("save-error");
@@ -166,6 +183,9 @@ export function ReassociationReviewToggle({
 				<View testID={`${testIDPrefix}-notice`}>
 					<InlineError message={t(NOTICE_KEY[notice])} />
 				</View>
+			) : null}
+			{phase === "unreadable" ? (
+				<CustomButton testID={`${testIDPrefix}-retry`} size="thin" title={t("loadRetryButton")} onPress={() => void retry()} />
 			) : null}
 		</View>
 	);

@@ -568,3 +568,79 @@ describe("AssociationRequestApprovalScreen — S12 never-log and session lifecyc
 		expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
 	});
 });
+
+describe("AssociationRequestApprovalScreen — failed-open retry and stale reads (WR-06)", () => {
+	function deferred<T>() {
+		let resolve!: (v: T) => void;
+		const promise = new Promise<T>((r) => {
+			resolve = r;
+		});
+		return { promise, resolve };
+	}
+
+	it("A-1. a failed open shows the load error and Retry; pressing Retry opens a NEW session and the review renders", async () => {
+		mockCreateTransports.mockImplementationOnce(() => {
+			throw Object.assign(new Error("strand"), { peerStrandUnavailable: true });
+		});
+		const tr = await renderScreen();
+		expect(textOf(tr, "association-approval-error")).toBe(EN.associationApprovalLoadError);
+		expect(exists(tr, "association-approval-retry")).toBe(true);
+		expect(mockCreateTransports).toHaveBeenCalledTimes(1);
+
+		await pressAsync(tr, "association-approval-retry");
+		expect(mockCreateTransports).toHaveBeenCalledTimes(2);
+		expect(exists(tr, "association-approval-error")).toBe(false);
+		expect(exists(tr, "association-approval-approve")).toBe(true);
+	});
+
+	it("A-2. a slow earlier read never replaces the request being shown; Approve acts on the last selection", async () => {
+		mockReview = IDENTITY_REVIEW;
+		const slow = deferred<any>();
+		const reg1Review = review({ ...IDENTITY_RESOLVED_REVIEW, resolvedRegistrantId: "reg-1", registrantName: "Ada Lovelace" });
+		const tr = await renderScreen();
+		mockGetReassociationReview.mockImplementationOnce(async () => slow.promise);
+		mockGetReassociationReview.mockImplementationOnce(async () => mockResolvedReview);
+		await renderer.act(async () => {
+			findPressable(tr, "association-approval-candidate-reg-1")!.props.onPress();
+		});
+		await flushTicks(6);
+		await renderer.act(async () => {
+			findPressable(tr, "association-approval-candidate-reg-2-abcdefghij")!.props.onPress();
+		});
+		await flushTicks(12);
+		await renderer.act(async () => {
+			slow.resolve(reg1Review);
+		});
+		await flushTicks(12);
+
+		expect(tr.root.findByProps({ testID: "association-approval-candidate-reg-2-abcdefghij" }).props.accessibilityState.selected).toBe(true);
+		expect(tr.root.findByProps({ testID: "association-approval-candidate-reg-1" }).props.accessibilityState.selected).toBe(false);
+
+		await pressAsync(tr, "association-approval-approve");
+		await pressAsync(tr, "association-approval-confirm-confirm");
+		expect(mockApproveReassociation).toHaveBeenCalledTimes(1);
+		expect(mockApproveReassociation.mock.calls[0][1]).toEqual({ registrantId: "reg-2-abcdefghij" });
+	});
+
+	it("A-3. unmounting while a read is in flight raises no warnings and closes the session exactly once", async () => {
+		const slow = deferred<any>();
+		mockGetReassociationReview.mockImplementationOnce(async () => slow.promise);
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const Screen = require("../AssociationRequestApprovalScreen").default;
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(<Screen />);
+		});
+		await flushTicks(8);
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await flushTicks(4);
+		await renderer.act(async () => {
+			slow.resolve(review());
+		});
+		await flushTicks(8);
+		expect(mockTransports.registration.close).toHaveBeenCalledTimes(1);
+		expect(mockTransports.association.close).toHaveBeenCalledTimes(1);
+	});
+});
