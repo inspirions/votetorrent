@@ -113,11 +113,14 @@ export function isShareExpired(share: ParsedInviteShare, nowMs: number): boolean
 	return ms !== undefined && ms <= nowMs;
 }
 
+/** The invite status the resolver already read (undefined only for a type with no status getter). */
+type InviteStatusLike = Awaited<ReturnType<IInvitationEngine['getKeyholderInvite']>> | undefined;
+
 export async function resolveInviteFromShare(
 	engine: Pick<IInvitationEngine, 'resolveInviteSlot' | 'getKeyholderInvite' | 'getOfficerInvite' | 'getAuthorityInvite'>,
 	text: string,
 	expectedType: InviteType
-): Promise<{ slotCid: string; invitePrivate: string; share: ParsedInviteShare }> {
+): Promise<{ slotCid: string; invitePrivate: string; share: ParsedInviteShare; status: InviteStatusLike }> {
 	const share = parseInviteShare(text);
 	if (!share) throw new InviteShareError('malformed');
 	if (share.type !== undefined && share.type !== expectedType) throw new InviteShareError('wrong-type');
@@ -142,7 +145,8 @@ export async function resolveInviteFromShare(
 		}
 	}
 	// Refuse an already-answered slot (accepted OR declined) BEFORE any caller provisions keys or
-	// signs: respondToInvite does not refuse it up front, so the biometric prompts would fire first.
+	// signs. The engine refuses it too (invite-already-answered), but this check spares the
+	// provisioning prompts. The status read here is returned so callers need no second read.
 	const status =
 		expectedType === 'k'
 			? await engine.getKeyholderInvite(slotCid)
@@ -152,7 +156,7 @@ export async function resolveInviteFromShare(
 					? await engine.getAuthorityInvite(slotCid)
 					: undefined;
 	if (status?.result !== undefined) throw new InviteShareError('already-answered');
-	return { slotCid, invitePrivate: share.invitePrivate, share };
+	return { slotCid, invitePrivate: share.invitePrivate, share, status };
 }
 
 export function inviteShareErrorKey(err: unknown): string | undefined {
@@ -169,4 +173,21 @@ export function inviteShareErrorKey(err: unknown): string | undefined {
 		case 'no-longer-valid':
 			return 'invitationAcceptNoLongerValid';
 	}
+}
+
+const ENGINE_CODE_KEYS: Record<string, string> = {
+	'invite-already-answered': 'invitationAcceptAlreadyAnswered',
+	'invite-no-longer-valid': 'invitationAcceptNoLongerValid',
+	'invite-superseded': 'invitationAcceptSuperseded',
+	'invite-unverifiable': 'invitationAcceptNotFound',
+	'self-invite': 'keyholderAcceptSelfInvite',
+	'seat-already-held': 'keyholderAcceptSeatHeld',
+};
+
+/** Copy key for a share error or a coded engine/app refusal; undefined for anything else. */
+export function inviteAcceptErrorKey(err: unknown): string | undefined {
+	const shareKey = inviteShareErrorKey(err);
+	if (shareKey) return shareKey;
+	const code = (err as { code?: unknown } | null | undefined)?.code;
+	return typeof code === 'string' && Object.prototype.hasOwnProperty.call(ENGINE_CODE_KEYS, code) ? ENGINE_CODE_KEYS[code] : undefined;
 }

@@ -3,7 +3,7 @@ import { bytesToHex } from '@noble/curves/utils.js';
 import { InvitationEngine } from '@votetorrent/vote-engine/rn';
 import { addTestAuthority, createTestNetwork, makeTestSignCallback } from '@votetorrent/vote-engine/test/fixtures/test-context';
 import type { InviteSlotResolution } from '@votetorrent/vote-core';
-import { InviteShareError, inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from '../invite-share';
+import { InviteShareError, inviteAcceptErrorKey, inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from '../invite-share';
 
 function kp() {
 	const priv = secp256k1.utils.randomSecretKey();
@@ -205,5 +205,40 @@ describe('invite expiration (UTC reads)', () => {
 		expect(isShareExpired({ ...base, expiration: '2026-10-06T08:49:05' }, at - 1)).toBe(false);
 		expect(isShareExpired({ ...base, expiration: 'garbage' }, at)).toBe(false);
 		expect(isShareExpired(base, at)).toBe(false);
+	});
+});
+
+describe('resolveInviteFromShare returns the status it read', () => {
+	it('carries the status of the one engine read', async () => {
+		const { text } = share();
+		const status = { invite: { name: 'Kay Two' }, result: undefined };
+		const e = eng(async () => ({ status: 'live', cid: 'cid-9' }), status);
+		const out = await resolveInviteFromShare(e, text, 'k');
+		expect(out.status).toBe(status);
+		expect(e.getKeyholderInvite).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('inviteAcceptErrorKey', () => {
+	const coded = (code: string) => Object.assign(new Error('x'), { code });
+	it.each([
+		['invite-already-answered', 'invitationAcceptAlreadyAnswered'],
+		['invite-no-longer-valid', 'invitationAcceptNoLongerValid'],
+		['invite-superseded', 'invitationAcceptSuperseded'],
+		['invite-unverifiable', 'invitationAcceptNotFound'],
+		['self-invite', 'keyholderAcceptSelfInvite'],
+		['seat-already-held', 'keyholderAcceptSeatHeld'],
+	])('engine code %s -> %s', (code, key) => {
+		expect(inviteAcceptErrorKey(coded(code))).toBe(key);
+	});
+	it('maps share errors like inviteShareErrorKey', () => {
+		expect(inviteAcceptErrorKey(new InviteShareError('wrong-type'))).toBe('invitationAcceptWrongType');
+		expect(inviteAcceptErrorKey(new InviteShareError('malformed'))).toBe('invitationAcceptMalformed');
+	});
+	it('anything else is undefined', () => {
+		expect(inviteAcceptErrorKey(coded('boom'))).toBeUndefined();
+		expect(inviteAcceptErrorKey(new Error('plain'))).toBeUndefined();
+		expect(inviteAcceptErrorKey('str')).toBeUndefined();
+		expect(inviteAcceptErrorKey(undefined)).toBeUndefined();
 	});
 });
