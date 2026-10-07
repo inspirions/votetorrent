@@ -19,6 +19,8 @@ import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { InlineError } from "../../components/InlineError";
 import { NoNetwork } from "../../components/NoNetwork";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
 import { loadRenderableSignatureTasks, type RenderableSignatureTask } from "./renderable-signature-tasks";
 
@@ -54,6 +56,7 @@ export default function TasksScreen() {
 	const [releaseKeyTasks, setReleaseKeyTasks] = useState<ReleaseKeyTask[]>();
 	const [signatureTasks, setSignatureTasks] = useState<RenderableSignatureTask[]>();
 	const [loadError, setLoadError] = useState("");
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
 	// Distinct from loadError: "no network selected yet" is the expected first-run
 	// state, so it renders the friendly <NoNetwork /> empty state rather than an
 	// error banner carrying an internal EngineFactory message.
@@ -66,6 +69,7 @@ export default function TasksScreen() {
 
 	const loadTasksEngines = useCallback(async () => {
 		setLoadError("");
+		setPeerUnavailable(false);
 		setHasNetwork(true);
 		try {
 			const [keyTasksEngine, signatureTasksEngine] = await Promise.all([
@@ -89,10 +93,16 @@ export default function TasksScreen() {
 				setHasNetwork(false);
 				return;
 			}
+			const peer = classifyPeerReadFailure(error);
+			if (peer) {
+				console.warn("Tasks load: peer unavailable:", peer.reason);
+				setPeerUnavailable(true);
+				return;
+			}
 			console.error("Error in loadTasksEngines:", error);
-			setLoadError(error instanceof Error ? error.message : String(error));
+			setLoadError(t("tasksLoadFailed"));
 		}
-	}, [getEngine]);
+	}, [getEngine, t]);
 
 	useFocusEffect(
 		useCallback(() => {
@@ -116,6 +126,18 @@ export default function TasksScreen() {
 	// function, so the list and the badge can never diverge.
 	const renderableSignatureTasks = signatureTasks ?? [];
 
+	const peerNotice = peerUnavailable ? (
+		<PeerReadUnavailableNotice
+			variant={releaseKeyTasks !== undefined || signatureTasks !== undefined ? "stale" : "unavailable"}
+			onRetry={loadTasksEngines}
+		/>
+	) : null;
+
+	// Nothing loaded and the other devices cannot be reached: say so, never "no tasks".
+	if (peerUnavailable && releaseKeyTasks === undefined && signatureTasks === undefined) {
+		return <ScrollView style={styles.container}>{peerNotice}</ScrollView>;
+	}
+
 	const isEmpty =
 		releaseKeyTasks !== undefined &&
 		signatureTasks !== undefined &&
@@ -126,6 +148,7 @@ export default function TasksScreen() {
 		return (
 			<View style={styles.emptyState}>
 				<InlineError message={loadError} />
+				{peerNotice}
 				<FontAwesome6 name="clipboard-list" size={48} color={colors.textSecondary} />
 				<ThemedText type="title">{t("noTasks")}</ThemedText>
 				<ThemedText type="default">{t("noTasksHelper")}</ThemedText>
@@ -163,6 +186,7 @@ export default function TasksScreen() {
 	return (
 		<ScrollView style={styles.container}>
 			<InlineError message={loadError} />
+			{peerNotice}
 			{Array.from(grouped.entries()).map(([authorityName, entries]) => (
 				<View key={authorityName} style={styles.section}>
 					<ThemedText type="title">{authorityName}</ThemedText>

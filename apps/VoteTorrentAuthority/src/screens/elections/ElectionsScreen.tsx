@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View, ScrollView, StyleSheet } from "react-native";
 import { NoNetwork } from "../../components/NoNetwork";
 import { useApp } from "../../providers/AppProvider";
@@ -18,6 +18,8 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { NavigationProp } from "../../navigation/types";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 
 /**
  * ElectionsScreen — three stacked sections per Phase 9 D-13:
@@ -38,7 +40,50 @@ export const ElectionsScreen = () => {
 	const [proposedElections, setProposedElections] = useState<Proposal<ElectionInit>[]>([]);
 	const [electionHistory, setElectionHistory] = useState<ElectionSummary[]>([]);
 	const [loadError, setLoadError] = useState("");
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
+	const [hasLoaded, setHasLoaded] = useState(false);
 	const { t } = useTranslation();
+
+	// Latest `t` via a ref so the load effects do not re-run when the translator's identity changes.
+	const tRef = useRef(t);
+	tRef.current = t;
+
+	// A read that could not reach the other devices shows the notice (never engine text); every
+	// other failure shows the translated generic copy and keeps the raw error in the console.
+	const reportLoadFailure = useCallback(
+		(error: unknown) => {
+			const peer = classifyPeerReadFailure(error);
+			if (peer) {
+				console.warn("Elections load: peer unavailable:", peer.reason);
+				setPeerUnavailable(true);
+				setLoadError("");
+				return;
+			}
+			setPeerUnavailable(false);
+			setLoadError(tRef.current("electionsLoadFailed"));
+		},
+		[]
+	);
+
+	const loadElections = useCallback(async () => {
+		const engine = await getEngine<IElectionsEngine>("elections");
+		setElectionsEngine(engine);
+		const [activeElections, proposed, history] = await Promise.all([
+			engine.getElections(),
+			engine.getProposedElections(),
+			engine.getElectionHistory(),
+		]);
+		setElections(activeElections);
+		setProposedElections(proposed);
+		setElectionHistory(history);
+		setHasLoaded(true);
+		setPeerUnavailable(false);
+		setLoadError("");
+	}, [getEngine]);
+
+	const retryLoad = useCallback(() => {
+		loadElections().catch(reportLoadFailure);
+	}, [loadElections, reportLoadFailure]);
 
 	useEffect(() => {
 		if (hasNetwork) {
@@ -52,25 +97,14 @@ export const ElectionsScreen = () => {
 		async function initializeElectionsEngine() {
 			if (!hasNetwork) return;
 			try {
-				const engine = await getEngine<IElectionsEngine>("elections");
-				setElectionsEngine(engine);
-
-				const [activeElections, proposed, history] = await Promise.all([
-					engine.getElections(),
-					engine.getProposedElections(),
-					engine.getElectionHistory(),
-				]);
-
-				setElections(activeElections);
-				setProposedElections(proposed);
-				setElectionHistory(history);
+				await loadElections();
 			} catch (error) {
 				console.warn("Error loading elections:", error);
-				setLoadError(error instanceof Error ? error.message : String(error));
+				reportLoadFailure(error);
 			}
 		}
 		initializeElectionsEngine();
-	}, [hasNetwork]);
+	}, [hasNetwork, loadElections, reportLoadFailure]);
 
 	// Phase 9 plan 09-15 — re-load on screen focus so a newly created election/revision
 	// appears on return (mirrors the useFocusEffect pattern from the ballot round in 09-09).
@@ -79,25 +113,14 @@ export const ElectionsScreen = () => {
 			async function reloadElections() {
 				if (!hasNetwork) return;
 				try {
-					const engine = await getEngine<IElectionsEngine>("elections");
-					setElectionsEngine(engine);
-
-					const [activeElections, proposed, history] = await Promise.all([
-						engine.getElections(),
-						engine.getProposedElections(),
-						engine.getElectionHistory(),
-					]);
-
-					setElections(activeElections);
-					setProposedElections(proposed);
-					setElectionHistory(history);
+					await loadElections();
 				} catch (error) {
 					console.warn("Error reloading elections on focus:", error);
-					setLoadError(error instanceof Error ? error.message : String(error));
+					reportLoadFailure(error);
 				}
 			}
 			reloadElections();
-		}, [hasNetwork, getEngine])
+		}, [hasNetwork, loadElections, reportLoadFailure])
 	);
 
 	if (!hasNetwork) {
@@ -119,6 +142,9 @@ export const ElectionsScreen = () => {
 	return (
 		<ScrollView style={styles.container}>
 			<InlineError message={loadError} />
+			{peerUnavailable ? (
+				<PeerReadUnavailableNotice variant={hasLoaded ? "stale" : "unavailable"} onRetry={retryLoad} />
+			) : null}
 			{/* Section 1: Active / Future elections — no header per D-13 */}
 			<View style={styles.section}>
 				{elections.length > 0 ? (
