@@ -619,7 +619,9 @@ describe('dkg-evaluator: restart and cap', () => {
 // ===========================================================================
 
 describe('dkg-evaluator: roster rules', () => {
-  it('an R0 declaring a user with no visible binding gives in-progress with waitingReason roster-mismatch (no abort)', () => {
+  it('an R0 declaring a user with no visible binding gives in-progress with waitingReason roster-mismatch (no abort), naming the declaring keyholder (initial/G2 WR-02)', () => {
+    // Revision 1: this case used to assert only the wait (and awaitingUserIds = []). It now also asserts WHO is named,
+    // because naming the declarer is the fix: the AR-62-053 revoke remedy needs someone to point at.
     const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
     const sorted = [...sim.userIds].sort()
     const ghostRoster = [...sorted, 'zzz-ghost'].sort()
@@ -628,6 +630,84 @@ describe('dkg-evaluator: roster rules', () => {
     expect(ev.phase).to.equal('in-progress')
     expect(ev.waitingReason).to.equal('roster-mismatch')
     expect(ev.attempts).to.deep.equal([])
+    expect(ev.disqualified).to.deep.equal([])
+    expect(ev.awaitingUserIds).to.deep.equal([sim.userIds[0]])
+  })
+
+  it('two keyholders declaring the same phantom are both named, sorted', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const sorted = [...sim.userIds].sort()
+    const ghostRoster = [...sorted, 'zzz-ghost'].sort()
+    const rows = sim.userIds.map((u, i) => round0Row(sim, 1, u, i < 2 ? ghostRoster : sorted))
+    const ev = evaluateDkgRevision(mkSnapshot(sim, rows))
+    expect(ev.waitingReason).to.equal('roster-mismatch')
+    expect(ev.awaitingUserIds).to.deep.equal([sim.userIds[0], sim.userIds[1]].sort())
+  })
+
+  it('an unbound id with a visible Keyholder row (replication lag) is itself the one awaited, and its declarer is not blamed', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const sorted = [...sim.userIds].sort()
+    const lagRoster = [...sorted, 'zzz-lag'].sort()
+    const rows = sim.userIds.map((u, i) => round0Row(sim, 1, u, i === 0 ? lagRoster : sorted))
+    const ev = evaluateDkgRevision(mkSnapshot(sim, rows, { liveRoster: [...sim.userIds, 'zzz-lag'] }))
+    expect(ev.phase).to.equal('in-progress')
+    expect(ev.waitingReason).to.equal('roster-mismatch')
+    expect(ev.awaitingUserIds).to.deep.equal(['zzz-lag'])
+    expect(ev.disqualified).to.deep.equal([])
+  })
+
+  it('an unbound id that signed a round-0 row of its own is traced too (named itself, not its declarer)', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const sorted = [...sim.userIds].sort()
+    const lagRoster = [...sorted, 'zzz-lag'].sort()
+    const rows = sim.userIds.map((u, i) => round0Row(sim, 1, u, i === 0 ? lagRoster : sorted))
+    rows.push(mkRow(1, 0, 'zzz-lag', serializeRound0Payload({ v: 1, commit: sim.r0CommitByUser[sim.userIds[0]!]!, roster: lagRoster, threshold: sim.threshold })))
+    const ev = evaluateDkgRevision(mkSnapshot(sim, rows))
+    expect(ev.waitingReason).to.equal('roster-mismatch')
+    expect(ev.awaitingUserIds).to.deep.equal(['zzz-lag'])
+  })
+
+  it('lag resolution: once the binding replicates nobody is disqualified, before or after, and no snapshot plans a removal', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const sorted = [...sim.userIds].sort()
+    const lagRoster = [...sorted, 'zzz-lag'].sort()
+    const rows = sim.userIds.map((u, i) => round0Row(sim, 1, u, i === 0 ? lagRoster : sorted))
+    const before = mkSnapshot(sim, rows, { liveRoster: [...sim.userIds, 'zzz-lag'] })
+    const after = mkSnapshot(sim, rows, { liveRoster: [...sim.userIds, 'zzz-lag'] })
+    after.bindings['zzz-lag'] = { dkgPublicKey: '02'.padEnd(66, '9') }
+    for (const snapshot of [before, after]) {
+      const ev = evaluateDkgRevision(snapshot)
+      expect(ev.disqualified).to.deep.equal([])
+      expect(ev.cumulativeDisqualified).to.deep.equal([])
+      for (const u of sim.userIds) expect(planDkgAction(ev, u).kind).to.not.equal('remove-disqualified')
+    }
+    // After replication the stall is the ordinary "waiting for zzz-lag's round-0 row", not a roster wait.
+    const evAfter = evaluateDkgRevision(after)
+    expect(evAfter.waitingReason).to.equal(undefined)
+    expect(evAfter.awaitingUserIds).to.deep.equal(['zzz-lag'])
+  })
+
+  it('remedy: revoking the declaring keyholder clears the phantom stall and an honest attempt 2 completes', () => {
+    const sim1 = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const sorted = [...sim1.userIds].sort()
+    const declarer = sim1.userIds[2]!
+    const ghostRoster = [...sorted, 'zzz-ghost'].sort()
+    const attempt1 = sim1.userIds.map((u) => round0Row(sim1, 1, u, u === declarer ? ghostRoster : sorted))
+    const stalled = evaluateDkgRevision(mkSnapshot(sim1, attempt1))
+    expect(stalled.waitingReason).to.equal('roster-mismatch')
+    expect(stalled.awaitingUserIds).to.deep.equal([declarer])
+    for (const u of sim1.userIds) expect(planDkgAction(stalled, u).kind).to.not.equal('remove-disqualified')
+
+    // An officer revokes the declarer (AR-62-053). The remaining two run an honest attempt 2.
+    const sim2 = simulateHonestDkg(2, 2, { electionId: 'e', revision: 0, attempt: 2 })
+    const snapshot = mkSnapshot(sim2, [...attempt1, ...honestRows(sim2, 2)], { liveRoster: [...sim2.userIds] })
+    snapshot.bindings[declarer] = { dkgPublicKey: sim1.usersByUserId[declarer]!.recvPublic }
+    const ev = evaluateDkgRevision(snapshot)
+    expect(ev.attempts[0]!.outcome).to.equal('aborted')
+    expect(ev.attempts[0]!.abortReason).to.equal('roster-changed')
+    expect(ev.disqualified).to.deep.equal([])
+    expect(ev.currentAttempt).to.equal(2)
+    expect(ev.readyToPublish).to.not.equal(null)
   })
 
   it('an R0 declaring a user whose binding is visible but whose Keyholder row is gone gives aborted/roster-changed', () => {

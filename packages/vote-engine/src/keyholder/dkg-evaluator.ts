@@ -49,7 +49,16 @@
 //     `symdiff`: no roster issue. Every member of a non-empty `symdiff` has
 //     a visible binding: `roster-changed` (abort). Any member of `symdiff`
 //     has NO visible binding: `in-progress` with `waitingReason
-//     'roster-mismatch'` (replication lag — not an abort).
+//     'roster-mismatch'` (replication lag — not an abort). The wait NAMES
+//     its cause in `awaitingUserIds`: each unbound id that is traced (a
+//     Keyholder row is visible, or it signed a DKG row of its own), else the
+//     keyholders whose round-0 roster declared it. Trade-off: a phantom id and
+//     a binding that has not replicated yet are indistinguishable in one
+//     snapshot, so the evaluator never disqualifies on this evidence. The
+//     named declarer is a prompt for the officer remedy (revoke that
+//     keyholder), which then yields a clean `roster-changed` abort; an honest
+//     declarer stops being named as soon as the binding replicates, so
+//     officers should wait before revoking (initial/G2 WR-02).
 //  7. Gates (attempt 1 only, before any row is read): a null revision/
 //     threshold gives `no-current-revision`; an empty `effectiveLive` gives
 //     `no-keyholders`; a failing `assertDkgThreshold` gives
@@ -179,6 +188,34 @@ export type DkgPlannedAction =
 
 function sortUnique (values: string[]): string[] {
   return [...new Set(values)].sort()
+}
+
+/**
+ * Who a `roster-mismatch` wait is waiting on (initial/G2 WR-02). Sorted union
+ * of (a) each unbound id that is TRACED (a visible Keyholder row, or any
+ * valid-signature row it sent) — we wait for its binding — and (b) the
+ * senders whose parsed round-0 roster declares an UNTRACED unbound id, so the
+ * officers' revoke remedy has someone to point at. Pure; no clock.
+ */
+function rosterMismatchAwaiting (
+  unboundIds: string[],
+  r0Rows: DkgMessageRow[],
+  parsedRosters: Record<string, string[]>,
+  liveRoster: string[],
+  validRows: DkgMessageRow[]
+): string[] {
+  const out: string[] = []
+  for (const id of unboundIds) {
+    const traced = liveRoster.includes(id) || validRows.some((r) => r.senderUserId === id)
+    if (traced) {
+      out.push(id)
+      continue
+    }
+    for (const row of r0Rows) {
+      if ((parsedRosters[row.senderUserId] ?? []).includes(id)) out.push(row.senderUserId)
+    }
+  }
+  return sortUnique(out)
 }
 
 function symmetricDifference (a: string[], b: string[]): string[] {
@@ -437,7 +474,10 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       currentRound = round
       roster = attemptRoster
       if (fb === 'waiting') {
-        awaitingUserIds = []
+        const unbound = symmetricDifference(attemptRoster, effectiveLive).filter((u) => !bindingIds.has(u))
+        const parsedRosters: Record<string, string[]> = {}
+        for (const row of r0Rows) parsedRosters[row.senderUserId] = r0Parsed[row.senderUserId]!.roster
+        awaitingUserIds = rosterMismatchAwaiting(unbound, r0Rows, parsedRosters, snapshot.liveRoster, validRows)
         waitingReason = 'roster-mismatch'
       } else {
         awaitingUserIds = sortUnique(attemptRoster.filter((u) => !posted.some((r) => r.senderUserId === u)))
