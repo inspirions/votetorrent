@@ -1,17 +1,18 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import type { PropsWithChildren } from "react";
-import type { INetworksEngine, IDefaultUserEngine, NetworkReference } from "@votetorrent/vote-core";
+import type { INetworksEngine, IDefaultUserEngine, NetworkReference, User } from "@votetorrent/vote-core";
 import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { hideSplash } from "react-native-splash-view";
 import { EngineFactory } from "../engines/engine-factory";
 import type { PeerStagingTransports } from "../engines/engine-factory";
-import { LocalStorageReact } from "@votetorrent/vote-engine/rn";
+import { LocalStorageReact, UserEngine } from "@votetorrent/vote-engine/rn";
 import type { StagingOpener, StagingDecisionSigner } from "@votetorrent/vote-engine/rn";
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
+import { repairDeviceIdentityForkIfNeeded, type OtherNetworkAnswer } from "../engines/device-identity-repair";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { classifyPeerReadFailure } from "../engines/peer-read-unavailable";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
@@ -181,6 +182,60 @@ type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic
 // takes minutes. It is deliberately NOT widened to minutes: the officer would sit on a spinner
 // with no explanation; the classified error view with Try Again is the path for the long case.
 const PEER_RETRY_DELAYS_MS = [5000, 15000];
+
+/**
+ * O-06: after the network is open, repair a device identity forked by the old Replace Signing Key.
+ * Returns the repaired user (already bound into the factory, the network re-opened with it and the
+ * cached engines rebuilt), or `undefined` when nothing changed. Never throws, never blocks boot.
+ *
+ * Cache handling (read from engine-factory.ts / networks-engine.ts): `NetworksEngine.open` is
+ * cache-first but rewrites the cached ctx with the supplied user, so re-opening with the repaired
+ * user re-points ctx.user for every sibling reading the established context. The factory's cached
+ * 'network' / 'user' / ... engines captured the OLD user, so `clearEngineCache()` (its existing
+ * public API) drops them and `getEngine("network", ref)` rebuilds against the repaired user.
+ */
+async function repairForkedIdentityAfterOpen(
+	factory: EngineFactory,
+	network: NetworkReference,
+	user: User,
+): Promise<User | undefined> {
+	try {
+		const networksEng = factory.getNetworksEngine();
+		const otherNetworkHasUser = async (userId: string): Promise<OtherNetworkAnswer> => {
+			const others = (await networksEng.getRecentNetworks()).filter((n) => n.hash !== network.hash);
+			if (others.length === 0) return "no";
+			let unknown = false;
+			for (const other of others) {
+				const otherCtx = networksEng.getEstablishedContext(other.hash);
+				// Not open in this process: cannot be checked without starting its strand -> fail safe.
+				if (!otherCtx) {
+					unknown = true;
+					continue;
+				}
+				const row = await otherCtx.db.prepare("select 1 as found from User where Id = :id").get({ id: userId });
+				if (row != null) return "yes";
+			}
+			return unknown ? "unknown" : "no";
+		};
+		const result = await repairDeviceIdentityForkIfNeeded({
+			deviceUser: user,
+			getUserEngineForCurrentUser: async () => {
+				const ctx = networksEng.getEstablishedContext(network.hash);
+				return ctx ? new UserEngine(user, ctx) : undefined;
+			},
+			otherNetworkHasUser,
+		});
+		if (result.outcome !== "repaired" || !result.user) return undefined;
+		factory.setCurrentUser(result.user);
+		await networksEng.open(network, result.user);
+		factory.clearEngineCache();
+		await factory.getEngine("network", network);
+		return result.user;
+	} catch {
+		console.warn("[identity-repair] outcome=failed");
+		return undefined;
+	}
+}
 
 export function AppProvider({ children }: PropsWithChildren) {
 	const { t } = useTranslation();
@@ -364,7 +419,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 		const factory = engineFactoryRef.current!;
 		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
 		const defaultUser = await defaultUserEng.get();
-		const user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
+		let user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
 		// Same D-19 rationale as the boot re-attach block below: Settings reads DefaultUser via
 		// defaultUserEngine.get(), so a first create (which never goes through boot) must persist
 		// one too or Settings reads "No default user found" until a restart. Write only when
@@ -377,6 +432,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 		// network re-attaches. It also writes networkRef to the recentNetworks list.
 		await factory.getNetworksEngine().open(networkRef, user);
 		await factory.getEngine("network", networkRef);
+		user = (await repairForkedIdentityAfterOpen(factory, networkRef, user)) ?? user;
 		setHasNetwork(true);
 	}, [setHasNetwork]);
 
@@ -503,7 +559,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// Mirror the pattern in AuthorityInvitationScreen.onSend.
 						const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
 						const defaultUser = await defaultUserEng.get();
-						const user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
+						let user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
 						// D-19: Persist a DefaultUser record at boot if one does not yet exist.
 						// DefaultUserEngine.get() (LocalStorage key 'defaultUser') is a DIFFERENT
 						// store from the network ctx.user resolved above. SettingsScreen reads
@@ -520,6 +576,8 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await openWithRetry(networksEng, network, user);
 						await factory.getEngine("network", network);
+						// O-06: repair a forked device identity (reversible; never blocks boot).
+						user = (await repairForkedIdentityAfterOpen(factory, network, user)) ?? user;
 						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
 						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
 						// default). Awaited HERE — rather than fired from index.js — so

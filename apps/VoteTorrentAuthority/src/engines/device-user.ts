@@ -82,6 +82,25 @@ export const DEVICE_PROVISIONING_KEY = 'deviceSigningProvisioning'
  */
 export const DEVICE_RECOVERY_IN_PROGRESS_KEY = 'deviceSigningRecoveryInProgress'
 
+/**
+ * O-06 identity-fork repair keys (see `device-identity-repair.ts`). All three hold local,
+ * non-secret metadata only (user ids, no key material).
+ *
+ * - BACKUP: the byte-exact pre-repair `deviceUser` string. Written once, never overwritten.
+ * - APPLIED: `{ fromUserId, toUserId }` of the latest repair, so a restore can verify the stored
+ *   id is still the one the repair wrote.
+ * - DECLINED: `{ fromUserId, toUserId }` written by a restore; the same pair is never repaired
+ *   again (sticky reversal).
+ */
+export const DEVICE_USER_FORK_BACKUP_KEY = 'deviceUser.forkRepairBackup.v1'
+export const DEVICE_USER_FORK_APPLIED_KEY = 'deviceUser.forkRepairApplied.v1'
+export const DEVICE_USER_FORK_DECLINED_KEY = 'deviceUser.forkRepairDeclined.v1'
+
+export interface ForkRepairPair {
+	fromUserId: string
+	toUserId: string
+}
+
 /** Ten years in milliseconds — expiration epoch for the provisioned device key. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000
 
@@ -299,4 +318,59 @@ export function generateSoftwareKeyForDev(): any {
 		return generateSoftwareDeviceKey()
 	}
 	throw new Error('generateSoftwareKeyForDev: must never run outside __DEV__ (D-12)')
+}
+
+/** The raw stored `deviceUser` string, or `null`. Used for the byte-exact repair backup. */
+export async function getRawDeviceUserRecord(): Promise<string | null> {
+	return AsyncStorage.getItem(DEVICE_USER_KEY)
+}
+
+/**
+ * Rewrite ONLY `user.id` in the stored record (every other field of the blob and of the user is
+ * carried over unchanged). Rejects when there is no stored record.
+ */
+export async function replaceDeviceUserId(newId: string): Promise<User> {
+	const stored = await AsyncStorage.getItem(DEVICE_USER_KEY)
+	if (stored === null) throw new Error('replaceDeviceUserId: no stored device user')
+	const parsed = JSON.parse(stored) as StoredDeviceUser
+	parsed.user = { ...parsed.user, id: newId }
+	await AsyncStorage.setItem(DEVICE_USER_KEY, JSON.stringify(parsed))
+	return parsed.user
+}
+
+/** Write the pre-repair backup only if none exists. Returns true when this call wrote it. */
+export async function writeForkRepairBackupIfAbsent(raw: string): Promise<boolean> {
+	const existing = await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)
+	if (existing !== null) return false
+	await AsyncStorage.setItem(DEVICE_USER_FORK_BACKUP_KEY, raw)
+	return true
+}
+
+export async function getForkRepairBackup(): Promise<string | null> {
+	return AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)
+}
+
+async function readPair(key: string): Promise<ForkRepairPair | undefined> {
+	const stored = await AsyncStorage.getItem(key)
+	if (stored === null) return undefined
+	try {
+		const p = JSON.parse(stored) as Partial<ForkRepairPair>
+		if (typeof p.fromUserId === 'string' && typeof p.toUserId === 'string') {
+			return { fromUserId: p.fromUserId, toUserId: p.toUserId }
+		}
+	} catch {
+		/* unreadable marker reads as absent */
+	}
+	return undefined
+}
+
+export const getForkRepairApplied = (): Promise<ForkRepairPair | undefined> => readPair(DEVICE_USER_FORK_APPLIED_KEY)
+export const getForkRepairDeclined = (): Promise<ForkRepairPair | undefined> => readPair(DEVICE_USER_FORK_DECLINED_KEY)
+
+export async function setForkRepairApplied(pair: ForkRepairPair): Promise<void> {
+	await AsyncStorage.setItem(DEVICE_USER_FORK_APPLIED_KEY, JSON.stringify(pair))
+}
+
+export async function setForkRepairDeclined(pair: ForkRepairPair): Promise<void> {
+	await AsyncStorage.setItem(DEVICE_USER_FORK_DECLINED_KEY, JSON.stringify(pair))
 }
