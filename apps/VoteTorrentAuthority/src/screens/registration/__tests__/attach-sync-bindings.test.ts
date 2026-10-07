@@ -121,6 +121,18 @@ describe("createRestRegistrationSyncBinding — R1-R10", () => {
 		expect(fetchJson).not.toHaveBeenCalled();
 	});
 
+	it("R2b: a private or loopback bridge host is refused locally, no fetch; a public host still fetches", async () => {
+		for (const url of ["https://192.168.1.2/x", "https://127.0.0.1/x"]) {
+			const { deps, fetchJson } = makeDeps({ restBridgeUrl: url });
+			const binding = createRestRegistrationSyncBinding(deps);
+			await expect(binding.syncNow({ authorityId: AUTHORITY_ID })).rejects.toThrow();
+			expect(fetchJson).not.toHaveBeenCalled();
+		}
+		const { deps, fetchJson } = makeDeps({ restBridgeUrl: "https://bridge.example" });
+		await createRestRegistrationSyncBinding(deps).syncNow({ authorityId: AUTHORITY_ID });
+		expect(fetchJson).toHaveBeenCalled();
+	});
+
 	it("R2: no URL (null or non-https) rejects before transport construction or fetch", async () => {
 		const { deps, fetchJson } = makeDeps({ restBridgeUrl: null });
 		const binding = createRestRegistrationSyncBinding(deps);

@@ -128,6 +128,20 @@ describe('officer-intake-key.ts (D-04, fakes)', () => {
 		await expect(readOfficerIntakeKeyState(depsRejectStatus, 'auth-1')).resolves.toBe('unavailable');
 	});
 
+	it('I3b: a contested key reads "enabled-contested"; an uncontested one reads "enabled"; enabling resolves on a contested re-read', async () => {
+		const mk = (isContested: boolean): OfficerIntakeKeyDeps => ({
+			getEngine: async <T>() =>
+				({
+					getOfficerEncryptionKeyStatus: async () => ({ isIntakeRecipient: true, isContested }),
+					registerOfficerEncryptionKey: async () => undefined,
+				}) as unknown as T,
+			createSigner: async () => async () => ({ signerUserId: 'u', signerKey: 'k', signature: 's' }),
+		});
+		await expect(readOfficerIntakeKeyState(mk(true), 'auth-1')).resolves.toBe('enabled-contested');
+		await expect(readOfficerIntakeKeyState(mk(false), 'auth-1')).resolves.toBe('enabled');
+		await expect(enableOfficerEncryptedIntake(mk(true), 'auth-1')).resolves.toBe('enabled-contested');
+	});
+
 	it('I4: when registration succeeds but the re-read state is not "enabled", enableOfficerEncryptedIntake rejects', async () => {
 		const deps: OfficerIntakeKeyDeps = {
 			getEngine: async <T>() =>

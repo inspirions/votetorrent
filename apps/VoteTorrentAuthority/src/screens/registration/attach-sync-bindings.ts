@@ -4,7 +4,7 @@ import { registerSyncBinding, type SyncBindingHandle, type TransportSyncReport }
 // so this is NOT the blocked-deep-subpath case the comment below describes; `AppProvider.tsx`
 // already imports from the same `/rn` entry statically (`LocalStorageReact`). A plain string
 // constant with no transitive runtime dependency of its own.
-import { REGISTRATION_DUPLICATE_CLOSED_REASON } from "@votetorrent/vote-engine/rn";
+import { REGISTRATION_DUPLICATE_CLOSED_REASON, isValidRestBridgeUrl } from "@votetorrent/vote-engine/rn";
 // Deep RELATIVE filesystem import — deliberately NOT a "@votetorrent/vote-engine" bare package
 // specifier. @votetorrent/vote-engine's package.json "exports" map lists only "." and "./rn";
 // Metro runs with unstable_enablePackageExports: true (metro.config.js), so any bare-specifier
@@ -109,8 +109,8 @@ interface StagedRequestJson {
 }
 
 /** The minimal local structural type this file needs from `IRegistrationEngine` — declared here
- * rather than imported from `@votetorrent/vote-engine`, so this file's only vote-engine import
- * stays the one deep relative path documented above. Type-only imports from `@votetorrent/vote-core`
+ * rather than imported from `@votetorrent/vote-engine`, so this file's only vote-engine imports
+ * stay the one deep relative path documented above and the `/rn` entry. Type-only imports from `@votetorrent/vote-core`
  * are fine (erased at build time; they never pull the package's runtime code into the bundle). */
 interface RegistrationIntakeEngine {
 	getRegistrationRequest(
@@ -178,13 +178,6 @@ function isNonEmptyAuthorityId(authorityId: unknown): authorityId is string {
 	return typeof authorityId === "string" && authorityId.length > 0;
 }
 
-/** Defensive, LOCAL https re-check — mirrors `normalizeIntakePolicyRow`'s own validation. The
- * authoritative check is 62-14's `isValidRestBridgeUrl`; this guard exists only against a forged
- * or corrupted policy row reaching this far. */
-function isLikelyHttpsUrl(url: string): boolean {
-	return url.startsWith("https://") && url.length <= 2048;
-}
-
 function isValidStagedDoc(doc: unknown): doc is { requestId: string; init: { id: string; authorityId?: string } } {
 	if (typeof doc !== "object" || doc === null) return false;
 	const d = doc as StagedRequestJson;
@@ -208,7 +201,7 @@ export function createRestRegistrationSyncBinding(deps: RestRegistrationSyncDeps
 			const intake = await deps.getEngine<IntakePolicyReader>("intake");
 			const policy = await intake.readIntakePolicy(authorityId);
 			const url = policy.restBridgeUrl;
-			if (url === null || !isLikelyHttpsUrl(url)) {
+			if (url === null || !isValidRestBridgeUrl(url)) {
 				throw new Error("no registration bridge URL is configured");
 			}
 

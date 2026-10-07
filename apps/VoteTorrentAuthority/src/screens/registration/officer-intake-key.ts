@@ -19,7 +19,8 @@ import { resolveAuthorityKeyVault } from '../../engines/key-vault';
  * No `@votetorrent/vote-engine` VALUE import — types only. Never logs.
  */
 
-export type OfficerIntakeKeyState = 'enabled' | 'not-enabled' | 'unavailable';
+/** `'enabled-contested'`: enabled, and another officer also published this key (a possible copy). */
+export type OfficerIntakeKeyState = 'enabled' | 'enabled-contested' | 'not-enabled' | 'unavailable';
 
 export interface OfficerIntakeKeyDeps {
 	getEngine: <T>(engineName: string) => Promise<T>;
@@ -31,7 +32,7 @@ export interface OfficerIntakeKeyDeps {
 
 /** The minimal local structural type this file needs from `IntakeEngine`. */
 interface OfficerIntakeEngine {
-	getOfficerEncryptionKeyStatus(authorityId: string, vault: IKeyVault): Promise<{ isIntakeRecipient: boolean }>;
+	getOfficerEncryptionKeyStatus(authorityId: string, vault: IKeyVault): Promise<{ isIntakeRecipient: boolean; isContested?: boolean }>;
 	registerOfficerEncryptionKey(
 		authorityId: string,
 		vault: IKeyVault,
@@ -73,7 +74,8 @@ export async function readOfficerIntakeKeyState(
 	try {
 		const intake = await deps.getEngine<OfficerIntakeEngine>('intake');
 		const status = await intake.getOfficerEncryptionKeyStatus(authorityId, resolveVault(deps));
-		return status.isIntakeRecipient ? 'enabled' : 'not-enabled';
+		if (!status.isIntakeRecipient) return 'not-enabled';
+		return status.isContested === true ? 'enabled-contested' : 'enabled';
 	} catch {
 		return 'unavailable';
 	}
@@ -83,7 +85,7 @@ export async function readOfficerIntakeKeyState(
  * Registers the officer's encryption key. A `createSigner()` rejection propagates UNCHANGED (no
  * wrapping, no re-throw of a new Error) so the hosting screen's `useDeviceSigningErrorHandler` can
  * classify it directly. After a successful registration call, re-reads the state; if it is not
- * `'enabled'` (e.g. a newer key from another device of the same officer — 62-14's one-current-key
+ * `'enabled'`/`'enabled-contested'` (e.g. a newer key from another device of the same officer — 62-14's one-current-key
  * rule), this rejects rather than silently returning a wrong state.
  */
 export async function enableOfficerEncryptedIntake(
@@ -101,7 +103,7 @@ export async function enableOfficerEncryptedIntake(
 	}
 
 	const state = await readOfficerIntakeKeyState(deps, authorityId);
-	if (state !== 'enabled') {
+	if (state !== 'enabled' && state !== 'enabled-contested') {
 		throw new Error('encrypted intake is not active for this device');
 	}
 	return state;

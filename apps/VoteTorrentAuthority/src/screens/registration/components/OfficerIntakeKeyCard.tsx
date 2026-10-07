@@ -45,14 +45,21 @@ export function OfficerIntakeKeyCard({
 		<View testID="officer-intake-key-card" style={[styles.cardSurface, { backgroundColor: colors.card }]}>
 			<ThemedText type="defaultSemiBold">{t("officerIntakeKeyHeading")}</ThemedText>
 
-			{state === "enabled" ? (
-				<ThemedText
-					type="default"
-					style={[localStyles.body, { color: colors.textSecondary }]}
-					testID="officer-intake-key-enabled"
-				>
-					{t("officerIntakeKeyEnabledConfirm")}
-				</ThemedText>
+			{state === "enabled" || state === "enabled-contested" ? (
+				<>
+					<ThemedText
+						type="default"
+						style={[localStyles.body, { color: colors.textSecondary }]}
+						testID="officer-intake-key-enabled"
+					>
+						{t("officerIntakeKeyEnabledConfirm")}
+					</ThemedText>
+					{state === "enabled-contested" && (
+						<View testID="officer-intake-key-contested">
+							<InlineError message={t("officerIntakeKeyContestedWarning")} />
+						</View>
+					)}
+				</>
 			) : (
 				<>
 					<ThemedText type="default" style={localStyles.body}>
