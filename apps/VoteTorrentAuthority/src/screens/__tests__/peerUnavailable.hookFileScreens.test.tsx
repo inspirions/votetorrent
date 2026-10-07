@@ -105,9 +105,10 @@ describe("H-1 AuthorityPeersScreen load", () => {
 		expect(text).toContain("peerReadUnavailableBody");
 		expect(text).not.toContain("cohort-unreachable");
 	});
-	it("negative control: a generic error renders as before", async () => {
+	it("negative control: a generic error renders translated copy, never its raw message", async () => {
 		const text = allText(await run(new Error("disk corrupt")));
-		expect(text).toContain("disk corrupt");
+		expect(text).toContain("errorLoadFailedGeneric");
+		expect(text).not.toContain("disk corrupt");
 		expect(text).not.toContain("peerReadUnavailableBody");
 	});
 });

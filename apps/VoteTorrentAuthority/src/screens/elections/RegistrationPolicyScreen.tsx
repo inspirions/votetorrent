@@ -30,7 +30,7 @@ import type {
 	RegistrantTier,
 	FieldRequirement,
 } from "@votetorrent/vote-core";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 
 /** Which control's home the D-13 confirmation card is intercepting on behalf of. */
 type PolicySection = "fields" | "disclosure" | "attestation" | "issues";
@@ -167,7 +167,7 @@ export default function RegistrationPolicyScreen() {
 		} catch (err) {
 			// Write failures must NOT set errorMessage here — they surface per-row inside
 			// the three section components via their own runWrite state machines.
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read"));
 		}
 	}, [getEngine, electionEngine, electionId]);
 

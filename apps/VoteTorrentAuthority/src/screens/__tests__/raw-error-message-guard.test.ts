@@ -302,21 +302,8 @@ export const EXEMPT_LINES: ExemptLine[] = [
 	{ file: 'services/bootstrap-upload.ts', key: '4262eefed532b800', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
 ];
 export const RESIDUE: ResidueEntry[] = [
-	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/authorities/PollingDevicesScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/authorities/PollingDevicesScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/authorities/ProposedAdministrationScreen.tsx', key: '7e9a3e40636c27ea', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/authorities/ProposedAdministrationScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/elections/EditElectionScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/elections/RegistrationPolicyScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
 	{ file: 'screens/elections/election-error-messages.ts', key: '7926ccbfd85c15ef', count: 2, owner: '62-135', site: 'builder validation text' },
 	{ file: 'screens/networks/AddNetworkScreen.tsx', key: 'e007f9059ff06149', count: 1, owner: '62-135', site: 'builder validation text' },
-	{ file: 'screens/networks/NetworkRevisionScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/networks/NetworkRevisionScreen.tsx', key: '5fd03c278f354719', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/networks/NetworkStatisticsScreen.tsx', key: '3eff87169296d4e6', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/tasks/ProposedRevisionScreen.tsx', key: '8a2232b1d2c1f7f1', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
-	{ file: 'screens/tasks/SignatureTaskScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
 ];
 
 describe('strict: no raw error text anywhere in the Authority app', () => {

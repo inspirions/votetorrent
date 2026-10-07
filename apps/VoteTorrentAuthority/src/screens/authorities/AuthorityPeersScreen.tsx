@@ -26,7 +26,7 @@ import { scopeDescriptions } from "@votetorrent/vote-core";
 import type { AuthorityPeer, IAuthorityConfigEngine } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
 // is unmet — belt-and-suspenders alongside `disabled`, mirroring
@@ -128,7 +128,7 @@ export default function AuthorityPeersScreen() {
 				setErrorMessage("");
 			}
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read"));
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
 		}
@@ -168,7 +168,7 @@ export default function AuthorityPeersScreen() {
 				// propagated so callers unwind cleanly, but no errorMessage is set.
 				const outcome = handleDeviceSigningError(err);
 				if (!unmountedRef.current && !outcome.handled) {
-					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+					setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 				}
 				throw err;
 			} finally {

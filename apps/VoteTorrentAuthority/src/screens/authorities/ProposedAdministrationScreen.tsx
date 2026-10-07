@@ -34,7 +34,7 @@ import { InlineError } from "../../components/InlineError";
 import { ThresholdPolicyRow } from "./components/ThresholdPolicyRow";
 import { globalStyles } from "../../theme/styles";
 import type { RootStackParamList } from "../../navigation/types";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 
 /**
  * Canonical Scope ordering — declaration order from
@@ -156,7 +156,7 @@ export default function ProposedAdministrationScreen() {
 					}
 				} catch (e) {
 					console.warn("Error loading proposed administration:", e);
-					if (!cancelled) setErrorMessage(peerUnavailableMessage(e, t, "read") ?? (e instanceof Error ? e.message : String(e)));
+					if (!cancelled) setErrorMessage(errorCopy(e, t, "read"));
 				} finally {
 					if (!cancelled) setIsLoading(false);
 				}
@@ -238,7 +238,7 @@ export default function ProposedAdministrationScreen() {
 		} catch (err) {
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 		} finally {
 			setIsProposing(false);
 		}

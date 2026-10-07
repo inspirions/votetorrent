@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
+import { errorCopy } from "../../utils/errorCopy";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { globalStyles } from "../../theme/styles";
 import type {
@@ -126,7 +127,7 @@ export default function SignatureTaskScreen() {
 			console.warn("sign error:", err);
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 			return;
 		} finally {
 			setIsProcessing(false);
@@ -159,7 +160,7 @@ export default function SignatureTaskScreen() {
 			// consistency with every other migrated catch block.
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			setErrorMessage(outcome.message ?? errorCopy(err, t, "write"));
 			return;
 		} finally {
 			setIsProcessing(false);
