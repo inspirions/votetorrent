@@ -9,7 +9,7 @@ import {
 } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
-import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+import { errorCopy } from "../../utils/errorCopy";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
@@ -180,7 +180,7 @@ export default function RegistrationInboxScreen() {
 			// The caught error's message is rendered as-is; the filter object,
 			// the officer's typed search term, and any row value are NEVER
 			// interpolated into it and never passed to any logging call.
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read", { log: false }));
 		} finally {
 			if (!unmountedRef.current) setLoadingInitial(false);
 		}
@@ -286,7 +286,7 @@ export default function RegistrationInboxScreen() {
 			// returns `total: undefined` (48-08's contract), so assigning it
 			// would blank a perfectly good count on the second page.
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read", { log: false }));
 		} finally {
 			if (!unmountedRef.current) setLoadingMore(false);
 		}

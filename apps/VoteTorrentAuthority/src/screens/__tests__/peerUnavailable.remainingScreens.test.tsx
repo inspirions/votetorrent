@@ -188,10 +188,11 @@ describe("remaining screens: peer-unavailable copy", () => {
 			expect(s).toContain("peerReadUnavailableBody");
 			expect(s).not.toContain("abc123");
 		});
-		it("R-4: a generic error still renders its raw message", async () => {
+		it("R-4: a generic error renders translated copy, never its raw message", async () => {
 			mockRejection = new Error("disk corrupt");
 			const s = texts(await renderScreen());
-			expect(s).toContain("disk corrupt");
+			expect(s).toContain("errorLoadFailedGeneric");
+			expect(s).not.toContain("disk corrupt");
 			expect(s).not.toContain("peerReadUnavailableBody");
 		});
 	});

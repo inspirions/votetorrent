@@ -976,7 +976,8 @@ describe("RegistrationInboxScreen — D-03/D-09/D-12 (48-18)", () => {
 		await flushTicks(4);
 
 		present(tr, "registration-inbox-error");
-		expect(treeText(tr)).toContain("listRegistrationRequests failed");
+		expect(treeText(tr)).toContain("errorLoadFailedGeneric");
+		expect(treeText(tr)).not.toContain("listRegistrationRequests failed");
 
 		// Exactly one occurrence: the search input's own `value` prop.
 		const occurrences = treeText(tr).split(SENTINEL).length - 1;
