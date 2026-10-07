@@ -87,3 +87,321 @@ describe('raw error message guard', () => {
 		for (const x of EXCEPTIONS) expect(x.reason.length).toBeGreaterThan(0);
 	});
 });
+
+// strict-guard:begin
+// The strict describe: the WHOLE Authority app, every non-test source file. Entries below are
+// keys and prose only, never line text, so this section cannot match its own patterns (the
+// self-scan test proves it). Never run a formatter on this file: one entry per source line.
+import * as crypto from 'crypto';
+
+export type Hit = { file: string; line: number; key: string; text: string };
+export type ExemptFile = { file: string; reason: string };
+export type ExemptLine = { file: string; key: string; count: number; reason: string };
+export type ResidueEntry = { file: string; key: string; count: number; owner: string; site: string };
+export type Lists = {
+	EXEMPT_FILES?: ExemptFile[];
+	EXEMPT_LINES?: ExemptLine[];
+	RESIDUE?: ResidueEntry[];
+};
+
+const MSG = 'mess' + 'age';
+const NAME_BASE = '\\w*(?:[Ee]rr|[Ee]rror|[Cc]ause|[Rr]eason)\\w*|e|e2|ex|caught';
+const R1 = new RegExp('instanceof ' + 'Error \\? [\\w$.?]+\\.' + MSG);
+const R5_A = '.errors' + '().map(';
+
+function nameAlt(extra: string[]): string {
+	return '(?:' + [NAME_BASE, ...extra].join('|') + ')';
+}
+
+function patternsFor(extra: string[]): RegExp[] {
+	const n = nameAlt(extra);
+	return [
+		R1,
+		new RegExp('String\\(' + n + '\\)'),
+		new RegExp('\\b' + n + '\\??\\.' + MSG),
+		new RegExp('\\)\\??\\.' + MSG),
+		new RegExp('\\$\\{' + n + '\\}'),
+	];
+}
+
+function catchBoundNames(text: string): string[] {
+	const out = new Set<string>();
+	const re = /catch\s*\(\s*([A-Za-z_$][\w$]*)/g;
+	for (let m = re.exec(text); m; m = re.exec(text)) out.add(m[1]);
+	const re2 = /\.catch\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*(?:=>|\)|:|,)/g;
+	for (let m = re2.exec(text); m; m = re2.exec(text)) out.add(m[1]);
+	return [...out];
+}
+
+export function lineKey(line: string): string {
+	const norm = line.trim().replace(/\s+/g, ' ');
+	return crypto.createHash('sha1').update(norm).digest('hex').slice(0, 16);
+}
+
+/**
+ * Index of the bracket closing the one at `open`, or -1. A small character scanner, not a regex:
+ * the contents of single-quoted and double-quoted strings (one line, backslash escapes honoured),
+ * of template strings (may span lines, contents opaque) and of comments never move the depth.
+ */
+function findClose(text: string, open: number): number {
+	const n = text.length;
+	let depth = 0;
+	for (let i = open; i < n; i++) {
+		const c = text[i];
+		if (c === "'" || c === '"') {
+			let j = i + 1;
+			while (j < n && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+			i = j;
+		} else if (c === '`') {
+			let j = i + 1;
+			while (j < n && text[j] !== '`') j += text[j] === '\\' ? 2 : 1;
+			if (j >= n) return -1;
+			i = j;
+		} else if (c === '/' && text[i + 1] === '/') {
+			while (i < n && text[i] !== '\n') i++;
+		} else if (c === '/' && text[i + 1] === '*') {
+			const j = text.indexOf('*/', i + 2);
+			if (j < 0) return -1;
+			i = j + 1;
+		} else if (c === '(' || c === '[' || c === '{') {
+			depth++;
+		} else if (c === ')' || c === ']' || c === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+/** Blank the argument span of every console call to spaces, keeping newlines. */
+export function blankConsoleSpans(text: string): { text: string; unclosed: number } {
+	const chars = text.split('');
+	let unclosed = 0;
+	const re = /console\.(?:log|warn|error|info|debug)\(/g;
+	for (let m = re.exec(text); m; m = re.exec(text)) {
+		const open = m.index + m[0].length - 1;
+		const close = findClose(text, open);
+		if (close < 0) {
+			unclosed++;
+			continue;
+		}
+		for (let i = open + 1; i < close; i++) if (chars[i] !== '\n') chars[i] = ' ';
+		re.lastIndex = close + 1;
+	}
+	return { text: chars.join(''), unclosed };
+}
+
+export function scanTextFull(relPath: string, text: string): { hits: Hit[]; unclosed: number } {
+	const { text: blanked, unclosed } = blankConsoleSpans(text);
+	const pats = patternsFor(catchBoundNames(text));
+	const orig = text.split('\n');
+	const hits: Hit[] = [];
+	for (const [i, line] of blanked.split('\n').entries()) {
+		const t = line.trim();
+		if (t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) continue;
+		const hit = pats.some((p) => p.test(line)) || (line.includes(R5_A) && line.includes('.' + MSG));
+		if (hit) hits.push({ file: relPath, line: i + 1, key: lineKey(orig[i]), text: orig[i].trim() });
+	}
+	return { hits, unclosed };
+}
+
+export function scanText(relPath: string, text: string): Hit[] {
+	return scanTextFull(relPath, text).hits;
+}
+
+const C12_FILES = [
+	'screens/registration/RegistrationRequestApprovalScreen.tsx',
+	'screens/invitations/AdministratorInvitationScreen.tsx',
+	'screens/invitations/AuthorityInvitationScreen.tsx',
+	'screens/invitations/KeyholderInvitationScreen.tsx',
+	'screens/elections/EditBallotScreen.tsx',
+	'screens/elections/ElectionDetailsScreen.tsx',
+	'screens/networks/AddNetworkScreen.tsx',
+];
+
+export function classify(hits: Hit[], lists: Lists, scannedFileCount: number): string[] {
+	const failures: string[] = [];
+	const exemptFiles = lists.EXEMPT_FILES ?? [];
+	const exemptLines = lists.EXEMPT_LINES ?? [];
+	const residue = lists.RESIDUE ?? [];
+	if (scannedFileCount <= 0) failures.push('zero files scanned');
+	for (const x of exemptFiles) {
+		if (!hits.some((h) => h.file === x.file)) failures.push(`stale EXEMPT_FILES entry (no hits): ${x.file}`);
+	}
+	const listed = (f: string, k: string) => [
+		...exemptLines.filter((x) => x.file === f && x.key === k),
+		...residue.filter((x) => x.file === f && x.key === k),
+	];
+	const actual = new Map<string, Hit[]>();
+	for (const h of hits) {
+		if (exemptFiles.some((x) => x.file === h.file)) continue;
+		const id = h.file + '\u0000' + h.key;
+		actual.set(id, [...(actual.get(id) ?? []), h]);
+	}
+	for (const [id, hs] of actual) {
+		const [f, k] = id.split('\u0000');
+		const entries = listed(f, k);
+		if (entries.length === 0) {
+			for (const h of hs) failures.push(`unlisted ${h.file}:${h.line} key=${h.key} ${h.text}`);
+		} else if (entries.length > 1 || entries[0].count !== hs.length) {
+			failures.push(`count mismatch ${f} key=${k}: ${hs.length} hits, listed ${entries.map((e) => e.count).join('+')}`);
+		}
+	}
+	for (const e of [...exemptLines, ...residue]) {
+		if (!actual.has(e.file + '\u0000' + e.key)) failures.push(`stale entry ${e.file} key=${e.key}`);
+	}
+	for (const x of [...exemptFiles, ...exemptLines]) {
+		if (C12_FILES.includes(x.file)) failures.push(`C12 file must not be exempt: ${x.file}`);
+	}
+	for (const r of residue) {
+		if (C12_FILES.includes(r.file) && !(r.file.endsWith('AddNetworkScreen.tsx') && r.owner === '62-135')) {
+			failures.push(`C12 file not allowed in RESIDUE: ${r.file}`);
+		}
+	}
+	return failures;
+}
+
+const SKIP_DIRS = ['__tests__', '__fixtures__', '__mocks__'];
+
+function walkAll(dir: string, out: string[]): void {
+	for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+		const p = path.join(dir, e.name);
+		if (e.isDirectory()) {
+			if (!SKIP_DIRS.includes(e.name)) walkAll(p, out);
+		} else if (/\.tsx?$/.test(e.name) && !/\.(test|spec)\.tsx?$/.test(e.name)) {
+			out.push(p);
+		}
+	}
+}
+
+export function scanTree(rootDir: string, lists: Lists): { failures: string[]; hits: Hit[]; files: number } {
+	const files: string[] = [];
+	walkAll(rootDir, files);
+	const hits: Hit[] = [];
+	const failures: string[] = [];
+	for (const f of files) {
+		const rel = path.relative(rootDir, f).split(path.sep).join('/');
+		const r = scanTextFull(rel, fs.readFileSync(f, 'utf8'));
+		hits.push(...r.hits);
+		if (r.unclosed > 0) failures.push(`unclosed console call in ${rel}`);
+	}
+	failures.push(...classify(hits, lists, files.length));
+	return { failures, hits, files: files.length };
+}
+
+export const EXEMPT_FILES: ExemptFile[] = [
+	{ file: 'engines/replication-proof-runner.ts', reason: 'dev proof harness, imported only from a gated proof runner, never rendered' },
+	{ file: 'engines/noise-crypto-parity-probe.ts', reason: 'dev probe, imported only behind a development flag, never rendered' },
+	{ file: 'engines/dial-probe.ts', reason: 'dev probe, imported only behind a development flag, never rendered' },
+	{ file: 'engines/persistence-proof.ts', reason: 'dev proof, imported only by its proof runner, never rendered' },
+	{ file: 'engines/strand-persistence-proof-runner.ts', reason: 'dev proof runner, started only behind a development flag, never rendered' },
+	{ file: 'engines/recovery-branch-proof.ts', reason: 'dev proof, imported only by its proof runner, never rendered' },
+];
+export const EXEMPT_LINES: ExemptLine[] = [
+	{ file: 'engines/device-signer.ts', key: 'e71aa10492f070ee', count: 1, reason: 'developer-facing text inside a thrown error for an unlinked native module; every screen maps it through the shared error copy' },
+	{ file: 'screens/authorities/AuthorityDetailsScreen.tsx', key: 'e5fdcc7f513d08cb', count: 1, reason: 'reads the failure only to detect the not-found case, never rendered' },
+	{ file: 'screens/elections/election-error-messages.ts', key: 'd7eb40dd0c9ea05d', count: 1, reason: 'matched against constraint patterns to classify, never returned' },
+	{ file: 'screens/registration/continuity-review.ts', key: '7c59e887d021bca7', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
+	{ file: 'screens/settings/SettingsScreen.tsx', key: 'f79afbba4990186c', count: 1, reason: 'debug seed control, rendered only in development builds' },
+	{ file: 'screens/users/RevokeKeyScreen.tsx', key: '1e730b284ab023c7', count: 1, reason: 'substring classification of the failure, never rendered' },
+	{ file: 'services/bootstrap-upload.ts', key: '4262eefed532b800', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
+];
+export const RESIDUE: ResidueEntry[] = [
+	{ file: 'screens/admin/EditOfficerScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/admin/EditOfficerScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/admin/OfficerDetailsScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/authorities/AuthorityPeersScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/authorities/PollingDevicesScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/authorities/PollingDevicesScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/authorities/ProposedAdministrationScreen.tsx', key: '7e9a3e40636c27ea', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/authorities/ProposedAdministrationScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/elections/EditElectionScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/elections/RegistrationPolicyScreen.tsx', key: 'dbf8a0cc501fe166', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/elections/election-error-messages.ts', key: '7926ccbfd85c15ef', count: 2, owner: '62-135', site: 'builder validation text' },
+	{ file: 'screens/networks/AddNetworkScreen.tsx', key: 'e007f9059ff06149', count: 1, owner: '62-135', site: 'builder validation text' },
+	{ file: 'screens/networks/NetworkRevisionScreen.tsx', key: '490eed0bfb0de3e1', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/networks/NetworkRevisionScreen.tsx', key: '5fd03c278f354719', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/networks/NetworkStatisticsScreen.tsx', key: '3eff87169296d4e6', count: 1, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/registration/RegistrantDetailScreen.tsx', key: 'dbf8a0cc501fe166', count: 2, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/RegistrantDetailScreen.tsx', key: '49c44809017c5aae', count: 1, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/RegistrantDetailScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/RegistrantsListScreen.tsx', key: 'dbf8a0cc501fe166', count: 2, owner: '62-136', site: 'registration list or inbox' },
+	{ file: 'screens/registration/RegistrationInboxScreen.tsx', key: 'dbf8a0cc501fe166', count: 2, owner: '62-136', site: 'registration list or inbox' },
+	{ file: 'screens/registration/components/AccessHistorySection.tsx', key: '49c44809017c5aae', count: 1, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/components/AssociationsSection.tsx', key: '49c44809017c5aae', count: 3, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/components/AssociationsSection.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/registration/components/AttestationChallengesSection.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-132', site: 'registration detail section' },
+	{ file: 'screens/tasks/ProposedRevisionScreen.tsx', key: '8a2232b1d2c1f7f1', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/tasks/SignatureTaskScreen.tsx', key: '1f915da742c35cd8', count: 2, owner: '62-134', site: 'authority, network, task or election screen' },
+	{ file: 'screens/users/AddKeyScreen.tsx', key: '1f915da742c35cd8', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/users/DefaultUserScreen.tsx', key: '8f950021f2963255', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/users/ReviseUserScreen.tsx', key: '5fd03c278f354719', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/users/ReviseUserScreen.tsx', key: 'dee1930e51647b92', count: 1, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/users/RevokeKeyScreen.tsx', key: 'dee1930e51647b92', count: 2, owner: '62-133', site: 'officer or user screen' },
+	{ file: 'screens/users/UserDetailsScreen.tsx', key: '3eff87169296d4e6', count: 2, owner: '62-133', site: 'officer or user screen' },
+];
+
+describe('strict: no raw error text anywhere in the Authority app', () => {
+	it('has no unlisted, stale or miscounted raw error render', () => {
+		const r = scanTree(SRC, { EXEMPT_FILES, EXEMPT_LINES, RESIDUE });
+		expect(r.files).toBeGreaterThan(0);
+		expect(r.failures).toEqual([]);
+	});
+});
+
+const FIXTURE_DIR = path.join(__dirname, '__fixtures__', 'raw-error');
+const FIXTURE_NAMES = [
+	'n01-instanceof-ternary',
+	'n04-cast-message',
+	'n05-optional-message',
+	'n06-catch-bound-name',
+	'n07-template',
+	'n08-console-same-line',
+	'n09-string-name',
+	'n10-builder-join',
+	'n12-duplicated-exempt-line',
+	'n13-unbalanced-paren-in-console-string',
+].map((n) => n + '.fixture.txt');
+// fixture name -> the line (1-based) that must be hit; undefined = the last line
+const RENDER_LINE: Record<string, number> = {
+	'n08-console-same-line.fixture.txt': 1,
+	'n13-unbalanced-paren-in-console-string.fixture.txt': 3,
+};
+
+describe('strict guard self-test', () => {
+	it('keeps exactly the ten committed negative-control fixtures', () => {
+		expect(fs.readdirSync(FIXTURE_DIR).sort()).toEqual([...FIXTURE_NAMES].sort());
+	});
+
+	it.each(FIXTURE_NAMES.filter((n) => !n.startsWith('n12')))('catches %s on its render line', (name) => {
+		const text = fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8');
+		const hits = scanText(name, text);
+		expect(hits.length).toBeGreaterThan(0);
+		const want = RENDER_LINE[name] ?? text.replace(/\n$/, '').split('\n').length;
+		expect(hits.map((h) => h.line)).toContain(want);
+	});
+
+	it('flags a duplicated exempt line as a count mismatch (2 hits, listed 1)', () => {
+		const name = 'n12-duplicated-exempt-line.fixture.txt';
+		const text = fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8');
+		const hits = scanText(name, text);
+		expect(hits).toHaveLength(2);
+		const failures = classify(
+			hits,
+			{ EXEMPT_LINES: [{ file: name, key: lineKey(text.split('\n')[0]), count: 1, reason: 'self-test' }] },
+			1,
+		);
+		expect(failures.some((f) => f.includes('count mismatch'))).toBe(true);
+	});
+
+	it('scans its own strict section to zero hits', () => {
+		const src = fs.readFileSync(__filename, 'utf8').split('\n');
+		const begin = src.indexOf('// strict-guard' + ':begin');
+		const end = src.indexOf('// strict-guard' + ':end');
+		expect(begin).toBeGreaterThanOrEqual(0);
+		expect(end).toBeGreaterThan(begin);
+		expect(scanText('self', src.slice(begin, end + 1).join('\n'))).toEqual([]);
+	});
+});
+// strict-guard:end
