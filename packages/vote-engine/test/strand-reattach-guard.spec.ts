@@ -205,7 +205,8 @@ describe('strand re-attach guard', () => {
 			async clear(): Promise<void> { store.clear(); },
 		};
 		const engineB = new NetworksEngine(deviceStorage, async () => db);
-		const result = await engineB.importFoundingBundle(text, undefined);
+		// 62-102: an import must carry an anchor; the bundle's own digest stands in for the typed fingerprint.
+		const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: bundle.digest });
 		expect(result.ok, result.ok ? 'ok' : String((result as { reason?: string }).reason)).to.equal(true);
 		expect(bundle.descriptor.networkHash).to.be.a('string');
 		expect(seen).to.deep.equal([]);
