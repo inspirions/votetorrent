@@ -10,6 +10,7 @@ import type { Database } from '@quereus/quereus'
 import { hexToBytes, bytesToHex } from '@noble/curves/utils.js'
 import { secp256k1 as secp } from '@noble/curves/secp256k1.js'
 import type { BallotSignatureTask, Signature } from '@votetorrent/vote-core'
+import { ElectionEngine } from '../src/election/election-engine.js'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import {
   createTestNetwork,
@@ -266,5 +267,80 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 2)', function () {
     await engine1.completeSignature(task1, { isAccepted: true, signature: sig1, sign: fx.holders[1]!.sign })
     expect(await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: false, confirmed: true })
     expect((await openUsers(db, nonce)).length, 'D-09 siblings stay open').to.be.greaterThan(0)
+  })
+})
+
+describe('submitBallotForConfirmation in-transaction lock (gap8/WR-02, threshold 2)', function () {
+  this.timeout(60_000)
+
+  /** A second officer's engine over the same database (a submit that replicated in). */
+  async function engineOf (fx: ThresholdAuthorityFixture, holderIdx: number): Promise<ElectionEngine> {
+    const row = await fx.elec.ctx.db
+      .prepare('select Id from Election where AuthorityId = :authorityId limit 1')
+      .get({ authorityId: fx.authorityId })
+    return new ElectionEngine(
+      { id: row!.Id as string, authorityId: fx.authorityId },
+      { db: fx.elec.ctx.db, user: fx.holders[holderIdx]!.user }
+    )
+  }
+
+  it('S8: a submit that raced its own signature prompt is refused in the transaction, one session only', async () => {
+    const fx = await createThresholdAuthority()
+    const db = fx.elec.ctx.db
+    const { ballotId } = await seedProposedBallot(fx.elec, 'sl-s8')
+    const other = await engineOf(fx, 1)
+    const cebBefore = await count(db, "select count(*) as n from AdminSigning where Scope = 'ceb'")
+    const officerBefore = await count(db, 'select count(*) as n from OfficerSignature')
+    const racingSign = async (digest: Uint8Array): Promise<Signature> => {
+      // The user-paced prompt is open; another officer's submit lands meanwhile.
+      await other.submitBallotForConfirmation(ballotId, fx.holders[1]!.sign)
+      return fx.holders[0]!.sign(digest)
+    }
+    await refusal(fx.elec.electionEngine.submitBallotForConfirmation(ballotId, racingSign), SUBMITTED)
+    expect(await count(db, "select count(*) as n from AdminSigning where Scope = 'ceb'") - cebBefore).to.equal(1)
+    expect(await count(db, 'select count(*) as n from OfficerSignature') - officerBefore).to.equal(1)
+    expect(
+      await count(
+        db,
+        `select count(distinct T.SigningNonce) as n from Task T join BallotSignatureTaskExtension E on E.TaskId = T.Id
+         where E.BallotId = :ballotId`,
+        { ballotId }
+      )
+    ).to.equal(1)
+  })
+
+  it('S8b: the in-transaction check reports confirmed when the racing submit also got confirmed', async () => {
+    const fx = await createThresholdAuthority()
+    const db = fx.elec.ctx.db
+    const { ballotId } = await seedProposedBallot(fx.elec, 'sl-s8b')
+    const other = await engineOf(fx, 1)
+    const racingSign = async (digest: Uint8Array): Promise<Signature> => {
+      await other.submitBallotForConfirmation(ballotId, fx.holders[1]!.sign)
+      const engine2 = new SignatureTasksEngine(makeNetworkRef(), { db, user: fx.holders[2]!.user })
+      const task = (await engine2.getRequestedSignatures(true)).find((t) => t.signatureType === 'ballot')!
+      await engine2.completeSignature(task, {
+        isAccepted: true,
+        signature: await fx.holders[2]!.sign(await engine2.getSignatureDigest(task)),
+        sign: fx.holders[2]!.sign,
+      })
+      return fx.holders[0]!.sign(digest)
+    }
+    await refusal(fx.elec.electionEngine.submitBallotForConfirmation(ballotId, racingSign), CONFIRMED)
+    expect(
+      await count(
+        db,
+        `select count(distinct T.SigningNonce) as n from Task T join BallotSignatureTaskExtension E on E.TaskId = T.Id
+         where E.BallotId = :ballotId`,
+        { ballotId }
+      )
+    ).to.equal(1)
+    expect(await count(db, 'select count(*) as n from Ballot where Id = :ballotId', { ballotId })).to.equal(1)
+  })
+
+  it('S8c: with no concurrent submit the threshold-2 submit succeeds as before (positive control)', async () => {
+    const fx = await createThresholdAuthority()
+    const { ballotId } = await seedProposedBallot(fx.elec, 'sl-s8c')
+    await fx.elec.electionEngine.submitBallotForConfirmation(ballotId, fx.holders[0]!.sign)
+    expect((await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).locked).to.equal(true)
   })
 })

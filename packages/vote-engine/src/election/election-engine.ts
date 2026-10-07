@@ -1143,6 +1143,20 @@ export class ElectionEngine implements IElectionEngine {
       // parity, 62-11) so a failure anywhere in this envelope leaves no orphan placeholder row.
       await this.ctx.db.exec('BEGIN')
       try {
+        // gap8/WR-02: re-run the lock as the FIRST statement of the write envelope. Step 0 spares
+        // the officer a signature prompt in the common case, but the prompt is user-paced: another
+        // officer's submit (or its confirmation) can replicate in while it is open, and Step 0's
+        // answer is then stale. This check closes that window; the inner catch rolls back. A submit
+        // that replicates in only AFTER this commit (two devices both passing before either
+        // replicates) is the cross-device residual next to AR-62-145, not closable by an engine read.
+        const lockInTx = await this.readBallotLock(ballotId)
+        if (lockInTx.confirmed) {
+          throw new Error('This ballot is already confirmed.')
+        }
+        if (lockInTx.open) {
+          throw new Error('This ballot is already submitted for confirmation.')
+        }
+
         // Step 4: insert UNSIGNED AdminSigning('ceb') — do NOT call sign() here (Pitfall 1); the
         // row is a never-updated placeholder at every threshold (999.1 R-02/R-04). Bind
         // Description and Districts from the ProposedBallot row so submit and finalize produce
