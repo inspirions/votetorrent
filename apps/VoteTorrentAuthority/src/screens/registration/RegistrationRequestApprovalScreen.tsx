@@ -56,6 +56,28 @@ import type { RootStackParamList } from "../../navigation/types";
 import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /**
+ * A local failure carried by code only. The code is the whole message: it never holds a request id or a
+ * screen name, and the catches map it to catalog copy, so nothing here can reach the screen as text.
+ */
+type ApprovalScreenErrorCode = "not-found" | "checklist-incomplete" | "no-task";
+class ApprovalScreenError extends Error {
+	readonly code: ApprovalScreenErrorCode;
+	constructor(code: ApprovalScreenErrorCode) {
+		super(code);
+		this.name = "ApprovalScreenError";
+		this.code = code;
+	}
+}
+const APPROVAL_ERROR_KEYS: Record<ApprovalScreenErrorCode, string> = {
+	"not-found": "registrationRequestNotFound",
+	"checklist-incomplete": "registrationRequestChecklistIncomplete",
+	"no-task": "registrationRequestNoTask",
+};
+function approvalErrorKey(err: unknown): string | undefined {
+	return err instanceof ApprovalScreenError ? APPROVAL_ERROR_KEYS[err.code] : undefined;
+}
+
+/**
  * RegistrationRequestApprovalScreen — the ceremony where an authority
  * officer actually decides a registration request (D-03/D-06/D-07).
  *
@@ -244,6 +266,9 @@ export default function RegistrationRequestApprovalScreen() {
 	const { requestId, authorityId } = useRoute().params as { requestId: string; authorityId: string };
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { t } = useTranslation();
+	// Effects read the translator through a ref so a language change does not re-run the load.
+	const tRef = useRef(t);
+	tRef.current = t;
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const { colors } = useTheme() as ExtendedTheme;
 	const insets = useSafeAreaInsets();
@@ -334,11 +359,8 @@ export default function RegistrationRequestApprovalScreen() {
 				const reg = await getEngine<IRegistrationEngine>("registration");
 				const r = await reg.getRegistrationRequest(requestId);
 				if (r === undefined) {
-					// requestId is a plain identifier and carries no PII (48-21's own
-					// param-hygiene gate enforces the same allow-list) — routing this
-					// through the existing catch/InlineError surface avoids inventing
-					// an i18n key 48-03 does not own.
-					throw new Error(`RegistrationRequestApprovalScreen: request not found (${requestId})`);
+					// Coded, so the catch shows catalog copy and never an id.
+					throw new ApprovalScreenError("not-found");
 				}
 				if (unmountedRef.current) return;
 				setRead(r);
@@ -355,7 +377,7 @@ export default function RegistrationRequestApprovalScreen() {
 					// under it is not.
 					if (!unmountedRef.current) {
 						setPriorRejectionsUnavailable(true);
-						setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+						setErrorMessage(peerUnavailableMessage(err, tRef.current, "read") ?? tRef.current("priorRejectionsUnavailable"));
 					}
 				}
 
@@ -405,7 +427,11 @@ export default function RegistrationRequestApprovalScreen() {
 					}
 				}
 			} catch (err) {
-				if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
+				if (!unmountedRef.current) {
+					const tr = tRef.current;
+					const coded = approvalErrorKey(err);
+					setErrorMessage(peerUnavailableMessage(err, tr, "read") ?? tr(coded ?? "registrationRequestLoadFailed"));
+				}
 			} finally {
 				if (!unmountedRef.current) setLoading(false);
 			}
@@ -479,12 +505,10 @@ export default function RegistrationRequestApprovalScreen() {
 			// engine refuses this independently — this check exists so the officer sees the
 			// refusal before a device signature is requested, not to replace it.
 			if (!isChecklistGateMet(checked)) {
-				throw new Error(
-					`RegistrationRequestApprovalScreen: the verification checklist does not satisfy the approval gate (requestId=${requestId})`
-				);
+				throw new ApprovalScreenError("checklist-incomplete");
 			}
 			if (!task) {
-				throw new Error(`RegistrationRequestApprovalScreen: no pending signature task for requestId=${requestId}`);
+				throw new ApprovalScreenError("no-task");
 			}
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			// The engine is authoritative; the screen never recomputes a digest
@@ -534,7 +558,8 @@ export default function RegistrationRequestApprovalScreen() {
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
-					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+					const coded = approvalErrorKey(err);
+					setErrorMessage(outcome.message ?? t(coded ?? "registrationRequestApproveFailed"));
 				}
 			}
 		} finally {
@@ -653,7 +678,7 @@ export default function RegistrationRequestApprovalScreen() {
 		try {
 			setErrorMessage("");
 			if (!task) {
-				throw new Error(`RegistrationRequestApprovalScreen: no pending signature task for requestId=${requestId}`);
+				throw new ApprovalScreenError("no-task");
 			}
 			const engine = await getEngine<ISignatureTasksEngine>("signatureTasksEngine");
 			await engine.completeSignature(task, {
@@ -669,7 +694,8 @@ export default function RegistrationRequestApprovalScreen() {
 			} else {
 				const outcome = handleDeviceSigningError(err);
 				if (!outcome.handled) {
-					setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+					const coded = approvalErrorKey(err);
+					setErrorMessage(outcome.message ?? t(coded ?? "registrationRequestVoteFailed"));
 				}
 			}
 		} finally {
@@ -903,6 +929,12 @@ export default function RegistrationRequestApprovalScreen() {
 			{/* Neither decided mode renders a footer of any kind. */}
 			{mode === "pending" && !unreachable && !showRejectCard ? (
 				<View testID="registration-request-approval-footer">
+					{/* Approve needs the officer's own task at every threshold; without one the engine can only refuse. */}
+					{!loading && canDecide && !task && !voteRecorded ? (
+						<View testID="registration-request-no-task-hint">
+							<ThemedText type="small">{t("registrationRequestNoTask")}</ThemedText>
+						</View>
+					) : null}
 					{/* Stacked (no `row`), not the two-across row every other footer
 					    in the app uses: a row gave each label ~84dp, and "APPROVE
 					    REGISTRATION" clipped to "APPROVE RE" rather than wrapping
@@ -933,7 +965,7 @@ export default function RegistrationRequestApprovalScreen() {
 										duplicateUnavailable ||
 										closureUnavailable ||
 										closedAsDuplicate ||
-										(thresholdAboveOne && !task) ||
+										!task ||
 										!contentReadable ||
 										submitting
 									}

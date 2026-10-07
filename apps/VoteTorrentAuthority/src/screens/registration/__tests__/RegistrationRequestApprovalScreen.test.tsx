@@ -706,7 +706,8 @@ describe("RegistrationRequestApprovalScreen — Group B (D-07 gate, accept cerem
 		mockTasks = []; // no 'registrant' task materialized for this request yet
 		const tr = await renderScreen();
 		press(tr, "verification-checklist-toggle-id");
-		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(false);
+		// Approve is not offered without a task; the handler is still driven directly to prove it fails closed.
+		expect(isDisabled(tr, "registration-request-approval-approve")).toBe(true);
 
 		await pressAsync(tr, "registration-request-approval-approve");
 
@@ -1031,7 +1032,8 @@ describe("RegistrationRequestApprovalScreen — Group F (never-log privacy rule)
 		});
 		const errorTr = await renderScreen();
 		const errorSubtreeText = jsonSubtreeText(errorTr, "registration-request-approval-error");
-		expect(errorSubtreeText).toContain("harmless-load-failure-token");
+		expect(errorSubtreeText).toContain("registrationRequestLoadFailed");
+		expect(errorSubtreeText).not.toContain("harmless-load-failure-token");
 		expect(errorSubtreeText).not.toContain(PII_SENTINEL);
 
 		const tr = await renderScreen();
