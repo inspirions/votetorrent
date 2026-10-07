@@ -9,6 +9,7 @@ import {
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type { INetworkEngine } from "@votetorrent/vote-core";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { globalStyles } from "../../theme/styles";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
@@ -42,7 +43,7 @@ export default function ProposedRevisionScreen() {
 			navigation.goBack();
 		} catch (err) {
 			console.warn("proposedRevision-resendRequest error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			setErrorMessage(peerUnavailableMessage(err, t, "write") ?? (err instanceof Error ? err.message : String(err)));
 		} finally {
 			setLoading(false);
 		}
@@ -57,7 +58,7 @@ export default function ProposedRevisionScreen() {
 			navigation.goBack();
 		} catch (err) {
 			console.warn("proposedRevision-cancelRequest error:", err);
-			setErrorMessage(err instanceof Error ? err.message : String(err));
+			setErrorMessage(peerUnavailableMessage(err, t, "write") ?? (err instanceof Error ? err.message : String(err)));
 		} finally {
 			setLoading(false);
 		}

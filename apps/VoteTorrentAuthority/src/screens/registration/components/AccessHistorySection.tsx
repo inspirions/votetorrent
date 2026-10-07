@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../../utils/peerUnavailableMessage";
 import { ThemedText } from "../../../components/ThemedText";
 import { ChipButton } from "../../../components/ChipButton";
 import { InlineError } from "../../../components/InlineError";
@@ -128,7 +129,7 @@ export function AccessHistorySection({ registrantId, canView }: AccessHistorySec
 			// "RegistrationEngine.getRegistrantAccessEvents: …" and binds no row
 			// value into it.
 			if (!unmountedRef.current) {
-				setErrorMessage(err instanceof Error ? err.message : String(err));
+				setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 			}
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
