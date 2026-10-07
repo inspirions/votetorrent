@@ -30,6 +30,7 @@ import { InMemoryTestKeyVault, KEYHOLDER_DKG_RECEIVING_KEY_POLICY, keyholderDkgR
 import { KeyholderDkgEngine } from '../../src/keyholder/keyholder-dkg-engine.js'
 import type { EngineContext } from '../../src/types.js'
 import { randomTestKeyPair } from './keys.js'
+import { inviteeContext, mintInviteKeyPair } from './invite-keys.js'
 import { makeElectionInit, makeTestSignCallback } from './test-context.js'
 import { HARNESS_TIMEOUTS, pollUntil } from '../harness/two-node-strand.js'
 import type { HarnessWorkflowNetwork, HarnessNodeName } from './harness-workflows.js'
@@ -99,6 +100,9 @@ async function setHarnessKeyholderThreshold (
  * keyholder slot by `name`. For a node-B participant, polls until the InviteSlot row is readable
  * on dbB before looking up its Cid there.
  */
+/** Slot Cid -> the invite private key its slot was created with. */
+const harnessInviteKeysBySlot = new Map<string, string>()
+
 async function inviteAndAcceptOnHarness (
   network: HarnessWorkflowNetwork,
   electionEngine: IElectionEngine,
@@ -108,14 +112,18 @@ async function inviteAndAcceptOnHarness (
 ): Promise<HarnessDkgParticipant> {
   let slotRowA = await network.dbA.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
   if (!slotRowA) {
+    const kp = mintInviteKeyPair()
     const invite: KeyholderInvite = {
-      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'k'.repeat(66), inviteSignature: ''
+      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: kp.inviteKey, inviteSignature: ''
     }
     await electionEngine.inviteKeyholder(invite, electionId, makeTestSignCallback(network.net.user))
     slotRowA = await network.dbA.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
+    if (slotRowA) harnessInviteKeysBySlot.set(slotRowA.Cid as string, kp.invitePrivate)
   }
   if (!slotRowA) throw new Error(`inviteAndAcceptOnHarness: no InviteSlot found for ${name}`)
   const slotCid = slotRowA.Cid as string
+  const invitePrivate = harnessInviteKeysBySlot.get(slotCid)
+  if (!invitePrivate) throw new Error(`inviteAndAcceptOnHarness: slot for ${name} has no known invite key (fixture never accepts keyless)`)
 
   const acceptCtx = node === 'node-A' ? network.ctxA : network.ctxB
   const acceptDb = node === 'node-A' ? network.dbA : network.dbB
@@ -139,8 +147,8 @@ async function inviteAndAcceptOnHarness (
     dkgPublicKey: recv.publicKey,
     sign
   }
-  const invitationEngine = new InvitationEngine(acceptCtx)
-  await invitationEngine.respondToInvite(slotCid, true, undefined, undefined, undefined, provisioning)
+  const invitationEngine = new InvitationEngine(inviteeContext(acceptCtx))
+  await invitationEngine.respondToInvite(slotCid, true, invitePrivate, undefined, undefined, provisioning)
 
   const resultRow = await acceptDb.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid: slotCid })
   const userId = resultRow?.InvokedId as string | undefined

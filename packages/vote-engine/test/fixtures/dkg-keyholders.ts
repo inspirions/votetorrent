@@ -23,6 +23,7 @@ import { KeyholderDkgEngine } from '../../src/keyholder/keyholder-dkg-engine.js'
 import { decodeDkgRoundVaultRecord, keyholderDkgRoundSecretAlias, type DkgRoundVaultRecord } from '../../src/keyholder/dkg-vault.js'
 import { digestToBytes } from '../../src/utils.js'
 import { randomTestKeyPair } from './keys.js'
+import { inviteeContext, mintInviteKeyPair } from './invite-keys.js'
 import { addTestAuthority, createTestNetwork, makeElectionInit, makeTestSignCallback, type TestAuthorityContext } from './test-context.js'
 import type { IElectionEngine } from '@votetorrent/vote-core'
 
@@ -105,17 +106,24 @@ export interface SeedDkgElectionResult {
  * scenario G's pending-invite unblock) can accept a keyholder invite
  * AFTER the election is already seeded.
  */
+/** Slot Cid -> the invite private key its slot was created with. */
+const inviteKeysBySlot = new Map<string, string>()
+
 export async function inviteAndAcceptKeyholder (auth: TestAuthorityContext, electionEngine: IElectionEngine, electionId: string, name: string): Promise<DkgTestParticipant> {
   let slotRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
   if (!slotRow) {
+    const kp = mintInviteKeyPair()
     const invite: KeyholderInvite = {
-      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'k'.repeat(66), inviteSignature: ''
+      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: kp.inviteKey, inviteSignature: ''
     }
     await electionEngine.inviteKeyholder(invite, electionId, makeTestSignCallback(auth.user))
     slotRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
+    if (slotRow) inviteKeysBySlot.set(slotRow.Cid as string, kp.invitePrivate)
   }
   if (!slotRow) throw new Error(`inviteAndAcceptKeyholder: no InviteSlot found for ${name}`)
   const slotCid = slotRow.Cid as string
+  const invitePrivate = inviteKeysBySlot.get(slotCid)
+  if (!invitePrivate) throw new Error(`inviteAndAcceptKeyholder: slot for ${name} has no known invite key (fixture never accepts keyless)`)
 
   const { privateHex: signingPrivateHex, publicHex: signingPublicHex } = randomTestKeyPair()
   const recv = generateDkgReceivingKey()
@@ -128,8 +136,8 @@ export async function inviteAndAcceptKeyholder (auth: TestAuthorityContext, elec
     dkgPublicKey: recv.publicKey,
     sign
   }
-  const invitationEngine = new InvitationEngine(auth.ctx)
-  await invitationEngine.respondToInvite(slotCid, true, undefined, undefined, undefined, provisioning)
+  const invitationEngine = new InvitationEngine(inviteeContext(auth.ctx))
+  await invitationEngine.respondToInvite(slotCid, true, invitePrivate, undefined, undefined, provisioning)
 
   const resultRow = await auth.ctx.db.prepare('select InvokedId from InviteResult where SlotCid = :cid').get({ cid: slotCid })
   const userId = resultRow?.InvokedId as string | undefined
@@ -151,10 +159,13 @@ export async function seedDkgElection (options: { keyholders: string[], threshol
   }
 
   for (const name of options.pendingInvites ?? []) {
+    const kp = mintInviteKeyPair()
     const invite: KeyholderInvite = {
-      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: 'k'.repeat(66), inviteSignature: ''
+      name, type: 'k', expiration: new Date(Date.now() + 3_600_000).toISOString(), inviteKey: kp.inviteKey, inviteSignature: ''
     }
     await electionEngine.inviteKeyholder(invite, electionId, makeTestSignCallback(auth.user))
+    const pendingRow = await auth.ctx.db.prepare("select Cid from InviteSlot where Type = 'k' and Name = :name").get({ name })
+    if (pendingRow) inviteKeysBySlot.set(pendingRow.Cid as string, kp.invitePrivate)
   }
 
   const revRow = await auth.ctx.db.prepare('select Revision from ElectionRevision where ElectionId = :id').get({ id: electionId })

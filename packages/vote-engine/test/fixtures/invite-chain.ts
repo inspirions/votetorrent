@@ -7,6 +7,7 @@ import { bytesToHex } from '@noble/curves/utils.js'
 import type { InviteType, Scope } from '@votetorrent/vote-core'
 import { AuthorityEngine } from '../../src/authority/authority-engine.js'
 import { allocateTid } from '../../src/database/tid-allocator.js'
+import { inviteeContext } from './invite-keys.js'
 import { InvitationEngine } from '../../src/invite/invitation-engine.js'
 import { fromCanonicalDatetime, nowCanonicalDatetime } from '../../src/utils.js'
 import { createTestNetwork, addTestAuthority, makeTestSignCallback } from './test-context.js'
@@ -16,6 +17,8 @@ export interface ChainFixture {
   auth: TestAuthorityContext
   authority: AuthorityEngine
   invitation: InvitationEngine
+  /** Keyholder accepts use this: a device that is not the inviting officer's. */
+  inviteeInvitation: InvitationEngine
 }
 
 export interface SentShare {
@@ -32,6 +35,7 @@ export async function makeChainFixture (): Promise<ChainFixture> {
     auth,
     authority: auth.authorityEngine as unknown as AuthorityEngine,
     invitation: new InvitationEngine(auth.ctx),
+    inviteeInvitation: new InvitationEngine(inviteeContext(auth.ctx)),
   }
 }
 
