@@ -94,7 +94,7 @@ export const CODE_TO_CLASS: Record<string, DeviceSigningErrorClass> = {
  */
 export function mapDeviceSigningError(err: unknown): DeviceSigningErrorClass {
 	const code = (err as { code?: string } | null | undefined)?.code;
-	if (code !== undefined && code in CODE_TO_CLASS) {
+	if (typeof code === 'string' && Object.prototype.hasOwnProperty.call(CODE_TO_CLASS, code)) {
 		return CODE_TO_CLASS[code]!;
 	}
 	return 'biometric-error';
@@ -166,10 +166,11 @@ export function isNavigationClass(c: DeviceSigningErrorClass): boolean {
  * counts as a device-signing rejection. Anything else — a plain `Error`,
  * `undefined`, `{}`, or an object with an unrecognized `code` — is "not
  * mine" and must fall through to the call site's own raw-message handling.
+ * Own keys only — a prototype name such as 'constructor' is not a code.
  */
 export function isDeviceSigningError(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null | undefined)?.code;
-	return typeof code === 'string' && code in CODE_TO_CLASS;
+	return typeof code === 'string' && Object.prototype.hasOwnProperty.call(CODE_TO_CLASS, code);
 }
 
 // Keystore/metadata desync detection (49-14) lives in device-signer.ts's self-verify, which throws

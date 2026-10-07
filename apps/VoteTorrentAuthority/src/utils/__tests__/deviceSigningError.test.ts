@@ -142,3 +142,41 @@ describe('recovery-key-invalidated / recovery-key-not-registered (49-14 follow-u
 		expect(isNavigationClass('recovery-key-not-registered')).toBe(false);
 	});
 });
+
+// Frozen literal copy of CODE_TO_CLASS taken before the O-10 fix.
+const EXPECTED_SNAPSHOT: Record<string, string> = {
+	CANCELED: 'cancellation',
+	NO_BIOMETRICS_ENROLLED: 'no-biometrics-enrolled',
+	LOCKOUT: 'lockout',
+	LOCKOUT_PERMANENT: 'lockout-permanent',
+	KEY_INVALIDATED_REASSOCIATE: 'key-invalidated',
+	NO_KEY_PROVISIONED: 'no-key-provisioned',
+	NO_DEVICE_CREDENTIAL: 'no-device-credential',
+	RECOVERY_KEY_INVALIDATED: 'recovery-key-invalidated',
+	RECOVERY_KEY_NOT_REGISTERED: 'recovery-key-not-registered',
+	RECOVERY_UNSUPPORTED_OS: 'recovery-unsupported-os',
+};
+
+describe('own-property code lookup (O-10)', () => {
+	const PROTOTYPE_NAMES = ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf'];
+
+	test.each(PROTOTYPE_NAMES)('code %s is not a device-signing code and maps to biometric-error', code => {
+		expect(isDeviceSigningError({ code })).toBe(false);
+		expect(mapDeviceSigningError({ code })).toBe('biometric-error');
+	});
+
+	test('every real code keeps its exact class (snapshot taken before the fix)', () => {
+		expect({ ...CODE_TO_CLASS }).toEqual(EXPECTED_SNAPSHOT);
+		for (const [code, cls] of Object.entries(EXPECTED_SNAPSHOT)) {
+			expect(mapDeviceSigningError({ code })).toBe(cls);
+			expect(isDeviceSigningError({ code })).toBe(true);
+		}
+	});
+
+	test('a non-string code is not mine and maps to biometric-error', () => {
+		for (const code of [5, {}, ['CANCELED'], null]) {
+			expect(isDeviceSigningError({ code })).toBe(false);
+			expect(mapDeviceSigningError({ code })).toBe('biometric-error');
+		}
+	});
+});
