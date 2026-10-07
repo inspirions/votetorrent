@@ -14,6 +14,16 @@ import type { Signature } from '../common/index.js'
 /** Mirrors the schema's `KeyholderDkgMessage.AttemptValid` bound (`Attempt` is 1..3). */
 export const DKG_MAX_ATTEMPTS = 3
 
+/**
+ * Per-round deadline after which a DKG status read FLAGS the round's awaited keyholders to officers
+ * (`KeyholderDkgStatus.overdueUserIds`). Advisory only: it never causes an automatic action, a fault, an abort or a
+ * disqualification; officers decide. 24 h is the user's figure (62-OPEN-ITEMS 8d) and matches the keyholder
+ * invitation default (user decision 9). APPROXIMATE: it rests on signer-claimed timestamps (a back-dating or
+ * slow-clock answerer can make it fire early, T-62-139-02), so no consumer may present it as a guarantee of a full
+ * 24 h of silence.
+ */
+export const DKG_ROUND_DEADLINE_MS = 24 * 60 * 60 * 1000
+
 /** `KeyholderDkgMessage.DkgRound` (R0 commit .. R4 result). */
 export type DkgRound = 0 | 1 | 2 | 3 | 4
 
@@ -86,6 +96,31 @@ export interface KeyholderDkgStatus {
   disqualified: DkgDisqualification[]
   electionKey: ElectionKeyRecord | null
   self?: KeyholderDkgSelfStatus
+  /**
+   * When the current round opened, by the evaluator's rule 10 (signed timestamps; the earliest answer caps the latest
+   * opening candidate). null when no round is running or no usable timestamp exists.
+   */
+  roundOpenedAt?: string | null
+  /**
+   * Sorted. The awaited keyholders (`awaitingUserIds`) once the current round has been open for
+   * `DKG_ROUND_DEADLINE_MS` at the status read; [] otherwise. Advisory flag only.
+   */
+  overdueUserIds?: string[]
+  /**
+   * Sorted user ids with a Keyholder row in the CURRENT revision, unfiltered by binding or disqualification.
+   * UNDEFINED (never []) when no ElectionRevision row was read.
+   */
+  liveRoster?: string[]
+  /**
+   * Sorted user ids that have at least one Keyholder row for this election and EVERY one of those rows is in a
+   * revision BEFORE the current one (a user with any row at or after the current revision is not listed).
+   * UNDEFINED (never []) when no ElectionRevision row was read.
+   *
+   * KeyholderDkgEngine sets all four optional fields on every read that found an ElectionRevision row. They are
+   * optional so hand-built status fixtures stay valid; a consumer treats undefined as unknown (no flag; fail closed
+   * for any security decision, e.g. the one-seat check).
+   */
+  earlierRevisionUserIds?: string[]
 }
 
 export interface KeyholderDkgSigner {

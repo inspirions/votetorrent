@@ -78,6 +78,32 @@
 //     then `restarting` (current attempt > 1 and its round is 0); otherwise
 //     `in-progress`.
 //
+// 10. Round opening time (62-139, user ruling 62-OPEN-ITEMS 8d: a per-round
+//     deadline that FLAGS the silent keyholder; officers decide; no automatic
+//     action). The evaluator never reads a clock: it returns `roundTiming`,
+//     the round's signed timestamp CANDIDATES with their authors, identical on
+//     every node for the same rows. `opening` = what says when the round
+//     opened (round R > 0: the attempt's round R-1 rows; round 0 of attempt
+//     > 1: every previous-attempt row; round 0 of attempt 1: the live
+//     members' binding `boundAt`); `answers` = the current round's rows.
+//     Only valid-signature rows with a timestamp count. The pure
+//     `resolveRoundOpenedAt` (time is a PARAMETER, supplied by the status
+//     read) picks one: entries dated beyond `now + maxFutureSkew` are ignored;
+//     once any non-awaited keyholder has answered, the result is the EARLIER
+//     of the earliest answer and the latest opening candidate (or the earliest
+//     answer alone if none survives). The earliest answer is a CAP written by
+//     keyholders who are not awaited: the flagged keyholder cannot move the
+//     deadline later by future-dating its own rows, one future-dating answerer
+//     cannot delay it while another honest answer exists, and the first
+//     answer never moves the opening time later (the driver is pull-only, so a
+//     round can sit open long before anyone answers). With no answer the
+//     latest opening candidate is used. Residual: with no answer yet, a row
+//     future-dated beyond the skew can delay the flag by at most one deadline
+//     period, ending when anyone answers. SentAt/BoundAt are signer-claimed:
+//     they feed ONLY an advisory flag, never a fault, abort or
+//     disqualification, and a back-dating or slow-clock answerer can make the
+//     flag fire early (T-62-139-02, accepted).
+//
 // `planDkgAction` priority: `none` when complete/failed/blocked or self is
 // not a live, non-disqualified participant; `remove-disqualified` for any
 // `cumulativeDisqualified` user still physically present in `liveRoster`;
@@ -126,6 +152,8 @@ export interface DkgMessageRow {
   payload: string
   resultKey: string | null
   signatureValid: boolean
+  /** The signed `SentAt` as stored (62-139 rule 10); absent in unstamped fixtures. */
+  sentAt?: string
 }
 
 export interface DkgRevisionSnapshot {
@@ -133,7 +161,7 @@ export interface DkgRevisionSnapshot {
   revision: number | null
   threshold: number | null
   liveRoster: string[]
-  bindings: Record<string, { dkgPublicKey: string }>
+  bindings: Record<string, { dkgPublicKey: string, boundAt?: string }>
   pendingInviteCount: number
   messages: DkgMessageRow[]
   /**
@@ -151,6 +179,9 @@ export interface DkgReadyToPublish {
   participants: number
   roster: string[]
 }
+
+export interface DkgTimestampCandidate { userId: string, at: string }
+export interface DkgRoundTiming { opening: DkgTimestampCandidate[], answers: DkgTimestampCandidate[] }
 
 export interface DkgInvalidRow { attempt: number, round: number, senderUserId: string }
 
@@ -174,6 +205,8 @@ export interface DkgRevisionEvaluation {
   cumulativeDisqualified: string[]
   /** The raw live `Keyholder` roster (unfiltered by binding or disqualification) — needed by `planDkgAction`'s `remove-disqualified` check. */
   liveRoster: string[]
+  /** Rule 10: the current round's signed timestamp candidates; null unless the phase is not-started/in-progress/restarting. */
+  roundTiming: DkgRoundTiming | null
 }
 
 export type DkgPlannedAction =
@@ -216,6 +249,76 @@ function rosterMismatchAwaiting (
     }
   }
   return sortUnique(out)
+}
+
+function byUserThenAt (a: DkgTimestampCandidate, b: DkgTimestampCandidate): number {
+  if (a.userId !== b.userId) return a.userId < b.userId ? -1 : 1
+  return a.at < b.at ? -1 : a.at > b.at ? 1 : 0
+}
+
+/** Rule 10: pure candidate collection for the current round (no clock). */
+function collectRoundTiming (
+  phase: DkgPhase,
+  attempt: number | null,
+  round: DkgRound | null,
+  roster: string[],
+  effectiveLive: string[],
+  validRows: DkgMessageRow[],
+  bindings: Record<string, { dkgPublicKey: string, boundAt?: string }>
+): DkgRoundTiming | null {
+  if (phase !== 'not-started' && phase !== 'in-progress' && phase !== 'restarting') return null
+  if (attempt === null || round === null) return null
+  const answerers = (attempt === 1 && round === 0) ? effectiveLive : roster
+  const toCandidates = (rows: DkgMessageRow[]): DkgTimestampCandidate[] => rows
+    .filter((r) => r.sentAt !== undefined)
+    .map((r) => ({ userId: r.senderUserId, at: r.sentAt! }))
+    .sort(byUserThenAt)
+  const answers = toCandidates(validRows.filter((r) => r.attempt === attempt && r.round === round && answerers.includes(r.senderUserId)))
+  let opening: DkgTimestampCandidate[]
+  if (round > 0) {
+    opening = toCandidates(validRows.filter((r) => r.attempt === attempt && r.round === round - 1 && roster.includes(r.senderUserId)))
+  } else if (attempt > 1) {
+    opening = toCandidates(validRows.filter((r) => r.attempt === attempt - 1))
+  } else {
+    opening = effectiveLive
+      .filter((u) => bindings[u]?.boundAt !== undefined)
+      .map((u) => ({ userId: u, at: bindings[u]!.boundAt! }))
+      .sort(byUserThenAt)
+  }
+  return { opening, answers }
+}
+
+/**
+ * Rule 10: pick the round's opening time. PURE: time is a parameter. See the header.
+ */
+export function resolveRoundOpenedAt (
+  timing: DkgRoundTiming | null,
+  awaitingUserIds: string[],
+  nowMs: number,
+  maxFutureSkewMs: number
+): string | null {
+  if (timing === null) return null
+  const usable = (c: DkgTimestampCandidate): number | null => {
+    const t = Date.parse(c.at)
+    return Number.isNaN(t) || t > nowMs + maxFutureSkewMs ? null : t
+  }
+  let firstAnswer: { t: number, userId: string, at: string } | null = null
+  for (const c of timing.answers) {
+    if (awaitingUserIds.includes(c.userId)) continue
+    const t = usable(c)
+    if (t === null) continue
+    if (firstAnswer === null || t < firstAnswer.t || (t === firstAnswer.t && c.userId < firstAnswer.userId)) firstAnswer = { t, userId: c.userId, at: c.at }
+  }
+  let lastOpening: { t: number, userId: string, at: string } | null = null
+  for (const c of timing.opening) {
+    const t = usable(c)
+    if (t === null) continue
+    if (lastOpening === null || t > lastOpening.t || (t === lastOpening.t && c.userId < lastOpening.userId)) lastOpening = { t, userId: c.userId, at: c.at }
+  }
+  if (firstAnswer !== null && lastOpening !== null) return lastOpening.t < firstAnswer.t ? lastOpening.at : firstAnswer.at
+  if (firstAnswer !== null) return firstAnswer.at
+  if (lastOpening !== null) return lastOpening.at
+  return null
 }
 
 function symmetricDifference (a: string[], b: string[]): string[] {
@@ -289,7 +392,7 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       ...base,
       phase: 'blocked', blockedReason: 'no-current-revision',
       currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
-      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: [], roundTiming: null
     }
   }
   const bindingIds = new Set(Object.keys(snapshot.bindings))
@@ -299,7 +402,7 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       ...base,
       phase: 'blocked', blockedReason: 'no-keyholders',
       currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
-      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: [], roundTiming: null
     }
   }
   try {
@@ -309,7 +412,7 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       ...base,
       phase: 'blocked', blockedReason: 'threshold-out-of-range',
       currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
-      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: [], roundTiming: null
     }
   }
   if (snapshot.pendingInviteCount > 0) {
@@ -317,7 +420,7 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
       ...base,
       phase: 'blocked', blockedReason: 'pending-invites',
       currentAttempt: null, currentRound: null, roster: [], awaitingUserIds: [],
-      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: []
+      attempts: [], disqualified: [], readyToPublish: null, cumulativeDisqualified: [], roundTiming: null
     }
   }
 
@@ -339,10 +442,12 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
   let roster: string[] = []
   let awaitingUserIds: string[] = []
   let readyToPublish: DkgReadyToPublish | null = null
+  let currentEffectiveLive: string[] = []
 
   attemptLoop:
   for (let attempt = 1; attempt <= DKG_MAX_ATTEMPTS; attempt++) {
     const effectiveLive = sortUnique(snapshot.liveRoster.filter((u) => bindingIds.has(u) && !cumulativeDisqualified.includes(u)))
+    currentEffectiveLive = effectiveLive
 
     if (attempt > 1 && (effectiveLive.length < 2 || effectiveLive.length < threshold)) {
       phase = 'failed'
@@ -711,7 +816,8 @@ export function evaluateDkgRevision (snapshot: DkgRevisionSnapshot): DkgRevision
     attempts,
     disqualified: disqualifiedAll,
     readyToPublish,
-    cumulativeDisqualified
+    cumulativeDisqualified,
+    roundTiming: collectRoundTiming(phase, currentAttempt, currentRound, roster, currentEffectiveLive, validRows, snapshot.bindings)
   }
 }
 

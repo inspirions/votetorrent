@@ -40,6 +40,7 @@ import {
 import {
   evaluateDkgRevision,
   planDkgAction,
+  resolveRoundOpenedAt,
   type DkgMessageRow,
   type DkgRevisionSnapshot
 } from '../src/keyholder/dkg-evaluator.js'
@@ -864,5 +865,106 @@ describe('dkg-evaluator: ElectionKey consistency', () => {
     const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: ekFor(sim, { groupCommitments: [], commitmentsWellFormed: false }) }))
     expect(ev.phase).to.equal('failed')
     expect(ev.failedReason).to.equal('election-key-mismatch')
+  })
+})
+
+// ===========================================================================
+// 62-139: round timing candidates (clock-free) and the pure resolver
+// ===========================================================================
+
+describe('dkg-evaluator: round timing candidates (62-139)', () => {
+  const T = Date.parse('2026-10-01T00:00:00.000Z')
+  const iso = (ms: number): string => new Date(ms).toISOString()
+  /** Distinct sentAt per row (index minutes after T). */
+  function stamp (rows: DkgMessageRow[], startMs = T): DkgMessageRow[] {
+    return rows.map((r, i) => ({ ...r, sentAt: iso(startMs + i * 60_000) }))
+  }
+
+  it('E1: cut after round 1 complete: opening = the five round-1 (userId, sentAt) pairs, answers empty', () => {
+    const sim = simulateHonestDkg(5, 3, { electionId: 'e', revision: 0, attempt: 1 })
+    const rows = stamp(honestRows(sim, 1, { uptoRound: 1 }))
+    const ev = evaluateDkgRevision(mkSnapshot(sim, rows))
+    expect(ev.currentRound).to.equal(2)
+    const expected = rows.filter((r) => r.round === 1).map((r) => ({ userId: r.senderUserId, at: r.sentAt! }))
+      .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : a.at < b.at ? -1 : 1))
+    expect(ev.roundTiming).to.deep.equal({ opening: expected, answers: [] })
+  })
+
+  it('E2: attempt 1 round 0: opening holds only live members bindings', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const bindings: Record<string, { dkgPublicKey: string, boundAt?: string }> = {}
+    sim.userIds.forEach((u, i) => { bindings[u] = { dkgPublicKey: sim.usersByUserId[u]!.recvPublic, boundAt: iso(T + i * 1000) } })
+    bindings['stranger'] = { dkgPublicKey: '02'.padEnd(66, '9'), boundAt: iso(T + 99 * 3_600_000) }
+    const ev = evaluateDkgRevision(mkSnapshot(sim, [], { bindings }))
+    expect(ev.phase).to.equal('not-started')
+    expect(ev.roundTiming!.opening.map((c) => c.userId)).to.deep.equal([...sim.userIds].sort())
+    expect(ev.roundTiming!.answers).to.deep.equal([])
+  })
+
+  it('E3: attempt 2 round 0 (restarting): opening = every attempt-1 row with its sentAt', () => {
+    const sim = simulateHonestDkg(5, 3, { electionId: 'e', revision: 0, attempt: 1 })
+    const dealer = sim.userIds[0]!
+    const recipient = sim.userIds[1]!
+    const badEntry = perturbedShareEntry(sim, dealer, recipient)
+    const dealerEntries = withReplacedEntry(sim.r2ByDealer[dealer]!, sim.usersByUserId[recipient]!.identifier, badEntry)
+    const evidence = [{ dealer: sim.usersByUserId[dealer]!.identifier, recipient: sim.usersByUserId[recipient]!.identifier, sharedSecret: bytesToHex(secp256k1.getSharedSecret(sim.usersByUserId[recipient]!.recvPrivate, secp256k1.Point.fromHex(badEntry.ephemeralPublicKey).toBytes(true), true)) }]
+    const rows = stamp([
+      ...honestRows(sim, 1, { uptoRound: 1 }),
+      ...sim.userIds.map((u) => (u === dealer ? round2Row(sim, 1, u, dealerEntries) : round2Row(sim, 1, u))),
+      ...sim.userIds.map((u) => (u === recipient ? complaintRow(1, u, evidence) : ackRow(1, u)))
+    ])
+    const ev = evaluateDkgRevision(mkSnapshot(sim, rows, { liveRoster: sim.userIds.filter((u) => u !== dealer) }))
+    expect(ev.phase).to.equal('restarting')
+    expect(ev.roundTiming!.opening).to.have.length(rows.length)
+    expect(ev.roundTiming!.answers).to.deep.equal([])
+  })
+
+  it('E4: unstamped rows are omitted', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const ev = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1, { uptoRound: 1 })))
+    expect(ev.roundTiming).to.deep.equal({ opening: [], answers: [] })
+  })
+
+  it('E5: complete, failed and blocked give null timing', () => {
+    const sim = simulateHonestDkg(3, 2, { electionId: 'e', revision: 0, attempt: 1 })
+    const blocked = evaluateDkgRevision(mkSnapshot(sim, [], { pendingInviteCount: 1 }))
+    expect(blocked.roundTiming).to.equal(null)
+    const failed = evaluateDkgRevision(mkSnapshot(sim, honestRows(sim, 1), { electionKey: { electionId: 'e', revision: 0, attempt: 1, jointPublicKey: 'zz', groupCommitments: [], threshold: 2, participants: 3, publishedAt: '', publisherUserId: 'u-1', signatureValid: true, commitmentsWellFormed: true } }))
+    expect(failed.phase).to.equal('failed')
+    expect(failed.roundTiming).to.equal(null)
+  })
+
+  it('E6: reversing the message array gives a deep-equal roundTiming', () => {
+    const sim = simulateHonestDkg(5, 3, { electionId: 'e', revision: 0, attempt: 1 })
+    const rows = stamp(honestRows(sim, 1, { uptoRound: 1 }))
+    const a = evaluateDkgRevision(mkSnapshot(sim, rows)).roundTiming
+    const b = evaluateDkgRevision(mkSnapshot(sim, [...rows].reverse())).roundTiming
+    expect(a).to.deep.equal(b)
+  })
+
+  describe('resolveRoundOpenedAt', () => {
+    const skew = 5 * 60_000
+    it('E7: a future-dated awaited opening row cannot move the result later; the earliest answer caps', () => {
+      const timing = { opening: [{ userId: 'C', at: iso(T + 30 * 86_400_000) }], answers: [{ userId: 'B', at: iso(T + 120_000) }, { userId: 'A', at: iso(T + 60_000) }] }
+      expect(resolveRoundOpenedAt(timing, ['C'], T + 3_600_000, skew)).to.equal(iso(T + 60_000))
+      const usable = { ...timing, opening: [{ userId: 'C', at: iso(T + 120_000) }] }
+      expect(resolveRoundOpenedAt(usable, ['C'], T + 3_600_000, skew)).to.equal(iso(T + 60_000))
+    })
+    it('E8: no answers: latest surviving opening; unparsable skipped; all dropped null; null timing null', () => {
+      const t = { opening: [{ userId: 'a', at: iso(T) }, { userId: 'b', at: iso(T + 60_000) }, { userId: 'c', at: iso(T + 30 * 86_400_000) }, { userId: 'd', at: 'garbage' }], answers: [] }
+      expect(resolveRoundOpenedAt(t, [], T + 600_000, skew)).to.equal(iso(T + 60_000))
+      expect(resolveRoundOpenedAt({ opening: [{ userId: 'c', at: iso(T + 86_400_000) }], answers: [] }, [], T, skew)).to.equal(null)
+      expect(resolveRoundOpenedAt(null, [], T, skew)).to.equal(null)
+    })
+    it('E9: a future answer is dropped; an awaited user answer is not an answer', () => {
+      const t = { opening: [{ userId: 'a', at: iso(T) }], answers: [{ userId: 'b', at: iso(T + 86_400_000) }] }
+      expect(resolveRoundOpenedAt(t, [], T + 60_000, skew)).to.equal(iso(T))
+      const t2 = { opening: [{ userId: 'a', at: iso(T + 60_000) }], answers: [{ userId: 'c', at: iso(T) }] }
+      expect(resolveRoundOpenedAt(t2, ['c'], T + 120_000, skew)).to.equal(iso(T + 60_000))
+    })
+    it('E10: the first answer never moves the opening later', () => {
+      const t = { opening: [{ userId: 'a', at: iso(T) }], answers: [{ userId: 'b', at: iso(T + 30 * 3_600_000) }] }
+      expect(resolveRoundOpenedAt(t, ['c'], T + 30 * 3_600_000 + 60_000, skew)).to.equal(iso(T))
+    })
   })
 })
