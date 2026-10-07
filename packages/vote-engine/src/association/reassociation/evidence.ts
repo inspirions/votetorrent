@@ -307,6 +307,9 @@ export function rankIdentityCandidates (
 ): ReassociationCandidate[] {
   const submitted = new Map<string, string>()
   for (const field of fields) {
+    // Belt and braces: the transport and the driver sanitize first, but a field that is not a
+    // well-formed string pair must never throw out of the officer's list.
+    if (field === null || typeof field !== 'object' || typeof field.name !== 'string' || typeof field.value !== 'string') continue
     submitted.set(normalizeFieldName(field.name), normalizeFieldValue(field.value))
   }
 

@@ -19,6 +19,7 @@ import {
   inSequenceHighWater
 } from '../../registration/transport/p2p-staging-seam.js'
 import type { StagingSealer, StagingOpener, StagingDecisionSigner, StagingReadReport, StagingUnreadableRow, StagingSqlPort } from '../../registration/transport/p2p-staging-seam.js'
+import { sanitizeIdentityFields } from '../reassociation/identity-fields.js'
 import { bytesToBase64url, digestToBytes, nowCanonicalDatetime } from '../../utils.js'
 
 /**
@@ -499,7 +500,7 @@ export class P2pAssociationTransport implements IAssociationRequestTransport, IA
         cursor: row.Cursor,
         digest: row.Digest,
         registrationCode: typeof decoded.registrationCode === 'string' ? decoded.registrationCode : undefined,
-        identityFields: Array.isArray(decoded.identityFields) ? decoded.identityFields : undefined
+        identityFields: sanitizeIdentityFields(decoded.identityFields)
       })
     }
 

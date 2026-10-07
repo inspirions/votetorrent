@@ -53,6 +53,7 @@ import {
   verifyRegistrationCode
 } from './evidence.js'
 import type { ApprovedRegistrationsRead, OpenedCode } from './evidence.js'
+import { sanitizeIdentityFields } from './identity-fields.js'
 
 /** The staged-answer shape `validateStagedAttestationAnswer` returns — duplicated structurally
  * (not imported) because `association-engine.ts`'s own copy is intentionally engine-internal. */
@@ -173,8 +174,10 @@ async function rawEvidenceFor (requestId: string, intake: ReassociationIntake): 
   if (typeof row.registrationCode === 'string' && row.registrationCode.length > 0) {
     return { kind: 'code', code: row.registrationCode }
   }
-  if (row.identityFields !== undefined && row.identityFields.length > 0) {
-    return { kind: 'identity', fields: row.identityFields }
+  // Defence in depth (WR-01): any intake, not only the P2P transport, may hand over junk.
+  const fields = sanitizeIdentityFields(row.identityFields)
+  if (fields !== undefined && fields.length > 0) {
+    return { kind: 'identity', fields }
   }
   return { kind: 'none' }
 }
@@ -253,6 +256,42 @@ async function buildReview (
   }
 }
 
+/**
+ * The review a row falls back to when its evidence cannot be built (WR-01): no evidence, no
+ * candidates, identity matching, and the route the policy gives for that. Never throws — a policy
+ * read failure degrades to the manual route, so one bad row never hides the others.
+ */
+async function fallbackReview (
+  host: ReassociationHost,
+  authorityId: string,
+  row: { id: string; deviceKey: string; electionId?: string; submittedAt: string; receivedAt: string; status: AssociationRequestStatus }
+): Promise<ReassociationReview> {
+  let route: ReassociationRouteKind = 'manual'
+  try {
+    const policy = await readIntakePolicyFrom(intakeQueryPortFromDb(host.ctx.db), authorityId)
+    route = reassociationRouteFor(policy, 'identity')
+  } catch {
+    route = 'manual'
+  }
+  return {
+    requestId: row.id,
+    authorityId,
+    status: row.status,
+    newDeviceKey: row.deviceKey,
+    electionId: row.electionId,
+    submittedAt: row.submittedAt,
+    receivedAt: row.receivedAt,
+    evidence: { kind: 'none' },
+    resolvedRegistrantId: undefined,
+    registrantName: undefined,
+    registrantRecord: undefined,
+    candidates: [],
+    existingDevices: [],
+    matchMethod: 'identity',
+    route
+  }
+}
+
 // Avoids importing ReassociationCandidate purely for a local alias cycle concern; re-declared via
 // the review type's own field instead.
 type ReassociationCandidateList = ReassociationReview['candidates']
@@ -285,7 +324,12 @@ export async function listPendingReassociations (
   const codeCache = new Map<string, OpenedCode>()
   const out: ReassociationReview[] = []
   for (const row of rows) {
-    out.push(await buildReview(host, authorityId, row, intake, opener, approved, codeCache))
+    try {
+      out.push(await buildReview(host, authorityId, row, intake, opener, approved, codeCache))
+    } catch {
+      // Per-row isolation (WR-01): one unbuildable row reads evidence 'none', never a rejected list.
+      out.push(await fallbackReview(host, authorityId, row))
+    }
   }
   return out
 }
@@ -302,7 +346,11 @@ export async function getReassociationReview (
 
   const approved = await listApprovedRegistrations(host.ctx.db, row.authorityId, opener)
   const codeCache = new Map<string, OpenedCode>()
-  return buildReview(host, row.authorityId, row, intake, opener, approved, codeCache, options)
+  try {
+    return await buildReview(host, row.authorityId, row, intake, opener, approved, codeCache, options)
+  } catch {
+    return await fallbackReview(host, row.authorityId, row)
+  }
 }
 
 /** R0/R1/R2 — the automatic authority-side re-association sync driver (D-41, D-46). */
