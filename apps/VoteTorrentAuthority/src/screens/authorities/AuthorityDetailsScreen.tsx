@@ -52,6 +52,8 @@ export default function AuthorityDetailsScreen() {
 	const [peerUnavailable, setPeerUnavailable] = useState(false);
 	// Try Again bumps this to re-run getAuthorityData.
 	const [reloadNonce, setReloadNonce] = useState(0);
+	// WR-02: sequence number of the latest getAuthorityData run; older runs may not write.
+	const authorityReadSeqRef = useRef(0);
 	const officerUsersRef = useRef(officerUsers);
 	officerUsersRef.current = officerUsers;
 
@@ -90,6 +92,11 @@ export default function AuthorityDetailsScreen() {
 
 	useEffect(() => {
 		async function getAuthorityData() {
+			// WR-02: a cohort-unreachable read can take a long time to fail while Try Again starts
+			// another. Only the latest read may write, so a slow earlier failure cannot re-raise the
+			// notice over fresh data, and a slow earlier success cannot overwrite a newer one.
+			const seq = ++authorityReadSeqRef.current;
+			const isLatest = () => seq === authorityReadSeqRef.current;
 			if (!networkEngine || !authorityEngine) {
 				setPinned(false);
 				setAdminDetails(null);
@@ -97,11 +104,14 @@ export default function AuthorityDetailsScreen() {
 			}
 			try {
 				const pinnedAuthorities = await networkEngine.getPinnedAuthorities();
+				if (!isLatest()) return;
 				setPinned(pinnedAuthorities.some((a: Authority) => a.id === authority.id));
 				const details = await authorityEngine.getAdminDetails();
+				if (!isLatest()) return;
 				setAdminDetails(details);
 				setPeerUnavailable(false);
 			} catch (error) {
+				if (!isLatest()) return;
 				const peerFailure = classifyPeerReadFailure(error);
 				if (peerFailure) {
 					// Gap 7 (D-23/D-39): the network could not answer, which is not the same as the

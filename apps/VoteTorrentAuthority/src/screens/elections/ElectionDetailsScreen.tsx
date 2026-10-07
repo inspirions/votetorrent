@@ -71,6 +71,12 @@ export default function ElectionDetailsScreen() {
 			mountedRef.current = false;
 		};
 	}, []);
+	// WR-02: a cohort-unreachable read can take a long time to fail while Try Again (or a refocus)
+	// starts another. Each read takes a sequence number and only the latest of its kind may write,
+	// so a slow earlier failure cannot re-raise the notice over fresh data, and a slow earlier
+	// success cannot overwrite a newer one.
+	const detailsReadSeqRef = useRef(0);
+	const ballotsReadSeqRef = useRef(0);
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
@@ -79,7 +85,9 @@ export default function ElectionDetailsScreen() {
 	// these details, so a send or a same-device accept that happened while this screen sat under
 	// the stack never reached them until the screen was rebuilt.
 	const loadElectionDetails = useCallback(
-		async (isActive: () => boolean) => {
+		async (isCallerActive: () => boolean) => {
+			const seq = ++detailsReadSeqRef.current;
+			const isActive = () => seq === detailsReadSeqRef.current && isCallerActive();
 			try {
 				if (electionEngine) {
 					// D-27: keyholders come from the engine only — no AsyncStorage merge.
@@ -125,7 +133,9 @@ export default function ElectionDetailsScreen() {
 	// D-09: Also refresh confirmation states on focus so Proposed/Confirmed badge
 	// updates when the user returns from the Tasks inbox after signing.
 	const loadBallots = useCallback(
-		async (isActive: () => boolean) => {
+		async (isCallerActive: () => boolean) => {
+			const seq = ++ballotsReadSeqRef.current;
+			const isActive = () => seq === ballotsReadSeqRef.current && isCallerActive();
 			setErrorMessage(""); // clear stale error before reload so transient failures don't persist
 			try {
 				if (electionEngine) {
