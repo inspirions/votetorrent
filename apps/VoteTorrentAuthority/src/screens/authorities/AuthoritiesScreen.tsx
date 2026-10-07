@@ -5,7 +5,7 @@ import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { InfoCard } from "../../components/InfoCard";
 import { CollapsibleSection } from "../../components/CollapsibleSection";
 import { ThemedText } from "../../components/ThemedText";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import type { NavigationProp } from "../../navigation/types";
 import type { Authority, INetworkEngine } from "@votetorrent/vote-core";
@@ -18,6 +18,8 @@ import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 
 export default function AuthoritiesScreen() {
 	const { t } = useTranslation();
+	const tRef = useRef(t);
+	tRef.current = t;
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NavigationProp>();
 	const { getEngine, hasNetwork } = useApp();
@@ -53,12 +55,12 @@ export default function AuthoritiesScreen() {
 				setPeerUnavailable(true);
 			} else {
 				console.warn("Error loading authorities:", error);
-				setErrorMessage(t("authoritiesLoadFailed"));
+				setErrorMessage(tRef.current("authoritiesLoadFailed"));
 			}
 		} finally {
 			setIsLoading(false);
 		}
-	}, [networkEngine, searchText, t]);
+	}, [networkEngine, searchText]);
 
 	useEffect(() => {
 		async function initializeNetworkEngine() {
@@ -69,11 +71,11 @@ export default function AuthoritiesScreen() {
 				setNetworkEngine(engine);
 			} catch (error) {
 				console.warn("Failed to initialize network engine:", error);
-				setErrorMessage(t("authoritiesLoadFailed"));
+				setErrorMessage(tRef.current("authoritiesLoadFailed"));
 			}
 		}
 		initializeNetworkEngine();
-	}, [hasNetwork, getEngine, t]);
+	}, [hasNetwork, getEngine]);
 
 	// Header right intentionally NOT overridden — the Authorities tab inherits
 	// the global circle-user account avatar from useTabHeaderOptions() to match
@@ -112,10 +114,10 @@ export default function AuthoritiesScreen() {
 				);
 			} catch (error) {
 				console.warn("Error toggling authority pin:", error);
-				setErrorMessage(t("authorityPinFailed"));
+				setErrorMessage(tRef.current("authorityPinFailed"));
 			}
 		},
-		[networkEngine, pinnedAuthorities, searchText, t]
+		[networkEngine, pinnedAuthorities, searchText]
 	);
 
 	if (hasNetwork && !networkEngine && errorMessage) {

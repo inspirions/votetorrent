@@ -32,6 +32,9 @@ type InvitedAuthority = { name: string; status: "sent" | "unsent" };
 
 export default function AuthorityDetailsScreen() {
 	const { t } = useTranslation();
+	// Effects read the latest t without re-running when its identity changes.
+	const tRef = useRef(t);
+	tRef.current = t;
 	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
 	const { authority } = useRoute().params as { authority: Authority };
@@ -52,6 +55,11 @@ export default function AuthorityDetailsScreen() {
 	const [peerUnavailable, setPeerUnavailable] = useState(false);
 	// Try Again bumps this to re-run getAuthorityData.
 	const [reloadNonce, setReloadNonce] = useState(0);
+	// Try Again after a failed engine open re-runs loadEngines.
+	const [engineNonce, setEngineNonce] = useState(0);
+	// A stale navigation: the authority is not on the active network (62-91 openAuthority code
+	// 'authority-not-found'). Shown as a translated state; never reads pins or administration.
+	const [notFound, setNotFound] = useState(false);
 	// WR-02: sequence number of the latest getAuthorityData run; older runs may not write.
 	const authorityReadSeqRef = useRef(0);
 	const officerUsersRef = useRef(officerUsers);
@@ -68,13 +76,14 @@ export default function AuthorityDetailsScreen() {
 			setPinned(!pinned);
 		} catch (error) {
 			console.warn("Error toggling authority pin:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setErrorMessage(tRef.current("authorityPinFailed"));
 		}
 	};
 
 	useEffect(() => {
 		async function loadEngines() {
 			setErrorMessage("");
+			setNotFound(false);
 			try {
 				const engine = await getEngine("network");
 				setNetworkEngine(engine as INetworkEngine);
@@ -83,12 +92,24 @@ export default function AuthorityDetailsScreen() {
 					setAuthorityEngine(authorityEngine);
 				}
 			} catch (error) {
+				const code = (error as { code?: unknown } | null)?.code;
+				const message = (error as { message?: unknown } | null)?.message;
+				if (code === "authority-not-found" || message === "Authority not found") {
+					setNotFound(true);
+					return;
+				}
+				const peerFailure = classifyPeerReadFailure(error);
+				if (peerFailure) {
+					console.warn("[authority-details] peer read unavailable:", peerFailure.reason);
+					setPeerUnavailable(true);
+					return;
+				}
 				console.warn("Error loading engines:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(tRef.current("authorityDetailsLoadFailed"));
 			}
 		}
 		loadEngines();
-	}, [getEngine, authority.id]);
+	}, [getEngine, authority.id, engineNonce]);
 
 	useEffect(() => {
 		async function getAuthorityData() {
@@ -97,6 +118,10 @@ export default function AuthorityDetailsScreen() {
 			// notice over fresh data, and a slow earlier success cannot overwrite a newer one.
 			const seq = ++authorityReadSeqRef.current;
 			const isLatest = () => seq === authorityReadSeqRef.current;
+			if (notFound) {
+				setAdminDetails(null);
+				return;
+			}
 			if (!networkEngine || !authorityEngine) {
 				setPinned(false);
 				setAdminDetails(null);
@@ -124,11 +149,11 @@ export default function AuthorityDetailsScreen() {
 				console.warn("Error checking pinned status:", error);
 				setPinned(false);
 				setAdminDetails(null);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(tRef.current("authorityDetailsLoadFailed"));
 			}
 		}
 		getAuthorityData();
-	}, [networkEngine, authorityEngine, authority.id, reloadNonce]);
+	}, [networkEngine, authorityEngine, authority.id, reloadNonce, notFound]);
 
 	useEffect(() => {
 		async function getUsers() {
@@ -192,7 +217,7 @@ export default function AuthorityDetailsScreen() {
 				console.warn("Error fetching users:", error);
 				setOfficers([]);
 				setOfficerUsers(new Map());
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(tRef.current("officersLoadFailed"));
 			}
 		}
 		getUsers();
@@ -209,7 +234,7 @@ export default function AuthorityDetailsScreen() {
 				setInvitedAuthorities((await fn.call(authorityEngine)) ?? []);
 			} catch (error) {
 				console.warn("Error loading invited authorities:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(tRef.current("invitedAuthoritiesLoadFailed"));
 			}
 		}
 		loadInvited();
@@ -217,15 +242,18 @@ export default function AuthorityDetailsScreen() {
 
 	useEffect(() => {
 		navigation.setOptions({
-			headerRight: () => (
-				<ChipButton
-					label={pinned ? t("unpin") : t("pin")}
-					icon={pinned ? "thumbtack-slash" : "thumbtack"}
-					onPress={handlePinToggle}
-				/>
-			),
+			// No pin chip for an authority that is not on this network: nothing to pin.
+			headerRight: notFound
+				? undefined
+				: () => (
+						<ChipButton
+							label={pinned ? t("unpin") : t("pin")}
+							icon={pinned ? "thumbtack-slash" : "thumbtack"}
+							onPress={handlePinToggle}
+						/>
+					),
 		});
-	}, [pinned, navigation, t, handlePinToggle]);
+	}, [pinned, notFound, navigation, t, handlePinToggle]);
 
 	if (!authority || !networkEngine) {
 		return null;
@@ -280,22 +308,37 @@ export default function AuthorityDetailsScreen() {
 					<ThemedText type="defaultSemiBold">{t("signature")}: </ThemedText>
 					<ThemedText>[{t("valid")}]</ThemedText>
 				</View>
-				<CustomButton
-					title={t("reviseAuthority")}
-					icon="pencil"
-					size="thin"
-					backgroundColor={colors.accent}
-					onPress={() => navigation.navigate("NetworkRevision", { networkId: authority.id })}
-				/>
+				{notFound ? (
+					<View
+						testID="authority-not-on-network"
+						accessibilityRole="alert"
+						style={[styles.notFoundBox, { borderColor: colors.warning, backgroundColor: colors.card }]}
+					>
+						<ThemedText type="defaultSemiBold">{t("authorityNotOnNetworkTitle")}</ThemedText>
+						<ThemedText type="small">{t("authorityNotOnNetworkBody")}</ThemedText>
+					</View>
+				) : (
+					<CustomButton
+						title={t("reviseAuthority")}
+						icon="pencil"
+						size="thin"
+						backgroundColor={colors.accent}
+						onPress={() => navigation.navigate("NetworkRevision", { networkId: authority.id })}
+					/>
+				)}
 			</View>
 
+			{notFound ? null : (
 			<View style={styles.section}>
 				<ThemedText type="title">{t("administration")}</ThemedText>
 
 				{peerUnavailable ? (
 					<PeerReadUnavailableNotice
 						variant={adminDetails ? "stale" : "unavailable"}
-						onRetry={() => setReloadNonce((n) => n + 1)}
+						onRetry={() => {
+							setReloadNonce((n) => n + 1);
+							setEngineNonce((n) => n + 1);
+						}}
 					/>
 				) : null}
 
@@ -386,6 +429,7 @@ export default function AuthorityDetailsScreen() {
 					</>
 				)}
 			</View>
+			)}
 
 			{adminDetails?.proposed && (
 				<View>
@@ -569,6 +613,14 @@ const localStyles = StyleSheet.create({
 	administratorsHeading: {
 		marginTop: 12,
 		marginBottom: 4,
+	},
+	notFoundBox: {
+		borderWidth: 1,
+		borderRadius: 8,
+		padding: 12,
+		marginTop: 8,
+		marginBottom: 8,
+		gap: 4,
 	},
 	invitedHeader: {
 		marginBottom: 8,

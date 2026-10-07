@@ -219,13 +219,14 @@ describe("AuthorityDetailsScreen — a read the network could not answer is not 
 		expect(text).not.toContain("N/A");
 	});
 
-	it("a non-peer error keeps today's behaviour: InlineError with the message, no notice", async () => {
+	it("a non-peer error shows translated copy, never the engine message, and no notice", async () => {
 		mockGetAdminDetails.mockRejectedValue(new Error("boom"));
 		const tr = await renderScreen();
 
 		expect(noticeShown(tr)).toBe(false);
 		const text = allText(tr);
-		expect(text).toContain("boom");
+		expect(text).toContain("authorityDetailsLoadFailed");
+		expect(text).not.toContain("boom");
 		expect(text).not.toContain("peerReadUnavailable");
 		// Today's absence rendering for a genuine failure is unchanged.
 		expect(text).toContain("N/A");
