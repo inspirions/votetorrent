@@ -559,10 +559,11 @@ class AttestationNativeModule: NSObject {
     return label
   }
 
-  /// Get-or-create the wrap key under [alias], keyed by `service` + `kSecAttrAccount == alias`.
-  /// NEVER updates or overwrites an existing item — a policy mismatch is rejected, never
-  /// reconciled (T-62-08-11). Returns the raw 32-byte AES key.
-  private func getOrCreateWrapKey(alias: String, requireAuth: Bool) throws -> Data {
+  /// Loads the wrap key under [alias], keyed by `service` + `kSecAttrAccount == alias`, creating it
+  /// only when [createIfMissing] is true (wrap). NEVER updates or overwrites an existing item — a
+  /// policy mismatch is rejected, never reconciled (T-62-08-11). Returns the raw 32-byte AES key.
+  /// [reason] becomes the Keychain prompt's `localizedReason` (the caller's promptSubtitle).
+  private func loadWrapKey(alias: String, requireAuth: Bool, createIfMissing: Bool, reason: String) throws -> Data {
     guard isValidWrapKeyAlias(alias) else {
       throw SecretWrapNativeError.code("INVALID_ARGUMENT", "invalid wrap key alias: \(alias)")
     }
@@ -580,7 +581,7 @@ class AttestationNativeModule: NSObject {
           "alias \(alias) was created with \(existingMarker), but this call requested \(wantedMarker)"
         )
       }
-    } else {
+    } else if createIfMissing {
       var randomBytes = [UInt8](repeating: 0, count: 32)
       guard SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes) == errSecSuccess else {
         throw SecretWrapNativeError.code("WRAP_FAILED", "SecRandomCopyBytes failed")
@@ -619,6 +620,11 @@ class AttestationNativeModule: NSObject {
         throw SecretWrapNativeError.code("WRAP_FAILED", "SecItemAdd failed with OSStatus \(addStatus)")
       }
     }
+    // A nil marker with createIfMissing == false (unwrap) deliberately falls through to the data read
+    // below. It must NOT throw NO_WRAP_KEY early: the marker read is no-UI and can spuriously return
+    // nil for an item that exists, and the JS callers treat NO_WRAP_KEY as replaceable, so an early
+    // throw could overwrite a saved vote or identity. The data read decides: an absent item gives
+    // errSecItemNotFound -> NO_WRAP_KEY (itemExisted false); a present one is decrypted.
 
     var readQuery: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -628,9 +634,10 @@ class AttestationNativeModule: NSObject {
     ]
     if requireAuth {
       let context = LAContext()
-      // promptSubtitle carries the localizedReason — iOS has no separate title/subtitle/negative
-      // button surface for a Keychain item read the way BiometricPrompt does.
-      context.localizedReason = ""
+      // The caller's promptSubtitle is the localizedReason — iOS has no separate title/subtitle/negative
+      // button surface for a Keychain item read the way BiometricPrompt does. An empty reason keeps
+      // the empty string (iOS then shows its default).
+      context.localizedReason = reason
       readQuery[kSecUseAuthenticationContext as String] = context
     }
     var item: CFTypeRef?
@@ -702,7 +709,7 @@ class AttestationNativeModule: NSObject {
         reject("INVALID_ENCODING", "aadBase64 did not decode", nil); return
       }
       do {
-        var keyData = try self.getOrCreateWrapKey(alias: keyAlias, requireAuth: requireAuth)
+        var keyData = try self.loadWrapKey(alias: keyAlias, requireAuth: requireAuth, createIfMissing: true, reason: promptSubtitle)
         defer { self.zeroize(&keyData) }
         let sealed = try AES.GCM.seal(plaintext, using: SymmetricKey(data: keyData), nonce: AES.GCM.Nonce(), authenticating: aad)
         let ciphertext = sealed.ciphertext + sealed.tag
@@ -721,7 +728,9 @@ class AttestationNativeModule: NSObject {
     }
   }
 
-  /// Answers `unwrapSecret`. Same prompt-surface note as `wrapSecret` above.
+  /// Answers `unwrapSecret`. Same prompt-surface note as `wrapSecret` above. Unwrap never creates a
+  /// key (parity with Android `SecretWrapHelper.unwrap`): an absent item rejects NO_WRAP_KEY with no
+  /// Keychain write. `promptSubtitle` is forwarded as the Keychain prompt's reason.
   @objc(unwrapSecret:ciphertextBase64:ivBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)
   func unwrapSecret(_ keyAlias: String,
                     ciphertextBase64: String,
@@ -748,7 +757,7 @@ class AttestationNativeModule: NSObject {
         reject("INVALID_ARGUMENT", "invalid wrap key alias: \(keyAlias)", nil); return
       }
       do {
-        var keyData = try self.getOrCreateWrapKey(alias: keyAlias, requireAuth: requireAuth)
+        var keyData = try self.loadWrapKey(alias: keyAlias, requireAuth: requireAuth, createIfMissing: false, reason: promptSubtitle)
         defer { self.zeroize(&keyData) }
         let ciphertext = combined.prefix(combined.count - 16)
         let tag = combined.suffix(16)
