@@ -254,12 +254,12 @@ type NonceSeam = { signingEngine: { generateSigningNonce(): string } }
  * Send a live invite for `name` through the real inviteKeyholder whose InviteSlot Cid sorts on the wanted
  * side of `otherCid`. The engine mints a random signing nonce, so the nonce is pinned for this one send
  * (an own property on the engine's signing engine, removed afterwards) and the Cid is predicted with the
- * same Digest expression; the InviteKey is regenerated until the order holds (bounded at 64 tries). The
+ * same Digest expression; the InviteKey is regenerated until the order holds (bounded at 1024 tries: when otherCid sits near an end of the order, 64 tries failed about 1 run in 65). The
  * ACTUAL stored Cid is returned and the caller asserts the order on it.
  */
 async function sendOrdered (fx: Fixture, name: string, otherCid: string, wantOtherFirst: boolean): Promise<{ cid: string, invite: KeyholderInvite }> {
   const expiration = futureCanonical()
-  for (let attempt = 0; attempt < 64; attempt++) {
+  for (let attempt = 0; attempt < 1024; attempt++) {
     const invite = makeInvite(name, expiration)
     const nonce = crypto.randomUUID()
     const predicted = await fx.auth.ctx.db
@@ -277,7 +277,7 @@ async function sendOrdered (fx: Fixture, name: string, otherCid: string, wantOth
       delete (signing as Partial<NonceSeam['signingEngine']>).generateSigningNonce
     }
   }
-  throw new Error('sendOrdered: no InviteKey produced the wanted Cid order in 64 tries')
+  throw new Error('sendOrdered: no InviteKey produced the wanted Cid order in 1024 tries')
 }
 
 const BOTH_ORDERS: Array<{ label: string, otherFirst: boolean }> = [
