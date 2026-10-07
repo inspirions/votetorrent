@@ -430,6 +430,88 @@ describe("E-5: createDeviceSigner CANCELED closes silently; file write rejection
 	});
 });
 
+// Signer codes raised INSIDE sign() during the export (the real on-device seam: the biometric prompt
+// runs inside the signer callback, after createDeviceSigner has resolved). mockExportFoundingBundle
+// models the post-62-91 engine: it awaits exporter.sign(...) and lets the rejection propagate
+// unchanged. These pass against the card's existing routing (it was already correct; the RED half of
+// this gap is 62-91 Task 1's engine specs), so no RED-first claim is made here.
+describe("E-5d..g: signer codes raised inside sign() are routed by code", () => {
+	const exportRejectingFromSign = (rejection: unknown) => {
+		mockCreateDeviceSigner.mockImplementation(async () => {
+			callOrder.push("createDeviceSigner");
+			return jest.fn(async () => {
+				throw rejection;
+			});
+		});
+		mockExportFoundingBundle.mockImplementation(async (...args: unknown[]) => {
+			const opts = args.find((a) => typeof (a as { sign?: unknown })?.sign === "function") as
+				| { sign: (d: Uint8Array) => Promise<unknown> }
+				| undefined;
+			// Fall back to the signer passed positionally, whatever the engine signature is.
+			const sign = opts?.sign ?? (args.find((a) => typeof a === "function") as ((d: Uint8Array) => Promise<unknown>) | undefined);
+			if (!sign) throw new Error("test seam: no sign callback passed to exportFoundingBundle");
+			await sign(new Uint8Array(32));
+			return { bundle: {}, text: "BUNDLE-TEXT", fileName: "founding-bundle.json" };
+		});
+	};
+	const run = async () => {
+		const tr = await renderScreen();
+		await openAndConfirm(tr);
+		await act(async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		});
+		return tr;
+	};
+
+	it("E-5d: sign() rejecting CANCELED closes the card silently, no navigate", async () => {
+		exportRejectingFromSign(Object.assign(new Error("user canceled"), { code: "CANCELED" }));
+		const tr = await run();
+		expect(mockExportFoundingBundle).toHaveBeenCalled();
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeNull();
+		expect(JSON.stringify(tr.toJSON())).not.toContain(resources.en.translation.networkFoundingExportError);
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	it("E-5e: sign() rejecting KEY_INVALIDATED_REASSOCIATE opens ProvisionSigningKey and closes the card", async () => {
+		exportRejectingFromSign(Object.assign(new Error("desync"), { code: "KEY_INVALIDATED_REASSOCIATE" }));
+		const tr = await run();
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "invalidated" });
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-card")).toBeNull();
+	});
+
+	it("E-5f: sign() rejecting LOCKOUT shows the lockout copy under the generic heading", async () => {
+		const info = jest.spyOn(console, "info").mockImplementation(() => {});
+		exportRejectingFromSign(Object.assign(new Error("locked"), { code: "LOCKOUT" }));
+		const tr = await run();
+		const { CODE_TO_CLASS, DEVICE_SIGNING_ERROR_COPY_KEY } = require("../../../utils/deviceSigningError");
+		const copyKey = DEVICE_SIGNING_ERROR_COPY_KEY[CODE_TO_CLASS.LOCKOUT] as string;
+		const lockoutCopy = (resources.en.translation as Record<string, string>)[copyKey];
+		expect(typeof lockoutCopy).toBe("string");
+		const json = JSON.stringify(tr.toJSON());
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeTruthy();
+		expect(json).toContain(resources.en.translation.networkFoundingExportError);
+		expect(json).toContain(lockoutCopy);
+		expect(mockNavigate).not.toHaveBeenCalled();
+		info.mockRestore();
+	});
+
+	it("E-5g (negative control): an engine signature-self-check shows the generic error, no navigate, card stays open", async () => {
+		const info = jest.spyOn(console, "info").mockImplementation(() => {});
+		mockExportFoundingBundle.mockImplementation(async () => {
+			throw Object.assign(new Error("self check"), { name: "FoundingBundleExportError", code: "signature-self-check" });
+		});
+		const tr = await run();
+		// The error body is the open card (it stays open with retry/dismiss).
+		expect(findJsonByTestID(tr.toJSON(), "founding-export-body-error")).toBeTruthy();
+		expect(JSON.stringify(tr.toJSON())).toContain(resources.en.translation.networkFoundingExportError);
+		expect(mockNavigate).not.toHaveBeenCalled();
+		info.mockRestore();
+	});
+});
+
 describe("E-6: Import Network button renders with zero and with recent networks, navigates to ImportFoundingBundle", () => {
 	it("renders and navigates with zero recent networks", async () => {
 		mockRecentNetworks = [];

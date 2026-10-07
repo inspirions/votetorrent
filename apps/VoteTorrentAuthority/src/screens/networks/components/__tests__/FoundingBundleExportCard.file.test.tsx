@@ -23,8 +23,9 @@ jest.mock("react-i18next", () => ({
 	initReactI18next: { type: "3rdParty", init: jest.fn() },
 }));
 
+const mockNavigate = jest.fn();
 jest.mock("@react-navigation/native", () => ({
-	useNavigation: () => ({ navigate: jest.fn(), setOptions: jest.fn() }),
+	useNavigation: () => ({ navigate: mockNavigate, setOptions: jest.fn() }),
 	useTheme: () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const { lightTheme: theme } = require("../../../../theme/themes");
@@ -361,6 +362,37 @@ describe("FoundingBundleExportCard file handoff", () => {
 	it("Done closes the card", async () => {
 		const { tr, onClose } = await renderReady();
 		await press(tr, "founding-export-done");
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+});
+
+// Signer codes raised inside sign() (the prompt runs there). These pass against today's card routing;
+// the RED half of this gap is the engine specs, so no RED-first claim is made here.
+describe("signer codes raised inside sign() during export", () => {
+	const rejectFromSign = (code: string) => {
+		mockCreateSigner.mockImplementation(async () =>
+			jest.fn(async () => {
+				throw Object.assign(new Error(code), { code });
+			}),
+		);
+		mockExport.mockImplementation(async (_hash: string, opts: { sign: (d: Uint8Array) => Promise<unknown> }) => {
+			await opts.sign(new Uint8Array(32));
+			return { bundle: {}, text: TEXT, fileName: FILE };
+		});
+	};
+
+	it("CANCELED closes the card without an error", async () => {
+		rejectFromSign("CANCELED");
+		const { tr, onClose } = await renderReady();
+		expect(onClose).toHaveBeenCalledTimes(1);
+		expect(exists(tr, "founding-export-body-error")).toBe(false);
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	it("KEY_INVALIDATED_REASSOCIATE navigates to ProvisionSigningKey and closes", async () => {
+		rejectFromSign("KEY_INVALIDATED_REASSOCIATE");
+		const { onClose } = await renderReady();
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "invalidated" });
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 });
