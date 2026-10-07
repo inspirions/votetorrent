@@ -370,6 +370,49 @@ export class UserEngine implements IUserEngine {
   }
 
   /**
+   * O-06 (engine half): read-only inspection for the forked-device-identity repair. Reports whether
+   * `localUserId` is a network User, and which CURRENT officers (any authority) hold `pubKey` as an
+   * active UserKey, sorted. Every UserKey read is a point lookup on the `UserId` primary-key prefix
+   * (`UserId = :userId and PubKey = :pubKey`); there is no scan of UserKey. Never logs ids.
+   */
+  async inspectDeviceIdentity (
+    localUserId: string,
+    pubKey: string
+  ): Promise<{ localIsNetworkUser: boolean, officerUserIdsHoldingKey: string[] }> {
+    this.requireCtx('inspectDeviceIdentity')
+    if (typeof localUserId !== 'string' || localUserId.length === 0) {
+      throw new Error('UserEngine.inspectDeviceIdentity: localUserId must be a non-empty string')
+    }
+    if (typeof pubKey !== 'string' || pubKey.length === 0) {
+      throw new Error('UserEngine.inspectDeviceIdentity: pubKey must be a non-empty string')
+    }
+    try {
+      const db = this.ctx!.db
+      const userRow = await db.prepare('select 1 as found from User where Id = :id').get({ id: localUserId })
+      const officerUserIds: string[] = []
+      for await (const row of db.eval(
+        `select distinct O.UserId as UserId
+           from Officer O
+           join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+          order by O.UserId`
+      )) {
+        officerUserIds.push(row.UserId as string)
+      }
+      const now = nowCanonicalDatetime()
+      const holding: string[] = []
+      for (const userId of officerUserIds) {
+        const keyRow = await db
+          .prepare('select 1 as found from UserKey where UserId = :userId and PubKey = :pubKey and Expiration > :date')
+          .get({ userId, pubKey, date: now })
+        if (keyRow != null) holding.push(userId)
+      }
+      return { localIsNetworkUser: userRow != null, officerUserIdsHoldingKey: holding.sort() }
+    } catch (err) {
+      this.rethrow(err, 'inspectDeviceIdentity')
+    }
+  }
+
+  /**
    * ENG-03 — Returns true iff an Officer row exists for `userId` whose
    * Scopes JSON array includes `scope`, under the currently effective Admin
    * (current AdminEffectiveAt), in ANY authority of the network.
