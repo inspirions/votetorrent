@@ -13,6 +13,7 @@ import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
+import { renewOfficerIntakeKeyAfterKeyReplacement } from "../registration/officer-intake-key";
 import { useApp } from "../../providers/AppProvider";
 import {
 	clearRecoveryInProgress,
@@ -126,11 +127,12 @@ export default function ProvisionSigningKeyScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const navigation = useNavigation<NavigationProp>();
-	const { getEngine } = useApp();
+	const { getEngine, resolveDeviceSigner } = useApp();
 	const { reason } = useRoute().params as { reason: ProvisionReason };
 
 	const [phase, setPhase] = useState<ScreenPhase>("idle");
 	const [errorClass, setErrorClass] = useState<DeviceSigningErrorClass | undefined>(undefined);
+	const [intakeRenewalFailed, setIntakeRenewalFailed] = useState(false);
 	const pending = phase === "pending";
 	const isFirstRun = reason === "first-run";
 
@@ -580,6 +582,16 @@ export default function ProvisionSigningKeyScreen() {
 			// follow-up); leaving it set on any earlier failure path is the entire point.
 			await clearRecoveryInProgress();
 
+			// O-01: the replacement can strand the officer's intake encryption key. Renew it now (one
+			// extra prompt, only when stranded). Never fails the recovery: a failure is surfaced as a
+			// notice on the success screen.
+			const renewal = await renewOfficerIntakeKeyAfterKeyReplacement({
+				getEngine,
+				createSigner: resolveDeviceSigner,
+			});
+			console.warn(`[intake-renewal] outcome=${renewal}`);
+			setIntakeRenewalFailed(renewal === "failed");
+
 			setPhase("success");
 		} catch (err) {
 			// T-49-USER-7 (deviceSigningError.ts:117-118) — mapDeviceSigningError/handleCeremonyError
@@ -647,6 +659,13 @@ export default function ProvisionSigningKeyScreen() {
 				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
 					{t(bodyKey)}
 				</ThemedText>
+				{phase === "success" && intakeRenewalFailed && (
+					<View testID="signing-key-intake-renewal-failed">
+						<ThemedText type="small" style={[localStyles.body, { color: colors.warning }]}>
+							{t("officerIntakeRenewalFailedBody")}
+						</ThemedText>
+					</View>
+				)}
 				<View testID="signing-key-provisioning-continue-button">
 					<CustomButton
 						title={t("signingKeyProvisioningContinueButton")}

@@ -209,6 +209,15 @@ export function BulkImportSyncScreen() {
 				void refreshPeerCounts();
 			})
 			.catch((err) => {
+				// The officer's key was superseded by their other device: a specific message, not the
+				// signing-error hook (the code literal mirrors officer-intake-key.ts).
+				if ((err as { code?: unknown } | null)?.code === "intake-key-superseded") {
+					if (!unmountedRef.current) {
+						setIntakeShowError(true);
+						setIntakeErrorMessage(t("officerIntakeKeySupersededBody"));
+					}
+					return;
+				}
 				const outcome = handleDeviceSigningError(err);
 				if (outcome.handled) return;
 				if (!unmountedRef.current) {
@@ -220,7 +229,7 @@ export function BulkImportSyncScreen() {
 				intakeSubmittingRef.current = false;
 				if (!unmountedRef.current) setIntakeSubmitting(false);
 			});
-	}, [getEngine, resolveDeviceSigner, authorityId, handleDeviceSigningError, refreshPeerCounts]);
+	}, [getEngine, resolveDeviceSigner, authorityId, handleDeviceSigningError, refreshPeerCounts, t]);
 
 	// --- D-29: registration REST bridge URL config (62-25) ---
 	// `undefined` = loading (never read yet). A re-read also runs after 'conflict'/'failed' (S11),

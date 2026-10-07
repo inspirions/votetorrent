@@ -37,6 +37,28 @@ interface OfficerIntakeEngine {
 		vault: IKeyVault,
 		sign: (digest: Uint8Array) => Promise<Signature>,
 	): Promise<unknown>;
+	/** Optional: absent on mock engines. */
+	renewStrandedOfficerEncryptionKey?(
+		vault: IKeyVault,
+		sign: (digest: Uint8Array) => Promise<Signature>,
+	): Promise<OfficerKeyRenewalResult>;
+}
+
+/** Local structural copy of the engine's renewal outcome (not exported from vote-engine). */
+export type OfficerKeyRenewalResult = 'not-an-officer' | 'no-local-key' | 'not-needed' | 'renewed';
+
+/** Outcome of `renewOfficerIntakeKeyAfterKeyReplacement`; never a rejection. */
+export type OfficerKeyRenewalOutcome = OfficerKeyRenewalResult | 'failed' | 'unsupported';
+
+/** Code carried by the error `enableOfficerEncryptedIntake` throws for a superseded key. */
+export const INTAKE_KEY_SUPERSEDED_CODE = 'intake-key-superseded';
+
+export function isIntakeKeySupersededError(err: unknown): boolean {
+	return (
+		typeof err === 'object' &&
+		err !== null &&
+		(err as { code?: unknown }).code === INTAKE_KEY_SUPERSEDED_CODE
+	);
 }
 
 function resolveVault(deps: OfficerIntakeKeyDeps): IKeyVault {
@@ -71,11 +93,38 @@ export async function enableOfficerEncryptedIntake(
 	const intake = await deps.getEngine<OfficerIntakeEngine>('intake');
 	const vault = resolveVault(deps);
 	const sign = await deps.createSigner();
-	await intake.registerOfficerEncryptionKey(authorityId, vault, sign);
+	const registered = await intake.registerOfficerEncryptionKey(authorityId, vault, sign);
+	if ((registered as { superseded?: unknown } | null | undefined)?.superseded === true) {
+		throw Object.assign(new Error('encrypted intake key superseded by another device'), {
+			code: INTAKE_KEY_SUPERSEDED_CODE,
+		});
+	}
 
 	const state = await readOfficerIntakeKeyState(deps, authorityId);
 	if (state !== 'enabled') {
 		throw new Error('encrypted intake is not active for this device');
 	}
 	return state;
+}
+
+/**
+ * Renews a stranded intake key right after a successful signing-key replacement. The injected
+ * signer factory is invoked lazily, only inside the sign callback the engine calls, so the
+ * common `not-needed` case costs no biometric prompt. Never rejects: any failure (engine, vault,
+ * signer cancel) resolves `'failed'`; an engine without the method resolves `'unsupported'`.
+ */
+export async function renewOfficerIntakeKeyAfterKeyReplacement(
+	deps: OfficerIntakeKeyDeps,
+): Promise<OfficerKeyRenewalOutcome> {
+	try {
+		const intake = await deps.getEngine<OfficerIntakeEngine>('intake');
+		if (typeof intake.renewStrandedOfficerEncryptionKey !== 'function') return 'unsupported';
+		const sign = async (digest: Uint8Array): Promise<Signature> => {
+			const signer = await deps.createSigner();
+			return signer(digest);
+		};
+		return await intake.renewStrandedOfficerEncryptionKey(resolveVault(deps), sign);
+	} catch {
+		return 'failed';
+	}
 }
