@@ -35,7 +35,7 @@ import {normalizeRegistrationCode} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {useKeyboardInset} from '../../hooks/useKeyboardInset';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
-import {classifyAttestationFailure, type AttestationFailureClass} from '../../engines/attestation-failure';
+import {classifyAttestationFailure, isDeviceKeyAbsent, type AttestationFailureClass} from '../../engines/attestation-failure';
 import {resolveVoterRequestTransports} from './attach-voter-request-transport';
 import {
 	advanceReassociation,
@@ -163,7 +163,17 @@ export default function ContinueOnAnotherDeviceScreen() {
 		async function bootstrap() {
 			try {
 				const producer = resolveAttestationProducer();
-				const {publicKey} = await producer.provisionDeviceKey();
+				// READ the current key first and create one only when none exists. provisionDeviceKey on
+				// every mount minted a NEW Android key each time (attestation-producer.ts:80), so after
+				// leaving and re-opening the screen the resume read looked for requests under a key that
+				// never submitted one and the pending request was lost (initial/G5 WR-02 way-out fix).
+				let publicKey: string;
+				try {
+					({publicKey} = await producer.getCurrentDeviceKey());
+				} catch (keyErr) {
+					if (!isDeviceKeyAbsent(keyErr)) throw keyErr;
+					({publicKey} = await producer.provisionDeviceKey());
+				}
 				if (cancelled) return;
 				deviceKeyRef.current = publicKey;
 
@@ -197,14 +207,15 @@ export default function ContinueOnAnotherDeviceScreen() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	// --- Pending: non-dismissible while awaiting the authority's decision ---
+	// --- Pending: guarded against an accidental back gesture while a request is in flight and no
+	// failure is showing. On a failure the voter can always leave (initial/G5 WR-02). ---
 	useEffect(() => {
-		if (branch !== 'pending') return;
+		if (branch !== 'pending' || failureClass !== null) return;
 		const unsubscribe = navigation.addListener('beforeRemove', e => {
 			e.preventDefault();
 		});
 		return unsubscribe;
-	}, [branch, navigation]);
+	}, [branch, failureClass, navigation]);
 
 	async function runAdvance() {
 		if (advanceInFlightRef.current) return;
@@ -377,7 +388,18 @@ export default function ContinueOnAnotherDeviceScreen() {
 		runAdvance();
 	}
 
-	const showClose = branch !== 'pending' && branch !== 'resolving';
+	const showClose = (branch !== 'pending' && branch !== 'resolving') || failureClass !== null;
+
+	// Non-destructive exit to the Registration root: the pending request lives in replicated rows and
+	// is found again on the next visit (read-only key lookup in bootstrap).
+	const backToRegistrationButton = (testID: string, label: string) => (
+		<Pressable
+			testID={testID}
+			onPress={() => navigation.popToTop()}
+			style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
+			<Text style={[styles.ctaLabel, {color: colors.primary}]}>{label}</Text>
+		</Pressable>
+	);
 
 	if (branch === 'resolving') {
 		return (
@@ -394,6 +416,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 		return (
 			<View testID="continue-device-identity-lost" style={[styles.screen, {backgroundColor: colors.background}]}>
 				<IdentityRecoveryView onCreateNewIdentity={createNewIdentity} onRetry={retryAdvance} />
+				{backToRegistrationButton('continue-device-back-to-registration', t('newDevice.backToRegistrationButton'))}
 			</View>
 		);
 	}
@@ -684,6 +707,9 @@ export default function ContinueOnAnotherDeviceScreen() {
 										<Text style={[styles.ctaLabel, {color: colors.primary}]}>{t('newDevice.retryButton')}</Text>
 									</Pressable>
 								)}
+								{failureClass === 'terminal'
+									? backToRegistrationButton('continue-device-back-to-registration', t('newDevice.backToRegistrationButton'))
+									: null}
 							</>
 						) : (
 							<>
@@ -698,6 +724,10 @@ export default function ContinueOnAnotherDeviceScreen() {
 								<Text style={[styles.sectionBody, {color: colors.textSecondary, fontSize: typeScale.body.fontSize}]}>
 									{t('newDevice.pendingBody')}
 								</Text>
+								<Text style={[styles.sectionBody, {color: colors.textSecondary, fontSize: typeScale.body.fontSize}]}>
+									{t('newDevice.checkBackLaterBody')}
+								</Text>
+								{backToRegistrationButton('continue-device-check-back-later', t('newDevice.checkBackLaterButton'))}
 							</>
 						)}
 					</View>

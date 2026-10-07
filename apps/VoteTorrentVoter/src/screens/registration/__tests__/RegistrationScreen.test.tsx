@@ -330,3 +330,64 @@ describe('RegistrationScreen — registration code re-show / entry links (D-40/D
 		expect(tr.root.findAllByProps({testID: 'continue-device-entry-link'}).length).toBeGreaterThan(0);
 	});
 });
+
+describe('RegistrationScreen failed code read (gap6/WR-07, S-1)', () => {
+	async function flush(times = 10) {
+		for (let i = 0; i < times; i++) await Promise.resolve();
+	}
+	async function mountWith(result: unknown) {
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => result);
+		setProviderState();
+		let tr!: renderer.ReactTestRenderer;
+		await renderer.act(async () => {
+			tr = renderer.create(
+				<ThemeProvider value={lightTheme}>
+					<RegistrationScreen />
+				</ThemeProvider>,
+			);
+			await flush();
+		});
+		return tr;
+	}
+	const ids = (tr: renderer.ReactTestRenderer, id: string) => tr.root.findAllByProps({testID: id}).length;
+
+	beforeEach(() => {
+		mockResolveRegistrationCodeAvailability.mockClear();
+	});
+
+	it('read-failed, registrant unknown: Try Again text + control and the continue-on-another-device link', async () => {
+		const tr = await mountWith({kind: 'unavailable', reason: 'read-failed', registrantKnown: false});
+		expect(ids(tr, 'registration-code-unavailable')).toBeGreaterThan(0);
+		expect(ids(tr, 'registration-code-retry')).toBeGreaterThan(0);
+		expect(ids(tr, 'continue-device-entry-link')).toBeGreaterThan(0);
+		expect(ids(tr, 'registration-code-not-available')).toBe(0);
+		expect(JSON.stringify(tr.toJSON())).toContain("isn't available right now");
+	});
+
+	it('read-failed, registrant known: Try Again without the entry link; Try Again re-runs the read and shows the result', async () => {
+		const tr = await mountWith({kind: 'unavailable', reason: 'read-failed', registrantKnown: true});
+		expect(ids(tr, 'registration-code-retry')).toBeGreaterThan(0);
+		expect(ids(tr, 'continue-device-entry-link')).toBe(0);
+		const callsBefore = mockResolveRegistrationCodeAvailability.mock.calls.length;
+		mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'available', code: 'ABCDE12345'}));
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'registration-code-retry'}).props.onPress();
+			await flush();
+		});
+		expect(mockResolveRegistrationCodeAvailability.mock.calls.length).toBe(callsBefore + 1);
+		expect(ids(tr, 'registration-code-retry')).toBe(0);
+		expect(ids(tr, 'registration-code-show-again-link')).toBeGreaterThan(0);
+	});
+
+	it('holder-key-missing keeps the permanent not-available text', async () => {
+		const tr = await mountWith({kind: 'unavailable', reason: 'holder-key-missing', registrantKnown: true});
+		expect(ids(tr, 'registration-code-not-available')).toBeGreaterThan(0);
+		expect(ids(tr, 'registration-code-retry')).toBe(0);
+	});
+
+	it('an unavailable result with no reason keeps the not-available text', async () => {
+		const tr = await mountWith({kind: 'unavailable'});
+		expect(ids(tr, 'registration-code-not-available')).toBeGreaterThan(0);
+		expect(ids(tr, 'registration-code-retry')).toBe(0);
+	});
+});

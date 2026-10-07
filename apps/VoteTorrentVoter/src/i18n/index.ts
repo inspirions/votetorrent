@@ -442,6 +442,11 @@ const resources = {
 			'newDevice.backToCodeLink': 'Use my code instead',
 			'newDevice.restartLink': 'My registration is still pending',
 			'newDevice.retryButton': 'Try Again',
+			'code.retryButton': 'Try Again',
+			'newDevice.checkBackLaterButton': 'Check Back Later',
+			'newDevice.checkBackLaterBody':
+				'Your request stays with the authority. Come back to this screen to see whether it was approved.',
+			'newDevice.backToRegistrationButton': 'Back to Registration',
 			'deviceRetired.heading': 'This device has been retired',
 			'deviceRetired.body':
 				'Your voting registration was moved to another device. This device can no longer be used to vote.',
@@ -809,6 +814,11 @@ const resources = {
 			'newDevice.backToCodeLink': 'Usar mi código en su lugar',
 			'newDevice.restartLink': 'Mi registro aún está pendiente',
 			'newDevice.retryButton': 'Intentar de nuevo',
+			'code.retryButton': 'Intentar de nuevo',
+			'newDevice.checkBackLaterButton': 'Volver más tarde',
+			'newDevice.checkBackLaterBody':
+				'Tu solicitud sigue con la autoridad. Vuelve a esta pantalla para ver si fue aprobada.',
+			'newDevice.backToRegistrationButton': 'Volver al registro',
 			'deviceRetired.heading': 'Este dispositivo ha sido retirado',
 			'deviceRetired.body':
 				'Tu registro de votación se trasladó a otro dispositivo. Este dispositivo ya no se puede usar para votar.',

@@ -26,7 +26,7 @@
  * `isRegistered` toggle above, so a toggled-off approved device can show the not-registered card
  * alongside "Show my registration code".
  */
-import React, {useCallback, useState} from 'react';
+import React, {useCallback, useRef, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -87,6 +87,21 @@ export default function RegistrationScreen() {
 		}, [getEngine]),
 	);
 
+	const retryInFlightRef = useRef(false);
+	async function onRetryCodeRead() {
+		if (retryInFlightRef.current) return;
+		retryInFlightRef.current = true;
+		try {
+			const result = await resolveRegistrationCodeAvailability({
+				getEngine,
+				getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+			});
+			setCodeAvailability(result);
+		} finally {
+			retryInFlightRef.current = false;
+		}
+	}
+
 	async function onShowAgain() {
 		const result = await resolveRegistrationCodeAvailability({
 			getEngine,
@@ -134,6 +149,32 @@ export default function RegistrationScreen() {
 								{t('newDevice.entryLink')}
 							</Text>
 						</Pressable>
+					</View>
+				) : codeAvailability?.kind === 'unavailable' && codeAvailability.reason === 'read-failed' ? (
+					// gap6/WR-07: a FAILED read is retryable and distinct from the permanent not-available
+					// notice. If the failure came before the device's registration was known, the voter
+					// still gets the continue-on-another-device entry so they are never at a dead end.
+					<View style={styles.codeSection}>
+						<Text
+							testID="registration-code-unavailable"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
+							{t('code.unavailable')}
+						</Text>
+						<Pressable testID="registration-code-retry" onPress={onRetryCodeRead} style={styles.link}>
+							<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+								{t('code.retryButton')}
+							</Text>
+						</Pressable>
+						{codeAvailability.registrantKnown === false ? (
+							<Pressable
+								testID="continue-device-entry-link"
+								onPress={() => navigation.navigate('ContinueOnAnotherDevice')}
+								style={styles.link}>
+								<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+									{t('newDevice.entryLink')}
+								</Text>
+							</Pressable>
+						) : null}
 					</View>
 				) : codeAvailability?.kind === 'not-sent' ||
 				  codeAvailability?.kind === 'not-holder' ||

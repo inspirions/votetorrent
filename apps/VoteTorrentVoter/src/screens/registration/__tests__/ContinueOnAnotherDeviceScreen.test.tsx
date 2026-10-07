@@ -236,10 +236,12 @@ describe('ContinueOnAnotherDeviceScreen — default branch (Surface 8, D-45)', (
 
 		expect(tr.root.findByProps({testID: 'continue-device-close'})).toBeDefined();
 
-		// 63-18: bootstrap CREATES the key exactly once; the resume lookup reads it back and must not
-		// mint a second one (on Android a second provision would orphan the first key).
-		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
-		expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(1);
+		// Bootstrap READS the current key first and creates one only when none exists
+		// (isDeviceKeyAbsent); provisioning on every mount minted a new Android key and orphaned the
+		// pending request (initial/G5 WR-02 way-out fix, attestation-producer.ts:80). Two reads: one
+		// bootstrap read + one resume read through resolveReassociationResume.
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(0);
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(2);
 
 		const pressables = [
 			'continue-device-close',
@@ -290,6 +292,15 @@ describe('ContinueOnAnotherDeviceScreen — default branch (Surface 8, D-45)', (
 
 		const prevented = fireBeforeRemove();
 		expect(prevented.defaultPrevented).toBe(true);
+	});
+});
+
+describe('ContinueOnAnotherDeviceScreen — fresh device key (63-18 never mint twice)', () => {
+	it('no key yet: provisions exactly once at bootstrap; the resume lookup only reads', async () => {
+		mockGetCurrentDeviceKey.mockRejectedValueOnce(Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'}));
+		await mountAndFlush();
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(2);
 	});
 });
 
