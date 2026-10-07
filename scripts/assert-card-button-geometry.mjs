@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Card button geometry gate. Measures a uiautomator dump.
 //
+// --density-dpi is REQUIRED (no default): read it from `adb shell wm density` on the device the
+// dump came from. A silent default would measure a different device's pixels.
+//
 // Usage:
 //   node scripts/assert-card-button-geometry.mjs <dump.xml> --density-dpi 420 \
 //        --label "KEEP REVIEWING" --label "CONFIRM REJECTION"
@@ -9,7 +12,7 @@
 //   node scripts/assert-card-button-geometry.mjs --selftest
 //
 // For each --label: find the node whose `text` equals the label, then its nearest
-// clickable ancestor. PASS needs button height >= ceil(44 * dpi / 160) px AND the
+// clickable ancestor. PASS needs button height >= ceil(48 * dpi / 160) px AND the
 // text node's bounds inside the button's bounds on all four edges.
 //
 // NOTE: uiautomator's `text` attribute carries the FULL string even when it is
@@ -66,8 +69,11 @@ function* walk(n) {
 	}
 }
 
+// The card-button component contract is a 48 dp minimum touch target.
+export const MIN_TOUCH_DP = 48;
+
 export function measure(xml, labels, dpi) {
-	const min = Math.ceil((44 * dpi) / 160);
+	const min = Math.ceil((MIN_TOUCH_DP * dpi) / 160);
 	const tree = parseTree(xml);
 	const nodes = [...walk(tree)];
 	const results = [];
@@ -125,6 +131,12 @@ if (argv.includes("--selftest")) {
 		// Pixel_8; the tall size is 147px (56dp at 420dpi).
 		["approval-footer-thin.xml", "FAIL", ["APPROVE REGISTRATION", "REJECT REQUEST"]],
 		["approval-footer-tall.xml", "PASS", ["APPROVE REGISTRATION", "REJECT REQUEST"]],
+		// A 118px button is 44.95dp at 420dpi: it cleared the old 44dp floor, fails the 48dp one.
+		["button-45dp.xml", "FAIL"],
+		// Tall enough (160px) but the text extends past the button's bottom edge: containment alone fails it.
+		["text-outside-tall-button.xml", "FAIL"],
+		// The label text is absent from the dump.
+		["missing-label.xml", "FAIL"],
 	]) {
 		const got = run(readFileSync(join(dir, f), "utf8"), fixtureLabels ?? labels, 420) ? "PASS" : "FAIL";
 		console.log(`SELFTEST ${f}: expected ${expected} got ${got}`);
@@ -134,7 +146,7 @@ if (argv.includes("--selftest")) {
 }
 const file = argv.find((a, i) => !a.startsWith("--") && argv[i - 1] !== "--density-dpi" && argv[i - 1] !== "--label");
 const labels = [];
-let dpi = 420;
+let dpi = Number.NaN;
 for (let i = 0; i < argv.length; i++) {
 	if (argv[i] === "--label") labels.push(argv[++i]);
 	else if (argv[i] === "--density-dpi") dpi = Number(argv[++i]);
