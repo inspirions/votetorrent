@@ -323,6 +323,14 @@ export interface Spec extends TurboModule {
 	 * iOS, which shares through RN `Share.share({ url })` instead).
 	 */
 	shareFile(uri: string, mimeType: string, subject: string, dialogTitle: string): Promise<Object>
+
+	/**
+	 * Deletes the regular file at the `file://` `uri` when it lies strictly inside the app cache
+	 * directory (Android `context.cacheDir`, iOS `NSCachesDirectory`); resolves `{ deleted: boolean }`.
+	 * Reject codes: `OUTSIDE_CACHE` (anything else: another directory, the cache root itself, a
+	 * non-file), `DELETE_FAILED`.
+	 */
+	deleteCachedFile(uri: string): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')

@@ -39,6 +39,29 @@ object FileShareHelper {
 		}
 	}
 
+	/**
+	 * Deletes the regular file at [uriString] iff its canonical path is a strict child of the canonical
+	 * cache directory. Returns whether a file was deleted. Rejects OUTSIDE_CACHE / DELETE_FAILED.
+	 */
+	fun deleteCachedFile(context: Context, uriString: String): Boolean {
+		try {
+			val path = Uri.parse(uriString).path
+			if (uriString.isEmpty() || path.isNullOrEmpty()) {
+				throw FileShareException("OUTSIDE_CACHE", "uri has no path")
+			}
+			val file = File(path).canonicalFile
+			val root = context.cacheDir.canonicalFile
+			if (!file.path.startsWith(root.path + File.separator) || !file.isFile) {
+				throw FileShareException("OUTSIDE_CACHE", "file is not a regular file inside the cache directory")
+			}
+			return file.delete()
+		} catch (e: FileShareException) {
+			throw e
+		} catch (e: Exception) {
+			throw FileShareException("DELETE_FAILED", e.message ?: "delete failed", e)
+		}
+	}
+
 	fun shareFile(
 		activity: Activity?,
 		context: Context,

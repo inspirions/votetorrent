@@ -57,7 +57,7 @@ export type {
 
 // Phase 62 plan 75 (D-36): write a cache file and share it AS A FILE. Named exports only — same
 // "no re-export of the TurboModule default" rule as above; `file-share.ts` requires it lazily.
-export { FileShareError, writeShareFile, shareFileAndroid } from './file-share'
+export { FileShareError, writeShareFile, shareFileAndroid, deleteCachedFile } from './file-share'
 export type { FileShareErrorCode } from './file-share'
 
 // Phase 63 review (CR-01, WR-03): FLAG_SECURE toggle and sensitive clipboard copy. Named exports

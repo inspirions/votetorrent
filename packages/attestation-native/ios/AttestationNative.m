@@ -93,6 +93,11 @@ RCT_EXTERN_METHOD(shareFile:(NSString *)uri
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Plan 62-138. Selector must match the Swift `@objc(deleteCachedFile:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(deleteCachedFile:(NSString *)uri
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Phase 63 review (CR-02, CR-01, WR-03). Selectors must match the Swift `@objc(deleteWrapKey:resolver:
 // rejecter:)`, `@objc(setSecureScreen:resolver:rejecter:)` and `@objc(copySensitiveText:)` EXACTLY.
 // copySensitiveText is a blocking synchronous method (the codegen spec returns `boolean`).

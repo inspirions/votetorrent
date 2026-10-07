@@ -578,6 +578,20 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}.start()
 	}
 
+	/** Plan 62-138: delete a regular file strictly inside cacheDir; resolves `{ deleted }`. Rejects OUTSIDE_CACHE / DELETE_FAILED. */
+	override fun deleteCachedFile(uri: String, promise: Promise) {
+		Thread {
+			try {
+				val deleted = FileShareHelper.deleteCachedFile(reactApplicationContext, uri)
+				promise.resolve(Arguments.createMap().apply { putBoolean("deleted", deleted) })
+			} catch (e: FileShareException) {
+				promise.reject(e.code, e.message, e)
+			} catch (e: Exception) {
+				promise.reject("DELETE_FAILED", e)
+			}
+		}.start()
+	}
+
 	/** Plan 62-75: share a vt-share cache file as a file (never EXTRA_TEXT). Rejects SHARE_FAILED. */
 	override fun shareFile(uri: String, mimeType: String, subject: String, dialogTitle: String, promise: Promise) {
 		try {

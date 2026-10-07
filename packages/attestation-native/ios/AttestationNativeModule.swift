@@ -907,6 +907,34 @@ class AttestationNativeModule: NSObject {
     }
   }
 
+  /// Plan 62-138: deletes the regular file at the `file://` `uri` iff its symlink-resolved, standardized
+  /// path is a strict child of NSCachesDirectory. Resolves `["deleted": Bool]`; rejects OUTSIDE_CACHE /
+  /// DELETE_FAILED.
+  @objc(deleteCachedFile:resolver:rejecter:)
+  func deleteCachedFile(_ uri: String,
+                        resolver resolve: @escaping RCTPromiseResolveBlock,
+                        rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let url = URL(string: uri), url.isFileURL else {
+      reject("OUTSIDE_CACHE", "uri is not a file URL", nil); return
+    }
+    let fm = FileManager.default
+    guard let cachesDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+      reject("DELETE_FAILED", "no caches directory", nil); return
+    }
+    let root = cachesDir.resolvingSymlinksInPath().standardizedFileURL.path
+    let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+    var isDir: ObjCBool = false
+    guard target.hasPrefix(root + "/"), fm.fileExists(atPath: target, isDirectory: &isDir), !isDir.boolValue else {
+      reject("OUTSIDE_CACHE", "file is not a regular file inside the caches directory", nil); return
+    }
+    do {
+      try fm.removeItem(atPath: target)
+      resolve(["deleted": true])
+    } catch {
+      reject("DELETE_FAILED", error.localizedDescription, error)
+    }
+  }
+
   /// Android-only seam. iOS shares through RN `Share.share({ url })`, whose sheet includes Save to Files.
   @objc(shareFile:mimeType:subject:dialogTitle:resolver:rejecter:)
   func shareFile(_ uri: String,

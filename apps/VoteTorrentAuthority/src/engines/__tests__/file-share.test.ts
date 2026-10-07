@@ -7,7 +7,7 @@ const mockState = { shouldThrow: false, omitMethods: false, os: 'android' }
 
 jest.mock('react-native', () => {
 	const actual: Record<string, unknown> = jest.requireActual('react-native')
-	const fake = { writeShareFile: jest.fn(), shareFile: jest.fn() }
+	const fake = { writeShareFile: jest.fn(), shareFile: jest.fn(), deleteCachedFile: jest.fn() }
 	const registry = actual.TurboModuleRegistry as { getEnforcing: (name: string) => unknown }
 	const registryProxy = new Proxy(registry, {
 		get(target, prop, receiver) {
@@ -37,10 +37,12 @@ jest.mock('react-native', () => {
 	})
 })
 
-import { FileShareError, shareFileAndroid, writeShareFile } from '@votetorrent/attestation-native'
+import { deleteCachedFile, FileShareError, shareFileAndroid, writeShareFile } from '@votetorrent/attestation-native'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the mock above.
-const { __fake: fake } = require('react-native') as { __fake: { writeShareFile: jest.Mock; shareFile: jest.Mock } }
+const { __fake: fake } = require('react-native') as {
+	__fake: { writeShareFile: jest.Mock; shareFile: jest.Mock; deleteCachedFile: jest.Mock }
+}
 
 const SHARE_OPTS = { mimeType: 'application/json', subject: 's', dialogTitle: 't' }
 
@@ -48,6 +50,7 @@ describe('file-share wrapper', () => {
 	beforeEach(() => {
 		fake.writeShareFile.mockReset()
 		fake.shareFile.mockReset()
+		fake.deleteCachedFile.mockReset()
 		mockState.shouldThrow = false
 		mockState.omitMethods = false
 		mockState.os = 'android'
@@ -159,5 +162,43 @@ describe('file-share wrapper', () => {
 		fake.shareFile.mockResolvedValue({ launched: true })
 		await shareFileAndroid('file:///x', SHARE_OPTS)
 		expect(fake.shareFile).toHaveBeenCalledWith('file:///x', 'application/json', 's', 't')
+	})
+
+	describe('deleteCachedFile', () => {
+		it('resolves true when native reports deleted', async () => {
+			fake.deleteCachedFile.mockResolvedValue({ deleted: true })
+			await expect(deleteCachedFile('file:///cache/x.json')).resolves.toBe(true)
+			expect(fake.deleteCachedFile).toHaveBeenCalledWith('file:///cache/x.json')
+		})
+
+		it('resolves false when native reports not deleted', async () => {
+			fake.deleteCachedFile.mockResolvedValue({ deleted: false })
+			await expect(deleteCachedFile('file:///cache/x.json')).resolves.toBe(false)
+		})
+
+		it('resolves false (never throws) when native rejects', async () => {
+			fake.deleteCachedFile.mockRejectedValue(Object.assign(new Error('no'), { code: 'OUTSIDE_CACHE' }))
+			await expect(deleteCachedFile('file:///etc/passwd')).resolves.toBe(false)
+		})
+
+		it('resolves false when the method is missing from the binary', async () => {
+			const d = fake.deleteCachedFile
+			delete (fake as Partial<typeof fake>).deleteCachedFile
+			try {
+				await expect(deleteCachedFile('file:///cache/x.json')).resolves.toBe(false)
+			} finally {
+				fake.deleteCachedFile = d
+			}
+		})
+
+		it('resolves false when the module is unavailable', async () => {
+			mockState.omitMethods = true
+			await expect(deleteCachedFile('file:///cache/x.json')).resolves.toBe(false)
+		})
+
+		it.each(['content://x/y', '/abs/path', 'https://a/b', ''])('refuses non-file uri %j before calling native', async uri => {
+			await expect(deleteCachedFile(uri)).resolves.toBe(false)
+			expect(fake.deleteCachedFile).not.toHaveBeenCalled()
+		})
 	})
 })

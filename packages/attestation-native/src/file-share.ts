@@ -41,7 +41,7 @@ function getNative(): NativeAttestationSpec {
 	return require('./specs/NativeAttestation').default as NativeAttestationSpec
 }
 
-function resolveNative(method: 'writeShareFile' | 'shareFile'): NativeAttestationSpec {
+function resolveNative(method: 'writeShareFile' | 'shareFile' | 'deleteCachedFile'): NativeAttestationSpec {
 	let native: NativeAttestationSpec
 	try {
 		native = getNative()
@@ -105,5 +105,22 @@ export async function shareFileAndroid(
 		await native.shareFile(uri, opts.mimeType, opts.subject, opts.dialogTitle)
 	} catch (e) {
 		throw mapNativeError(e, 'share-failed')
+	}
+}
+
+/**
+ * Deletes a file the app itself cached (e.g. a document-picker copy). Native refuses anything that
+ * is not a regular file strictly inside the app cache directory. NEVER throws: resolves `true` only
+ * when native reports the file deleted; a non-`file://` uri, a missing module or method, or any
+ * native rejection resolves `false`.
+ */
+export async function deleteCachedFile(uri: string): Promise<boolean> {
+	if (typeof uri !== 'string' || !uri.startsWith('file://')) return false
+	try {
+		const native = resolveNative('deleteCachedFile')
+		const result = (await native.deleteCachedFile(uri)) as { deleted?: unknown } | null | undefined
+		return result?.deleted === true
+	} catch {
+		return false
 	}
 }
