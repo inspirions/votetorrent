@@ -431,8 +431,12 @@ echo "[run-replication-proof] STRAND_ID captured: ${STRAND_ID}"
 # into the runner's generated config so it connects automatically.
 # STRAND_ID is the hash of the network the device created, so the drone must JOIN that strand, not
 # found a second history under the same id (round-3 UAT test 15: while peered, the device's own
-# committed rows read as missing). Default join for both drones; pass DRONE_STRAND_ROLE=found to
-# reproduce a historical run (the drone then founds the strand, as every run before this default did).
+# committed rows read as missing). Both drones default to join. Only drone-A's role is overridable
+# from DRONE_STRAND_ROLE: pass DRONE_STRAND_ROLE=found to reproduce a historical run (drone-A then
+# founds the strand, as every run before this default did). Drone-B reads its OWN variable,
+# DRONE_B_STRAND_ROLE (default join), and never inherits DRONE_STRAND_ROLE: historical drone-B was
+# never a founder, and inheriting `found` would make it found a third history under the device's
+# STRAND_ID (WR-05).
 echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-join} under Node 22 ..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "${NVM_DIR}/nvm.sh" ]; then
@@ -559,11 +563,14 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # device-rewritten 10.0.2.2 addrs below — drone-A and drone-B are both host-side
 # Node processes talking to each other directly over loopback (Pitfall 2: distinct
 # host-loopback vs emulator-alias address spaces).
-echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-join} under Node 22 ..."
+# Drone-B's role comes from DRONE_B_STRAND_ROLE only (default join), never from DRONE_STRAND_ROLE
+# (WR-05; see Step 3). With STRAND_ID set, drone.mjs refuses an unset role, so historical drone-B's
+# derived founder-ness ({}) is not reproducible here; join (founder: false) is the closest match.
+echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_B_STRAND_ROLE:-join} (from DRONE_B_STRAND_ROLE) under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
 DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" \
   STRAND_ID="${STRAND_ID}" \
-  DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-join}" \
+  DRONE_STRAND_ROLE="${DRONE_B_STRAND_ROLE:-join}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
   DRONE_INVITE="${DRONE_INVITE}" \
