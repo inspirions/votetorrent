@@ -17,7 +17,7 @@ import { StyleSheet } from "react-native";
 import renderer, { act } from "react-test-renderer";
 import { lightTheme } from "../../../theme/themes";
 import { resources } from "../../../i18n";
-import { mapFoundingImportResult } from "../foundingBundleState";
+import { mapFoundingImportResult, isCompleteFingerprintInput } from "../foundingBundleState";
 import type { FoundingBundleImportResult } from "@votetorrent/vote-core";
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
@@ -63,10 +63,17 @@ jest.mock("@react-navigation/native", () => ({
 	},
 }));
 
-let mockNetworksEngine: { importFoundingBundle: jest.Mock } | undefined;
+let mockNetworksEngine: { importFoundingBundle: jest.Mock; inspectFoundingBundle?: jest.Mock } | undefined;
 const mockSelectNetwork = jest.fn(async () => undefined);
+// Tests that only care about the import result get a default "valid file" inspection.
+const mockDefaultInspect = jest.fn(async () => ({ ok: true, networkName: "Test Network" }));
 jest.mock("../../../providers/AppProvider", () => ({
-	useApp: () => ({ networksEngine: mockNetworksEngine, selectNetwork: mockSelectNetwork }),
+	useApp: () => ({
+		networksEngine: mockNetworksEngine
+			? { inspectFoundingBundle: mockDefaultInspect, ...mockNetworksEngine }
+			: undefined,
+		selectNetwork: mockSelectNetwork,
+	}),
 }));
 
 const mockGetDeviceUser = jest.fn(async () => ({ id: "user-1" }));
@@ -84,8 +91,32 @@ const ImportFoundingBundleScreen = require("../ImportFoundingBundleScreen").defa
 
 const NETWORK_REF = { hash: "netHash1", name: "Test Network", primaryAuthorityDomainName: "authority.example" };
 
+// The file's fingerprint. The picked text below carries it ONLY inside its digest, so any app code
+// that derived a fingerprint from the file would produce this value.
+const F = "a1b2 c3d4 e5f6 0718";
+const F_COMPACT = "a1b2c3d4e5f60718";
+const BUNDLE_TEXT = JSON.stringify({
+	formatVersion: 1,
+	digest: Buffer.concat([Buffer.from(F_COMPACT, "hex"), Buffer.alloc(24)]).toString("base64url"),
+});
+
 function okResult(outcome: "replayed" | "already-present"): FoundingBundleImportResult {
-	return { ok: true, outcome, networkRef: NETWORK_REF as any, network: {} as any };
+	return { ok: true, outcome, fingerprint: F, networkRef: NETWORK_REF as any, network: {} as any };
+}
+function anchorResult(reason: "anchor-mismatch" | "anchor-required"): FoundingBundleImportResult {
+	return { ok: false, reason, category: "invalid-bundle", detail: "fixed" };
+}
+/** An engine whose import compares the typed anchor with F, like the real one. */
+function comparingEngine() {
+	return {
+		inspectFoundingBundle: jest.fn(async () => ({ ok: true, networkName: "Test Network" })),
+		importFoundingBundle: jest.fn(async (_text: string, _user: unknown, options?: { expectedFingerprint?: string }) => {
+			const typed = options?.expectedFingerprint;
+			if (typeof typed !== "string") return anchorResult("anchor-required");
+			const norm = typed.toLowerCase().replace(/[\s-]+/g, "");
+			return norm === F_COMPACT ? okResult("replayed") : anchorResult("anchor-mismatch");
+		}),
+	};
 }
 function alreadyJoinedResult(): FoundingBundleImportResult {
 	return { ok: false, reason: "already-joined", category: "already-joined", networkRef: NETWORK_REF as any };
@@ -171,12 +202,13 @@ beforeEach(() => {
 
 describe("M-1: mapFoundingImportResult — exhaustive 62-16 category map", () => {
 	it("ok replayed -> success (carries networkRef)", () => {
-		expect(mapFoundingImportResult(okResult("replayed"))).toEqual({ state: "success", networkRef: NETWORK_REF });
+		expect(mapFoundingImportResult(okResult("replayed"))).toEqual({ state: "success", networkRef: NETWORK_REF, fingerprint: F });
 	});
 	it("ok already-present -> success (carries networkRef)", () => {
 		expect(mapFoundingImportResult(okResult("already-present"))).toEqual({
 			state: "success",
 			networkRef: NETWORK_REF,
+			fingerprint: F,
 		});
 	});
 	it("category already-joined -> alreadyJoined (carries networkRef)", () => {
@@ -190,6 +222,16 @@ describe("M-1: mapFoundingImportResult — exhaustive 62-16 category map", () =>
 	});
 	it("category error -> genericError", () => {
 		expect(mapFoundingImportResult(errorResult())).toEqual({ state: "genericError" });
+	});
+	it("reason anchor-mismatch -> fingerprintMismatch, anchor-required -> anchorRequired (before the category branch)", () => {
+		expect(mapFoundingImportResult(anchorResult("anchor-mismatch"))).toEqual({ state: "fingerprintMismatch" });
+		expect(mapFoundingImportResult(anchorResult("anchor-required"))).toEqual({ state: "anchorRequired" });
+	});
+	it("isCompleteFingerprintInput: 16 hex after lowercasing and stripping spaces/dashes", () => {
+		expect(isCompleteFingerprintInput("A1B2-C3D4 e5f6 0718")).toBe(true);
+		expect(isCompleteFingerprintInput("a1b2c3d4e5f6071")).toBe(false);
+		expect(isCompleteFingerprintInput("a1b2c3d4e5f60718a")).toBe(false);
+		expect(isCompleteFingerprintInput("g1b2c3d4e5f60718")).toBe(false);
 	});
 });
 
@@ -315,7 +357,9 @@ describe("S-3: validating shows the validating copy and contains no pressable el
 			resolvePick({ kind: "picked", text: "bundle-text" });
 			await Promise.resolve();
 			await Promise.resolve();
+			await Promise.resolve();
 		});
+		await completeJoin(tr);
 
 		const validatingBody = findJsonByTestID(tr.toJSON(), "founding-import-body-validating")!.node;
 		expect(validatingBody).toBeTruthy();
@@ -325,24 +369,169 @@ describe("S-3: validating shows the validating copy and contains no pressable el
 	});
 });
 
-describe("S-4: picked text passed unchanged, device user as second arg, no options; result maps through mapFoundingImportResult", () => {
-	it("calls importFoundingBundle(text, deviceUser) and lands on success", async () => {
+describe("S-4: the picked text is inspected, then (after the typed fingerprint) passed unchanged to the import", () => {
+	it("inspects first; Join calls importFoundingBundle(text, deviceUser, { expectedFingerprint }) exactly once, no expectedDigest", async () => {
 		mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: "SENTINEL-BUNDLE-TEXT" });
 		mockGetDeviceUser.mockResolvedValue({ id: "user-xyz" } as any);
-		mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
+		const engine = comparingEngine();
+		mockNetworksEngine = engine;
 
 		const tr = await mount();
-		await pressButton(tr, resources.en.translation.networkFoundingImportChooseFileButton);
+		await pressButton(tr, CHOOSE());
+		expect(engine.inspectFoundingBundle).toHaveBeenCalledWith("SENTINEL-BUNDLE-TEXT");
+		expect(engine.importFoundingBundle).not.toHaveBeenCalled();
 
-		expect(mockNetworksEngine!.importFoundingBundle).toHaveBeenCalledWith("SENTINEL-BUNDLE-TEXT", { id: "user-xyz" });
-		expect(mockNetworksEngine!.importFoundingBundle.mock.calls[0]).toHaveLength(2);
+		await completeJoin(tr, "A1B2-C3D4 e5f6 0718");
+		expect(engine.importFoundingBundle).toHaveBeenCalledTimes(1);
+		const [text, user, options] = engine.importFoundingBundle.mock.calls[0] as any[];
+		expect(text).toBe("SENTINEL-BUNDLE-TEXT");
+		expect(user).toEqual({ id: "user-xyz" });
+		expect(typeof options.expectedFingerprint).toBe("string");
+		expect(options.expectedFingerprint.toLowerCase().replace(/[\s-]+/g, "")).toBe(F_COMPACT);
+		expect(options).not.toHaveProperty("expectedDigest");
 	});
 });
 
+describe("S-4b: typed fingerprint step — nothing from the file is shown before the engine accepts the typed value", () => {
+	async function reachConfirm() {
+		mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: BUNDLE_TEXT });
+		const engine = comparingEngine();
+		mockNetworksEngine = engine;
+		const tr = await mount();
+		await pressButton(tr, CHOOSE());
+		return { tr, engine };
+	}
+	function expectNoDisclosure(tr: renderer.ReactTestRenderer) {
+		const json = JSON.stringify(tr.toJSON()).toLowerCase();
+		expect(json).not.toContain(F);
+		expect(json).not.toContain(F_COMPACT);
+		for (const group of F.split(" ")) expect(json).not.toContain(group);
+	}
+
+	it("shows the confirm body with heading, body, network name and a Join that is disabled until 16 hex", async () => {
+		const { tr } = await reachConfirm();
+		const body = findJsonByTestID(tr.toJSON(), "founding-import-body-confirm")!;
+		expect(body).toBeTruthy();
+		const json = JSON.stringify(body.node);
+		expect(json).toContain(resources.en.translation.networkFoundingImportFingerprintHeading);
+		expect(json).toContain(resources.en.translation.networkFoundingImportFingerprintBody);
+		expect(json).toContain("Test Network");
+		const join = () => findButton(tr, JOIN());
+		expect((join().props as any).disabled).toBe(true);
+		await typeFingerprint(tr, "0000 1111 22");
+		expect((join().props as any).disabled).toBe(true);
+		await typeFingerprint(tr, "0000 1111 2222 3333");
+		expect((join().props as any).disabled).toBe(false);
+	});
+
+	it("never renders the file's fingerprint (full or by group): empty, partial, and after a wrong attempt", async () => {
+		const { tr, engine } = await reachConfirm();
+		expectNoDisclosure(tr);
+		await typeFingerprint(tr, "0000 11");
+		expectNoDisclosure(tr);
+		await completeJoin(tr, "0000 1111 2222 3333");
+		expect(engine.importFoundingBundle).toHaveBeenCalledTimes(1);
+		expectNoDisclosure(tr);
+	});
+
+	it("wrong value: anchor-mismatch shows the mismatch copy, stays on confirm with the input cleared, joins nothing", async () => {
+		const { tr } = await reachConfirm();
+		await completeJoin(tr, "0000 1111 2222 3333");
+		const body = findJsonByTestID(tr.toJSON(), "founding-import-body-confirm")!;
+		expect(body).toBeTruthy();
+		expect(JSON.stringify(body.node)).toContain(resources.en.translation.networkFoundingImportFingerprintMismatch);
+		const inputs = tr.root.findAll((n) => n.props.testID === INPUT_ID && typeof n.props.onChangeText === "function");
+		expect((inputs[0].props as any).value).toBe("");
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
+
+	it("right value (different case/spacing): joins, selects the network, and only then shows the confirmed fingerprint", async () => {
+		const { tr } = await reachConfirm();
+		mockSelectNetwork.mockImplementationOnce(() => new Promise(() => {}));
+		await completeJoin(tr, "A1B2-C3D4 E5F6-0718");
+		const body = findJsonByTestID(tr.toJSON(), "founding-import-body-success")!;
+		expect(body).toBeTruthy();
+		const json = JSON.stringify(body.node);
+		expect(json).toContain(resources.en.translation.networkFoundingImportFingerprintConfirmed);
+		expect(json).toContain(F);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(NETWORK_REF);
+	});
+
+	it("an inspection failure never reaches the import: invalid-bundle -> invalidSignature, error -> genericError", async () => {
+		mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: BUNDLE_TEXT });
+		for (const [category, testID] of [
+			["invalid-bundle", "invalidSignature"],
+			["error", "genericError"],
+		] as const) {
+			const engine = {
+				inspectFoundingBundle: jest.fn(async () => ({ ok: false, reason: "malformed", category, detail: "d" })),
+				importFoundingBundle: jest.fn(),
+			};
+			mockNetworksEngine = engine;
+			const tr = await mount();
+			await pressButton(tr, CHOOSE());
+			expect(findJsonByTestID(tr.toJSON(), `founding-import-body-${testID}`)).toBeTruthy();
+			expect(engine.importFoundingBundle).not.toHaveBeenCalled();
+		}
+	});
+
+	it("anchor-required has its own translated copy (en and es)", async () => {
+		for (const locale of ["en", "es"] as const) {
+			mockCurrentLocale = locale;
+			mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: BUNDLE_TEXT });
+			mockNetworksEngine = {
+				inspectFoundingBundle: jest.fn(async () => ({ ok: true, networkName: "N" })),
+				importFoundingBundle: jest.fn(async () => anchorResult("anchor-required")),
+			};
+			const tr = await mount();
+			await pressButton(tr, resources[locale].translation.networkFoundingImportChooseFileButton);
+			await typeFingerprint(tr, F);
+			await pressButton(tr, resources[locale].translation.networkFoundingImportJoinButton);
+			const body = findJsonByTestID(tr.toJSON(), "founding-import-body-anchorRequired")!;
+			expect(body).toBeTruthy();
+			expect(JSON.stringify(body.node)).toContain(resources[locale].translation.networkFoundingImportAnchorRequired);
+		}
+	});
+
+	it("Choose another file on the confirm body goes back to picking", async () => {
+		const { tr } = await reachConfirm();
+		let resolvePick!: (v: unknown) => void;
+		mockPickFoundingBundleFile.mockReturnValue(new Promise((resolve) => (resolvePick = resolve)));
+		await pressButton(tr, resources.en.translation.networkFoundingImportChooseAnotherFileButton);
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-body-picking")).toBeTruthy();
+		await act(async () => {
+			resolvePick({ kind: "cancelled" });
+			await Promise.resolve();
+		});
+	});
+});
+
+const CHOOSE = () => resources.en.translation.networkFoundingImportChooseFileButton;
+const JOIN = () => resources.en.translation.networkFoundingImportJoinButton;
+const INPUT_ID = "founding-import-fingerprint-input";
+
+async function typeFingerprint(tr: renderer.ReactTestRenderer, value: string) {
+	const inputs = tr.root.findAll((n) => n.props.testID === INPUT_ID && typeof n.props.onChangeText === "function");
+	expect(inputs.length).toBeGreaterThan(0);
+	await act(async () => {
+		(inputs[0].props as any).onChangeText(value);
+	});
+}
+
+/** On the confirm body: type the exporter's fingerprint and press Join. */
+async function completeJoin(tr: renderer.ReactTestRenderer, value: string = F) {
+	expect(findJsonByTestID(tr.toJSON(), "founding-import-body-confirm")).toBeTruthy();
+	await typeFingerprint(tr, value);
+	await pressButton(tr, JOIN());
+}
+
+/** Pick, and (when the file passed the validity check) type F and join. */
 async function pickAndResolve(pickResult: unknown) {
 	mockPickFoundingBundleFile.mockResolvedValue(pickResult);
 	const tr = await mount();
-	await pressButton(tr, resources.en.translation.networkFoundingImportChooseFileButton);
+	await pressButton(tr, CHOOSE());
+	if (findJsonByTestID(tr.toJSON(), "founding-import-body-confirm")) await completeJoin(tr);
 	return tr;
 }
 
@@ -354,6 +543,8 @@ describe("S-5: invalidSignature and genericError bodies — geometry + EN/ES ful
 			mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: "bundle" });
 			const tr = await mount();
 			await pressButton(tr, resources[locale].translation.networkFoundingImportChooseFileButton);
+			await typeFingerprint(tr, F);
+			await pressButton(tr, resources[locale].translation.networkFoundingImportJoinButton);
 
 			const json = tr.toJSON();
 			const found = findJsonByTestID(json, "founding-import-body-invalidSignature")!;
@@ -391,6 +582,8 @@ describe("S-5: invalidSignature and genericError bodies — geometry + EN/ES ful
 			mockPickFoundingBundleFile.mockResolvedValue({ kind: "picked", text: "bundle" });
 			const tr = await mount();
 			await pressButton(tr, resources[locale].translation.networkFoundingImportChooseFileButton);
+			await typeFingerprint(tr, F);
+			await pressButton(tr, resources[locale].translation.networkFoundingImportJoinButton);
 
 			const json = tr.toJSON();
 			const found = findJsonByTestID(json, "founding-import-body-genericError")!;

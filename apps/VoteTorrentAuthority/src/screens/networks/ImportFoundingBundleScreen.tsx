@@ -23,10 +23,11 @@ import { ScrollView, StyleSheet, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ThemedText } from '../../components/ThemedText'
 import { CustomButton } from '../../components/CustomButton'
+import { CustomTextInput } from '../../components/CustomTextInput'
 import { useApp } from '../../providers/AppProvider'
 import { getDeviceUser } from '../../engines/device-user'
 import { pickFoundingBundleFile } from '../../engines/pick-founding-bundle-file'
-import { mapFoundingImportResult, type FoundingImportState } from './foundingBundleState'
+import { isCompleteFingerprintInput, mapFoundingImportResult, type FoundingImportState } from './foundingBundleState'
 import type { NavigationProp } from '../../navigation/types'
 import { globalStyles } from '../../theme/styles'
 import { useDeviceSigningErrorHandler } from '../../hooks/useDeviceSigningErrorHandler'
@@ -35,6 +36,12 @@ import type { NetworkReference } from '@votetorrent/vote-core'
 interface ScreenState {
 	kind: FoundingImportState
 	networkRef?: NetworkReference
+	/** confirmFingerprint: the name from the validity check (never a digest or fingerprint). */
+	networkName?: string
+	/** confirmFingerprint: the last typed value was refused by the engine. */
+	mismatch?: boolean
+	/** success: the file's fingerprint, shown only after the engine accepted the typed value. */
+	fingerprint?: string
 }
 
 function logImport(token: string): void {
@@ -64,6 +71,9 @@ export default function ImportFoundingBundleScreen() {
 	selectNetworkRef.current = selectNetwork
 	const mountedRef = useRef(true)
 	const inFlightRef = useRef(false)
+	// The picked file text, kept between the validity check and Join. Never rendered or logged.
+	const bundleTextRef = useRef<string | null>(null)
+	const [typedFingerprint, setTypedFingerprint] = useState('')
 	// UAT 62 P2b: set when a select failure was ROUTED (e.g. NO_KEY_PROVISIONED -> the provisioning
 	// ceremony). That ceremony's CONTINUE pops back here, so the next focus retries the select once.
 	const retryOnFocusRef = useRef<NetworkReference | null>(null)
@@ -108,25 +118,18 @@ export default function ImportFoundingBundleScreen() {
 			}
 
 			try {
-				const deviceUser = await getDeviceUser()
-				const result = await networksEngine.importFoundingBundle(picked.text, deviceUser)
-				logImport(result.ok ? result.outcome : result.reason)
-				const outcome = mapFoundingImportResult(result)
+				// Validity check only: the result deliberately carries no digest or fingerprint, so
+				// the officer must type the value the EXPORTER reads out (D-36).
+				const inspection = await networksEngine.inspectFoundingBundle(picked.text)
 				if (!mountedRef.current) return
-				switch (outcome.state) {
-					case 'success':
-						setScreenState({ kind: 'success', networkRef: outcome.networkRef })
-						break
-					case 'alreadyJoined':
-						setScreenState({ kind: 'alreadyJoined', networkRef: outcome.networkRef })
-						break
-					case 'invalidSignature':
-						setScreenState({ kind: 'invalidSignature' })
-						break
-					case 'genericError':
-						setScreenState({ kind: 'genericError' })
-						break
+				if (!inspection.ok) {
+					logImport(inspection.reason)
+					setScreenState({ kind: inspection.category === 'invalid-bundle' ? 'invalidSignature' : 'genericError' })
+					return
 				}
+				bundleTextRef.current = picked.text
+				setTypedFingerprint('')
+				setScreenState({ kind: 'confirmFingerprint', networkName: inspection.networkName })
 			} catch {
 				logImport('throw')
 				if (mountedRef.current) setScreenState({ kind: 'genericError' })
@@ -135,6 +138,56 @@ export default function ImportFoundingBundleScreen() {
 			inFlightRef.current = false
 		}
 	}, [networksEngine])
+
+	const handleJoin = useCallback(async () => {
+		if (inFlightRef.current) return
+		const text = bundleTextRef.current
+		if (text === null || !networksEngine || !isCompleteFingerprintInput(typedFingerprint)) return
+		inFlightRef.current = true
+		const typed = typedFingerprint
+		const networkName = screenState.networkName
+		if (mountedRef.current) setScreenState({ kind: 'validating' })
+		try {
+			const deviceUser = await getDeviceUser()
+			// The ENGINE compares the typed value with the file; the app never holds the expected one.
+			const result = await networksEngine.importFoundingBundle(text, deviceUser, { expectedFingerprint: typed })
+			logImport(result.ok ? result.outcome : result.reason)
+			const outcome = mapFoundingImportResult(result)
+			if (!mountedRef.current) return
+			switch (outcome.state) {
+				case 'success':
+					bundleTextRef.current = null
+					setScreenState({ kind: 'success', networkRef: outcome.networkRef, fingerprint: outcome.fingerprint })
+					break
+				case 'alreadyJoined':
+					bundleTextRef.current = null
+					setScreenState({ kind: 'alreadyJoined', networkRef: outcome.networkRef })
+					break
+				case 'fingerprintMismatch':
+					setTypedFingerprint('')
+					setScreenState({ kind: 'confirmFingerprint', networkName, mismatch: true })
+					break
+				case 'anchorRequired':
+					bundleTextRef.current = null
+					setScreenState({ kind: 'anchorRequired' })
+					break
+				case 'invalidSignature':
+					bundleTextRef.current = null
+					setScreenState({ kind: 'invalidSignature' })
+					break
+				case 'genericError':
+					bundleTextRef.current = null
+					setScreenState({ kind: 'genericError' })
+					break
+			}
+		} catch {
+			logImport('throw')
+			bundleTextRef.current = null
+			if (mountedRef.current) setScreenState({ kind: 'genericError' })
+		} finally {
+			inFlightRef.current = false
+		}
+	}, [networksEngine, typedFingerprint, screenState.networkName])
 
 	// Success auto-navigates: await selectNetwork(networkRef), then go Home. On a rejection the
 	// network is already in recentNetworks regardless: a device with no signing key
@@ -207,6 +260,52 @@ export default function ImportFoundingBundleScreen() {
 						</ThemedText>
 					</View>
 				)
+			case 'confirmFingerprint':
+				return (
+					<View testID="founding-import-body-confirm" style={localStyles.body}>
+						<ThemedText type="defaultSemiBold">{t('networkFoundingImportFingerprintHeading')}</ThemedText>
+						<ThemedText type="default" style={{ color: colors.textSecondary }}>
+							{t('networkFoundingImportFingerprintBody')}
+						</ThemedText>
+						{screenState.networkName ? <ThemedText type="default">{screenState.networkName}</ThemedText> : null}
+						{screenState.mismatch ? (
+							<ThemedText testID="founding-import-mismatch" type="default" style={{ color: colors.error }}>
+								{t('networkFoundingImportFingerprintMismatch')}
+							</ThemedText>
+						) : null}
+						<CustomTextInput
+							testID="founding-import-fingerprint-input"
+							title={t('networkFoundingImportFingerprintInputLabel')}
+							placeholder="xxxx xxxx xxxx xxxx"
+							value={typedFingerprint}
+							onChangeText={setTypedFingerprint}
+							autoCapitalize="none"
+							autoCorrect={false}
+						/>
+						<CustomButton
+							testID="founding-import-join"
+							title={t('networkFoundingImportJoinButton')}
+							disabled={!isCompleteFingerprintInput(typedFingerprint)}
+							onPress={handleJoin}
+						/>
+						<CustomButton
+							title={t('networkFoundingImportChooseAnotherFileButton')}
+							onPress={handleChooseFile}
+						/>
+					</View>
+				)
+			case 'anchorRequired':
+				return (
+					<View testID="founding-import-body-anchorRequired" style={localStyles.body}>
+						<ThemedText type="default" style={{ color: colors.error }}>
+							{t('networkFoundingImportAnchorRequired')}
+						</ThemedText>
+						<CustomButton
+							title={t('networkFoundingImportChooseAnotherFileButton')}
+							onPress={handleChooseFile}
+						/>
+					</View>
+				)
 			case 'invalidSignature':
 				return (
 					<View testID="founding-import-body-invalidSignature" style={localStyles.body}>
@@ -253,6 +352,11 @@ export default function ImportFoundingBundleScreen() {
 						<ThemedText type="default" style={{ color: colors.success }}>
 							{t('networkFoundingImportSuccess')}
 						</ThemedText>
+						{screenState.fingerprint ? (
+							<ThemedText testID="founding-import-fingerprint" type="small" style={{ color: colors.textSecondary }}>
+								{`${t('networkFoundingImportFingerprintConfirmed')}: ${screenState.fingerprint}`}
+							</ThemedText>
+						) : null}
 						{selectFailed && screenState.networkRef ? (
 							<CustomButton
 								testID="founding-import-success-view-network"

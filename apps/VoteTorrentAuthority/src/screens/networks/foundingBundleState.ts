@@ -22,6 +22,8 @@ export type FoundingImportState =
 	| 'idle'
 	| 'picking'
 	| 'validating'
+	| 'confirmFingerprint'
+	| 'anchorRequired'
 	| 'invalidSignature'
 	| 'alreadyJoined'
 	| 'success'
@@ -30,7 +32,9 @@ export type FoundingImportState =
 export type FoundingExportState = 'idle' | 'confirming' | 'generating' | 'sharing' | 'ready' | 'error'
 
 export type FoundingImportOutcome =
-	| { readonly state: 'success'; readonly networkRef: NetworkReference }
+	| { readonly state: 'success'; readonly networkRef: NetworkReference; readonly fingerprint: string }
+	| { readonly state: 'fingerprintMismatch' }
+	| { readonly state: 'anchorRequired' }
 	| { readonly state: 'alreadyJoined'; readonly networkRef: NetworkReference }
 	| { readonly state: 'invalidSignature' }
 	| { readonly state: 'genericError' }
@@ -44,10 +48,19 @@ export function mapFoundingImportResult(result: FoundingBundleImportResult): Fou
 		switch (result.outcome) {
 			case 'replayed':
 			case 'already-present':
-				return { state: 'success', networkRef: result.networkRef }
+				return { state: 'success', networkRef: result.networkRef, fingerprint: result.fingerprint }
 			default:
 				return assertNever(result.outcome)
 		}
+	}
+
+	// The typed-fingerprint outcomes come first, by reason: both are 'invalid-bundle' by category,
+	// but they have their own copy and the mismatch stays on the confirm step.
+	if (result.reason === 'anchor-mismatch') {
+		return { state: 'fingerprintMismatch' }
+	}
+	if (result.reason === 'anchor-required') {
+		return { state: 'anchorRequired' }
 	}
 
 	// A plain `switch` on `result.category` here defeats TypeScript's discriminated-union
@@ -68,4 +81,13 @@ export function mapFoundingImportResult(result: FoundingBundleImportResult): Fou
 		return { state: 'genericError' }
 	}
 	return assertNever(result.category)
+}
+
+/**
+ * Enables the Join button only: lowercase, strip spaces and dashes, exactly 16 hex characters.
+ * The app never compares the value with anything; the engine does (the app never holds the
+ * expected fingerprint, so it cannot decide a match).
+ */
+export function isCompleteFingerprintInput(text: string): boolean {
+	return /^[0-9a-f]{16}$/.test(text.toLowerCase().replace(/[\s-]+/g, ''))
 }
