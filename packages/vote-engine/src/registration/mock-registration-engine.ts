@@ -97,9 +97,26 @@ export class MockRegistrationEngine implements IRegistrationEngine {
    * `ClosesRequestId` rows (D-44), so screens can be tested against duplicate closure
    * without the schema. The request's own Status stays 'p', as in the real engine.
    */
-  markDuplicateClosure (requestId: string, state: RegistrationDuplicateClosureState): void {
+  markDuplicateClosure (
+    requestId: string,
+    state: RegistrationDuplicateClosureState,
+    options?: { closedByRequestId?: string, closedAt?: string }
+  ): void {
+    // Mirrors vote-core models.ts RegistrationDuplicateClosure: 'closing' always has a closer (it is
+    // defined by another decision naming it) and never a closedAt; 'closed' may have a null closer
+    // (a 'd' row no decision names) and carries the 'd' row's DecidedAt.
+    const closedByRequestId = options?.closedByRequestId ?? null
+    if (state === 'closing' && closedByRequestId === null) {
+      throw new Error("markDuplicateClosure: a 'closing' request must name the request that closes it")
+    }
     this.duplicateClosures.set(requestId, state)
+    this.duplicateClosureDetails.set(requestId, {
+      closedByRequestId,
+      ...(state === 'closed' ? { closedAt: options?.closedAt ?? new Date().toISOString() } : {})
+    })
   }
+
+  private readonly duplicateClosureDetails = new Map<string, { closedByRequestId: string | null, closedAt?: string }>()
 
   private readonly registrationRequests = new Map<string, {
     id: string
@@ -775,7 +792,11 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   /** D-09: in-memory parity — counts + a median measured from receivedAt, matching the real engine's measurement basis. NO rating/score/rank surface. */
   async getRegistrationTransparencyStats (authorityId: string): Promise<RegistrationTransparencyStats> {
     const rows = [...this.registrationRequests.values()].filter((r) => r.authorityId === authorityId)
-    const pending = rows.filter((r) => r.status === 'p').length
+    // Mirrors registration-engine.ts getRegistrationTransparencyStats: pending excludes rows closed or
+    // closing as duplicates, which are reported separately (present only when > 0).
+    const pendingRows = rows.filter((r) => r.status === 'p')
+    const closedAsDuplicate = pendingRows.filter((r) => this.duplicateClosures.has(r.id)).length
+    const pending = pendingRows.length - closedAsDuplicate
     const approved = rows.filter((r) => r.status === 'a').length
     const rejected = rows.filter((r) => r.status === 'r').length
 
@@ -793,7 +814,9 @@ export class MockRegistrationEngine implements IRegistrationEngine {
         : Math.round((deltas[mid - 1]! + deltas[mid]!) / 2)
     }
 
-    return { pending, approved, rejected, medianTimeToDecisionMs }
+    return closedAsDuplicate > 0
+      ? { pending, approved, rejected, medianTimeToDecisionMs, closedAsDuplicate }
+      : { pending, approved, rejected, medianTimeToDecisionMs }
   }
 
   async rejectRegistrationRequest (_requestId: string, _decision: RegistrationRequestDecision, _signatureOrCallback: SignatureOrCallback): Promise<void> {
@@ -843,7 +866,8 @@ export class MockRegistrationEngine implements IRegistrationEngine {
   async getDuplicateClosure (requestId: string): Promise<RegistrationDuplicateClosure | undefined> {
     const state = this.duplicateClosures.get(requestId)
     if (state === undefined) return undefined
-    return { requestId, state, closedByRequestId: null }
+    const details = this.duplicateClosureDetails.get(requestId) ?? { closedByRequestId: null }
+    return { requestId, state, closedByRequestId: details.closedByRequestId, ...(details.closedAt !== undefined ? { closedAt: details.closedAt } : {}) }
   }
 
   /** D-44 mock parity: the mock publishes no decisions, so nothing is ever "unpublished". */
