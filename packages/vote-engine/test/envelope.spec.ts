@@ -305,16 +305,28 @@ describe('envelope (62-04, D-03/D-04)', () => {
       }
     })
 
-    it('a duplicate publicKey throws duplicate-recipient', () => {
+    it('two userIds may share one publicKey: the seal succeeds and each opens only through its own userId (initial/G1 WR-03)', () => {
+      const secret = repeated(0x91, 32)
+      const shared = bytesToHex(secp256k1.getPublicKey(secret, true))
       const recipients: EnvelopeRecipient[] = [
-        { userId: 'u1', publicKey: validKey },
-        { userId: 'u2', publicKey: validKey }
+        { userId: 'a', publicKey: shared },
+        { userId: 'b', publicKey: shared }
       ]
-      try {
-        sealToRecipients(plaintext, recipients, binding)
-        expect.fail('must throw')
-      } catch (err) {
-        expect((err as EnvelopeSealError).code).to.equal('duplicate-recipient')
+      const sealed = sealToRecipients(plaintext, recipients, binding)
+      expect(openEnvelope(sealed, { userId: 'a', secretKey: secret }, binding).ok).to.equal(true)
+      expect(openEnvelope(sealed, { userId: 'b', secretKey: secret }, binding).ok).to.equal(true)
+      const z = openEnvelope(sealed, { userId: 'z', secretKey: secret }, binding)
+      expect(z.ok).to.equal(false)
+    })
+
+    it('a repeated userId still throws even when the publicKeys differ or match', () => {
+      for (const second of [validKey, bytesToHex(secp256k1.getPublicKey(repeated(0x83, 32), true))]) {
+        try {
+          sealToRecipients(plaintext, [{ userId: 'u1', publicKey: validKey }, { userId: 'u1', publicKey: second }], binding)
+          expect.fail('must throw')
+        } catch (err) {
+          expect((err as EnvelopeSealError).code).to.equal('duplicate-recipient')
+        }
       }
     })
 

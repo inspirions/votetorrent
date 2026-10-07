@@ -199,6 +199,37 @@ describe('src/intake/policy.ts — AuthorityIntakePolicy reader/writer (D-29, D-
     })
   })
 
+  describe('isValidRestBridgeUrl — private and local hosts (initial/G1 IN-03)', () => {
+    const REFUSED = [
+      'https://127.0.0.1/x', 'https://127.1/x', 'https://2130706433/x', 'https://0x7f000001/x', 'https://0177.0.0.1/x',
+      'https://localhost/x', 'https://localhost./x', 'https://foo.localhost', 'https://printer.local/x', 'https://nas.lan/x',
+      'https://svc.internal/x', 'https://router.home.arpa/x', 'https://bridge/x', 'https://bridge./x',
+      'https://10.1.2.3', 'https://172.16.0.1', 'https://172.31.255.255', 'https://192.168.1.2', 'https://169.254.169.254/x',
+      'https://100.64.0.1', 'https://0.0.0.0', 'https://192.0.0.8', 'https://192.0.2.1', 'https://198.51.100.7',
+      'https://203.0.113.9', 'https://198.18.0.1', 'https://198.19.255.255', 'https://224.0.0.1', 'https://240.0.0.1',
+      'https://255.255.255.255'
+    ]
+    const ACCEPTED = [
+      'https://bridge.example.org/x', 'https://bridge.example.org./x', 'https://8.8.8.8/x', 'https://172.15.0.1',
+      'https://172.32.0.1', 'https://100.63.255.255', 'https://100.128.0.1', 'https://192.0.3.1', 'https://192.0.1.1',
+      'https://198.17.255.255', 'https://198.20.0.1', 'https://198.51.101.1', 'https://203.0.114.1',
+      'https://example.com:8443/path', 'https://bridge.example', 'https://lan.example.org'
+    ]
+    for (const url of REFUSED) {
+      it(`refuses ${url}`, () => { expect(isValidRestBridgeUrl(url)).to.equal(false) })
+    }
+    for (const url of ACCEPTED) {
+      it(`accepts ${url}`, () => { expect(isValidRestBridgeUrl(url)).to.equal(true) })
+    }
+
+    it('a stored row whose bridge URL is now refused reads without throwing and offers no REST bridge', () => {
+      const view = normalizeIntakePolicyRow('auth-z', { Revision: 2, RestBridgeUrl: 'https://192.168.1.2/x', ReassociationMode: 'automatic', SetAt: '2026-01-01T00:00:00.000Z' })
+      expect(view.restBridgeUrl).to.equal(null)
+      expect(view.revision).to.equal(2)
+      expect(view.reassociationMode).to.equal('automatic')
+    })
+  })
+
   describe('normalizeIntakePolicyRow — defensive reader', () => {
     it('a forged row with an invalid URL and mode falls back field by field', () => {
       const view = normalizeIntakePolicyRow('auth-x', { Revision: 4, RestBridgeUrl: 'http://x', ReassociationMode: 'weird', SetAt: 'x' })

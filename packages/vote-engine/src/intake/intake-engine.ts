@@ -244,7 +244,15 @@ export class IntakeEngine {
     const isCurrent = localPublicKey !== null && current !== undefined && current.publicKey === localPublicKey
     const isIntakeRecipient = isCurrent && (await this.isCurrentOfficer(authorityId, userId))
 
-    return { userId, authorityId, hasLocalKey, localPublicKey, published, isCurrent, isIntakeRecipient }
+    let isContested = false
+    if (isCurrent && localPublicKey !== null) {
+      const recipientSet = await resolveIntakeRecipients(port, authorityId)
+      isContested = recipientSet.contestedKeys.some(
+        (entry) => entry.publicKey === localPublicKey && entry.userIds.some((id) => id !== userId)
+      )
+    }
+
+    return { userId, authorityId, hasLocalKey, localPublicKey, published, isCurrent, isIntakeRecipient, isContested }
   }
 
   /** `resolveIntakeRecipients` over this engine's own DB handle (D-04/D-32). */

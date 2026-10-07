@@ -103,7 +103,7 @@ function compareUserId (a: string, b: string): number {
 
 /**
  * D-04/D-32: every current officer's current, usable key — one entry per
- * officer, sorted by userId. Throws `IntakeError('invalid-argument')` for an
+ * officer (even when several officers publish the same key), sorted by userId. Throws `IntakeError('invalid-argument')` for an
  * empty `authorityId`; an unknown authority yields an empty set (no current
  * officers, so nothing to resolve).
  */
@@ -135,11 +135,12 @@ export async function resolveIntakeRecipients (
     if (picked !== undefined) pickedByUser.set(userId, picked)
   }
 
-  // Cross-officer duplicate public keys (T-62-14-04): an insider re-publishing
-  // another officer's key would otherwise make every seal throw
-  // 'duplicate-recipient'. Keep the earliest claimant (tie: smaller userId);
-  // drop the rest as 'duplicate-public-key'. A dropped officer lands in
-  // officersWithoutKey.
+  // Cross-officer duplicate public keys (initial/G1 WR-03). No claimant is
+  // ever dropped: a PubKey carries no proof of possession, so an insider who
+  // copies another officer's key (and backdates RegisteredAt) must not evict
+  // the owner. Every claimant is sealed to under its OWN userId (the wrap AAD
+  // binds the userId, so a claimant without the private key gains nothing);
+  // the shared keys are reported in `contestedKeys` so the owner can be told.
   const byPublicKey = new Map<string, CandidateEncryptionKey[]>()
   for (const picked of pickedByUser.values()) {
     const list = byPublicKey.get(picked.publicKey) ?? []
@@ -148,23 +149,14 @@ export async function resolveIntakeRecipients (
   }
 
   const finalRecipients: EnvelopeRecipient[] = []
+  const contestedKeys: Array<{ publicKey: string, userIds: string[] }> = []
   for (const [publicKey, claimants] of byPublicKey) {
-    if (claimants.length === 1) {
-      finalRecipients.push({ userId: claimants[0]!.userId, publicKey })
-      continue
-    }
-    const sorted = [...claimants].sort((a, b) => {
-      const at = Date.parse(a.registeredAt)
-      const bt = Date.parse(b.registeredAt)
-      if (at !== bt) return at - bt
-      return compareUserId(a.userId, b.userId)
-    })
-    const winner = sorted[0]!
-    finalRecipients.push({ userId: winner.userId, publicKey })
-    for (const loser of sorted.slice(1)) {
-      droppedKeys.push({ userId: loser.userId, publicKey: loser.publicKey, reason: 'duplicate-public-key' })
+    for (const claimant of claimants) finalRecipients.push({ userId: claimant.userId, publicKey })
+    if (claimants.length > 1) {
+      contestedKeys.push({ publicKey, userIds: claimants.map((c) => c.userId).sort(compareUserId) })
     }
   }
+  contestedKeys.sort((a, b) => compareUserId(a.publicKey, b.publicKey))
 
   finalRecipients.sort((a, b) => compareUserId(a.userId, b.userId))
   const recipientUserIds = new Set(finalRecipients.map((r) => r.userId))
@@ -174,6 +166,7 @@ export async function resolveIntakeRecipients (
     authorityId,
     recipients: finalRecipients,
     officersWithoutKey,
-    droppedKeys
+    droppedKeys,
+    contestedKeys
   }
 }

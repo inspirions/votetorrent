@@ -174,7 +174,6 @@ function assertRecipients (recipients: unknown, where: string): asserts recipien
     )
   }
   const seenUserIds = new Set<string>()
-  const seenPublicKeys = new Set<string>()
   for (const raw of list) {
     if (raw === null || typeof raw !== 'object') {
       throw new EnvelopeSealError('invalid-recipient-key', `${where}: each recipient must be an object`)
@@ -192,11 +191,10 @@ function assertRecipients (recipients: unknown, where: string): asserts recipien
     if (seenUserIds.has(r.userId)) {
       throw new EnvelopeSealError('duplicate-recipient', `${where}: duplicate recipient userId`)
     }
-    if (seenPublicKeys.has(r.publicKey)) {
-      throw new EnvelopeSealError('duplicate-recipient', `${where}: duplicate recipient publicKey`)
-    }
+    // Two userIds MAY share a publicKey: a copied key must not evict its owner
+    // (initial/G1 WR-03). Each wrap binds its own userId in the AAD, so a
+    // claimant without the private key gains nothing. Only userIds are unique.
     seenUserIds.add(r.userId)
-    seenPublicKeys.add(r.publicKey)
   }
 }
 

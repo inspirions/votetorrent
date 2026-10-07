@@ -13,6 +13,7 @@ import { UserEngine } from '../src/user/user-engine.js'
 import { IntakeEngine } from '../src/intake/intake-engine.js'
 import { IntakeError } from '../src/intake/types.js'
 import { intakeQueryPortFromDb, intakeQueryPortFromStrandPort } from '../src/intake/query-port.js'
+import { createIntakeOpener, createIntakeSealer } from '../src/intake/sealing.js'
 import type { IntakeQueryPort } from '../src/intake/query-port.js'
 import { resolveIntakeRecipients } from '../src/intake/recipients.js'
 import { ENCRYPTION_KEY_ALG, encryptionPublicKeyFromSecret, generateEncryptionKeyPair, officerEncryptionKeyAlias } from '../src/crypto/index.js'
@@ -286,7 +287,8 @@ describe('src/intake/* — officer encryption-key registration (D-04) and recipi
         localPublicKey: null,
         published: false,
         isCurrent: false,
-        isIntakeRecipient: false
+        isIntakeRecipient: false,
+        isContested: false
       })
     })
 
@@ -428,6 +430,40 @@ describe('src/intake/* — officer encryption-key registration (D-04) and recipi
       expect(set.officersWithoutKey).to.deep.equal(expected)
     })
 
+    it('a copied key (backdated by the copier) does not evict the owner: A is a recipient, opens, the copier cannot, and both statuses say contested', async () => {
+      const a = fx.holders[0]!
+      const b = fx.holders[1]!
+      const c = fx.holders[2]!
+      const vaultA = new InMemoryTestKeyVault()
+      const vaultB = new InMemoryTestKeyVault()
+      const vaultC = new InMemoryTestKeyVault()
+      const regA = await new IntakeEngine({ db: fx.elec.ctx.db, user: a.user }).registerOfficerEncryptionKey(fx.authorityId, vaultA, a.sign)
+      await new IntakeEngine({ db: fx.elec.ctx.db, user: c.user }).registerOfficerEncryptionKey(fx.authorityId, vaultC, c.sign)
+      // B publishes A's public key, claiming a RegisteredAt long before A's.
+      await insertRawEncryptionKeyRow(fx.elec.ctx, b.user, regA.publicKey, '2000-01-01T00:00:00.000Z')
+
+      const set = await new IntakeEngine({ db: fx.elec.ctx.db }).listIntakeRecipients(fx.authorityId)
+      const ids = set.recipients.map((r) => r.userId)
+      expect(ids).to.include(a.user.id)
+      expect(ids).to.include(b.user.id)
+      expect(ids).to.include(c.user.id)
+      expect(set.officersWithoutKey).to.not.include(a.user.id)
+      expect(set.contestedKeys).to.deep.equal([{ publicKey: regA.publicKey, userIds: [a.user.id, b.user.id].sort() }])
+
+      const binding = { requestId: 'req-contested', digest: 'digest-contested' }
+      const sealed = await createIntakeSealer({ port: intakeQueryPortFromDb(fx.elec.ctx.db), authorityId: fx.authorityId }).seal('{"hello":"world"}', binding)
+      const openedByA = await createIntakeOpener({ vault: vaultA, userId: a.user.id }).open(sealed, binding)
+      expect(openedByA.ok).to.equal(true)
+      const openedByB = await createIntakeOpener({ vault: vaultB, userId: b.user.id }).open(sealed, binding)
+      expect(openedByB.ok).to.equal(false)
+
+      const statusA = await new IntakeEngine({ db: fx.elec.ctx.db, user: a.user }).getOfficerEncryptionKeyStatus(fx.authorityId, vaultA)
+      expect(statusA.isIntakeRecipient).to.equal(true)
+      expect(statusA.isContested).to.equal(true)
+      const statusC = await new IntakeEngine({ db: fx.elec.ctx.db, user: c.user }).getOfficerEncryptionKeyStatus(fx.authorityId, vaultC)
+      expect(statusC.isContested).to.equal(false)
+    })
+
     it('an empty authorityId throws invalid-argument', async () => {
       let caught: unknown
       try {
@@ -497,7 +533,7 @@ describe('src/intake/* — officer encryption-key registration (D-04) and recipi
       expect(set.droppedKeys).to.deep.equal([{ userId: 'u1', publicKey: 'not-a-key', reason: 'invalid-public-key' }])
     })
 
-    it('two officers claiming the same PubKey: keeps the earliest RegisteredAt claimant, drops the later one', async () => {
+    it('two officers claiming the same PubKey: BOTH are recipients (a copied key must not evict its owner), the key is reported contested', async () => {
       const port = makeFakePort({
         officers: ['u1', 'u2'],
         keysByUser: {
@@ -507,9 +543,38 @@ describe('src/intake/* — officer encryption-key registration (D-04) and recipi
         validSignersByUser: { u1: ['sig-1'], u2: ['sig-2'] }
       })
       const set = await resolveIntakeRecipients(port, 'auth-1')
-      expect(set.recipients).to.deep.equal([{ userId: 'u1', publicKey: VALID_PUB_A }])
-      expect(set.officersWithoutKey).to.deep.equal(['u2'])
-      expect(set.droppedKeys).to.deep.equal([{ userId: 'u2', publicKey: VALID_PUB_A, reason: 'duplicate-public-key' }])
+      expect(set.recipients).to.deep.equal([{ userId: 'u1', publicKey: VALID_PUB_A }, { userId: 'u2', publicKey: VALID_PUB_A }])
+      expect(set.officersWithoutKey).to.deep.equal([])
+      expect(set.droppedKeys).to.deep.equal([])
+      expect(set.contestedKeys).to.deep.equal([{ publicKey: VALID_PUB_A, userIds: ['u1', 'u2'] }])
+    })
+
+    it('the copier backdating RegisteredAt changes nothing: the owner stays a recipient (initial/G1 WR-03)', async () => {
+      const port = makeFakePort({
+        officers: ['u1', 'u2'],
+        keysByUser: {
+          u1: [{ PubKey: VALID_PUB_A, Alg: ENCRYPTION_KEY_ALG, RegisteredAt: '2026-01-01T00:00:00.000Z', SignerKey: 'sig-1' }],
+          u2: [{ PubKey: VALID_PUB_A, Alg: ENCRYPTION_KEY_ALG, RegisteredAt: '2000-01-01T00:00:00.000Z', SignerKey: 'sig-2' }]
+        },
+        validSignersByUser: { u1: ['sig-1'], u2: ['sig-2'] }
+      })
+      const set = await resolveIntakeRecipients(port, 'auth-1')
+      expect(set.recipients.map((r) => r.userId)).to.deep.equal(['u1', 'u2'])
+      expect(set.officersWithoutKey).to.deep.equal([])
+    })
+
+    it('a single claimant has no contested keys (negative control: no false warning)', async () => {
+      const port = makeFakePort({
+        officers: ['u1', 'u3'],
+        keysByUser: {
+          u1: [{ PubKey: REAL_PUB_1, Alg: ENCRYPTION_KEY_ALG, RegisteredAt: '2026-01-01T00:00:00.000Z', SignerKey: 'sig-1' }],
+          u3: [{ PubKey: REAL_PUB_2, Alg: ENCRYPTION_KEY_ALG, RegisteredAt: '2026-01-01T00:00:00.000Z', SignerKey: 'sig-3' }]
+        },
+        validSignersByUser: { u1: ['sig-1'], u3: ['sig-3'] }
+      })
+      const set = await resolveIntakeRecipients(port, 'auth-1')
+      expect(set.contestedKeys).to.deep.equal([])
+      expect(set.recipients).to.have.length(2)
     })
 
     it('equal RegisteredAt per-user ties break by PubKey descending', async () => {

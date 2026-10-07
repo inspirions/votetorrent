@@ -69,6 +69,7 @@ export type ReassociationRoute = 'manual' | 'automatic'
 export interface IntakeRecipientDroppedKey {
   readonly userId: string
   readonly publicKey: string
+  /** 'duplicate-public-key' is no longer produced (initial/G1 WR-03); kept so older readers type-check. */
   readonly reason: 'invalid-public-key' | 'signer-key-revoked' | 'duplicate-public-key'
 }
 
@@ -82,6 +83,8 @@ export interface IntakeRecipientSet {
   readonly recipients: readonly EnvelopeRecipient[]
   readonly officersWithoutKey: readonly string[]
   readonly droppedKeys: readonly IntakeRecipientDroppedKey[]
+  /** Keys published by more than one current officer; every claimant is still a recipient. Sorted. */
+  readonly contestedKeys: ReadonlyArray<{ readonly publicKey: string, readonly userIds: readonly string[] }>
 }
 
 export interface OfficerEncryptionKeyRegistration {
@@ -106,6 +109,11 @@ export interface OfficerEncryptionKeyStatus {
   readonly published: boolean
   readonly isCurrent: boolean
   readonly isIntakeRecipient: boolean
+  /**
+   * True when another CURRENT officer of this authority publishes this officer's current key.
+   * The officer still receives every request.
+   */
+  readonly isContested: boolean
 }
 
 /** Resolves recipients on EVERY call, so officer changes replicated in between calls are honoured. */
