@@ -849,6 +849,8 @@ export async function seedAuthorityInvite (
       admin: { effectiveAt: adminEffectiveAt, thresholdPolicies },
       officers,
     },
+    // 62-102: respondToInvite signs with the invite's one-time private key itself.
+    invitePrivate: inviteShare.invitePrivate,
     inviteSignature: 'a'.repeat(128),
   }
   await auth.networkEngine.respondToInvite(inviteAction)

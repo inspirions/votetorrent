@@ -667,7 +667,8 @@ describe('UserEngine', () => {
         AsyncStorage,
         ctx
       )
-      const fakeInviteKey = 'k'.repeat(66)
+      const fakeInviteKeyPair = randomTestKeyPair()
+      const fakeInviteKey = fakeInviteKeyPair.publicHex
       const fakeInvite = { inviteKey: fakeInviteKey, type: 'au' as const, expiration: '0', inviteSignature: 'a'.repeat(128) }
       await ctx.db.exec(
         `INSERT INTO InviteSlot (Cid, Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce)
@@ -677,6 +678,7 @@ describe('UserEngine', () => {
       )
       await networkEngine.respondToInvite({
         invite: fakeInvite,
+        invitePrivate: fakeInviteKeyPair.privateHex,
         isAccepted: true,
         invokes: { authority: { name: 'Invokee', domainName: 'inv.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: 'a'.repeat(128),
@@ -718,6 +720,7 @@ describe('UserEngine', () => {
       const inviteSignature = signInviteResult(fakeInvitePrivate, slotRowForSig!.Cid as string, 'null', false)
       await networkEngine.respondToInvite({
         invite: fakeInvite,
+        invitePrivate: fakeInvitePrivate,
         isAccepted: false,
         invokes: undefined,
         inviteSignature,

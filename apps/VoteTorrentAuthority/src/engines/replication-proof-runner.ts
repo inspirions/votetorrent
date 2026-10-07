@@ -1084,11 +1084,10 @@ export async function runReplicationProof(): Promise<void> {
               },
             ],
           },
-          // 999.1 R-03 documented limitation — the authority-accept branch's InviteResult.Digest
-          // embeds a server-generated id unknown at signing time, so no caller can pre-sign it;
-          // NetworkEngine.respondToInvite does not cryptographically verify this field on that
-          // branch (see network-engine.ts's own comment at this call site). Matches vote-engine's
-          // own seedAuthorityInvite test fixture convention for this exact reason.
+          // 62-102: NetworkEngine.respondToInvite now signs with the invite's one-time private key
+          // itself and refuses (code invite-key-required) without it. This dev two-device joiner
+          // has no invite private key, so this fallback fails closed. That is two-device proof
+          // debt; see the two-device todo. The field below is ignored by the engine.
           inviteSignature: 'a'.repeat(128),
         };
         const networkEngine = new NetworkEngine(

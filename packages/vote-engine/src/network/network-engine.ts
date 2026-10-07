@@ -1,6 +1,10 @@
 import { QuereusError, MisuseError } from '@quereus/quereus'
+import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
+import { secp256k1 } from '@noble/curves/secp256k1.js'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { FeatureNotAvailableError, toImageRef } from '@votetorrent/vote-core'
 import { AuthorityEngine } from '../authority/authority-engine.js'
+import { readInviteChain } from '../invite/read-invite-chain.js'
 import { UserEngine } from '../user/user-engine.js'
 import {
   asText,
@@ -57,6 +61,13 @@ import { NetworkPinAuthorityBuilder } from './builders/network-pin-authority-bui
 import { NetworkUnpinAuthorityBuilder } from './builders/network-unpin-authority-builder.js'
 import { NetworkProposeRevisionBuilder } from './builders/network-propose-revision-builder.js'
 import { NetworkRespondToInviteBuilder } from './builders/network-respond-to-invite-builder.js'
+
+/** A fixed-message error carrying a string `code` the app maps to copy (62-102). */
+function invitationError (code: string, message: string): Error {
+  const err = new Error(message) as Error & { code: string }
+  err.code = code
+  return err
+}
 
 export class NetworkEngine implements INetworkEngine {
   constructor (
@@ -1108,14 +1119,35 @@ export class NetworkEngine implements INetworkEngine {
     //
     // The CHECK constraints (SigningValid + SignatureValid) require an
     // existing AdminSignature row for the slot and a valid signature
-    // over the digest. This method is the engine boundary; the caller
-    // supplies the already-computed signature in the InviteAction.
-    // D-05: query InviteSlot by InviteKey+Type for CID (SQL-side, not JS-computed)
-    const slotRow = await this.ctx.db
-      .prepare('SELECT Cid FROM InviteSlot WHERE InviteKey = :inviteKey AND Type = :type')
-      .get({ inviteKey: invite.invite.inviteKey, type: invite.invite.type })
-    if (!slotRow) throw new Error('InviteSlot not found for given inviteKey and type')
-    const slotCid = slotRow.Cid as string
+    // over the digest.
+    //
+    // 62-102 (gap7/IN-03): this method SIGNS the InviteResult itself with the
+    // invite's one-time private key (`invite.invitePrivate`, REQUIRED) and
+    // verifies it against the slot's InviteKey on BOTH branches, so no
+    // accepted result is ever written that the invite key did not sign. The
+    // caller's `inviteSignature` is ignored. The slot is the live head of the
+    // invite chain (cancelled, answered, expired and ambiguous chains refuse
+    // with a coded error), exactly as the app path (InvitationEngine) does.
+    const invitePrivateHex = invite.invitePrivate
+    if (typeof invitePrivateHex !== 'string' || !/^[0-9a-fA-F]{64}$/.test(invitePrivateHex)) {
+      throw invitationError('invite-key-required', 'respondToInvite: the invite private key is required')
+    }
+    const resolution = await readInviteChain(
+      this.ctx.db,
+      invite.invite.inviteKey,
+      invite.invite.type,
+      nowCanonicalDatetime()
+    )
+    if (resolution.status === 'not-found') throw invitationError('invite-not-found', 'respondToInvite: invite not found')
+    if (resolution.status === 'answered') throw invitationError('invite-already-answered', 'respondToInvite: invite already answered')
+    if (resolution.status === 'no-longer-valid') throw invitationError('invite-no-longer-valid', 'respondToInvite: invite is no longer valid')
+    if (resolution.status === 'ambiguous') throw invitationError('invite-unverifiable', 'respondToInvite: invite chain is ambiguous')
+    const slotCid = resolution.cid
+    const signInviteResult = (digestToken: string): { signature: string; valid: boolean } => {
+      const signedBytes = inviteResultSignedBytes({ slotCid, digestToken, accept: invite.isAccepted })
+      const signature = bytesToHex(secp256k1.sign(sha256(signedBytes), hexToBytes(invitePrivateHex)))
+      return { signature, valid: verifyAdHocInviteSignature(signedBytes, signature, invite.invite.inviteKey) }
+    }
     // Group B (Phase 12.3-01): for authority invites, generate the authority
     // Id at invite-response time so the SQL-side Digest() committed to
     // InviteResult.Digest matches what Authority.InsertValid recomputes when
@@ -1195,24 +1227,40 @@ export class NetworkEngine implements INetworkEngine {
           return ua < ub ? -1 : ua > ub ? 1 : 0
         })
         const firstOfficer = sortedOfficers[0]!
-        // 999.1 R-03 — DOCUMENTED LIMITATION (not a fabricated `true`): the
-        // A1 LOCKED encoding requires digestToken = the exact value written
-        // to InviteResult.Digest, which for this branch embeds
-        // `generatedAuthorityId` — a fresh `crypto.randomUUID()` minted
-        // INSIDE this method, after `invite.inviteSignature` was already
-        // produced by the caller. No pre-image of that id can exist at
-        // signing time, so `inviteSignature` cannot cryptographically commit
-        // to it — the caller cannot know a value the engine hasn't generated
-        // yet (a genuine architectural gap in this call path, pre-existing
-        // the 999.1 phase; the previous hardcoded `context.IsSignatureValid
-        // = true` stub silently masked it). A real check here would ALWAYS
-        // reject every legitimate accept — fixing it properly needs a
-        // vote-core `InviteAction` shape change (e.g. letting the caller
-        // supply/commit the id before signing, or a sign-callback pattern
-        // like `saveInviteWithSigning`'s D-03/D-04) — out of this plan's
-        // scope (Rule 4 — architectural). Tracked in the 999.1-09 SUMMARY.
-        // The non-authority branch below has no such gap (its digestToken
-        // is fully caller-known ahead of time) and IS verified for real.
+        // 62-102 (gap7/IN-03): compute the 7-argument Digest first (the exact
+        // arguments the INSERT used), sign over that very value with the
+        // invite key, verify against the slot's InviteKey and refuse on
+        // failure. The previous hard-coded true signature flag accepted
+        // an unsigned claim.
+        const digestParams = {
+          tid: 1,
+          authorityId: generatedAuthorityId,
+          authorityName: invokesAuthority?.name ?? null,
+          authorityDomainName: invokesAuthority?.domainName ?? null,
+          authorityImageRef: authorityImageRefJson,
+          adminEffectiveAt: invokesAdmin.effectiveAt,
+          adminThresholdPolicies: invokesAdmin.thresholdPolicies,
+          officerAdminEffectiveAt: firstOfficer.adminEffectiveAt,
+          officerUserId: firstOfficer.userId,
+          officerTitle: firstOfficer.title,
+          officerScopes: firstOfficer.scopes,
+        }
+        const digestRow = await this.ctx.db
+          .prepare(
+            `select Digest(:tid, :authorityId, :authorityName, :authorityDomainName, :authorityImageRef,
+              Digest(:adminEffectiveAt, :adminThresholdPolicies),
+              Digest(:officerAdminEffectiveAt, :officerUserId, :officerTitle, :officerScopes)
+            ) as d`
+          )
+          .get(digestParams)
+        const digestValue = digestRow?.d
+        if (typeof digestValue !== 'string') {
+          throw new Error('respondToInvite: could not compute the authority invite digest')
+        }
+        const signed = signInviteResult(digestValue)
+        if (!signed.valid) {
+          throw invitationError('invite-signature-invalid', 'respondToInvite: invite signature does not verify')
+        }
         await this.ctx.db.exec(
 					`insert into InviteResult (
 						SlotCid,
@@ -1221,33 +1269,21 @@ export class NetworkEngine implements INetworkEngine {
 						InviteSignature,
 						InvokedId
 					)
-					with context IsSigningValid = true, IsSignatureValid = true
+					with context IsSigningValid = true, IsSignatureValid = :isSignatureValid
 					values (
 						:slotCid,
 						:isAccepted,
-						Digest(:tid, :authorityId, :authorityName, :authorityDomainName, :authorityImageRef,
-							Digest(:adminEffectiveAt, :adminThresholdPolicies),
-							Digest(:officerAdminEffectiveAt, :officerUserId, :officerTitle, :officerScopes)
-						),
+						:digest,
 						:inviteSignature,
 						:invokedId
 					)`,
           {
             slotCid,
             isAccepted: invite.isAccepted,
-            tid: 1,
-            authorityId: generatedAuthorityId,
-            authorityName: invokesAuthority?.name ?? null,
-            authorityDomainName: invokesAuthority?.domainName ?? null,
-            authorityImageRef: authorityImageRefJson,
-            adminEffectiveAt: invokesAdmin.effectiveAt,
-            adminThresholdPolicies: invokesAdmin.thresholdPolicies,
-            officerAdminEffectiveAt: firstOfficer.adminEffectiveAt,
-            officerUserId: firstOfficer.userId,
-            officerTitle: firstOfficer.title,
-            officerScopes: firstOfficer.scopes,
-            inviteSignature: invite.inviteSignature,
+            digest: digestValue,
+            inviteSignature: signed.signature,
             invokedId,
+            isSignatureValid: signed.valid,
           }
         )
       } else {
@@ -1262,11 +1298,12 @@ export class NetworkEngine implements INetworkEngine {
         // 999.1 R-03: same A1 LOCKED domain as the authority-accepted branch
         // above, with digestToken = the plain resultDigest (or 'null' for a
         // decline — inviteResultSignedBytes applies that coalesce).
-        const isSignatureValid = verifyAdHocInviteSignature(
-          inviteResultSignedBytes({ slotCid, digestToken: resultDigest ?? 'null', accept: invite.isAccepted }),
-          invite.inviteSignature,
-          invite.invite.inviteKey,
-        )
+        // 62-102: signed engine-side with the invite key, never taken from the caller.
+        const signedResult = signInviteResult(resultDigest ?? 'null')
+        if (!signedResult.valid) {
+          throw invitationError('invite-signature-invalid', 'respondToInvite: invite signature does not verify')
+        }
+        const isSignatureValid = signedResult.valid
         await this.ctx.db.exec(
 					`insert into InviteResult (
 						SlotCid,
@@ -1287,13 +1324,16 @@ export class NetworkEngine implements INetworkEngine {
             slotCid,
             isAccepted: invite.isAccepted,
             digest: resultDigest,
-            inviteSignature: invite.inviteSignature,
+            inviteSignature: signedResult.signature,
             invokedId,
             isSignatureValid,
           }
         )
       }
     } catch (err) {
+      // 62-102: a string `code` on the error (invite-signature-invalid, ...) survives the rewrap.
+      const code = (err as { code?: unknown } | null)?.code
+      if (typeof code === 'string' && !(err instanceof QuereusError)) throw err
       if (err instanceof QuereusError) {
         throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
       } else if (err instanceof MisuseError) {

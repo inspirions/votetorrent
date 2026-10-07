@@ -3273,6 +3273,7 @@ describe('AuthorityEngine', () => {
       await authorityEngine.saveInviteWithSigning(invite, 'iad', sig)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'Accepted', domainName: 'a.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -3299,6 +3300,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotRow.Cid, 'null', false)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: false,
         invokes: undefined,
         inviteSignature,
@@ -4792,6 +4794,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'NewAuthority', domainName: 'na.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4818,6 +4821,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'X', domainName: 'x.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4828,6 +4832,7 @@ describe('AuthorityEngine', () => {
       try {
         await networkEngine.respondToInvite({
           invite,
+          invitePrivate: invite.invitePrivate,
           isAccepted: true,
           invokes: { authority: { name: 'Y', domainName: 'y.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
           inviteSignature: invite.inviteSignature,
@@ -4856,6 +4861,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'AC', domainName: 'ac.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4869,7 +4875,9 @@ describe('AuthorityEngine', () => {
         .get({ c: slotCid })
       expect(Boolean(row?.IsAccepted)).to.equal(true)
       expect(row?.Digest).to.not.equal(null)
-      expect(row?.InviteSignature).to.equal(invite.inviteSignature)
+      // 62-102: the engine signs the result with the invite key itself; the stored value is not the caller's string.
+      expect(row?.InviteSignature).to.be.a('string').with.length(128)
+      expect(row?.InviteSignature).to.not.equal(invite.inviteSignature)
     })
 
     it('should create InviteResult marking rejection with null digest', async () => {
@@ -4884,6 +4892,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotCid, 'null', false)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: false,
         invokes: undefined,
         inviteSignature,
@@ -4948,6 +4957,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes), true)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes,
         inviteSignature,
@@ -4975,6 +4985,7 @@ describe('AuthorityEngine', () => {
       const invokes1 = { officer: { userId: 'user-3', title: 'A' } }
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: invokes1,
         inviteSignature: signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes1), true),
@@ -4986,6 +4997,7 @@ describe('AuthorityEngine', () => {
         const invokes2 = { officer: { userId: 'user-4', title: 'B' } }
         await networkEngine.respondToInvite({
           invite,
+          invitePrivate: invite.invitePrivate,
           isAccepted: true,
           invokes: invokes2,
           inviteSignature: signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes2), true),

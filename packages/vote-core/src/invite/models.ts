@@ -128,7 +128,17 @@ export interface InviteAction<TInvokes> {
 	/** Whether the invitation was accepted */
 	isAccepted: boolean;
 
-	/** The digest is the invite, the isAccepted flag, and the acceptingId. Signed by the private key given in the invitation */
+	/**
+	 * The invite's one-time private key (hex). REQUIRED by
+	 * NetworkEngine.respondToInvite, which signs the result with it itself.
+	 * Never the device key (T-21-04-05).
+	 */
+	invitePrivate?: string;
+
+	/**
+	 * The digest is the invite, the isAccepted flag, and the acceptingId. Signed by the private key given in the invitation
+	 * @deprecated ignored by NetworkEngine.respondToInvite, which signs with invitePrivate
+	 */
 	inviteSignature: string;
 }
 
