@@ -13,7 +13,10 @@ import { useDeviceSigningErrorHandler } from "../../../hooks/useDeviceSigningErr
 import { isThresholdCoSignRefusal } from "../../registration/continuity-review";
 
 /**
- * ReassociationReviewToggle — Surface 4 settings (D-46). Whether a voter's device-change request
+ * ReassociationReviewToggle — Surface 4 settings (D-46). It lives on the authority-level
+ * Registration Requests screen, beside the device-change queue it governs (user ruling
+ * 2026-10-07); an election's Registration Policy screen shows a read-only note instead
+ * (ReassociationReviewNote). Whether a voter's device-change request
  * is reviewed by an officer ('manual', the default) or processed like a first device
  * ('automatic'). A radio pair, never a switch: both options are always visible, so an officer
  * reads the whole choice without toggling anything.

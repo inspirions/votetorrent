@@ -18,7 +18,7 @@ import { reconcilePolicyState } from "./registration-policy-reconciliation";
 import { RegistrationFieldsSection } from "./components/RegistrationFieldsSection";
 import { DisclosurePolicySection, isDistrictAudienceAvailable } from "./components/DisclosurePolicySection";
 import { AttestationPolicySection } from "./components/AttestationPolicySection";
-import { ReassociationReviewToggle } from "./components/ReassociationReviewToggle";
+import { ReassociationReviewNote } from "./components/ReassociationReviewNote";
 import { ElectionEvent, scopeDescriptions } from "@votetorrent/vote-core";
 import type {
 	IElectionEngine,
@@ -96,9 +96,6 @@ export default function RegistrationPolicyScreen() {
 
 	const { scopes, loading: scopesLoading } = useCurrentOfficerScopes(authorityId);
 	const canWrite = !scopesLoading && scopes?.includes("mel") === true;
-	// 62-27 (D-46): the re-association review setting is an `AuthorityIntakePolicy` write, which is a
-	// 'vrg' write, unlike this screen's 'mel' sections. UI legibility only; the schema CHECK enforces.
-	const canWriteIntakePolicy = !scopesLoading && scopes?.includes("vrg") === true;
 	const reconciliation = reconcilePolicyState(fields, disclosures);
 	const needsConfirmation = rosterNonEmpty || registrationOpen;
 
@@ -816,10 +813,11 @@ export default function RegistrationPolicyScreen() {
 				)}
 			</View>
 
-			{/* D-46 (62-27): per-authority device-change review mode. The setting is per-authority but
-			    lives on this per-election settings surface, as the UI-SPEC sites it. */}
+			{/* D-46: the device-change review mode is per-authority, so it is edited on the authority's
+			    Registration Requests screen (user ruling 2026-10-07); this election screen only shows
+			    the current value read-only. */}
 			<View style={styles.section} testID="registration-policy-reassociation-section">
-				<ReassociationReviewToggle authorityId={authorityId} canWrite={canWriteIntakePolicy} />
+				<ReassociationReviewNote authorityId={authorityId} />
 			</View>
 		</ScrollView>
 	);

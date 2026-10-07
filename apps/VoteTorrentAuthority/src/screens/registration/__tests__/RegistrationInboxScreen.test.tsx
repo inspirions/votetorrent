@@ -262,6 +262,13 @@ jest.mock("../../../engines/device-user", () => ({
 	getOrCreateDeviceUser: jest.fn(async () => ({ id: "device-user-1", name: "Device User" })),
 }));
 
+// The device-change review toggle now mounts on this screen and imports the device signer; the
+// real module initialises i18next, which this suite's react-i18next mock does not provide. The
+// toggle's own behaviour is covered by RegistrationInboxScreen.reassociationReview.test.tsx.
+jest.mock("../../../engines/device-signer", () => ({
+	createDeviceSigner: jest.fn(async () => async () => ({ signature: "s", signerKey: "k", signerUserId: "u" })),
+}));
+
 jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: mockGetEngine }),
 }));

@@ -30,6 +30,7 @@ import type {
 } from "@votetorrent/vote-core";
 import { RegistrationRequestRow } from "./components/RegistrationRequestRow";
 import { ReassociationQueueSection } from "./components/ReassociationQueueSection";
+import { ReassociationReviewToggle } from "../elections/components/ReassociationReviewToggle";
 import { registrationContentUnreadKey } from "./continuity-review";
 import { TransparencyStatsCard } from "./components/TransparencyStatsCard";
 import type { RootStackParamList } from "../../navigation/types";
@@ -386,6 +387,16 @@ export default function RegistrationInboxScreen() {
 					label={t("associationRequestStatusInboxButton")}
 					onPress={() => navigation.navigate("AssociationRequestStatus", { authorityId })}
 				/>
+			</View>
+
+			{/* D-46: the per-authority device-change review setting, beside the queue it governs.
+			    Moved here from the election's Registration Policy screen by the user ruling of
+			    2026-10-07; same component, same 'vrg' scope (canWrite), same signed write. */}
+			<View style={styles.section} testID="registration-inbox-reassociation-review">
+				<ReassociationReviewToggle authorityId={authorityId} canWrite={canWrite} />
+				<ThemedText type="small" style={{ color: colors.textSecondary }}>
+					{t("reassociationReviewAuthorityWide")}
+				</ThemedText>
 			</View>
 
 			{/* D-41/D-46 (62-27): device-change requests awaiting officer review are reached from
