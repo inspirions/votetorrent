@@ -187,4 +187,92 @@ describe('keyholder-identity.ts (D-21/D-16)', () => {
 		const signer = createKeyholderSigner({ vault }, a.record);
 		await expect(signer.sign(new Uint8Array(32))).rejects.toMatchObject({ code: 'auth-denied' });
 	});
+
+	describe('vault hygiene (WR-G4-01 / WR-G4-02)', () => {
+		type Vault = ReturnType<typeof makeHarness>['vault'];
+		function spyVault(
+			base: Vault,
+			opts: { failPutAt?: number; failDeleteAlias?: (alias: string) => boolean; failDeleteOnce?: boolean }
+		) {
+			const captured: Uint8Array[] = [];
+			const deleteAttempts: string[] = [];
+			let puts = 0;
+			let deleteFailed = false;
+			const vault = {
+				...base,
+				hasSecret: base.hasSecret.bind(base),
+				getSecret: base.getSecret.bind(base),
+				putSecret: async (alias: string, secret: Uint8Array, policy: never) => {
+					puts += 1;
+					captured.push(secret);
+					if (opts.failPutAt === puts) throw new Error('biometric cancelled');
+					return base.putSecret(alias, secret, policy);
+				},
+				deleteSecret: async (alias: string) => {
+					deleteAttempts.push(alias);
+					if (opts.failDeleteAlias?.(alias) && !(opts.failDeleteOnce && deleteFailed)) {
+						deleteFailed = true;
+						throw new Error('vault delete failed');
+					}
+					return base.deleteSecret(alias);
+				},
+			} as unknown as Vault;
+			return { vault, captured, deleteAttempts };
+		}
+		const allZero = (b: Uint8Array) => b.every((x) => x === 0);
+
+		it('V-1 discard keeps the record when a vault delete fails, still attempts both, and a retry succeeds', async () => {
+			const { vault, identityStorage } = makeHarness();
+			const a = await provisionKeyholderIdentity({ vault, storage: identityStorage }, 'slot-a');
+			const sAlias = keyholderSigningKeyAlias(a.userId);
+			const spy = spyVault(vault, { failDeleteAlias: (x) => x === sAlias, failDeleteOnce: true });
+			await expect(discardKeyholderIdentity({ vault: spy.vault, storage: identityStorage }, a.userId)).rejects.toMatchObject({
+				code: 'store-write-failed',
+			});
+			expect(spy.deleteAttempts).toContain(keyholderDkgReceivingKeyAlias(a.userId));
+			expect(await getKeyholderIdentity(a.userId, identityStorage)).toEqual(a.record);
+
+			await expect(discardKeyholderIdentity({ vault: spy.vault, storage: identityStorage }, a.userId)).resolves.toBeUndefined();
+			expect(await vault.hasSecret(sAlias)).toBe(false);
+			expect(await vault.hasSecret(keyholderDkgReceivingKeyAlias(a.userId))).toBe(false);
+			expect(await getKeyholderIdentity(a.userId, identityStorage)).toBeUndefined();
+		});
+
+		it('V-3 a failing FIRST vault write zeroes both private keys and surfaces the error', async () => {
+			const { vault, identityStorage } = makeHarness();
+			const spy = spyVault(vault, { failPutAt: 1 });
+			await expect(provisionKeyholderIdentity({ vault: spy.vault, storage: identityStorage }, 'slot-a')).rejects.toThrow(
+				'biometric cancelled'
+			);
+			expect(spy.captured.length).toBeGreaterThanOrEqual(1);
+			for (const b of spy.captured) expect(allZero(b)).toBe(true);
+			expect(await listKeyholderIdentities(identityStorage)).toHaveLength(0);
+		});
+
+		it('V-4 a store-write failure zeroes the keys, deletes both aliases and still reports store-write-failed even if a cleanup delete rejects', async () => {
+			const { vault } = makeHarness();
+			const spy = spyVault(vault, { failDeleteAlias: () => true });
+			const dropStorage: KeyVaultStorage = {
+				async getItem() {
+					return null;
+				},
+				async setItem() {},
+				async removeItem() {},
+			};
+			await expect(provisionKeyholderIdentity({ vault: spy.vault, storage: dropStorage }, 'slot-a')).rejects.toMatchObject({
+				code: 'store-write-failed',
+			});
+			for (const b of spy.captured) expect(allZero(b)).toBe(true);
+			expect(spy.deleteAttempts).toHaveLength(2);
+		});
+
+		it('V-5 a rejecting rollback delete never replaces the original receiving-key error', async () => {
+			const { vault, identityStorage } = makeHarness();
+			const spy = spyVault(vault, { failPutAt: 2, failDeleteAlias: () => true });
+			await expect(provisionKeyholderIdentity({ vault: spy.vault, storage: identityStorage }, 'slot-a')).rejects.toThrow(
+				'biometric cancelled'
+			);
+			for (const b of spy.captured) expect(allZero(b)).toBe(true);
+		});
+	});
 });

@@ -168,18 +168,10 @@ export async function provisionKeyholderIdentity(
 	const signingPublicKey = bytesToHex(secp256k1.getPublicKey(signingPriv, true));
 	const receiving = generateDkgReceivingKey();
 
-	await vault.putSecret(signingAlias, signingPriv, KEYHOLDER_SIGNING_KEY_POLICY);
-
-	try {
-		await vault.putSecret(receivingAlias, receiving.privateKey, KEYHOLDER_DKG_RECEIVING_KEY_POLICY);
-	} catch (err) {
-		signingPriv.fill(0);
-		receiving.privateKey.fill(0);
-		await vault.deleteSecret(signingAlias).catch(() => undefined);
-		throw err;
-	}
-	receiving.privateKey.fill(0);
-
+	// Everything from the first vault write onward zeroes BOTH private buffers on any throw (a
+	// cancelled biometric prompt on the very first write included). Cleanup deletes are
+	// allSettled so a rejecting delete never replaces the original error. On success the receiving
+	// key is zeroed here and the signing key stays live until `release()` (sign() uses it).
 	const record: KeyholderIdentityRecord = {
 		v: 1,
 		userId,
@@ -189,27 +181,43 @@ export async function provisionKeyholderIdentity(
 		dkgReceivingPublicKey: receiving.publicKey,
 		createdAt: new Date().toISOString(),
 	};
-
+	const cleanup = async (aliases: string[]): Promise<void> => {
+		await Promise.allSettled(aliases.map((alias) => vault.deleteSecret(alias)));
+	};
 	try {
-		await withStoreMutex(storage, async () => {
-			const current = await readStore(storage, userId);
-			const updated: IdentityStoreShape = { v: 1, identities: [...current.identities, record] };
-			const serialized = JSON.stringify(updated);
-			await storage.setItem(KEYHOLDER_IDENTITY_STORAGE_KEY, serialized);
-			const readBack = await storage.getItem(KEYHOLDER_IDENTITY_STORAGE_KEY);
-			if (readBack !== serialized) {
-				throw new KeyholderIdentityError('store-write-failed', `keyholder-identity: store write for userId ${userId} was not read back correctly`);
-			}
-		});
-	} catch (err) {
-		signingPriv.fill(0);
-		await vault.deleteSecret(signingAlias).catch(() => undefined);
-		await vault.deleteSecret(receivingAlias).catch(() => undefined);
-		if (codeOf(err) === 'store-corrupt') {
+		await vault.putSecret(signingAlias, signingPriv, KEYHOLDER_SIGNING_KEY_POLICY);
+
+		try {
+			await vault.putSecret(receivingAlias, receiving.privateKey, KEYHOLDER_DKG_RECEIVING_KEY_POLICY);
+		} catch (err) {
+			await cleanup([signingAlias]);
 			throw err;
 		}
-		throw new KeyholderIdentityError('store-write-failed', `keyholder-identity: store write for userId ${userId} failed`);
+
+		try {
+			await withStoreMutex(storage, async () => {
+				const current = await readStore(storage, userId);
+				const updated: IdentityStoreShape = { v: 1, identities: [...current.identities, record] };
+				const serialized = JSON.stringify(updated);
+				await storage.setItem(KEYHOLDER_IDENTITY_STORAGE_KEY, serialized);
+				const readBack = await storage.getItem(KEYHOLDER_IDENTITY_STORAGE_KEY);
+				if (readBack !== serialized) {
+					throw new KeyholderIdentityError('store-write-failed', `keyholder-identity: store write for userId ${userId} was not read back correctly`);
+				}
+			});
+		} catch (err) {
+			await cleanup([signingAlias, receivingAlias]);
+			if (codeOf(err) === 'store-corrupt') {
+				throw err;
+			}
+			throw new KeyholderIdentityError('store-write-failed', `keyholder-identity: store write for userId ${userId} failed`);
+		}
+	} catch (err) {
+		signingPriv.fill(0);
+		receiving.privateKey.fill(0);
+		throw err;
 	}
+	receiving.privateKey.fill(0);
 
 	let released = false;
 	const provisioning: KeyholderAcceptProvisioning = {
@@ -239,13 +247,22 @@ export async function provisionKeyholderIdentity(
 	};
 }
 
-/** Idempotent: removes both vault aliases and the identity record. A second call resolves. */
+/**
+ * Idempotent: removes both vault aliases and the identity record. A second call resolves. If either
+ * vault delete fails the record is KEPT (so wrapped secrets are never left without an index) and the
+ * call rejects with `store-write-failed`; a later discard retries.
+ */
 export async function discardKeyholderIdentity(deps: KeyholderIdentityDeps, userId: string): Promise<void> {
 	const { vault } = deps;
 	const storage = resolveStorage(deps.storage);
 
-	await vault.deleteSecret(keyholderSigningKeyAlias(userId)).catch(() => undefined);
-	await vault.deleteSecret(keyholderDkgReceivingKeyAlias(userId)).catch(() => undefined);
+	const results = await Promise.allSettled([
+		vault.deleteSecret(keyholderSigningKeyAlias(userId)),
+		vault.deleteSecret(keyholderDkgReceivingKeyAlias(userId)),
+	]);
+	if (results.some((r) => r.status === 'rejected')) {
+		throw new KeyholderIdentityError('store-write-failed', `keyholder-identity: vault delete failed for userId ${userId}; identity record kept`);
+	}
 
 	await withStoreMutex(storage, async () => {
 		let current: IdentityStoreShape;
