@@ -129,6 +129,62 @@ describe('pickFoundingBundleFile — D-36 never-throwing picker seam', () => {
 	});
 });
 
+describe('pickFoundingBundleFile — cap on text length and cache-copy cleanup (initial/WR-G4-04)', () => {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { pickFoundingBundleFile, MAX_FOUNDING_BUNDLE_FILE_BYTES } = require('../pick-founding-bundle-file');
+	const NO_SIZE_PICK = [{ uri: 'content://picked-uri', name: 'bundle.json', size: null, error: null }];
+
+	it('C-1: a provider that reports no size but whose text exceeds the cap resolves too-large and the copy is deleted', async () => {
+		const picker = makeFakePicker({ pick: jest.fn(async () => NO_SIZE_PICK) });
+		const readText = jest.fn(async () => 'x'.repeat(MAX_FOUNDING_BUNDLE_FILE_BYTES + 1));
+		const deleteLocalCopy = jest.fn(async () => true);
+
+		const result = await pickFoundingBundleFile({ picker, readText, deleteLocalCopy });
+
+		expect(result).toEqual({ kind: 'too-large' });
+		expect(deleteLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
+	});
+
+	it('C-2: text exactly at the cap is accepted', async () => {
+		const picker = makeFakePicker({ pick: jest.fn(async () => NO_SIZE_PICK) });
+		const text = 'x'.repeat(MAX_FOUNDING_BUNDLE_FILE_BYTES);
+		const result = await pickFoundingBundleFile({ picker, readText: async () => text, deleteLocalCopy: jest.fn(async () => true) });
+		expect(result).toEqual({ kind: 'picked', text });
+	});
+
+	it('C-3: the copy is deleted after a successful read', async () => {
+		const deleteLocalCopy = jest.fn(async () => true);
+		const result = await pickFoundingBundleFile({ picker: makeFakePicker(), readText: async () => 'ok', deleteLocalCopy });
+		expect(result).toEqual({ kind: 'picked', text: 'ok' });
+		expect(deleteLocalCopy).toHaveBeenCalledTimes(1);
+		expect(deleteLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
+	});
+
+	it('C-4: the copy is deleted after a read failure', async () => {
+		const deleteLocalCopy = jest.fn(async () => true);
+		const readText = jest.fn(async () => { throw new Error('fetch failed'); });
+		const result = await pickFoundingBundleFile({ picker: makeFakePicker(), readText, deleteLocalCopy });
+		expect(result).toEqual({ kind: 'unreadable', reason: 'read-failed' });
+		expect(deleteLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
+	});
+
+	it('C-5: no delete when the copy step itself failed', async () => {
+		const deleteLocalCopy = jest.fn(async () => true);
+		const picker = makeFakePicker({
+			keepLocalCopy: jest.fn(async () => [{ status: 'error', sourceUri: 'content://picked-uri', copyError: 'disk full' }]),
+		});
+		const result = await pickFoundingBundleFile({ picker, readText: async () => 'x', deleteLocalCopy });
+		expect(result).toEqual({ kind: 'unreadable', reason: 'copy-failed' });
+		expect(deleteLocalCopy).not.toHaveBeenCalled();
+	});
+
+	it('C-6: a rejecting deleteLocalCopy never changes the pick result', async () => {
+		const deleteLocalCopy = jest.fn(async () => { throw new Error('boom'); });
+		const result = await pickFoundingBundleFile({ picker: makeFakePicker(), readText: async () => 'ok', deleteLocalCopy });
+		expect(result).toEqual({ kind: 'picked', text: 'ok' });
+	});
+});
+
 describe('pickFoundingBundleFile — P-5: lazy require discipline', () => {
 	it('requiring the seam module does not load the picker module; the factory runs only on the first pickFoundingBundleFile() call', () => {
 		let factoryCallCount = 0;

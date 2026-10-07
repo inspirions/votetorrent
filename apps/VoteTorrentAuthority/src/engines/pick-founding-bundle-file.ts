@@ -57,6 +57,8 @@ export interface PickerModuleSubset {
 export interface PickFoundingBundleFileDeps {
 	picker?: PickerModuleSubset
 	readText?: (uri: string) => Promise<string>
+	/** Deletes the picker's cache copy. Default: attestation-native `deleteCachedFile`. */
+	deleteLocalCopy?: (uri: string) => Promise<unknown>
 }
 
 const DEFAULT_FOUNDING_BUNDLE_FILE_NAME = 'founding-bundle.json'
@@ -75,6 +77,12 @@ function defaultReadText(uri: string): Promise<string> {
 	return fetch(uri).then((response) => response.text())
 }
 
+function defaultDeleteLocalCopy(uri: string): Promise<unknown> {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires -- lazy, like the picker: keeps the native module out of module evaluation.
+	const native = require('@votetorrent/attestation-native') as { deleteCachedFile: (uri: string) => Promise<boolean> }
+	return native.deleteCachedFile(uri)
+}
+
 function logFailure(reason: string): void {
 	// eslint-disable-next-line no-console -- closed token only, never a uri/name/content (T-62-23-04).
 	console.info(`[founding-bundle] pick: ${reason}`)
@@ -91,6 +99,7 @@ export async function pickFoundingBundleFile(
 ): Promise<PickedFoundingBundleFile> {
 	const picker = deps?.picker ?? getPicker()
 	const readText = deps?.readText ?? defaultReadText
+	const deleteLocalCopy = deps?.deleteLocalCopy ?? defaultDeleteLocalCopy
 
 	let pickedUri: string
 	let pickedName: string | null
@@ -142,9 +151,21 @@ export async function pickFoundingBundleFile(
 
 	try {
 		const text = await readText(localUri)
+		// The provider may report no size, so the cap is enforced on what was actually read.
+		if (text.length > MAX_FOUNDING_BUNDLE_FILE_BYTES) {
+			logFailure('too-large')
+			return { kind: 'too-large' }
+		}
 		return { kind: 'picked', text }
 	} catch {
 		logFailure('read-failed')
 		return { kind: 'unreadable', reason: 'read-failed' }
+	} finally {
+		// The cache copy never outlives the import; a failed delete must not change the result.
+		try {
+			await deleteLocalCopy(localUri)
+		} catch {
+			// best effort
+		}
 	}
 }
