@@ -29,6 +29,9 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 import { setKeyholderKeyVaultForTests } from '../../../engines/keyholder-vault';
 import { InviteShareError } from '../../invitations/invite-share';
+import { stashInviteShare } from '../../invitations/invite-share-handoff';
+
+jest.mock('@votetorrent/attestation-native', () => ({ setSecureScreen: jest.fn(async () => true) }));
 
 function makeShareText(type = 'k', name = 'Ada Keyholder') {
   const priv = secp256k1.utils.randomSecretKey();
@@ -42,7 +45,7 @@ function makeShareText(type = 'k', name = 'Ada Keyholder') {
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
 
-const mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string; electionEngine?: unknown; keyholder?: unknown } = {
+const mockRouteParams: { mode: 'send' | 'accept'; shareToken?: string; electionEngine?: unknown; keyholder?: unknown } = {
   mode: 'accept',
 };
 
@@ -61,7 +64,7 @@ const mockRespondToInvite = jest.fn(
     _provisioning?: { signingKey: { key: string; type: string; expiration: number }; dkgPublicKey: string; sign: (digest: Uint8Array) => Promise<unknown> }
   ) => {}
 );
-const mockGetKeyholderInvite = jest.fn(async () => undefined);
+const mockGetKeyholderInvite = jest.fn(async (_cid: string): Promise<any> => undefined);
 const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'cid-1' }));
 const mockInvitationEngine = {
   resolveInviteSlot: mockResolveInviteSlot,
@@ -122,6 +125,10 @@ jest.mock('@react-navigation/native', () => ({
       success: '#34C759',
     },
   }),
+  useFocusEffect: (cb: () => void | (() => void)) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('react').useEffect(cb, [cb]);
+  },
   useRoute: () => ({ params: mockRouteParams }),
   useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), setOptions: mockSetOptions }),
 }));
@@ -166,6 +173,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockRespondToInvite.mockResolvedValue(undefined);
   mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: 'cid-1' });
+  // The slot's STORED name is what the screen shows (never the name inside the pasted JSON).
+  mockGetKeyholderInvite.mockResolvedValue({ invite: { name: 'Ada Keyholder' }, result: undefined });
   mockAcceptKeyholderInvitation.mockResolvedValue({ userId: 'u', slotCid: 'cid-1' });
   setKeyholderKeyVaultForTests(makeFakeVault() as never);
 });
@@ -173,7 +182,7 @@ beforeEach(() => {
 afterEach(() => {
   setKeyholderKeyVaultForTests(undefined);
   mockRouteParams.mode = 'accept';
-  delete mockRouteParams.initialShare;
+  delete mockRouteParams.shareToken;
   delete mockRouteParams.electionEngine;
   delete mockRouteParams.keyholder;
 });
@@ -196,7 +205,7 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     expect(buttonByTitle(tr, 'decline').props.disabled).toBe(true);
   });
 
-  it('pasting a share shows the invitee name and enables Accept/Decline', async () => {
+  it('pasting a share shows the slot\'s stored name and enables Accept/Decline', async () => {
     const tr = await render();
     await paste(tr, makeShareText().text);
     const name = tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-name');
@@ -272,7 +281,7 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
   });
 
   it('Decline with an unresolvable share renders not-found copy and does not respond', async () => {
-    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'not-found' });
+    mockResolveInviteSlot.mockResolvedValue({ status: 'not-found' });
     const tr = await render();
     await paste(tr, makeShareText().text);
     await renderer.act(async () => {
@@ -284,7 +293,7 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
   });
 
   it('Decline of a withdrawn or expired share renders invitationAcceptNoLongerValid with no prompt and no response', async () => {
-    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'no-longer-valid' });
+    mockResolveInviteSlot.mockResolvedValue({ status: 'no-longer-valid' });
     const tr = await render();
     await paste(tr, makeShareText().text);
     await renderer.act(async () => {
@@ -337,14 +346,15 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     expect(mockGoBack).toHaveBeenCalledTimes(1);
   });
 
-  it('seeds the paste field from the initialShare route param', async () => {
-    mockRouteParams.initialShare = makeShareText('k', 'Seeded Name').text;
+  it('seeds the share from the shareToken route param', async () => {
+    mockRouteParams.shareToken = stashInviteShare(makeShareText('k', 'Seeded Name').text);
+    mockGetKeyholderInvite.mockResolvedValue({ invite: { name: 'Seeded Name' }, result: undefined });
     try {
       const tr = await render();
       expect(JSON.stringify(tr.toJSON())).toContain('Seeded Name');
       expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
     } finally {
-      delete mockRouteParams.initialShare;
+      delete mockRouteParams.shareToken;
     }
   });
 });
@@ -422,5 +432,100 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L)', () => {
     expect(payload.invitePrivate).toMatch(/^[0-9a-f]{64}$/);
     expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-share').length).toBeGreaterThan(0);
     expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-copy').length).toBeGreaterThan(0);
+  });
+});
+
+describe('KeyholderInvitationScreen - hardened accept (stored name, masked share, latch)', () => {
+  const textInputs = (tr: renderer.ReactTestRenderer) => tr.root.findAll((n) => String(n.type) === 'TextInput');
+  const coded = (code: string) => Object.assign(new Error('engine text'), { code });
+  let share!: { invitePrivate: string; text: string };
+
+  beforeEach(() => {
+    share = makeShareText('k', 'Mallory');
+    mockRouteParams.shareToken = stashInviteShare(share.text);
+    mockGetKeyholderInvite.mockResolvedValue({ invite: { name: 'Kay Two' }, result: undefined });
+  });
+
+  it('gap6/WR-06: shows the name STORED on the slot, never the name in the pasted JSON', async () => {
+    const tr = await render();
+    const name = tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-name' && typeof n.props?.children === 'string');
+    expect(name[0].props.children).toBe('Kay Two');
+    expect(JSON.stringify(tr.toJSON())).not.toContain('Mallory');
+    expect(mockGetKeyholderInvite).toHaveBeenCalledWith('cid-1');
+  });
+
+  it('gap6/WR-06: a raw-hex share keeps the paste hint and a disabled footer until the slot resolves', async () => {
+    mockRouteParams.shareToken = stashInviteShare(share.invitePrivate);
+    let release!: (v: unknown) => void;
+    mockResolveInviteSlot.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptPasteHint');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    expect(buttonByTitle(tr, 'decline').props.disabled).toBe(true);
+    await renderer.act(async () => {
+      release({ status: 'live', cid: 'cid-1' });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(JSON.stringify(tr.toJSON())).toContain('Kay Two');
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(false);
+  });
+
+  it('gap6/WR-05: opened with a shareToken shows only the summary; no field or param holds the private key', async () => {
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationPastedSummary');
+    expect(JSON.stringify(tr.toJSON())).not.toContain(share.invitePrivate);
+    expect(textInputs(tr).filter((n) => String(n.props.value ?? '').includes(share.invitePrivate))).toHaveLength(0);
+    expect(JSON.stringify(mockRouteParams)).not.toMatch(/[0-9a-f]{64}/i);
+  });
+
+  it('Decline: a double tap sends one respondToInvite', async () => {
+    let release!: () => void;
+    mockRespondToInvite.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    const tr = await render();
+    let a!: Promise<unknown>;
+    let b!: Promise<unknown>;
+    await renderer.act(async () => {
+      a = buttonByTitle(tr, 'decline').props.onPress();
+      b = buttonByTitle(tr, 'decline').props.onPress();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(buttonByTitle(tr, 'decline').props.disabled).toBe(true);
+    await renderer.act(async () => {
+      release();
+      await Promise.all([a, b]);
+    });
+    expect(mockRespondToInvite).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['self-invite', 'keyholderAcceptSelfInvite'],
+    ['seat-already-held', 'keyholderAcceptSeatHeld'],
+    ['invite-superseded', 'invitationAcceptSuperseded'],
+  ])('Accept refusal coded %s renders %s', async (code, key) => {
+    mockAcceptKeyholderInvitation.mockRejectedValueOnce(coded(code));
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'accept').props.onPress();
+    });
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain(key);
+    expect(json).not.toContain('engine text');
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('Decline refusal coded invite-superseded renders invitationAcceptSuperseded', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(coded('invite-superseded'));
+    const tr = await render();
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'decline').props.onPress();
+    });
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptSuperseded');
+  });
+
+  it('send mode still renders the Name field and the Send button', async () => {
+    mockRouteParams.mode = 'send';
+    const tr = await render();
+    expect(tr.root.findAll((n) => (n.type as unknown) === 'TextInput' && n.props.accessibilityLabel === 'name').length).toBeGreaterThan(0);
+    expect(buttonByTitle(tr, 'send')).toBeDefined();
   });
 });
