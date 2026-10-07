@@ -662,16 +662,23 @@ export default function RegistrantDetailScreen() {
 					// D-52: sealed selective details this device cannot open are shown as unread,
 					// never as an empty preview (which would read as "no selective details"). No
 					// audience selector is offered. Nothing from the record is rendered.
-					<View testID="registrant-detail-selective-unread" style={localStyles.sealedNotice}>
-						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
-						<ThemedText
-							type="small"
-							testID="registrant-detail-selective-unread-text"
-							style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
-						>
-							{t(SELECTIVE_TIER_READ_STATE_COPY[selectiveReadState])}
-						</ThemedText>
-					</View>
+					<>
+						<View testID="registrant-detail-selective-unread" style={localStyles.sealedNotice}>
+							<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+							<ThemedText
+								type="small"
+								testID="registrant-detail-selective-unread-text"
+								style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
+							>
+								{t(SELECTIVE_TIER_READ_STATE_COPY[selectiveReadState])}
+							</ThemedText>
+						</View>
+						{selectiveReadState === "not-a-recipient" ? (
+							<ThemedText type="small" testID="registrant-detail-selective-late-officer" style={{ color: colors.textSecondary }}>
+								{t("sealedBeforeOfficerExplanation")}
+							</ThemedText>
+						) : null}
+					</>
 				) : (
 					<SelectiveAudiencePreview
 						leaves={selectiveTier?.selectiveDetails ?? []}
@@ -707,17 +714,24 @@ export default function RegistrantDetailScreen() {
 					// Not hidden: the section, its title, the lifecycle controls and Access History
 					// all stay. Nothing from the record (values, ciphertext, failure detail) is
 					// rendered or put in `errorMessage`.
-					<View testID="registrant-detail-private-sealed" style={localStyles.sealedNotice}>
-						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
-						<View testID={"registrant-detail-private-sealed-" + privateReadState} />
-						<ThemedText
-							type="small"
-							testID="registrant-detail-private-sealed-text"
-							style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
-						>
-							{t(PRIVATE_TIER_READ_STATE_COPY[privateReadState])}
-						</ThemedText>
-					</View>
+					<>
+						<View testID="registrant-detail-private-sealed" style={localStyles.sealedNotice}>
+							<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
+							<View testID={"registrant-detail-private-sealed-" + privateReadState} />
+							<ThemedText
+								type="small"
+								testID="registrant-detail-private-sealed-text"
+								style={[{ color: colors.textSecondary }, localStyles.sealedNoticeText]}
+							>
+								{t(PRIVATE_TIER_READ_STATE_COPY[privateReadState])}
+							</ThemedText>
+						</View>
+						{privateReadState === "not-a-recipient" ? (
+							<ThemedText type="small" testID="registrant-detail-private-late-officer" style={{ color: colors.textSecondary }}>
+								{t("sealedBeforeOfficerExplanation")}
+							</ThemedText>
+						) : null}
+					</>
 				) : privateRows.length === 0 ? (
 					<View testID="registrant-detail-private-empty">
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>

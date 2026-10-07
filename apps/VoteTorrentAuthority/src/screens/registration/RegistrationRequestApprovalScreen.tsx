@@ -826,6 +826,11 @@ export default function RegistrationRequestApprovalScreen() {
 									</ThemedText>
 								</View>
 							</View>
+							{read?.payloadAccess === "not-a-recipient" ? (
+								<ThemedText type="small" testID="registration-request-approval-late-officer" style={{ color: colors.textSecondary }}>
+									{t("sealedBeforeOfficerExplanation")}
+								</ThemedText>
+							) : null}
 							{/* D-07 + WR-02: the tampered state is still rejectable, and the engine refuses
 							    any reject whose checklist does not meet the gate. Without the checklist here
 							    a fresh tampered read has `checked = []` and Reject could never be enabled.
