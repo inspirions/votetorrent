@@ -2408,7 +2408,10 @@ const resources = {
 
 const deviceLanguage = getLocales()[0]?.languageCode ?? 'en';
 
-i18n.use(initReactI18next).init({
+// Guard: a re-evaluation of this module (Fast Refresh) must not re-run init() and reset the
+// language the user chose back to the device locale.
+if (!i18n.isInitialized)
+	i18n.use(initReactI18next).init({
 	resources: resources,
 	lng: deviceLanguage,
 	fallbackLng: 'en',
