@@ -828,32 +828,66 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 				});
 			}
 
-			it('release build (__DEV__ false): renders the identity recovery view, never the transient retry, and Create -> Confirm calls createNewIdentity once', async () => {
+			// 62-REVIEW WR-04: this is the REAL provider's release state. Outside __DEV__ the provider
+			// never writes seededElectionId (only the dev seed does), so it is undefined here, and the
+			// permanent reason comes from where production raises it: createDeviceSigner's unwrap
+			// (getOrCreateDeviceUser returns the wrapped record without unwrapping). The identity is
+			// read before the election and network preconditions, so the voter meets the recovery
+			// view, never the no-election copy that would otherwise hide the loss.
+			it('release build (__DEV__ false, no seeded election): a lost identity read from createDeviceSigner renders the recovery view before any precondition, and Create -> Confirm calls createNewIdentity once', async () => {
 				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
-				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError('no-wrap-key'));
+				mockSeededElectionId = undefined;
+				mockCreateDeviceSigner.mockRejectedValueOnce(identityError('no-wrap-key'));
+				try {
+					const tr = renderScreen();
+					await pressConfirm(tr);
 
-				const tr = renderScreen();
-				await pressConfirm(tr);
+					expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+					const text = JSON.stringify(tr.toJSON());
+					expect(text).not.toContain('There is no election to register for on this phone yet.');
+					expect(text).not.toContain('Something went wrong verifying your device');
+					expect(text).not.toContain('no-wrap-key');
+					expect(text).not.toContain('DeviceIdentityKeyUnavailableError');
+					expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
+					expect(tr.root.findAllByProps({testID: 'confirmation-retry-cta'})).toHaveLength(0);
+					expect(tr.root.findAllByProps({testID: 'confirmation-error'})).toHaveLength(0);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledWith('Device User');
+					// Nothing after the identity read ran: no hardware key, no network, no transport.
+					expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+					expect(mockResolveVoterRequestTransports).not.toHaveBeenCalled();
+					expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
 
-				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
-				const text = JSON.stringify(tr.toJSON());
-				expect(text).not.toContain('Something went wrong verifying your device');
-				expect(text).not.toContain('no-wrap-key');
-				expect(text).not.toContain('DeviceIdentityKeyUnavailableError');
-				expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
-				expect(tr.root.findAllByProps({testID: 'confirmation-retry-cta'})).toHaveLength(0);
-				expect(tr.root.findAllByProps({testID: 'confirmation-error'})).toHaveLength(0);
-				expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
+					renderer.act(() => {
+						tr.root.findByProps({testID: 'identity-recovery-create'}).props.onPress();
+					});
+					expect(mockCreateNewIdentity).not.toHaveBeenCalled();
+					await renderer.act(async () => {
+						tr.root.findByProps({testID: 'identity-recovery-confirm'}).props.onPress();
+						await flushMicrotasks(5);
+					});
+					expect(mockCreateNewIdentity).toHaveBeenCalledTimes(1);
+				} finally {
+					mockSeededElectionId = SEEDED_ELECTION_ID;
+				}
+			});
 
-				renderer.act(() => {
-					tr.root.findByProps({testID: 'identity-recovery-create'}).props.onPress();
-				});
-				expect(mockCreateNewIdentity).not.toHaveBeenCalled();
-				await renderer.act(async () => {
-					tr.root.findByProps({testID: 'identity-recovery-confirm'}).props.onPress();
-					await flushMicrotasks(5);
-				});
-				expect(mockCreateNewIdentity).toHaveBeenCalledTimes(1);
+			it('release build, readable identity, no seeded election: the identity read runs (no prompt) and the no-election copy still shows', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockSeededElectionId = undefined;
+				try {
+					const tr = renderScreen();
+					await pressConfirm(tr);
+
+					const text = JSON.stringify(tr.toJSON());
+					expect(text).toContain('There is no election to register for on this phone yet.');
+					expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+					expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+					expect(mockProduce).not.toHaveBeenCalled();
+				} finally {
+					mockSeededElectionId = SEEDED_ELECTION_ID;
+				}
 			});
 
 			it.each(['tag-mismatch', 'key-mismatch'])('__DEV__ true: %s also renders the recovery view', async reason => {

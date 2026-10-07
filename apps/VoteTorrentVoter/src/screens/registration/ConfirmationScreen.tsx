@@ -17,6 +17,10 @@
  * transport.ts`'s `resolveVoterRequestTransports`).
  *
  * The ceremony (order matters — the biometric-last property, D-06/D-15/D-16, is unchanged):
+ *   0. Read the voter's own secp256k1 identity (`getOrCreateDeviceUser` + `createDeviceSigner`,
+ *      which unwraps eagerly) BEFORE the election and network preconditions, so a permanently lost
+ *      identity reaches the recovery view in a release build too (62-REVIEW WR-04). No biometric:
+ *      the identity wrap alias is `requireAuth: false`.
  *   1. `provisionDeviceKey()` — resolves the hardware-backed P-256 public key BEFORE any request is
  *      submitted. Idempotent; does NOT prompt biometric.
  *   2. Map the shared draft onto `RegisterInit` tiers (unchanged tier mapping / WR-04).
@@ -181,6 +185,23 @@ export default function ConfirmationScreen() {
 		setIsSubmitting(true);
 		setFailureClass(null);
 		try {
+			// The voter's OWN device identity (secp256k1, device-user.ts) — self-signs both requests
+			// below as ITSELF. This is the SAME underlying keypair `useVoterApp().sign` wraps as the
+			// dev-seeded founding officer, but it is deliberately resolved HERE, freshly, rather than
+			// destructured from useVoterApp() — the officer signer must not appear anywhere in this
+			// ceremony.
+			//
+			// 62-REVIEW WR-04: read FIRST, before the election and network preconditions. In a release
+			// build seededElectionId is always undefined (only the __DEV__ seed writes it), so a later
+			// read would leave a permanently lost identity hidden behind NoElectionConfiguredError and
+			// the recovery view unreachable. createDeviceSigner unwraps eagerly, so a lost identity
+			// throws here. The read prompts nothing: the identity wrap alias is requireAuth:false
+			// (device-key-wrap.ts; native unwrap skips BiometricPrompt / LAContext for it), so the
+			// biometric-last property below is unchanged.
+			const deviceUser = await getOrCreateDeviceUser('Device User');
+			const deviceUserKey = deviceUser.activeKeys[0]!.key;
+			const deviceSign = await createDeviceSigner('Device User');
+
 			// WR-03: the registration request's payload only enforces field policy when
 			// init.electionId is set. Fail closed rather than submit with policy unenforced.
 			if (!seededElectionId) {
@@ -201,15 +222,6 @@ export default function ConfirmationScreen() {
 			const networkEngine = await getEngine<INetworkEngine>('network');
 			const details = await networkEngine.getDetails();
 			const authorityId = details.network.primaryAuthorityId;
-
-			// The voter's OWN device identity (secp256k1, device-user.ts) — self-signs both requests
-			// below as ITSELF. This is the SAME underlying keypair `useVoterApp().sign` wraps as the
-			// dev-seeded founding officer, but it is deliberately resolved HERE, freshly, rather than
-			// destructured from useVoterApp() — the officer signer must not appear anywhere in this
-			// ceremony.
-			const deviceUser = await getOrCreateDeviceUser('Device User');
-			const deviceUserKey = deviceUser.activeKeys[0]!.key;
-			const deviceSign = await createDeviceSigner('Device User');
 
 			// D-28/D-29/D-32: reach the authority through the joined network's own strand — P2P by
 			// default, or the authority-configured REST bridge for registration only. Unreachable
