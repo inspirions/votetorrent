@@ -216,6 +216,67 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		});
 	});
 
+	describe('re-accept after a revision change: a held seat is released only on positive proof (A1-A4)', () => {
+		type Facts = { revision: number | null; liveRoster?: string[]; earlierRevisionUserIds?: string[] } | undefined;
+		const U = 'u-held';
+
+		async function run(reader: ((electionId: string) => Promise<Facts>) | undefined, held = true) {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			if (held) {
+				await storage.setItem('vt.keyholder-identities.v1', JSON.stringify({ v: 1, identities: [{ userId: U, inviteSlotCid: 'held-slot' }] }));
+			}
+			const respondToInvite = jest.fn(async () => undefined);
+			const engine = {
+				resolveInviteSlot: jest.fn(async () => ({ status: 'live', cid: 'new-slot' })),
+				respondToInvite,
+				getKeyholderInvite: jest.fn(async () => undefined),
+				getKeyholderSlotSeat: jest.fn(async (cid: string) => ({ electionId: 'e1', selfInvite: false, cid })),
+			};
+			const deps = { invitationEngine: engine as never, vault, storage, ...(reader ? { readKeyholderSeatFacts: reader } : {}) };
+			return { promise: acceptKeyholderInvitation(deps, makeShare('Zed').text), respondToInvite, wrapper };
+		}
+
+		it('A1: earlier-revision proof (revision read, absent from liveRoster, present in earlierRevisionUserIds) lets the accept proceed', async () => {
+			const reader = jest.fn(async () => ({ revision: 1, liveRoster: ['other'], earlierRevisionUserIds: [U] }));
+			const { promise, respondToInvite } = await run(reader);
+			await promise;
+			expect(respondToInvite).toHaveBeenCalledTimes(1);
+			expect(reader).toHaveBeenCalledTimes(1);
+			expect(reader).toHaveBeenCalledWith('e1');
+		});
+
+		it('A2: a held id in the live roster refuses with 0 wraps', async () => {
+			const { promise, respondToInvite, wrapper } = await run(async () => ({ revision: 1, liveRoster: [U], earlierRevisionUserIds: [] }));
+			await expect(promise).rejects.toMatchObject({ code: 'seat-already-held' });
+			expect(wrapper.authWraps).toBe(0);
+			expect(respondToInvite).not.toHaveBeenCalled();
+		});
+
+		const refusals: Array<[string, ((electionId: string) => Promise<Facts>) | undefined]> = [
+			['revision null with empty lists', async () => ({ revision: null, liveRoster: [], earlierRevisionUserIds: [] })],
+			['liveRoster undefined', async () => ({ revision: 1, liveRoster: undefined, earlierRevisionUserIds: [U] })],
+			['earlierRevisionUserIds undefined', async () => ({ revision: 1, liveRoster: [], earlierRevisionUserIds: undefined })],
+			['held id in neither list', async () => ({ revision: 1, liveRoster: [], earlierRevisionUserIds: [] })],
+			['reader absent', undefined],
+			['reader resolves undefined', async () => undefined],
+			['reader rejects', async () => { throw new Error('status down'); }],
+		];
+		it.each(refusals)('A3: fail closed when %s', async (_name, reader) => {
+			const { promise, respondToInvite, wrapper } = await run(reader);
+			await expect(promise).rejects.toMatchObject({ code: 'seat-already-held' });
+			expect(wrapper.authWraps).toBe(0);
+			expect(respondToInvite).not.toHaveBeenCalled();
+		});
+
+		it('A4: with no held identity of the same election the reader is never called', async () => {
+			const reader = jest.fn(async () => ({ revision: 1, liveRoster: [], earlierRevisionUserIds: [] }));
+			const { promise, respondToInvite } = await run(reader, false);
+			await promise;
+			expect(reader).not.toHaveBeenCalled();
+			expect(respondToInvite).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	it('A3: a failure before any write rejects with the original error and leaves nothing behind', async () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Dana');

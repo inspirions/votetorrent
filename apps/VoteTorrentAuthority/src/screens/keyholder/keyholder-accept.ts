@@ -45,6 +45,26 @@ export interface KeyholderAcceptDeps {
 	invitationEngine: IInvitationEngine;
 	vault: IKeyVault;
 	storage?: KeyVaultStorage;
+	/** The election's current-revision seat facts (the DKG status read). Absent or failing means no proof. */
+	readKeyholderSeatFacts?: (electionId: string) => Promise<SeatFacts | undefined>;
+}
+
+export interface SeatFacts {
+	revision: number | null;
+	liveRoster?: string[];
+	earlierRevisionUserIds?: string[];
+}
+
+/** True only on positive proof that `userId` is an earlier-revision seat (never on an unread roster). */
+function isProvenEarlierRevisionSeat(facts: SeatFacts | undefined, userId: string): boolean {
+	return (
+		!!facts &&
+		typeof facts.revision === 'number' &&
+		Array.isArray(facts.liveRoster) &&
+		Array.isArray(facts.earlierRevisionUserIds) &&
+		!facts.liveRoster.includes(userId) &&
+		facts.earlierRevisionUserIds.includes(userId)
+	);
 }
 
 export async function acceptKeyholderInvitation(
@@ -58,9 +78,20 @@ export async function acceptKeyholderInvitation(
 	if (seat.selfInvite) {
 		throw keyholderAcceptError('The officer who sent this keyholder invitation cannot accept it', 'self-invite');
 	}
+	let facts: SeatFacts | undefined;
+	let factsRead = false;
 	for (const held of await listKeyholderIdentities(deps.storage)) {
 		const heldSeat = await deps.invitationEngine.getKeyholderSlotSeat(held.inviteSlotCid);
 		if (heldSeat && heldSeat.electionId === seat.electionId) {
+			if (!factsRead) {
+				factsRead = true;
+				try {
+					facts = deps.readKeyholderSeatFacts ? await deps.readKeyholderSeatFacts(seat.electionId) : undefined;
+				} catch {
+					facts = undefined;
+				}
+			}
+			if (isProvenEarlierRevisionSeat(facts, held.userId)) continue;
 			throw keyholderAcceptError('This device already holds a keyholder seat for this election', 'seat-already-held');
 		}
 	}

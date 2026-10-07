@@ -8,6 +8,7 @@ import type {
 	IDefaultUserEngine,
 	IElectionEngine,
 	IInvitationEngine,
+	IKeyholderDkgEngine,
 	InviteStatus,
 	KeyholderInvite,
 	SentKeyholderInvite,
@@ -244,7 +245,22 @@ export function KeyholderInvitationScreen() {
 		setIsAccepting(true);
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
-			await acceptKeyholderInvitation({ invitationEngine: engine, vault: resolveKeyholderKeyVault() }, pastedInvite);
+			await acceptKeyholderInvitation(
+				{
+					invitationEngine: engine,
+					vault: resolveKeyholderKeyVault(),
+					// Positive proof that a held same-election identity is an earlier-revision seat (never prompts).
+					readKeyholderSeatFacts: async (electionId) => {
+						try {
+							const s = await (await getEngine<IKeyholderDkgEngine>("keyholderDkg")).getDkgStatus(electionId);
+							return { revision: s.revision, liveRoster: s.liveRoster, earlierRevisionUserIds: s.earlierRevisionUserIds };
+						} catch {
+							return undefined;
+						}
+					},
+				},
+				pastedInvite
+			);
 			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
