@@ -42,7 +42,7 @@ import {
 	migrateLegacyPlaintextIdentityKey,
 	replaceUnrecoverableDeviceIdentity,
 } from '../engines/device-user';
-import {isReplaceableIdentityError} from '../engines/identity-errors';
+import {isIdentityNotReplaceable, isReplaceableIdentityError} from '../engines/identity-errors';
 import {errorClassName} from '../utils/errorClassName';
 import {IdentityRecoveryView} from '../components/IdentityRecoveryView';
 import {seedDevNetwork} from '../engines/dev-seed';
@@ -185,6 +185,11 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		});
 	}, []);
 
+	// WR-03 (see createNewIdentity below): true from a successful identity replacement until the
+	// next boot that succeeds, or until the whole createNewIdentity sequence succeeds. Declared
+	// before the init effect, which clears it on every successful boot.
+	const replacedThisSessionRef = useRef(false);
+
 	useEffect(() => {
 		// Quick task 260928-kkf (mirrors authority AppProvider): a cancelled run has been
 		// SUPERSEDED — by unmount, a node change re-running this effect, or the escape
@@ -198,6 +203,9 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		};
 
 		async function initialize() {
+			// Set when this run surfaces a boot error; a run that ends without one is a successful
+			// boot and clears replacedThisSessionRef (62-REVIEW WR-03).
+			let bootFailed = false;
 			try {
 				const factory = engineFactoryRef.current!;
 
@@ -247,6 +255,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						// D-15 parity: surface the recoverable error; spinner resolves to an
 						// error view. NEVER fall back to a silent empty in-memory network.
 						console.error('seedDevNetwork failed:', errorClassName(seedError));
+						bootFailed = true;
 						setInitError({error: seedError});
 						// fall through to setIsInitialized(true) below so the spinner never
 						// hangs.
@@ -257,6 +266,13 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				// network gate on it, mirroring the authority app's cold-start-no-network state.
 
 				if (cancelled) return;
+				// 62-REVIEW WR-03: a successful boot ends the retry window of a replacement made
+				// earlier in this session (in __DEV__ the seed has just read the identity). A later,
+				// separate loss must be replaced again, and a 'readable' refusal must no longer be
+				// accepted as "already done".
+				if (!bootFailed) {
+					replacedThisSessionRef.current = false;
+				}
 				setIsInitialized(true);
 				hideSplash();
 				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
@@ -304,19 +320,27 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// identity founded (__DEV__ only; release has no seeded network), and re-runs the boot.
 	//
 	// WR-03: once the replacement has succeeded the record is READABLE, so a second
-	// replaceUnrecoverableDeviceIdentity call would be refused forever. If a later step fails, the
-	// view offers Create again; that retry must SKIP the replacement THIS session already completed
-	// and only finish the remaining (idempotent) steps. The skip is keyed on this ref, never on the
-	// refusal's message or reason: a refusal while nothing was replaced (e.g. 'readable' on the
-	// first attempt) propagates to the view's failed state untouched (T-62-87-01).
-	const replacedThisSessionRef = useRef(false);
+	// replaceUnrecoverableDeviceIdentity call is refused with reason 'readable'. If a later step
+	// fails, the view offers Create again; that retry must finish the remaining (idempotent) steps.
+	//
+	// 62-REVIEW WR-03: the replacement is ALWAYS attempted (the engine re-checks the record under
+	// its lock), so a record that has become permanently locked AGAIN is replaced again rather
+	// than skipped. Only a 'readable' refusal is accepted, and only while replacedThisSessionRef
+	// says this session's own replacement has not yet been settled by a successful boot (the ref
+	// is cleared there, and when this whole sequence succeeds). Any other refusal, or a
+	// 'readable' refusal while nothing was replaced (T-62-87-01), propagates to the view's
+	// failed state. The decision is keyed on the typed reason, never on the message.
 	const createNewIdentity = useCallback(async () => {
 		const factory = engineFactoryRef.current!;
-		if (!replacedThisSessionRef.current) {
-			const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
-			const defaultUser = await defaultUserEng.get();
+		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
+		const defaultUser = await defaultUserEng.get();
+		try {
 			await replaceUnrecoverableDeviceIdentity(defaultUser?.name ?? (__DEV__ ? 'Dev Voter' : 'Device User'));
 			replacedThisSessionRef.current = true;
+		} catch (replaceError) {
+			if (!(replacedThisSessionRef.current && isIdentityNotReplaceable(replaceError, 'readable'))) {
+				throw replaceError;
+			}
 		}
 		if (__DEV__) {
 			await factory.getNetworksEngine().clearRecentNetworks();
