@@ -128,6 +128,17 @@ async function send (fx: Fixture, invite: KeyholderInvite): Promise<string> {
   return row!.Cid as string
 }
 
+type ReadRevisionSeam = {
+  readRevisionKeyholders(electionId: string, revision: number, keyholdersJson: unknown, field: string): Promise<Awaited<ReturnType<typeof projection>>>
+}
+
+/** The projection of a Keyholders JSON that already names `names` (a pre-change revision may hold namesakes). */
+async function legacyProjection (fx: Fixture, names: string[]) {
+  return (fx.electionEngine as unknown as ReadRevisionSeam).readRevisionKeyholders(
+    fx.electionId, 0, JSON.stringify(names.map(name => ({ name }))), 'ElectionRevision.Keyholders',
+  )
+}
+
 async function projection (fx: Fixture) {
   return (await fx.electionEngine.getElectionDetails()).current.keyholders
 }
@@ -232,13 +243,17 @@ describe('keyholder invite sent state (62-76)', () => {
     expect(code).to.equal('invite-type-not-resendable')
   })
 
-  it('S6: two invitees with the same Name and one slot - the first absorbs it, no duplicate, no crash', async () => {
-    const fx = await createElectionWithInvitees(['Twin', 'Twin'])
+  it('S6: two invitees with the same Name and one slot - both read unknown, no duplicate, no crash (legacy data)', async () => {
+    // 62-104: the engine refuses to WRITE two invitees with one name; a pre-change revision can still hold them.
+    const fx = await createElectionWithInvitees(['Twin', 'Lee'])
     await send(fx, makeInvite('Twin'))
-    const kh = await projection(fx)
+    const kh = await legacyProjection(fx, ['Twin', 'Twin'])
     expect(kh).to.have.length(2)
-    expect(kh[0]!.sent?.state).to.equal('live')
-    expect(kh[1]!.sent).to.equal(undefined)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    expect(kh[1]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    let code: string | undefined
+    try { await createElectionWithInvitees(['Twin', 'Twin']) } catch (err) { code = (err as { code?: string }).code }
+    expect(code).to.equal('duplicate-keyholder-name')
   })
 })
 
@@ -353,16 +368,21 @@ describe('keyholder invite sent state - every chain of a name is ranked (62-84)'
     })
   }
 
-  it('S7c: two same-name invitees and three chains (one live, two expired) - live first, then no-longer-valid, no duplicate', async () => {
-    const fx = await createElectionWithInvitees(['Kay', 'Kay'])
+  it('S7c: a name held by two invitees (legacy data) reads unknown for both, never another invitee\'s chain; the engine refuses to write it', async () => {
+    // 62-104 (IN-06): chains of one name cannot be told apart per invitee, so none is handed out.
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
     await insertExpiredKSlot(fx, 'Kay', '2000-01-02T00:00:00')
-    const liveCid = await send(fx, makeInvite('Kay', futureCanonical()))
+    await send(fx, makeInvite('Kay', futureCanonical()))
     await insertExpiredKSlot(fx, 'Kay', '2000-01-03T00:00:00')
-    const kh = await projection(fx)
+    const kh = await legacyProjection(fx, ['Kay', 'Kay'])
     expect(kh).to.have.length(2)
-    expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, liveCid) })
-    // Ties inside a rank break on the latest expiration: the later of the two dead chains is handed out.
-    expect(kh[1]!.sent).to.deep.equal({ state: 'no-longer-valid', expiration: '2000-01-03T00:00:00' })
+    expect(kh[0]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    expect(kh[1]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    // A single-name revision still reads the ranked head (live) - unchanged.
+    expect((await projection(fx))[0]!.sent?.state).to.equal('live')
+    let code: string | undefined
+    try { await createElectionWithInvitees(['Kay', 'Kay']) } catch (err) { code = (err as { code?: string }).code }
+    expect(code).to.equal('duplicate-keyholder-name')
   })
 })
 
@@ -406,6 +426,17 @@ describe('keyholder invite sent state - a decline reads declined, and a newer li
     await insertExpiredKSlot(fx, 'Kay')
     const kh = await projection(fx)
     expect(kh[0]!.sent).to.deep.equal({ state: 'declined', expiration: await storedExpiration(fx, cidA) })
+  })
+
+  it('S10d (62-104, IN-06): chain A declined and chain B live under one name, a legacy revision naming it twice - neither invitee reads declined or live', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const cidA = await send(fx, makeInvite('Kay'))
+    await decline(fx, cidA)
+    await send(fx, makeInvite('Kay'))
+    const kh = await legacyProjection(fx, ['Kay', 'Kay'])
+    expect(kh).to.have.length(2)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
+    expect(kh[1]!.sent).to.deep.equal({ state: 'unknown', expiration: '' })
   })
 })
 

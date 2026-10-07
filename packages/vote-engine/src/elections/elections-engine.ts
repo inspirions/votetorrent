@@ -1,3 +1,4 @@
+import { findDuplicateKeyholderName } from '../election/keyholder-names.js'
 import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { ElectionEngine } from '../election/election-engine.js'
 import { digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
@@ -150,6 +151,11 @@ export class ElectionsEngine implements IElectionsEngine {
    */
   async adjustElection (election: ElectionInit): Promise<void> {
     this.requireCtx('adjustElection')
+    // 62-104 (IN-06): a keyholder slot binds to its invitee by name, so names are unique per election.
+    // Refused before any Tid is reserved or row written.
+    if (findDuplicateKeyholderName((election.revision?.keyholders ?? []).map(k => k.name ?? '')) !== undefined) {
+      throw Object.assign(new Error('Two keyholders on one election cannot share a name'), { code: 'duplicate-keyholder-name' })
+    }
     const tid = await allocateTid(this.ctx!.db, 'elections')
     const e = election.election
     // IN-24 (17-REVIEW): the revision row belongs to THIS proposal — a
@@ -341,6 +347,11 @@ export class ElectionsEngine implements IElectionsEngine {
    */
   async createElection (election: ElectionInit, options?: { signingNonce?: string; revisionSigningNonce?: string }): Promise<void> {
     this.requireCtx('createElection')
+    // 62-104 (IN-06): a keyholder slot binds to its invitee by name, so names are unique per election.
+    // Refused before any Tid is reserved or row written.
+    if (findDuplicateKeyholderName((election.revision?.keyholders ?? []).map(k => k.name ?? '')) !== undefined) {
+      throw Object.assign(new Error('Two keyholders on one election cannot share a name'), { code: 'duplicate-keyholder-name' })
+    }
     // D-03: consume the T/T+1 pair reserved as ONE count=2 block (either the
     // pending reservation a prior peekNextElectionTid/seedElectionSigning
     // already made — the common byte-alignment-contract path, see the deviation

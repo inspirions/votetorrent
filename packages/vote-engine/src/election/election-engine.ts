@@ -1,5 +1,6 @@
 import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import type { SqlValue } from '@quereus/quereus'
+import { findDuplicateKeyholderName, normalizeKeyholderName, KEYHOLDER_INVITE_MAX_LIFETIME_MS, KEYHOLDER_INVITE_EXPIRY_SKEW_MS } from './keyholder-names.js'
 import { digestToBytes, formatPgRange, fromCanonicalDatetime, keyholderInviteSignedBytes, nowCanonicalDatetime, parseJsonOr, parseKeyholdersAsInviteStatus, parsePgRange, parseScoreRange, formatScoreRange, verifyAdHocInviteSignature } from '../utils.js'
 import type { EngineContext } from '../types.js'
 import type {
@@ -498,6 +499,11 @@ export class ElectionEngine implements IElectionEngine {
    * pre-signs through the AdminSigning/AdminSignature pipeline downstream.
    */
   async proposeRevision (revision: ElectionRevisionInit): Promise<void> {
+    // 62-104 (IN-06): a keyholder slot binds to its invitee by name, so names are unique per election.
+    // Refused before any Tid is reserved or row written.
+    if (findDuplicateKeyholderName((revision.keyholders ?? []).map(k => k.name ?? '')) !== undefined) {
+      throw Object.assign(new Error('Two keyholders on one election cannot share a name'), { code: 'duplicate-keyholder-name' })
+    }
     const tid = await allocateTid(this.ctx.db, 'election')
     const userId = this.ctx.user?.id ?? null
     const signerKey = this.ctx.user?.activeKeys?.[0]?.key ?? null
@@ -818,6 +824,18 @@ export class ElectionEngine implements IElectionEngine {
     signatureOrCallback: Signature | ((digest: Uint8Array) => Promise<Signature>)
   ): Promise<void> {
     try {
+      // O-11: a keyholder invitation must expire in the future and within 7 days (plus clock skew).
+      // Refused before a nonce or Tid is taken and before any write.
+      // Callers pass either the canonical form (no zone, UTC) or a full ISO string with Z.
+      const expiresAtMs = Date.parse(/(Z|[+-]\d\d:?\d\d)$/.test(keyholder.expiration) ? keyholder.expiration : `${keyholder.expiration}Z`)
+      const nowMs = Date.now()
+      if (Number.isNaN(expiresAtMs) || expiresAtMs <= nowMs ||
+          expiresAtMs > nowMs + KEYHOLDER_INVITE_MAX_LIFETIME_MS + KEYHOLDER_INVITE_EXPIRY_SKEW_MS) {
+        throw Object.assign(
+          new Error('A keyholder invitation must expire in the future and no more than 7 days from now'),
+          { code: 'invite-expiration-out-of-range' }
+        )
+      }
       const nonce = this.signingEngine.generateSigningNonce()
       const tid = await allocateTid(this.ctx.db, 'election')
 
@@ -1563,8 +1581,17 @@ export class ElectionEngine implements IElectionEngine {
       console.warn('[keyholders] sent state unavailable:', peerError)
       sentUnavailable = true
     }
+    // 62-104 (IN-06): legacy data only - new revisions cannot hold duplicate names. A name held by more than
+    // one invitee cannot be told apart per invitee, so every such invitee reads 'unknown' and no chain is
+    // handed out (a namesake must never see another invitee's declined or live chain).
+    const nameCounts = new Map<string, number>()
+    for (const invitee of invitees) {
+      const key = normalizeKeyholderName(invitee.invite.name ?? '')
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1)
+    }
     const takeSent = (name: string): InviteSentState | undefined => {
       if (sentUnavailable) return { state: 'unknown', expiration: '' }
+      if ((nameCounts.get(normalizeKeyholderName(name)) ?? 0) > 1) return { state: 'unknown', expiration: '' }
       return sentByName.get(name)?.shift()
     }
 
