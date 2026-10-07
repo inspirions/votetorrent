@@ -20,6 +20,11 @@ describe("keyholderInviteState", () => {
 	it("answered without a result (replication lag) -> sent", () => {
 		expect(keyholderInviteState({ invite: inv, sent: { state: "answered", expiration: exp } } as S)).toBe("sent");
 	});
+	it("sent declined without a result (the real engine's only shape for a decline) -> declined, never sent", () => {
+		expect(keyholderInviteState({ invite: inv, sent: { state: "declined", expiration: exp } } as S)).toBe("declined");
+		expect(KEYHOLDER_INVITE_STATE_META[keyholderInviteState({ invite: inv, sent: { state: "declined", expiration: exp } } as S)])
+			.toEqual({ labelKey: "keyholderStatusDeclined", colorKey: "error" });
+	});
 	it("no-longer-valid (cancelled, expired or superseded) -> no-longer-valid", () => {
 		expect(keyholderInviteState({ invite: inv, sent: { state: "no-longer-valid", expiration: exp } } as S)).toBe("no-longer-valid");
 	});

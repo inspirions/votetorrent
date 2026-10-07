@@ -10,6 +10,10 @@
  * the order asserted; S8 carries an ambiguous chain as 'unknown'; S9 degrades an unreadable slot table
  * to 'unknown' without failing the election read; M4 is mock parity for repeated sends.
  *
+ * 62 CR-01: S10 - a decline (InviteResult IsAccepted false, no Keyholder row) reads 'declined', never
+ * 'answered' (which the label shows as Sent); a newer live resend outranks it in BOTH Cid orders; a
+ * decline outranks a dead chain. M5 is the mock parity for a decline (sent 'declined', no result).
+ *
  * Fixtures are built only through real engine paths: createElection with invitees, inviteKeyholder,
  * InvitationEngine.respondToInvite, AuthorityEngine.cancelInvite/resendInvite. The one raw write is
  * an already-expired 'k' slot (the engine refuses to send an expired one), inserted under a past
@@ -329,6 +333,49 @@ describe('keyholder invite sent state - every chain of a name is ranked (62-84)'
   })
 })
 
+describe('keyholder invite sent state - a decline reads declined, and a newer live resend wins (62 CR-01)', () => {
+  /** Kay declines through the real path: respondToInvite(accept=false) writes InviteResult(IsAccepted=false) and no Keyholder row. */
+  async function decline (fx: Fixture, cid: string): Promise<void> {
+    await new InvitationEngine(fx.auth.ctx).respondToInvite(cid, false)
+  }
+
+  it('S10: a declined chain alone reads declined (never answered, so the label cannot read Sent)', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const cidA = await send(fx, makeInvite('Kay'))
+    await decline(fx, cidA)
+    const kh = await projection(fx)
+    expect(kh).to.have.length(2)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'declined', expiration: await storedExpiration(fx, cidA) })
+    // A decline writes no Keyholder row, so the projection carries no result: `sent` is the only carrier.
+    expect(kh[0]!.result).to.equal(undefined)
+    expect(kh[1]!.sent).to.equal(undefined)
+  })
+
+  for (const order of BOTH_ORDERS) {
+    it('S10: declined chain A then a live resend chain B reads live with B\'s expiration (' + order.label + ')', async () => {
+      const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+      const cidA = await send(fx, makeInvite('Kay'))
+      await decline(fx, cidA)
+      expect((await projection(fx))[0]!.sent?.state).to.equal('declined')
+      const b = await sendOrdered(fx, 'Kay', cidA, order.otherFirst)
+      expect(cidA < b.cid).to.equal(order.otherFirst)
+      const kh = await projection(fx)
+      expect(kh[0]!.sent).to.deep.equal({ state: 'live', expiration: await storedExpiration(fx, b.cid) })
+      expect(kh[0]!.result).to.equal(undefined)
+      expect(kh[1]!.sent).to.equal(undefined)
+    })
+  }
+
+  it('S10: a decline outranks a dead chain of the same name (the officer is told "declined", not "no longer valid")', async () => {
+    const fx = await createElectionWithInvitees(['Kay', 'Lee'])
+    const cidA = await send(fx, makeInvite('Kay'))
+    await decline(fx, cidA)
+    await insertExpiredKSlot(fx, 'Kay')
+    const kh = await projection(fx)
+    expect(kh[0]!.sent).to.deep.equal({ state: 'declined', expiration: await storedExpiration(fx, cidA) })
+  })
+})
+
 describe('keyholder invite sent state - ambiguous chains are carried, not dropped (62-84)', () => {
   /** Two originals (two signing nonces) under one InviteKey: readInviteChain reports 'ambiguous'. */
   async function ambiguousChain (fx: Fixture): Promise<{ inviteKey: string, latest: string }> {
@@ -462,7 +509,27 @@ describe('keyholder invite sent state - mock parity (62-76)', () => {
     await m.inviteKeyholder(makeInvite('Prof. James Wilson'), 'election-2', async () => { throw new Error('unused') })
     const kh = await mockKeyholders(m)
     expect(kh.find(k => k.invite.name === 'Dr. Sarah Chen')!.sent).to.equal(undefined)
-    expect(kh.find(k => k.invite.name === 'Judge Michael Rodriguez')!.sent).to.equal(undefined)
+  })
+
+  it('M5 (CR-01): a declined mock keyholder has the real engine shape - sent declined, no result', async () => {
+    const m = new MockElectionEngine()
+    const judge = (await mockKeyholders(m)).find(k => k.invite.name === 'Judge Michael Rodriguez')!
+    expect(judge.sent?.state).to.equal('declined')
+    expect(judge.sent?.expiration).to.be.a('string').and.not.equal('')
+    expect(judge.result).to.equal(undefined)
+  })
+
+  it('M5 (CR-01): a live resend to a declined mock keyholder reads live; an expired one leaves it declined', async () => {
+    const m = new MockElectionEngine()
+    await m.inviteKeyholder(makeInvite('Judge Michael Rodriguez', '2000-01-02T00:00:00'), 'election-2', async () => { throw new Error('unused') })
+    const declined = (await mockKeyholders(m)).find(k => k.invite.name === 'Judge Michael Rodriguez')!
+    expect(declined.sent?.state).to.equal('declined')
+    expect(declined.result).to.equal(undefined)
+    const future = futureIso()
+    await m.inviteKeyholder(makeInvite('Judge Michael Rodriguez', future), 'election-2', async () => { throw new Error('unused') })
+    const resent = (await mockKeyholders(m)).find(k => k.invite.name === 'Judge Michael Rodriguez')!
+    expect(resent.sent).to.deep.equal({ state: 'live', expiration: future })
+    expect(resent.result).to.equal(undefined)
   })
 
   it('M4: repeated sends to one name read live with the future expiration, in either send order', async () => {

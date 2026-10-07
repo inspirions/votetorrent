@@ -62,10 +62,14 @@ export const BALLOT_HEADER_TID = 1
  * 'unknown' (an ambiguous chain, or an unreadable invitation table) outranks no-longer-valid on purpose: an
  * ambiguous chain may be live, and reporting it as dead would invite a duplicate resend. Ties break on the
  * latest expiration.
+ * 62 CR-01: 'declined' (a signed no) ranks BELOW live, so "send again" after a decline reads Sent, and above
+ * unknown / no-longer-valid, so a decline with no newer live chain reads Declined instead of being hidden by a
+ * dead or ambiguous chain of the same name. 'answered' is an acceptance only and still wins over everything.
  */
 const SENT_STATE_RANK: Record<InviteSentState['state'], number> = {
-  answered: 4,
-  live: 3,
+  answered: 5,
+  live: 4,
+  declined: 3,
   unknown: 2,
   'no-longer-valid': 1
 }
@@ -1433,7 +1437,7 @@ export class ElectionEngine implements IElectionEngine {
     // the shared readInviteChain rule. 'not-found' yields no entry.
     // 62-84 (CR-01, WR-04): 'ambiguous' is carried as 'unknown' (never dropped, so the label cannot read
     // "Not sent" for an invitation that was sent). All of a name's chains go into one list sorted by
-    // SENT_STATE_RANK (answered > live > unknown > no-longer-valid), ties on the latest expiration, and
+    // SENT_STATE_RANK (answered > live > declined > unknown > no-longer-valid), ties on the latest expiration, and
     // takeSent hands out the head - never InviteSlot row (Cid hash) order. Same-name invitees each take
     // their own entry; an extra chain is dropped only after every same-name invitee has one.
     // 62-84 (D-23, gap 7): sent state is auxiliary. When the network cannot serve the invitation tables
@@ -1470,6 +1474,20 @@ export class ElectionEngine implements IElectionEngine {
         let sent: InviteSentState
         if (chain.status === 'ambiguous') {
           sent = { state: 'unknown', expiration: latestExpiration(chainRows) }
+        } else if (chain.status === 'answered') {
+          // 62 CR-01: readInviteChain reports 'answered' for ANY InviteResult, but a decline
+          // (IsAccepted false) writes no Keyholder row, so without its polarity a declined keyholder
+          // would read "Sent" forever. Read the answer's polarity for the answered slot (one PK-keyed
+          // row). A value that is neither accepted nor declined fails closed to 'unknown'.
+          const answer = await this.ctx.db
+            .prepare('SELECT IsAccepted FROM InviteResult WHERE SlotCid = :slotCid')
+            .get({ slotCid: chain.cid })
+          const isAccepted = answer?.IsAccepted as unknown
+          const state: InviteSentState['state'] = isAccepted === true || isAccepted === 1
+            ? 'answered'
+            : isAccepted === false || isAccepted === 0 ? 'declined' : 'unknown'
+          const headRow = chainRows.find(r => r.Cid === chain.cid)
+          sent = { state, expiration: headRow?.Expiration ?? latestExpiration(chainRows) }
         } else {
           const headRow = chain.status === 'no-longer-valid' ? undefined : chainRows.find(r => r.Cid === chain.cid)
           sent = { state: chain.status, expiration: headRow?.Expiration ?? latestExpiration(chainRows) }

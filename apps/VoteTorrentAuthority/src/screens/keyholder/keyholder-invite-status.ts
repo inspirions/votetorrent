@@ -5,11 +5,13 @@ export type KeyholderInviteState = "accepted" | "declined" | "sent" | "no-longer
 /**
  * What a keyholder's `InviteStatus` says. `result` is set only from a real `Keyholder` row (the
  * invitee ACCEPTED) or an `InviteResult`, so it means "responded". The election engine's keyholder
- * projection also reports `sent` (live | answered | no-longer-valid | unknown) read from the
+ * projection also reports `sent` (live | answered | declined | no-longer-valid | unknown) read from the
  * invitation slots, which is what lets the officer see "Sent" before any response. The engine ranks
  * every invitation sent to one name, so after "send again" the newest live one decides.
  *
  * - response wins: accepted / declined regardless of `sent`
+ * - sent declined: declined. A decline writes no Keyholder row, so the engine never sets `result` for
+ *   it; `sent` is the only carrier. A newer live resend outranks the decline and reads sent.
  * - live, or answered without a visible result yet (replication lag): sent
  * - no-longer-valid covers cancelled, expired and superseded invitations: "no longer valid, send again"
  * - unknown is the fail-closed reading of an ambiguous invitation or an invitation table the network
@@ -24,6 +26,8 @@ export function keyholderInviteState(status: InviteStatus<SentKeyholderInvite>):
 		case "live":
 		case "answered":
 			return "sent";
+		case "declined":
+			return "declined";
 		case "no-longer-valid":
 			return "no-longer-valid";
 		case "unknown":

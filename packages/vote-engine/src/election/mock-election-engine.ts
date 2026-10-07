@@ -74,8 +74,9 @@ export class MockElectionEngine implements IElectionEngine {
 	// 62-76: keyholder invitations received via inviteKeyholder, name -> every expiration sent to that
 	// name (62-84: appended on each send, like the real engine's one chain per send). Feeds the `sent`
 	// field of the keyholder projection with the real engine's ranking: an invitee that has a result is
-	// 'answered', else any unexpired send makes it 'live' (the latest such expiration), else
-	// 'no-longer-valid' with the latest expiration; never-invited invitees carry no `sent`.
+	// 'answered', else any unexpired send makes it 'live' (the latest such expiration), else a seeded
+	// decline stays 'declined' (62 CR-01), else 'no-longer-valid' with the latest expiration;
+	// never-invited invitees carry no `sent`.
 	private sentKeyholderInvites = new Map<string, string[]>();
 
 	constructor(confirmationState?: MockBallotConfirmationState) {
@@ -132,11 +133,13 @@ export class MockElectionEngine implements IElectionEngine {
 						invite: { name: 'Dr. Sarah Chen' },
 					},
 					{
+						// 62 CR-01 (real-engine shape): a decline writes an InviteResult with IsAccepted false
+						// but NO Keyholder row, so the engine carries it only as sent 'declined', never as a
+						// `result`.
 						invite: { name: 'Judge Michael Rodriguez' },
-						result: {
-							isAccepted: false,
-							invitationSignature: 'mock-invitation-signature-2',
-							invokedId: 'mock-invoked-id-2',
+						sent: {
+							state: 'declined',
+							expiration: toCanonicalDatetime(new Date(MOCK_NOW - MOCK_DAY_MS)),
 						},
 					},
 					{
@@ -186,6 +189,10 @@ export class MockElectionEngine implements IElectionEngine {
 			if (k.result) return { ...k, sent: { state: 'answered' as const, expiration: latest(sends) } };
 			const live = sends.filter((v) => expirationMs(v) > now);
 			if (live.length > 0) return { ...k, sent: { state: 'live' as const, expiration: latest(live) } };
+			// 62 CR-01: the real ranking puts a decline above a dead chain (answered > live > declined >
+			// unknown > no-longer-valid). A seeded decline predates every session send, so only a live
+			// resend outranks it.
+			if (k.sent?.state === 'declined') return k;
 			return { ...k, sent: { state: 'no-longer-valid' as const, expiration: latest(sends) } };
 		});
 		return Promise.resolve(mockElection);
