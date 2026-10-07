@@ -50,7 +50,15 @@ export interface ApprovedRegistrationsRead {
 
 /** `openRegistrationCode`'s own tiny result union — never re-exports the code itself beyond this
  * module's own return value; callers compare via `registrationCodesEqual`, never read it raw. */
-export type OpenedCode = { readonly status: 'code'; readonly code: string } | { readonly status: 'unverifiable' }
+export type OpenedCode =
+  | { readonly status: 'code'; readonly code: string }
+  | { readonly status: 'unverifiable' }
+  /** The registration provably holds NO code: no staging row at all (bridge/import), or every staging
+   * row opened and decoded and none carried a code. It can never be the registration a code belongs to. */
+  | { readonly status: 'no-evidence' }
+  /** Code(s) are present but none has a verified requester binding (legacy, pre-binding, or forged
+   * rows). `codes` lets a caller tell "could be this one's" from "cannot be this one's". Never a match. */
+  | { readonly status: 'unbound'; readonly codes: readonly string[] }
 
 /**
  * Every `RegistrationRequest` of `authorityId` that is approved (`Status = 'a'`) AND whose
@@ -121,13 +129,20 @@ export async function listApprovedRegistrations (db: Database, authorityId: stri
  * onto another strand) collapse to ONE candidate, because only the victim's key can produce a
  * verified row and a registrant has one deterministic code — counting a harmless replay as an
  * ambiguity would let any peer downgrade a victim to manual review for free. Exactly one distinct
- * code is `{ status: 'code' }`; none, or two or more distinct, is `'unverifiable'`.
+ * code is `{ status: 'code' }`; two or more distinct is `'unverifiable'`; none is `'no-evidence'`,
+ * `'unbound'` or (when a row could not be read) `'unverifiable'`, as described below.
  *
- * D-54: a registration staged before the binding existed (no `registrationCodeSignature`), and any
- * bridge/import registration (no staging row at all), has NO code evidence and reads
- * `'unverifiable'` — never a match, never the automatic route; the request falls back to
- * identity-field matching under manual review (D-45/D-46). `'unverifiable'` also covers an
- * opener that refuses and a plaintext that fails the version/id/shape checks.
+ * D-54: a code with no verifiable binding (a registration staged before the binding existed — no
+ * `registrationCodeSignature` — or a forged/replayed row) is NEVER a match and never the automatic
+ * route; the request falls back to identity-field matching under manual review (D-45/D-46). It reads
+ * `{ status: 'unbound', codes }` so a caller can tell whether a presented code COULD be this
+ * registration's (it equals one of `codes`: unverifiable) or cannot be (a miss).
+ *
+ * gap1/WR-03 (62-113): a registration with NO staging row at all (bridge/import) or whose staging
+ * rows carry no code at all reads `{ status: 'no-evidence' }` — it can never hold any code, so it
+ * cannot make a miss ambiguous and a wrong code reads 'unmatched', not 'unverifiable'. Content the
+ * officer cannot read (an opener that refuses, a plaintext that fails the version/id/shape checks)
+ * stays `'unverifiable'`: unknown content is conservative.
  */
 export async function openRegistrationCode (db: Database, opener: ReassociationOpener, requestId: string): Promise<OpenedCode> {
   const keyRow = await db
@@ -148,10 +163,14 @@ export async function openRegistrationCode (db: Database, opener: ReassociationO
     })
   }
 
+  if (rows.length === 0) return { status: 'no-evidence' }
+
   const verifiedCodes: string[] = []
+  const unboundCodes: string[] = []
+  let sawUnreadable = false
   for (const row of rows) {
     const opened = await opener.open(row.initJson, { requestId, digest: row.digest })
-    if (!opened.ok) continue
+    if (!opened.ok) { sawUnreadable = true; continue }
 
     const decoded = decodeStagingPlaintext(opened.plaintext) as
       {
@@ -164,27 +183,36 @@ export async function openRegistrationCode (db: Database, opener: ReassociationO
       decoded === undefined || decoded === null || typeof decoded !== 'object' ||
       decoded.version !== 1 ||
       decoded.init === null || typeof decoded.init !== 'object' ||
-      (decoded.init as { id?: unknown }).id !== requestId ||
-      typeof decoded.registrationCode !== 'string' ||
-      decoded.registrationCodeSignature === null || typeof decoded.registrationCodeSignature !== 'object' ||
-      typeof decoded.registrationCodeSignature.signature !== 'string'
-    ) continue
+      (decoded.init as { id?: unknown }).id !== requestId
+    ) { sawUnreadable = true; continue }
+    if (typeof decoded.registrationCode !== 'string') continue // a well-formed row with no code
 
+    const binding = decoded.registrationCodeSignature
+    if (binding === null || typeof binding !== 'object' || typeof binding.signature !== 'string') {
+      unboundCodes.push(decoded.registrationCode)
+      continue
+    }
     const verified = await verifyRegistrationCodeBinding(db, {
       requestId,
       code: decoded.registrationCode,
-      signature: decoded.registrationCodeSignature.signature,
+      signature: binding.signature,
       requesterKey
     })
     if (verified) verifiedCodes.push(decoded.registrationCode)
+    else unboundCodes.push(decoded.registrationCode)
   }
 
   const distinct: string[] = []
   for (const code of verifiedCodes) {
     if (!distinct.some((seen) => registrationCodesEqual(seen, code))) distinct.push(code)
   }
-  if (distinct.length !== 1) return { status: 'unverifiable' }
-  return { status: 'code', code: distinct[0]! }
+  if (distinct.length > 1) return { status: 'unverifiable' }
+  if (distinct.length === 1) return { status: 'code', code: distinct[0]! }
+  // No verified code: unreadable rows keep it conservative; otherwise tell "has codes, none bound"
+  // from "provably no code".
+  if (sawUnreadable) return { status: 'unverifiable' }
+  if (unboundCodes.length > 0) return { status: 'unbound', codes: unboundCodes }
+  return { status: 'no-evidence' }
 }
 
 async function openCached (db: Database, opener: ReassociationOpener, requestId: string, cache: Map<string, OpenedCode>): Promise<OpenedCode> {
@@ -210,14 +238,16 @@ export async function verifyRegistrationCode (
   const reg = approved.registrations.find((a) => a.registrantId === registrantId)
   if (reg === undefined) return 'unverifiable'
   const opened = await openCached(db, opener, reg.requestId, cache)
-  if (opened.status === 'unverifiable') return 'unverifiable'
+  // Single-registrant semantics unchanged: without a verified code there is nothing to match against.
+  if (opened.status !== 'code') return 'unverifiable'
   return registrationCodesEqual(presented, opened.code) ? 'matched' : 'unmatched'
 }
 
 /**
  * Scans every approved registration for one whose own code equals `presented`. Exactly one match
  * is `{outcome:'matched', registrantId}`. Zero matches while at least one row could not be
- * verified (its staging envelope), or at least one approved row's REGISTRATION PAYLOAD itself
+ * read (its staging envelope) or holds an UNBOUND code equal to `presented` (62-113: rows that
+ * provably hold no code never count), or at least one approved row's REGISTRATION PAYLOAD itself
  * could not be opened (D-49 — `approved.unreadCount > 0`, so it was never even a candidate), or
  * MORE than one match (an officer-visible ambiguity, D-45's guessing-oracle note), is
  * `{outcome:'unverifiable'}` — never auto-approved. Otherwise `{outcome:'unmatched'}`.
@@ -235,6 +265,12 @@ export async function resolveRegistrantByCode (
 
   for (const reg of approved.registrations) {
     const opened = await openCached(db, opener, reg.requestId, cache)
+    if (opened.status === 'no-evidence') continue // can never hold any code (gap1/WR-03)
+    if (opened.status === 'unbound') {
+      // Could be THIS registration's code, just unverifiable (D-54): ambiguity only if it equals one.
+      if (opened.codes.some((c) => registrationCodesEqual(presented, c))) sawUnverifiable = true
+      continue
+    }
     if (opened.status === 'unverifiable') {
       sawUnverifiable = true
       continue

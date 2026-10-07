@@ -758,6 +758,18 @@ export async function getDeviceRetirement (
  * id, and `RegistrationRequest.RequesterKey` is cleartext (V-5). A request whose id differs from
  * the registrant id AND whose payload is sealed cannot be resolved without an opener and returns
  * `undefined`; a legacy unsealed row is still resolved through the fallback scan below.
+ *
+ * gap1/IN-05 (62-113, option b, read side): the direct lookup is scoped to self-issued requests
+ * (`IssuerType = 'registrant'`, a literal, never a bind), so it can never return a bridge key — a
+ * bridge-issued request whose Id happens to equal a registrant id used to be trusted blindly. The
+ * schema has no cleartext column binding a RequestId to a RegistrantId (only the sealed Payload
+ * carries `registrant.id`, D-49), so a stronger read-side equality check would need an opener this
+ * caller does not have, and an approval-time refusal was rejected (it would break specs that submit
+ * with a random request id and spend the officer signature first). Residual, fail-closed: a
+ * colliding approved SELF-ISSUED request can still be returned here, but the only caller
+ * (Voter `continuity.ts`) also requires the holder key to equal THIS device's identity key AND that
+ * this device staged a request whose id is the registrant id — so the victim sees "not available on
+ * this device", exactly what it sees without the collision.
  */
 export async function getRegistrationCodeHolderKey (host: ReassociationHost, registrantId: string): Promise<string | undefined> {
   const registrantRow = await host.ctx.db
@@ -767,7 +779,7 @@ export async function getRegistrationCodeHolderKey (host: ReassociationHost, reg
   const authorityId = asText(registrantRow.AuthorityId, 'Registrant.AuthorityId')
 
   const direct = await host.ctx.db
-    .prepare("select RequesterKey from RegistrationRequest where Id = :registrantId and AuthorityId = :authorityId and Status = 'a'")
+    .prepare("select RequesterKey from RegistrationRequest where Id = :registrantId and AuthorityId = :authorityId and Status = 'a' and IssuerType = 'registrant'")
     .get({ registrantId, authorityId })
   if (direct) return asText(direct.RequesterKey, 'RegistrationRequest.RequesterKey')
 
