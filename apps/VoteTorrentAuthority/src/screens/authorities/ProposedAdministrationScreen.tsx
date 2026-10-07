@@ -34,6 +34,7 @@ import { InlineError } from "../../components/InlineError";
 import { ThresholdPolicyRow } from "./components/ThresholdPolicyRow";
 import { globalStyles } from "../../theme/styles";
 import type { RootStackParamList } from "../../navigation/types";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /**
  * Canonical Scope ordering — declaration order from
@@ -155,7 +156,7 @@ export default function ProposedAdministrationScreen() {
 					}
 				} catch (e) {
 					console.warn("Error loading proposed administration:", e);
-					if (!cancelled) setErrorMessage(e instanceof Error ? e.message : String(e));
+					if (!cancelled) setErrorMessage(peerUnavailableMessage(e, t, "read") ?? (e instanceof Error ? e.message : String(e)));
 				} finally {
 					if (!cancelled) setIsLoading(false);
 				}

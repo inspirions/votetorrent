@@ -9,6 +9,7 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import type { NavigationProp } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { driveKeyholderDkg, keyholderDkgRowState, type KeyholderDkgRowState } from "./keyholder-dkg-driver";
 import { KeyholderDkgStatusRow } from "./components/KeyholderDkgStatusRow";
@@ -76,7 +77,7 @@ export function KeyholderScreen() {
 						// never happens, and every successful read) renders the row.
 						setDkgRowState(outcome.status === null && outcome.error ? null : keyholderDkgRowState(outcome.status));
 						if (outcome.error) {
-							setDkgErrorMessage(outcome.error.authDenied ? t("deviceSigningErrorGeneric") : outcome.error.message);
+							setDkgErrorMessage(outcome.error.authDenied ? t("deviceSigningErrorGeneric") : (peerUnavailableMessage({ message: outcome.error.message }, t, "write") ?? outcome.error.message));
 						} else {
 							setDkgErrorMessage("");
 						}

@@ -31,6 +31,7 @@ import {
 // confirmation card.
 import { LifecycleConfirmCard } from "../registration/components/LifecycleConfirmCard";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 // A stable no-op for the (non-optional) CustomButton.onPress prop when a gate
 // is unmet — belt-and-suspenders alongside `disabled`, mirroring
@@ -115,7 +116,7 @@ export default function PollingDevicesScreen() {
 			);
 			if (!unmountedRef.current) setDevices(sorted);
 		} catch (err) {
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			if (!unmountedRef.current) setErrorMessage(peerUnavailableMessage(err, t, "read") ?? (err instanceof Error ? err.message : String(err)));
 		} finally {
 			if (!unmountedRef.current) setLoading(false);
 		}

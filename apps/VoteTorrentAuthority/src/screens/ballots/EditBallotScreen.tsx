@@ -17,6 +17,7 @@ import { loadAuthoritiesWithRetry } from "../../utils/loadAuthoritiesWithRetry";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import type { Authority, Ballot, INetworkEngine } from "@votetorrent/vote-core";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /**
  * EditBallotScreen — Ballot Template frame (Figma 57:490) in edit/populated mode.
@@ -130,7 +131,7 @@ const EditBallotScreen = () => {
 				}
 			} catch (error) {
 				console.warn("getBallotDetails error", error);
-				setLoadError(error instanceof Error ? error.message : String(error));
+				setLoadError(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		};
 		loadBallot();

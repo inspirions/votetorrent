@@ -22,6 +22,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 export default function EditOfficerScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -77,7 +78,7 @@ export default function EditOfficerScreen() {
 				}
 			} catch (error) {
 				console.warn("Error loading officer:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		}
 		loadOfficer();

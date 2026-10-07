@@ -4,6 +4,8 @@
 // an organizer. This maps them to plain-language copy, with special care for the
 // deadline/timeline rules that are easy to trip.
 
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+
 /** Minimal translate signature — avoids importing i18next types into screens. */
 export type Translate = (key: string, opts?: Record<string, unknown>) => string;
 
@@ -67,6 +69,9 @@ export function mapElectionError(err: unknown, t: Translate): string {
 		}
 		return lines.join("\n");
 	}
+
+	const peer = peerUnavailableMessage(err, t, "write");
+	if (peer) return peer;
 
 	const raw = err instanceof Error ? err.message : String(err);
 	// Known DB CHECK constraints — especially the deadline ordering rules.
