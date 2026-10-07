@@ -172,6 +172,10 @@ export interface TwoNodeHarness {
     portB: HarnessStrandPort
   }>
   readonly timings: HarnessTimings
+  /** O-02: change the explicit `founder` value node-B's NEXT addStrand passes (undefined = pass none). */
+  setNodeBFounder (founder: boolean | undefined): void
+  /** O-02: dial node-A from a peerless node-B, wait for the mesh to settle, then enrol it (re-uses enrolNodeB). */
+  connectAndEnrolNodeB (): Promise<void>
   /** stops node-B then node-A; idempotent; never throws (logs instead) */
   stop (): Promise<void>
 }
@@ -180,6 +184,19 @@ export interface TwoNodeHarnessOptions {
   partyId?: string
   clusterSize?: number
   log?: (line: string) => void
+  /**
+   * O-02 instrument (default off). Start node-B with NO bootstrap address to node-A and
+   * without enrolment, so it is genuinely peerless (zero control connections). The
+   * node-A-before-node-B strand ordering assertion is bypassed for node-B in this mode.
+   * Connect and enrol it later with `connectAndEnrolNodeB()`.
+   */
+  peerlessNodeB?: boolean
+  /**
+   * O-02 instrument (default undefined = today's behaviour: node-B passes no `founder`
+   * flag). When set, node-B's addStrand receives this explicit `founder` value. Can be
+   * changed at runtime via `setNodeBFounder()`. node-A always opens with founder:true.
+   */
+  nodeBFounder?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +264,7 @@ class MeshTimeoutError extends Error {}
  */
 async function attemptBringUp (
   listenAddrs: string[],
-  opts: { partyId: string; clusterSize: number; log: (line: string) => void }
+  opts: { partyId: string; clusterSize: number; log: (line: string) => void; peerlessNodeB?: boolean }
 ): Promise<{
   nodeA: any
   nodeB: any
@@ -311,9 +328,15 @@ async function attemptBringUp (
     const t2 = Date.now()
     const nodeAAddr = loopbackWs((nodeA.getControlNode()?.getMultiaddrs() ?? []).map((m: any) => m.toString()))
     const privateKeyB = await generateKeyPair('Ed25519')
-    nodeB = new CadreNode(buildConfig([nodeAAddr], privateKeyB))
+    // O-02 (peerlessNodeB): no bootstrap address, so node-B has zero control connections.
+    nodeB = new CadreNode(buildConfig(opts.peerlessNodeB ? [] : [nodeAAddr], privateKeyB))
     await withTimeout(nodeB.start(), HARNESS_TIMEOUTS.startMs, 'node-B start')
     timings.startBMs = Date.now() - t2
+
+    if (opts.peerlessNodeB) {
+      // Deliberately no settle and no enrolment: connectAndEnrolNodeB() does both on demand.
+      return { nodeA, nodeB, timings }
+    }
 
     // --- 4. Settle: poll until both nodes have >= 1 connection, then grace 3000ms. ---
     const t3 = Date.now()
@@ -425,14 +448,15 @@ function buildHarnessNode (
   isNodeA: boolean,
   openedByA: Set<string>,
   timings: HarnessTimings,
-  log: (line: string) => void
+  log: (line: string) => void,
+  founderCtl: { nodeB?: boolean; bypassOrdering: boolean }
 ): HarnessNode {
   const dbFactoryCache = new Map<string, Promise<Database>>()
   const openStrandCache = new Map<string, Promise<Database>>()
   const stats = { mutateCount: 0, queryCount: 0 }
 
   function assertOrdering (strandId: string): void {
-    if (!isNodeA && !openedByA.has(strandId)) {
+    if (!isNodeA && !founderCtl.bypassOrdering && !openedByA.has(strandId)) {
       throw new Error(`two-node harness: open strand ${strandId} on node-A (founder) before node-B`)
     }
   }
@@ -448,6 +472,7 @@ function buildHarnessNode (
       awaitFirstSync: false
     }
     if (isNodeA) addStrandConfig.founder = true
+    else if (founderCtl.nodeB !== undefined) addStrandConfig.founder = founderCtl.nodeB
 
     await withTimeout(node.addStrand(addStrandConfig), HARNESS_TIMEOUTS.addStrandMs, `${name} addStrand(${strandId})`)
     await node.whenStrandWritable(strandId, { timeoutMs: HARNESS_TIMEOUTS.writableMs })
@@ -548,13 +573,14 @@ export async function startTwoNodeHarness (options: TwoNodeHarnessOptions = {}):
   const clusterSize = options.clusterSize ?? 2
   const log = options.log ?? ((line: string) => console.log(`[p2p-harness] ${line}`))
 
+  const peerlessNodeB = options.peerlessNodeB === true
   let built: { nodeA: any; nodeB: any; timings: HarnessTimings }
   try {
-    built = await attemptBringUp(['/ip4/127.0.0.1/tcp/0/ws'], { partyId, clusterSize, log })
+    built = await attemptBringUp(['/ip4/127.0.0.1/tcp/0/ws'], { partyId, clusterSize, log, peerlessNodeB })
   } catch (error) {
     if (error instanceof MeshTimeoutError) {
       log(`DEVIATION: control mesh did not settle on 127.0.0.1 (${(error as Error).message}); falling back to 0.0.0.0 per topology.mjs`)
-      built = await attemptBringUp(['/ip4/0.0.0.0/tcp/0/ws'], { partyId, clusterSize, log })
+      built = await attemptBringUp(['/ip4/0.0.0.0/tcp/0/ws'], { partyId, clusterSize, log, peerlessNodeB })
     } else {
       throw error
     }
@@ -563,8 +589,12 @@ export async function startTwoNodeHarness (options: TwoNodeHarnessOptions = {}):
   const { nodeA, nodeB, timings } = built
   const openedByA = new Set<string>()
 
-  const harnessNodeA = buildHarnessNode('node-A', 'founder-drone', nodeA, true, openedByA, timings, log)
-  const harnessNodeB = buildHarnessNode('node-B', 'peer', nodeB, false, openedByA, timings, log)
+  const founderCtl: { nodeB?: boolean; bypassOrdering: boolean } = {
+    nodeB: options.nodeBFounder,
+    bypassOrdering: peerlessNodeB
+  }
+  const harnessNodeA = buildHarnessNode('node-A', 'founder-drone', nodeA, true, openedByA, timings, log, founderCtl)
+  const harnessNodeB = buildHarnessNode('node-B', 'peer', nodeB, false, openedByA, timings, log, founderCtl)
 
   let stopped = false
 
@@ -574,6 +604,18 @@ export async function startTwoNodeHarness (options: TwoNodeHarnessOptions = {}):
     nodeA: harnessNodeA,
     nodeB: harnessNodeB,
     timings,
+    setNodeBFounder (founder: boolean | undefined) {
+      founderCtl.nodeB = founder
+    },
+    async connectAndEnrolNodeB () {
+      // A peerless node-B has no route to node-A; dialInvite (inside enrolNodeB) is the dial.
+      // Settle is checked afterwards, never faked: a failure throws.
+      await enrolNodeB(nodeA, nodeB, log)
+      const settled = await pollSettle(nodeA, nodeB, HARNESS_TIMEOUTS.meshMs)
+      if (!settled) throw new Error('two-node harness: control mesh did not settle after connectAndEnrolNodeB')
+      const memberNow = await nodeA.isAuthorizedMember(nodeB.peerId.toString())
+      if (!memberNow) throw new Error('two-node harness: node-B is not an authorized member after connectAndEnrolNodeB')
+    },
     async openSharedStrand (strandId: string = `vt-harness-${runId}`) {
       const dbA = await harnessNodeA.openStrand(strandId)
       const dbB = await harnessNodeB.openStrand(strandId)

@@ -1,0 +1,197 @@
+/**
+ * o02-peerless-import-founder.harness.spec.ts — 62-93 (O-02 falsification instrument).
+ *
+ * Opt-in (`RUN_P2P_HARNESS=1`; pending otherwise, libp2p never loaded). Two arms:
+ *   Arm J (control): node-B connected + enrolled, imports a founding bundle with the
+ *     strand opened `founder:false` (what rn-db-factory computes with peers).
+ *   Arm F (O-02): node-B PEERLESS, imports with the strand opened `founder:true` (what
+ *     rn-db-factory computes with zero control connections), THEN connects + enrols.
+ * Arm order from env `O02_ARM_ORDER` ("JF" default, or "FJ"); run label from `O02_RUN`.
+ *
+ * Each arm boots its own harness (own node-A, own network, own exported bundle): a
+ * bundle only makes sense against the node-A that founded it, so a single shared bundle
+ * across two independent node-A instances is not possible.
+ *
+ * Only unconditional facts are asserted (the arm ran, the measurements were taken, and
+ * Arm J converges, as founding-bundle.harness F-1 already shows). Arm F's outcome is
+ * LOGGED as `[o02] arm=F run=<n> sha=<head> headerEqual=<bool> aToB=<bool> bToA=<bool>
+ * errors=<tokens>`, never asserted. Prediction: 62-gap-repros/o02-peerless-import-founder/RESULTS.md.
+ * NO product source is touched; measured runs belong to 62-98.
+ */
+
+import { expect } from 'chai'
+import { execSync } from 'node:child_process'
+import type { Database } from '@quereus/quereus'
+import { NetworksEngine } from '../src/networks/networks-engine.js'
+import { makeTestUser, makeTestNetworkInit, makeTestSignCallback } from './fixtures/test-context.js'
+import {
+  startTwoNodeHarness,
+  describeP2PHarness,
+  pollUntil,
+  HARNESS_TIMEOUTS,
+  type TwoNodeHarness
+} from './harness/two-node-strand.js'
+import type { FoundingBundle, LocalStorage } from '@votetorrent/vote-core'
+
+function makeDeviceLocalStorage (): LocalStorage {
+  const store = new Map<string, unknown>()
+  return {
+    async getItem<TValue> (key: string): Promise<TValue | undefined> {
+      return store.has(key) ? (store.get(key) as TValue) : undefined
+    },
+    async setItem<TValue> (key: string, value: TValue): Promise<void> {
+      store.set(key, value)
+    },
+    async removeItem (key: string): Promise<void> {
+      store.delete(key)
+    },
+    async clear (): Promise<void> {
+      store.clear()
+    }
+  }
+}
+
+const RUN = process.env.O02_RUN ?? '0'
+const ARM_ORDER = (process.env.O02_ARM_ORDER ?? 'JF').toUpperCase() === 'FJ' ? ['F', 'J'] : ['J', 'F']
+const SHA = (() => {
+  try { return execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim() } catch { return 'unknown' }
+})()
+
+const ERROR_TOKENS = ['Missing block', 'cohort-unreachable', 'BlockUnavailable'] as const
+
+interface ArmResult {
+  arm: 'J' | 'F'
+  ran: boolean
+  headerEqual: boolean
+  aToB: boolean
+  bToA: boolean
+  errors: string[]
+}
+
+function tokensIn (error: unknown, into: Set<string>): void {
+  const text = `${(error as Error)?.message ?? error}`
+  for (const t of ERROR_TOKENS) if (text.includes(t)) into.add(t)
+}
+
+async function readAll (db: Database, sql: string): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = []
+  for await (const row of db.eval(sql)) rows.push(row as Record<string, unknown>)
+  return rows
+}
+
+/** Strand bootstrap rows: the singleton Header (open strand; Member/Manager are closed-only). */
+async function readBootstrapRows (db: Database): Promise<string> {
+  const header = await readAll(db, 'select Id, Type, sAppId, sAppVersion, Engine, EngineVersion from Strand.Header order by Id')
+  return JSON.stringify(header)
+}
+
+async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
+  const errors = new Set<string>()
+  const result: ArmResult = { arm, ran: false, headerEqual: false, aToB: false, bToA: false, errors: [] }
+  const peerless = arm === 'F'
+  const harness: TwoNodeHarness = await startTwoNodeHarness({
+    peerlessNodeB: peerless,
+    // J: explicit founder:false (connected joiner); F: explicit founder:true (peerless importer).
+    nodeBFounder: peerless
+  })
+  try {
+    const user = makeTestUser({ id: `o02-${arm}-${harness.runId}` })
+    const engineA = new NetworksEngine(makeDeviceLocalStorage(), harness.nodeA.dbFactory)
+    await engineA.create(makeTestNetworkInit(), user)
+    const ref = (await engineA.getRecentNetworks())[0]
+    if (!ref) throw new Error(`o02 arm ${arm}: node-A has no recent network after create()`)
+    const exported = await engineA.exportFoundingBundle(ref.hash, {
+      userId: user.id,
+      signerKey: user.activeKeys[0]!.key,
+      sign: makeTestSignCallback(user)
+    })
+    const bundle: FoundingBundle = exported.bundle
+    const hash = bundle.descriptor.networkHash
+
+    if (!peerless) {
+      // Control: same settle grace as founding-bundle.harness F-1, and wait for A's Network row.
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      await pollUntil(
+        async () => (await harness.nodeB.dbFactory(hash)).prepare('select Id from Network').get({}),
+        (row) => row?.Id === bundle.descriptor.networkId,
+        { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: "o02 J: B sees A's Network row" }
+      )
+    }
+
+    const engineB = new NetworksEngine(makeDeviceLocalStorage(), harness.nodeB.dbFactory)
+    const imported = await engineB.importFoundingBundle(exported.text, undefined)
+    if (!imported.ok) errors.add(`import:${(imported as { reason: string }).reason}`)
+
+    if (peerless) await harness.connectAndEnrolNodeB()
+
+    const dbA = await harness.nodeA.dbFactory(hash)
+    const dbB = await harness.nodeB.dbFactory(hash)
+    const ns = `o02-${arm}-${harness.runId}`
+
+    // (1) bootstrap rows identical on both nodes (polled: settle may take a while).
+    try {
+      await pollUntil(
+        async () => [await readBootstrapRows(dbA), await readBootstrapRows(dbB)] as const,
+        ([a, b]) => a === b && a !== '[]',
+        { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: bootstrap rows equal` }
+      )
+      result.headerEqual = true
+    } catch (e) { tokensIn(e, errors) }
+
+    // (2) A writes after the import; does B read it?
+    try {
+      await dbA.exec('insert into TidHighWater (Namespace, HighWater) values (:ns, :hw)', { ns: `${ns}-a`, hw: 1 } as any)
+      await pollUntil(
+        async () => dbB.prepare('select HighWater from TidHighWater where Namespace = :ns').get({ ns: `${ns}-a` } as any),
+        (row) => row?.HighWater === 1,
+        { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: A->B` }
+      )
+      result.aToB = true
+    } catch (e) { tokensIn(e, errors) }
+
+    // (3) B writes; does A read it?
+    try {
+      await dbB.exec('insert into TidHighWater (Namespace, HighWater) values (:ns, :hw)', { ns: `${ns}-b`, hw: 2 } as any)
+      await pollUntil(
+        async () => dbA.prepare('select HighWater from TidHighWater where Namespace = :ns').get({ ns: `${ns}-b` } as any),
+        (row) => row?.HighWater === 2,
+        { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: B->A` }
+      )
+      result.bToA = true
+    } catch (e) { tokensIn(e, errors) }
+
+    result.ran = true
+  } catch (e) {
+    tokensIn(e, errors)
+    errors.add(`arm-error:${((e as Error)?.message ?? String(e)).slice(0, 120).replace(/\s+/g, ' ')}`)
+  } finally {
+    await harness.stop()
+  }
+  result.errors = [...errors]
+  // (4) one log line per arm (shape is what 62-98 parses).
+  console.log(
+    `[o02] arm=${arm} run=${RUN} sha=${SHA} headerEqual=${result.headerEqual} aToB=${result.aToB} bToA=${result.bToA} errors=${result.errors.join(',') || 'none'}`
+  )
+  return result
+}
+
+describeP2PHarness('O-02: peerless founder:true import vs connected joiner (62-93 instrument)', function () {
+  this.timeout(HARNESS_TIMEOUTS.suiteMs)
+
+  const results = new Map<'J' | 'F', ArmResult>()
+
+  for (const arm of ARM_ORDER as ('J' | 'F')[]) {
+    it(`arm ${arm}: ran and measured (${arm === 'J' ? 'control, asserts convergence' : 'O-02, logged only'})`, async function () {
+      this.timeout(HARNESS_TIMEOUTS.suiteMs)
+      const r = await runArm(arm)
+      results.set(arm, r)
+      // Unconditional: the arm reached its measurements. Arm F's OUTCOME is never asserted.
+      expect(r.ran, `arm ${arm} must reach its measurements (errors=${r.errors.join(',')})`).to.equal(true)
+      if (arm === 'J') {
+        expect(r.headerEqual, 'control: bootstrap rows equal').to.equal(true)
+        expect(r.aToB, 'control: A->B').to.equal(true)
+        expect(r.bToA, 'control: B->A').to.equal(true)
+      }
+    })
+  }
+})
