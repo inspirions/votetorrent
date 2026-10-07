@@ -256,16 +256,23 @@ describe("ReassociationReviewToggle (D-46)", () => {
 		expect(switches).toHaveLength(0);
 	});
 
-	test("T10: RegistrationPolicyScreen mounts the toggle after the attestation section, gated on the vrg scope", () => {
-		const src = fs.readFileSync(path.resolve(__dirname, "../../RegistrationPolicyScreen.tsx"), "utf8");
-		const attestationAt = src.indexOf('testID="registration-policy-attestation-section"');
-		const sectionAt = src.indexOf('testID="registration-policy-reassociation-section"');
-		const toggleAt = src.indexOf("<ReassociationReviewToggle");
+	// 62-143 (authority-level ruling): the toggle lives on Registration Requests, gated on the vrg scope;
+	// Registration Policy keeps only a read-only note in its reassociation section, after attestation.
+	test("T10: RegistrationInboxScreen mounts the toggle gated on vrg; RegistrationPolicyScreen shows only the note", () => {
+		const inbox = fs.readFileSync(path.resolve(__dirname, "../../../registration/RegistrationInboxScreen.tsx"), "utf8");
+		const reviewAt = inbox.indexOf('testID="registration-inbox-reassociation-review"');
+		expect(reviewAt).toBeGreaterThan(0);
+		expect(inbox.indexOf("<ReassociationReviewToggle")).toBeGreaterThan(reviewAt);
+		expect(inbox).toMatch(/canWrite = !scopesLoading && scopes\?\.includes\("vrg"\) === true/);
+		expect(inbox).toMatch(/<ReassociationReviewToggle authorityId=\{authorityId\} canWrite=\{canWrite\} \/>/);
+
+		const policy = fs.readFileSync(path.resolve(__dirname, "../../RegistrationPolicyScreen.tsx"), "utf8");
+		const attestationAt = policy.indexOf('testID="registration-policy-attestation-section"');
+		const sectionAt = policy.indexOf('testID="registration-policy-reassociation-section"');
 		expect(attestationAt).toBeGreaterThan(0);
 		expect(sectionAt).toBeGreaterThan(attestationAt);
-		expect(toggleAt).toBeGreaterThan(sectionAt);
-		expect(src).toMatch(/canWriteIntakePolicy = !scopesLoading && scopes\?\.includes\("vrg"\) === true/);
-		expect(src).toMatch(/canWrite=\{canWriteIntakePolicy\}/);
+		expect(policy.indexOf("<ReassociationReviewNote")).toBeGreaterThan(sectionAt);
+		expect(policy).not.toContain("<ReassociationReviewToggle");
 	});
 });
 
