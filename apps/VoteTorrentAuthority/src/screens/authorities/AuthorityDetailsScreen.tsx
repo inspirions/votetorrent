@@ -60,6 +60,24 @@ export default function AuthorityDetailsScreen() {
 	// A stale navigation: the authority is not on the active network (62-91 openAuthority code
 	// 'authority-not-found'). Shown as a translated state; never reads pins or administration.
 	const [notFound, setNotFound] = useState(false);
+	// REVIEW/IN-05: everything kept from a read (engine, pin state, administration, officers, invited
+	// list, the peer notice) belongs to the authority it was read for. When the route moves to a
+	// different authority the previous one's reads are dropped in the same render, so the
+	// last-read fallback of a peer failure can never show A's data under B. The network engine is
+	// per network, not per authority, and is kept.
+	const [readSubjectId, setReadSubjectId] = useState(authority.id);
+	if (readSubjectId !== authority.id) {
+		setReadSubjectId(authority.id);
+		setAuthorityEngine(null);
+		setPinned(false);
+		setAdminDetails(null);
+		setOfficers([]);
+		setOfficerUsers(new Map());
+		setInvitedAuthorities([]);
+		setPeerUnavailable(false);
+		setNotFound(false);
+		setErrorMessage("");
+	}
 	// WR-02: sequence number of the latest getAuthorityData run; older runs may not write.
 	const authorityReadSeqRef = useRef(0);
 	const officerUsersRef = useRef(officerUsers);
