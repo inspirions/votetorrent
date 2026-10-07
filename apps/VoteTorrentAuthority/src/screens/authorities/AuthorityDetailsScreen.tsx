@@ -25,6 +25,7 @@ import { CustomTextInput } from "../../components/CustomTextInput";
 import { globalStyles } from "../../theme/styles";
 import { formatDate } from "../../utils/displayUtils";
 import { OfficerCard } from "./components/OfficerCard";
+import { PendingInvitationsSection } from "./components/PendingInvitationsSection";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 
 /** Shape the (forthcoming) real authority engine will provide for invited authorities. */
@@ -446,6 +447,8 @@ export default function AuthorityDetailsScreen() {
 						)}
 					</>
 				)}
+
+				<PendingInvitationsSection authorityId={authority.id} authorityEngine={authorityEngine} />
 			</View>
 			)}
 

@@ -44,6 +44,16 @@ jest.mock("@react-navigation/native", () => ({
 		setOptions: mockSetOptions,
 	}),
 	useRoute: () => ({ params: mockRouteParams }),
+	// Run the callback once on mount (like a first focus); an effect keyed on `cb` would re-run every render.
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const ReactLib = require("react");
+		ReactLib.useEffect(() => {
+			const cleanup = cb();
+			return typeof cleanup === "function" ? cleanup : undefined;
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, []);
+	},
 }));
 
 const ADMIN_ID = "authority-1:2026-10-01T00:00:00";
@@ -70,7 +80,7 @@ const USER_NAMES: Record<string, string> = { "user-una": "Una Test", "user-bea":
 
 const mockGetAdminDetails = jest.fn();
 const mockGetUser = jest.fn();
-const mockAuthorityEngine = { getAdminDetails: mockGetAdminDetails };
+const mockAuthorityEngine = { getAdminDetails: mockGetAdminDetails, getPendingInviteCids: jest.fn(async () => []) };
 const mockNetworkEngine = {
 	openAuthority: jest.fn(async (_id: string): Promise<any> => mockAuthorityEngine),
 	getPinnedAuthorities: jest.fn(async () => []),
@@ -78,7 +88,7 @@ const mockNetworkEngine = {
 	unpinAuthority: jest.fn(async () => {}),
 	getUser: mockGetUser,
 };
-const mockGetEngine = jest.fn(async (name: string) => (name === "network" ? mockNetworkEngine : undefined));
+const mockGetEngine = jest.fn(async (name: string) => (name === "network" ? mockNetworkEngine : name === "invitations" ? { getOfficerInvite: jest.fn(async () => undefined) } : undefined));
 
 jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: mockGetEngine }),
@@ -159,7 +169,7 @@ describe("AuthorityDetailsScreen -- the last read belongs to its authority (REVI
 		expect(allText(tr)).toContain("Una Test");
 
 		// Authority B: its engine's administration read cannot reach the other devices.
-		const engineB = { getAdminDetails: jest.fn().mockRejectedValue(peerUnavailableError()) };
+		const engineB = { getAdminDetails: jest.fn().mockRejectedValue(peerUnavailableError()), getPendingInviteCids: jest.fn(async () => []) };
 		mockNetworkEngine.openAuthority.mockImplementation(async (id: string) =>
 			id === "authority-2" ? (engineB as any) : (mockAuthorityEngine as any),
 		);

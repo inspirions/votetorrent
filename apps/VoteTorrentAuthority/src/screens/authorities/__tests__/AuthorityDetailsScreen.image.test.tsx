@@ -28,12 +28,23 @@ jest.mock("@react-navigation/native", () => ({
 	}),
 	useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn(), setOptions: jest.fn() }),
 	useRoute: () => ({ params: mockRouteParams }),
+	// Run the callback once on mount (like a first focus); an effect keyed on `cb` would re-run every render.
+	useFocusEffect: (cb: () => void | (() => void)) => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const ReactLib = require("react");
+		ReactLib.useEffect(() => {
+			const cleanup = cb();
+			return typeof cleanup === "function" ? cleanup : undefined;
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, []);
+	},
 }));
 
 const IMAGE_URL = "https://test.example.org/seal.png";
 const BASE_AUTHORITY = { id: "authority-1", name: "Test Authority", domainName: "test.example.org" };
 
 const mockAuthorityEngine = {
+	getPendingInviteCids: jest.fn(async () => []),
 	getAdminDetails: jest.fn(async () => ({
 		admin: { id: "admin-1", authorityId: "authority-1", officers: [], effectiveAt: Date.UTC(2026, 9, 1), thresholdPolicies: [] },
 		proposed: undefined,
@@ -46,7 +57,7 @@ const mockNetworkEngine = {
 	unpinAuthority: jest.fn(async () => {}),
 	getUser: jest.fn(),
 };
-const mockGetEngine = jest.fn(async (name: string) => (name === "network" ? mockNetworkEngine : undefined));
+const mockGetEngine = jest.fn(async (name: string) => (name === "network" ? mockNetworkEngine : name === "invitations" ? { getOfficerInvite: jest.fn(async () => undefined) } : undefined));
 
 jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: mockGetEngine }),
