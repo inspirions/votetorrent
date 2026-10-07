@@ -16,6 +16,7 @@ import { globalStyles } from "../../theme/styles";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
+import { usePreserveScrollOnResize } from "../../hooks/usePreserveScrollOnResize";
 import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
 import { reprobeAfterConnect } from "./reprobeAfterConnect";
 
@@ -35,6 +36,8 @@ export default function NetworksScreen() {
 	const insets = useSafeAreaInsets();
 	const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
 	const directFocusedRef = useRef(false);
+	// O-04: keep the scroll position across a rotation (width change); never reacts to the IME.
+	const preserveScroll = usePreserveScrollOnResize(scrollRef);
 
 	// The Direct (advanced) field and CONNECT are the LAST section. On API 35+ (forced
 	// edge-to-edge) the window is not resized for the IME, so useKeyboardInset pads the content
@@ -145,6 +148,7 @@ export default function NetworksScreen() {
 	return (
 		<ScrollView
 			ref={scrollRef}
+			{...preserveScroll}
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
