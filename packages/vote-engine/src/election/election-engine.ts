@@ -66,11 +66,17 @@ export const BALLOT_HEADER_TID = 1
  * 62 CR-01: 'declined' (a signed no) ranks BELOW live, so "send again" after a decline reads Sent, and above
  * unknown / no-longer-valid, so a decline with no newer live chain reads Declined instead of being hidden by a
  * dead or ambiguous chain of the same name. 'answered' is an acceptance only and still wins over everything.
+ * 62-139: 'accepted-earlier-revision' (an acceptance whose acceptor has Keyholder rows only in revisions before the
+ * one being projected) is only read for the revision's own projection (never for a history revision that the
+ * acceptance belongs to or precedes) and ranks with 'declined', below a new live invitation.
  */
 const SENT_STATE_RANK: Record<InviteSentState['state'], number> = {
   answered: 5,
   live: 4,
   declined: 3,
+  // 62-139: equal rank with declined, so compareSentStates' later expiration decides between the two latest
+  // answers (a newer decline outranks an older earlier-revision acceptance and vice versa).
+  'accepted-earlier-revision': 3,
   unknown: 2,
   'no-longer-valid': 1
 }
@@ -1557,12 +1563,28 @@ export class ElectionEngine implements IElectionEngine {
           // would read "Sent" forever. Read the answer's polarity for the answered slot (one PK-keyed
           // row). A value that is neither accepted nor declined fails closed to 'unknown'.
           const answer = await this.ctx.db
-            .prepare('SELECT IsAccepted FROM InviteResult WHERE SlotCid = :slotCid')
+            .prepare('SELECT IsAccepted, InvokedId FROM InviteResult WHERE SlotCid = :slotCid')
             .get({ slotCid: chain.cid })
           const isAccepted = answer?.IsAccepted as unknown
-          const state: InviteSentState['state'] = isAccepted === true || isAccepted === 1
+          let state: InviteSentState['state'] = isAccepted === true || isAccepted === 1
             ? 'answered'
             : isAccepted === false || isAccepted === 0 ? 'declined' : 'unknown'
+          if (state === 'answered' && typeof answer?.InvokedId === 'string') {
+            // 62-139 (keep RE-ACCEPT, user ruling 2026-10-07): keyholders accept each revision separately. Compare
+            // the acceptor's Keyholder rows with the PROJECTED revision (this function's argument, a history
+            // revision at the second call site), both through Number(...). A row at the projected revision, or a
+            // later one, keeps 'answered'; rows only before it mean a new invitation is needed; no row at all
+            // (deleted, or not yet replicated) stays 'answered'. Two equality terms; rows collected first.
+            const revisionRows: number[] = []
+            for await (const kr of this.ctx.db.eval(
+              'select ElectionRevision from Keyholder where ElectionId = :electionId and UserId = :userId',
+              { electionId, userId: answer.InvokedId }
+            )) {
+              revisionRows.push(Number(kr.ElectionRevision))
+            }
+            const projected = Number(revision)
+            if (revisionRows.length > 0 && revisionRows.every((r) => r < projected)) state = 'accepted-earlier-revision'
+          }
           const headRow = chainRows.find(r => r.Cid === chain.cid)
           sent = { state, expiration: headRow?.Expiration ?? latestExpiration(chainRows) }
         } else {

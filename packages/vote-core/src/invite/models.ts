@@ -42,6 +42,9 @@ export interface Invite {
  * 'live' = sent and still answerable;
  * 'answered' = the invitee ACCEPTED (a signed InviteResult with IsAccepted true; the Keyholder row
  * may still be replicating);
+ * 'accepted-earlier-revision' = the name's accepted invitation belongs to an earlier revision of the election than
+ * the one being projected (its acceptor has Keyholder rows only in earlier revisions); keyholders accept each
+ * revision separately (user ruling 2026-10-07: keep re-accept), so a new invitation is needed;
  * 'declined' = the invitee said no (a signed InviteResult with IsAccepted false). A decline writes no
  * Keyholder row, so this is the only place a decline is visible;
  * 'no-longer-valid' = cancelled, expired, or superseded and closed;
@@ -49,7 +52,7 @@ export interface Invite {
  * network could not serve the invitation tables. It is deliberately NOT "not sent".
  */
 export interface InviteSentState {
-	state: 'live' | 'answered' | 'declined' | 'no-longer-valid' | 'unknown';
+	state: 'live' | 'answered' | 'accepted-earlier-revision' | 'declined' | 'no-longer-valid' | 'unknown';
 	/**
 	 * Expiration of the invitation (the chain head's when it is live, answered or declined; the latest of the
 	 * chain's rows otherwise). '' when nothing could be read ('unknown' from an unreadable table).
