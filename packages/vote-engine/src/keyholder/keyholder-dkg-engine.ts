@@ -237,13 +237,29 @@
 //     this engine at all (and so never re-removes a re-added row) transfers
 //     to the still-open T-62-02-13 Keyholder-delete-authorization gap —
 //     not re-opened or re-designed here.
-// 16. Liveness residual (accepted, not mitigated): no wall-clock timeout on
-//     replicated rows — an absent participant stalls the DKG with
-//     `awaitingUserIds` naming them. The officer remedy is
-//     `ElectionEngine.revokeKeyholder`, which the roster-rule fallback
-//     (rule 6) turns into a clean `roster-changed` abort once the revoked
-//     member's further rows become structurally impossible (`
-//     SenderIsBoundKeyholder` would reject them). Evidence: scenario H.
+// 16. Liveness residual: there is NO automatic timeout or action (user
+//     ruling 2026-10-07) — an absent participant stalls the DKG with
+//     `awaitingUserIds` naming them. Since 62-139 a STATUS READ flags
+//     `overdueUserIds` (the awaited keyholders) once the current round has
+//     been open for `DKG_ROUND_DEADLINE_MS`, by the resolver rule of
+//     evaluator rule 10: the earliest answer caps the latest opening
+//     candidate, so neither the flagged keyholder nor the first answer can
+//     move the deadline later, and candidates more than 5 minutes ahead of
+//     the reader are ignored. The flag is advisory and approximate (it can
+//     fire early on a back-dated or slow-clock answer) and is computed only
+//     here at the status read: time never enters the evaluator, and
+//     `advanceDkg` / `planDkgAction` never read it. Officers decide; the only
+//     in-app action is to ask the keyholder to open this election's keyholder
+//     screen (the driver is pull-only). There is NO in-app way to replace a
+//     silent keyholder today: `ElectionEngine.revokeKeyholder` is engine-only
+//     with no permission check (todo
+//     2026-10-02-keyholder-delete-has-no-check-and-revoke-checks-no-permission)
+//     and no product path bumps ElectionRevision (adjustElection writes only
+//     ProposedElectionRevision); that is an open decision for the user. If a
+//     revoke does happen, the roster-rule fallback (rule 6) turns it into a
+//     clean `roster-changed` abort. Signer-claimed timestamps can move the
+//     flag earlier (back-dating) but cannot cause any fault. Evidence:
+//     scenario H, dkg-round-deadline.spec.ts.
 // 17. Lag residual (accepted): a replication lag that makes one node see a
 //     roster change before another can consume at most one extra attempt
 //     (the roster-rule fallback aborts that attempt as `roster-changed`
@@ -399,6 +415,7 @@ import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import {
   DKG_MAX_ATTEMPTS,
+  DKG_ROUND_DEADLINE_MS,
   type DkgActionTaken,
   type DkgAdvanceResult,
   type DkgRound,
@@ -446,6 +463,7 @@ import {
 import {
   evaluateDkgRevision,
   planDkgAction,
+  resolveRoundOpenedAt,
   type DkgMessageRow,
   type DkgPlannedAction,
   type DkgRevisionEvaluation,
@@ -508,8 +526,35 @@ function collectRoundPayloads<T> (
   return out
 }
 
+/**
+ * Rule 16 / evaluator rule 10: SentAt and BoundAt are signer-claimed, so candidates dated further than this ahead of
+ * the reader are ignored. Same 5-minute value as SUBMITTED_AT_MAX_FUTURE_SKEW_MS (registration/association) and
+ * KEYHOLDER_INVITE_EXPIRY_SKEW_MS (keyholder invitations).
+ */
+const DKG_TIMESTAMP_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+/**
+ * Sorted unique user ids that have at least one Keyholder row and EVERY one of whose rows is in a revision BEFORE
+ * `revision` (a user with any row at or after it is not listed). Compares with Number(...): the column can arrive as a
+ * number or a numeric string.
+ */
+export function earlierRevisionUserIdsOf (rows: Array<{ userId: string, electionRevision: unknown }>, revision: unknown): string[] {
+  const current = Number(revision)
+  const byUser = new Map<string, boolean>()
+  for (const row of rows) {
+    const earlier = Number(row.electionRevision) < current
+    byUser.set(row.userId, (byUser.get(row.userId) ?? true) && earlier)
+  }
+  return [...byUser.entries()].filter(([, allEarlier]) => allEarlier).map(([userId]) => userId).sort()
+}
+
 export class KeyholderDkgEngine implements IKeyholderDkgEngine {
-  constructor (private readonly ctx: EngineContext, private readonly deps: { vault: IKeyVault }) {}
+  constructor (private readonly ctx: EngineContext, private readonly deps: { vault: IKeyVault, now?: () => number }) {}
+
+  /** The injectable clock (the same shape as KeyReleaseEngineDeps.now). Used only for SentAt stamps and the status-read deadline flag. */
+  private nowMs (): number {
+    return (this.deps.now ?? Date.now)()
+  }
 
   // -------------------------------------------------------------------------
   // Snapshot loader -- read-side signature verification (T-62-17-01)
@@ -548,12 +593,15 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
       liveRoster.push(row.UserId as string)
     }
 
-    const bindings: Record<string, { dkgPublicKey: string }> = {}
+    const bindings: Record<string, { dkgPublicKey: string, boundAt?: string }> = {}
     for await (const row of this.ctx.db.eval(
-      'select UserId, DkgPublicKey from KeyholderDkgBinding where ElectionId = :electionId and ElectionRevision = :revision',
+      'select UserId, DkgPublicKey, BoundAt from KeyholderDkgBinding where ElectionId = :electionId and ElectionRevision = :revision',
       { electionId, revision }
     )) {
-      bindings[row.UserId as string] = { dkgPublicKey: row.DkgPublicKey as string }
+      bindings[row.UserId as string] = {
+        dkgPublicKey: row.DkgPublicKey as string,
+        ...(typeof row.BoundAt === 'string' ? { boundAt: row.BoundAt } : {})
+      }
     }
 
     const pendingRow = await this.ctx.db
@@ -567,7 +615,7 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
 
     const messages: DkgMessageRow[] = []
     for await (const row of this.ctx.db.eval(
-      `select Attempt, DkgRound, SenderUserId, Payload, ResultKey,
+      `select Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt,
           (
             SignatureValid(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
               or SignatureValidP256(Digest('KeyholderDkgMessage', ElectionId, ElectionRevision, Attempt, DkgRound, SenderUserId, Payload, ResultKey, SentAt), Signature, SenderKey)
@@ -582,7 +630,8 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
         senderUserId: row.SenderUserId as string,
         payload: row.Payload as string,
         resultKey: (row.ResultKey as string | null) ?? null,
-        signatureValid: normalizeBool(row.SigValid)
+        signatureValid: normalizeBool(row.SigValid),
+        ...(typeof row.SentAt === 'string' ? { sentAt: row.SentAt } : {})
       })
     }
 
@@ -747,6 +796,30 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     if (evaluation.blockedReason !== undefined) status.blockedReason = evaluation.blockedReason
     if (evaluation.waitingReason !== undefined) status.waitingReason = evaluation.waitingReason
     if (evaluation.failedReason !== undefined) status.failedReason = evaluation.failedReason
+    if (evaluation.revision === null) {
+      // No ElectionRevision row was read: the roster facts are UNKNOWN, never [] (T-62-139-06).
+      status.liveRoster = undefined
+      status.earlierRevisionUserIds = undefined
+      status.roundOpenedAt = null
+      status.overdueUserIds = []
+    } else {
+      status.liveRoster = [...evaluation.liveRoster].sort()
+      const keyholderRows: Array<{ userId: string, electionRevision: unknown }> = []
+      for await (const row of this.ctx.db.eval(
+        'select UserId, ElectionRevision from Keyholder where ElectionId = :electionId',
+        { electionId }
+      )) {
+        keyholderRows.push({ userId: row.UserId as string, electionRevision: row.ElectionRevision })
+      }
+      status.earlierRevisionUserIds = earlierRevisionUserIdsOf(keyholderRows, evaluation.revision)
+      const now = this.nowMs()
+      const roundOpenedAt = resolveRoundOpenedAt(evaluation.roundTiming, evaluation.awaitingUserIds, now, DKG_TIMESTAMP_MAX_FUTURE_SKEW_MS)
+      status.roundOpenedAt = roundOpenedAt
+      // Advisory only (rule 16): nothing reads this to act.
+      status.overdueUserIds = roundOpenedAt !== null && now - Date.parse(roundOpenedAt) >= DKG_ROUND_DEADLINE_MS
+        ? [...evaluation.awaitingUserIds].sort()
+        : []
+    }
     if (selfUserId !== undefined) {
       const isDisqualified = evaluation.cumulativeDisqualified.includes(selfUserId)
       const isParticipant = evaluation.roster.includes(selfUserId) && !isDisqualified
@@ -788,7 +861,7 @@ export class KeyholderDkgEngine implements IKeyholderDkgEngine {
     electionId: string, revision: number, attempt: number, dkgRound: number,
     resultKey: string | null, payload: string, signer: KeyholderDkgSigner
   ): Promise<void> {
-    const sentAt = new Date().toISOString()
+    const sentAt = new Date(this.nowMs()).toISOString()
     const digestRow = await this.ctx.db
       .prepare(
         "select Digest('KeyholderDkgMessage', :electionId, :revision, :attempt, :dkgRound, :senderUserId, :payload, :resultKey, :sentAt) as d"
