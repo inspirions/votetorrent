@@ -298,8 +298,12 @@ the port and at least one implementation are proven together.
 - **Removed officers keep access to what was already wrapped to them**
   (D-04 + D-07: officer removal is forward-looking only). Conversely,
   **officers added later cannot read envelopes sealed before they were
-  added** — re-wrapping existing envelopes to a newly added officer is out
-  of scope for this plan (research Open Q2).
+  added**. This is a product rule, kept on purpose (D-51; user decision
+  2026-10-07): officers added later, or who enable encrypted intake later,
+  never receive access to envelopes sealed before they were added. No
+  re-wrap or re-seal ceremony exists or is planned. An officer who was a
+  recipient handles those records, and the app says so on the screens where
+  it happens.
 - **Not externally audited.** This is an in-repo, built-in review (D-25,
   Plan 04 Task 3) backed by published known-answer vectors and an
   independent `node:crypto` re-implementation — it is not a substitute for
