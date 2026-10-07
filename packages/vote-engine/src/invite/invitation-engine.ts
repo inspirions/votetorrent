@@ -6,6 +6,7 @@ import type { EngineContext } from '../types.js'
 import { digestToBytes, fromCanonicalDatetime, inviteResultSignedBytes, nowCanonicalDatetime, toCanonicalDatetime, verifyAdHocInviteSignature } from '../utils.js'
 import { allocateTid } from '../database/tid-allocator.js'
 import { readInviteChain } from './read-invite-chain.js'
+import { withInviteWriteSerial } from './invite-write-serial.js'
 import type {
   IInvitationEngine,
   InviteSlotResolution,
@@ -479,7 +480,24 @@ export class InvitationEngine implements IInvitationEngine {
       }
 
       if (!keyholderWrite) {
-        await this.ctx.db.exec(inviteResultSql, inviteResultParams)
+        // gap7/IN-04: liveness is re-checked and the InviteResult inserted inside ONE transaction,
+        // serialized per database, so a result (or cancellation) landing between the earlier read and
+        // this write is refused instead of double-written.
+        await withInviteWriteSerial(this.ctx.db, async () => {
+          await this.ctx.db.exec('BEGIN')
+          try {
+            await this.assertSlotIsLiveHead(slotRow)
+            await this.ctx.db.exec(inviteResultSql, inviteResultParams)
+            await this.ctx.db.exec('COMMIT')
+          } catch (innerErr) {
+            try {
+              await this.ctx.db.exec('ROLLBACK')
+            } catch {
+              // already rolled back by the failed statement — ignore, the original error is what matters.
+            }
+            throw innerErr
+          }
+        })
 
         // Phase-22 boundary (D-08): cross-device P2P network send is deferred.
         // The local InviteResult write above is the only real action this phase.
@@ -493,96 +511,98 @@ export class InvitationEngine implements IInvitationEngine {
       // collision on User) leaves ZERO rows behind — fixing the 62-09 crossnote's documented
       // non-atomicity (a failed mint used to orphan the InviteResult write).
       const tid = await allocateTid(this.ctx.db, 'user')
-      await this.ctx.db.exec('BEGIN')
-      try {
-        // A cancellation can land while the signing prompt was open: re-check first thing inside
-        // the transaction (the catch below rolls back). Residual: InviteResult rows replicated from
-        // another device are not re-validated against cancellation (P2P concern, tier-2 engine
-        // control, not schema).
-        await this.assertSlotIsLiveHead(slotRow)
-        await this.ctx.db.exec(inviteResultSql, inviteResultParams)
-
-          await this.ctx.db.exec(
-            `insert into User (
-              Id,
-              Name,
-              ImageRef
-            )
-            with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :userInviteSignature, Tid = ${tid}
-            values (:userId, :userName, null)`,
-            {
-              inviteSlotCid: slotCid,
-              userInviteSignature: slotRow.InviteSignature,
-              userId: keyholderWrite.userId,
-              userName: slotRow.Name,
-            }
-          )
-
-          // D-21: a fresh identity's ONLY key is the caller-provisioned keyholder signing key —
-          // the bootstrap UserKey context form (never the officer's key, never SignatureValid-
-          // checked beyond the bootstrap branch), mirroring NetworksEngine.create's founding key.
-          await this.ctx.db.exec(
-            `insert into UserKey (
-              UserId,
-              Type,
-              PubKey,
-              Expiration
-            )
-            with context UserKey = null, Signature = null, Tid = ${tid}, now = :now, IsSignatureValid = true
-            values (:userId, :keyType, :keyValue, :expiration)`,
-            {
-              userId: keyholderWrite.userId,
-              keyType: keyholder!.signingKey.type,
-              keyValue: keyholder!.signingKey.key,
-              expiration: toCanonicalDatetime(keyholder!.signingKey.expiration),
-              now: nowCanonicalDatetime(),
-            }
-          )
-
-          await this.ctx.db.exec(
-            `insert into Keyholder (
-              ElectionId,
-              ElectionRevision,
-              UserId
-            )
-            with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
-            values (:electionId, :revision, :userId)`,
-            { electionId: keyholderWrite.electionId, revision: keyholderWrite.revision, userId: keyholderWrite.userId }
-          )
-
-          await this.ctx.db.exec(
-            `insert into KeyholderDkgBinding (
-              ElectionId,
-              ElectionRevision,
-              UserId,
-              InviteSlotCid,
-              DkgPublicKey,
-              BoundAt,
-              SignerKey,
-              Signature
-            )
-            values (:electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt, :signerKey, :signature)`,
-            {
-              electionId: keyholderWrite.electionId,
-              revision: keyholderWrite.revision,
-              userId: keyholderWrite.userId,
-              inviteSlotCid: slotCid,
-              dkgPublicKey: keyholder!.dkgPublicKey,
-              boundAt: keyholderWrite.boundAt,
-              signerKey: keyholder!.signingKey.key,
-              signature: keyholderWrite.bindingSignature,
-            }
-          )
-
-        await this.ctx.db.exec('COMMIT')
-      } catch (innerErr) {
+      await withInviteWriteSerial(this.ctx.db, async () => {
+        await this.ctx.db.exec('BEGIN')
         try {
-          await this.ctx.db.exec('ROLLBACK')
-        } catch {
-          // already rolled back by the failed statement — ignore, the original error is what matters.
+          // A cancellation can land while the signing prompt was open: re-check first thing inside
+          // the transaction (the catch below rolls back). Residual: InviteResult rows replicated from
+          // another device are not re-validated against cancellation (P2P concern, tier-2 engine
+          // control, not schema).
+          await this.assertSlotIsLiveHead(slotRow)
+          await this.ctx.db.exec(inviteResultSql, inviteResultParams)
+
+            await this.ctx.db.exec(
+              `insert into User (
+                Id,
+                Name,
+                ImageRef
+              )
+              with context SigningNonce = null, InviteSlotCid = :inviteSlotCid, InviteSignature = :userInviteSignature, Tid = ${tid}
+              values (:userId, :userName, null)`,
+              {
+                inviteSlotCid: slotCid,
+                userInviteSignature: slotRow.InviteSignature,
+                userId: keyholderWrite.userId,
+                userName: slotRow.Name,
+              }
+            )
+
+            // D-21: a fresh identity's ONLY key is the caller-provisioned keyholder signing key —
+            // the bootstrap UserKey context form (never the officer's key, never SignatureValid-
+            // checked beyond the bootstrap branch), mirroring NetworksEngine.create's founding key.
+            await this.ctx.db.exec(
+              `insert into UserKey (
+                UserId,
+                Type,
+                PubKey,
+                Expiration
+              )
+              with context UserKey = null, Signature = null, Tid = ${tid}, now = :now, IsSignatureValid = true
+              values (:userId, :keyType, :keyValue, :expiration)`,
+              {
+                userId: keyholderWrite.userId,
+                keyType: keyholder!.signingKey.type,
+                keyValue: keyholder!.signingKey.key,
+                expiration: toCanonicalDatetime(keyholder!.signingKey.expiration),
+                now: nowCanonicalDatetime(),
+              }
+            )
+
+            await this.ctx.db.exec(
+              `insert into Keyholder (
+                ElectionId,
+                ElectionRevision,
+                UserId
+              )
+              with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = ${tid}
+              values (:electionId, :revision, :userId)`,
+              { electionId: keyholderWrite.electionId, revision: keyholderWrite.revision, userId: keyholderWrite.userId }
+            )
+
+            await this.ctx.db.exec(
+              `insert into KeyholderDkgBinding (
+                ElectionId,
+                ElectionRevision,
+                UserId,
+                InviteSlotCid,
+                DkgPublicKey,
+                BoundAt,
+                SignerKey,
+                Signature
+              )
+              values (:electionId, :revision, :userId, :inviteSlotCid, :dkgPublicKey, :boundAt, :signerKey, :signature)`,
+              {
+                electionId: keyholderWrite.electionId,
+                revision: keyholderWrite.revision,
+                userId: keyholderWrite.userId,
+                inviteSlotCid: slotCid,
+                dkgPublicKey: keyholder!.dkgPublicKey,
+                boundAt: keyholderWrite.boundAt,
+                signerKey: keyholder!.signingKey.key,
+                signature: keyholderWrite.bindingSignature,
+              }
+            )
+
+          await this.ctx.db.exec('COMMIT')
+        } catch (innerErr) {
+          try {
+            await this.ctx.db.exec('ROLLBACK')
+          } catch {
+            // already rolled back by the failed statement — ignore, the original error is what matters.
+          }
+          throw innerErr
         }
-        throw innerErr
-      }
+      })
 
     } catch (err) {
       this.rethrow(err, 'respondToInvite')

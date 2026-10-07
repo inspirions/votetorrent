@@ -101,6 +101,26 @@ describe('readInviteChain fail-closed branches (WR-08)', () => {
   })
 })
 
+describe('unscoped chain read reports ambiguity before answers (WR-06)', () => {
+  it('W6: a planted answered copy under another nonce cannot make the share read answered', async () => {
+    const fx = await makeChainFixture()
+    const s = await sendInvite(fx, 'of')
+    await expectLive(fx, s)
+    const planted = await insertRawChainRow(fx, s, {
+      resendSalt: null,
+      name: 'Planted copy',
+      nonce: bytesToHex(secp256k1.utils.randomSecretKey()),
+    })
+    // The planted copy is answered (its own nonce-scoped chain is live, so the answer is accepted).
+    await fx.invitation.respondToInvite(planted, true, s.invitePrivate)
+    expect(await resultRows(fx, [planted])).to.equal(1)
+    await expectAmbiguous(fx, s)
+    // The victim's own slot is NOT refused as answered: its nonce-scoped chain is live.
+    await fx.invitation.respondToInvite(s.cid, true, s.invitePrivate)
+    expect(await resultRows(fx, [s.cid])).to.equal(1)
+  })
+})
+
 interface StubRow { Cid: string, SigningNonce: string, ResendSalt: string | null }
 
 /** Implements only the two db calls readInviteChain makes; replaces the db ARGUMENT, no production seam. */
