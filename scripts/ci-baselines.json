@@ -77,9 +77,9 @@
   },
   "authorityTypecheck": {
     "command": "yarn workspace votetorrent-authority typecheck",
-    "measuredOn": "2026-09-15",
-    "maxErrors": 49,
-    "note": "This is a ceiling, not a floor: the producer half added to apps/VoteTorrentAuthority by this phase must introduce none. A drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed. Lowered 51 -> 49 on 2026-09-15 (commit 46dae0c0, phase 59-11): the tree measured 49, 2 below the recorded ceiling, and this file's own note already required exactly this -- 'a drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed'. A stale 51 would have hidden up to two phase-59 Authority-side regressions behind headroom nobody was using."
+    "measuredOn": "2026-10-08",
+    "maxErrors": 44,
+    "note": "This is a ceiling, not a floor: the producer half added to apps/VoteTorrentAuthority by this phase must introduce none. A drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed. Lowered 51 -> 49 on 2026-09-15 (commit 46dae0c0, phase 59-11): the tree measured 49, 2 below the recorded ceiling, and this file's own note already required exactly this -- 'a drop below 51 means someone fixed something and the ceiling should be lowered in that same commit, not silently absorbed'. A stale 51 would have hidden up to two phase-59 Authority-side regressions behind headroom nobody was using. Lowered 49 -> 44 on 2026-10-08 (62-127): the five test-context TS2307s are resolved by a typed declaration (src/types/vote-engine-test-context.d.ts); per-file diff shows exactly those five removed and nothing added (one unrelated error from another session in-flight, attach-sync-bindings.test.ts TS2305, is excluded from the 44)."
   },
   "voterJest": {
     "command": "yarn workspace votetorrent-voter test",
