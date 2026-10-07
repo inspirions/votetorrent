@@ -178,6 +178,20 @@ function countableUnreadableIds<T>(report: StagingReadReport<T>): string[] {
 		.map((row) => row.requestId);
 }
 
+/** Closes each transport in its own try/catch: a transport's close() re-awaits its strand
+ * promise, so a failed strand open rejects again here — that must neither skip the other close
+ * nor replace the sync's own outcome (initial/G3 WR-04). Logs the error class name only. */
+async function closeTransports(...transports: Array<{ close?: () => unknown }>): Promise<void> {
+	for (const transport of transports) {
+		try {
+			await transport.close?.();
+		} catch (err) {
+			const name = err instanceof Error ? err.name : 'unknown';
+			console.warn(`attach-peer-sync-binding: transport close failed (${name})`);
+		}
+	}
+}
+
 export function createPeerSyncBinding(deps: PeerSyncBindingDeps): SyncBindingHandle {
 	let lastRunRejected = new Set<string>();
 
@@ -307,9 +321,8 @@ export function createPeerSyncBinding(deps: PeerSyncBindingDeps): SyncBindingHan
 				if (!(await assocEngine.getAssociationRequest(doc.requestId))) pending += 1;
 			}
 		} finally {
-			await registration.close();
-			await association.close();
 			lastRunRejected = new Set(errorItemIds);
+			await closeTransports(registration, association);
 		}
 
 		return {
@@ -361,8 +374,7 @@ export function createPeerSyncBinding(deps: PeerSyncBindingDeps): SyncBindingHan
 			const assocAttReport = await association.readStagedAttestationsReport();
 			for (const id of countableUnreadableIds(assocAttReport)) failed.add(id);
 		} finally {
-			await registration.close();
-			await association.close();
+			await closeTransports(registration, association);
 		}
 
 		return { pending, synced, failed: failed.size };

@@ -396,6 +396,32 @@ describe('createPeerSyncBinding — syncNow (D-28/D-32)', () => {
 		expect(transports.association.close).toHaveBeenCalledTimes(1);
 	});
 
+	it('S-4: a rejecting registration.close still closes association, and syncNow returns its own report with this run\'s failed items', async () => {
+		const { deps, transports } = makeDeps({
+			regReport: { delivered: [regDoc('rej-close')], unreadable: [] },
+			submitRegistrationImpl: async () => {
+				throw new Error('boom');
+			},
+		});
+		(transports.registration.close as jest.Mock).mockRejectedValueOnce(new Error('strand open failed'));
+		const binding = createPeerSyncBinding(deps);
+		const report = await binding.syncNow({ authorityId: 'auth-1' });
+		expect(transports.association.close).toHaveBeenCalledTimes(1);
+		expect(report.errorItemIds).toContain('rej-close');
+		const counts = await binding.readCounts!({ authorityId: 'auth-1' });
+		expect(counts.failed).toBeGreaterThanOrEqual(1);
+	});
+
+	it('S-4b: association.close rejecting does not hide the sync report; readCounts closes both even when the first close rejects', async () => {
+		const { deps, transports } = makeDeps({});
+		(transports.association.close as jest.Mock).mockRejectedValueOnce(new Error('assoc close failed'));
+		const binding = createPeerSyncBinding(deps);
+		await expect(binding.syncNow({ authorityId: 'auth-1' })).resolves.toMatchObject({ errorItemIds: [] });
+		(transports.registration.close as jest.Mock).mockRejectedValueOnce(new Error('reg close failed'));
+		await expect(binding.readCounts!({ authorityId: 'auth-1' })).resolves.toMatchObject({ failed: 0 });
+		expect(transports.association.close).toHaveBeenCalledTimes(2);
+	});
+
 	it('P8: syncNow rejects before createTransports with no/empty context; a createTransports throw propagates', async () => {
 		const { deps, createTransports } = makeDeps({});
 		const binding = createPeerSyncBinding(deps);

@@ -139,15 +139,34 @@ export interface RestRegistrationSyncDeps {
 	) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 }
 
-const DEFAULT_FETCH_JSON: NonNullable<RestRegistrationSyncDeps["fetchJson"]> = (url, init) => {
-	if (init?.method === "POST") {
-		return fetch(url, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: init.body,
-		});
+/** A bridge that never answers must not leave the card "syncing" forever (initial/G3 WR-03). */
+export const REST_BRIDGE_FETCH_TIMEOUT_MS = 15_000;
+
+const DEFAULT_FETCH_JSON: NonNullable<RestRegistrationSyncDeps["fetchJson"]> = async (url, init) => {
+	const controller = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			controller.abort();
+			reject(new Error("registration bridge request timed out"));
+		}, REST_BRIDGE_FETCH_TIMEOUT_MS);
+	});
+	try {
+		const request =
+			init?.method === "POST"
+				? fetch(url, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: init.body,
+						signal: controller.signal,
+					})
+				: fetch(url, { signal: controller.signal });
+		// Swallow a late rejection of the losing branch (the abort rejects the request itself).
+		request.catch(() => undefined);
+		return await Promise.race([request, timeout]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
 	}
-	return fetch(url);
 };
 
 /** A bridge-reported decision notice, as read back from `pollDecisions()` (R-3 wire format). */
@@ -209,15 +228,24 @@ export function createRestRegistrationSyncBinding(deps: RestRegistrationSyncDeps
 					.filter((id): id is string => typeof id === "string"),
 			);
 
+			// A listing that throws, times out or answers non-2xx is a FAILED sync, never an honest
+			// empty batch (initial/G3 WR-03). Messages are fixed strings carrying at most the numeric
+			// status — never the URL, a body or engine text.
 			let staged: unknown[] = [];
+			let res: { ok: boolean; status: number; json: () => Promise<unknown> };
 			try {
-				const res = await fetchJson(`${url}/staged-requests`);
-				if (res.ok) {
-					const body = (await res.json()) as { staged?: unknown };
-					if (Array.isArray(body.staged)) staged = body.staged;
-				}
+				res = await fetchJson(`${url}/staged-requests`);
 			} catch {
-				// No listing reachable — an honest, empty batch, not a throw.
+				throw new Error("registration bridge listing failed");
+			}
+			if (!res.ok) {
+				throw new Error(`registration bridge listing failed (status ${res.status})`);
+			}
+			try {
+				const body = (await res.json()) as { staged?: unknown };
+				if (Array.isArray(body.staged)) staged = body.staged;
+			} catch {
+				throw new Error("registration bridge listing failed");
 			}
 
 			const engine = await deps.getEngine<RegistrationIntakeEngine>("registration");

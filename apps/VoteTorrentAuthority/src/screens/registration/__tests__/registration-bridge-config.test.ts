@@ -104,7 +104,7 @@ describe('registration-bridge-config.ts — fakes (M3-M5)', () => {
 			return result.outcome;
 		}
 
-		await expect(runWithCode('invalid-policy')).resolves.toBe('invalid-url');
+		await expect(runWithCode('invalid-policy')).resolves.toBe('failed');
 		await expect(runWithCode('threshold-requires-co-sign')).resolves.toBe('co-sign-required');
 		await expect(runWithCode('not-authorized')).resolves.toBe('not-authorized');
 		await expect(runWithCode('not-a-current-officer')).resolves.toBe('not-authorized');

@@ -4,6 +4,7 @@ import { REGISTRATION_DUPLICATE_CLOSED_REASON } from "@votetorrent/vote-engine/r
 import {
 	attachSyncBindings,
 	createRestRegistrationSyncBinding,
+	REST_BRIDGE_FETCH_TIMEOUT_MS,
 	REST_SYNC_REQUEST_ID_PATTERN,
 	type RestRegistrationSyncDeps,
 } from "../attach-sync-bindings";
@@ -326,16 +327,61 @@ describe("createRestRegistrationSyncBinding — R1-R10", () => {
 		expect(report2.pending).toBeGreaterThanOrEqual(1);
 	});
 
-	it("R9: a non-ok or throwing GET /staged-requests yields an empty batch, not a rejection", async () => {
-		const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example", stagedResponse: { ok: false, status: 500 } });
-		const binding = createRestRegistrationSyncBinding(deps);
-		const report = await binding.syncNow({ authorityId: AUTHORITY_ID });
-		expect(report.imported).toBe(0);
+	it("R9 (inverted, S-1): a non-ok or throwing GET /staged-requests REJECTS the sync with a fixed message, never an empty healthy batch", async () => {
+		for (const status of [401, 500]) {
+			const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example", stagedResponse: { ok: false, status } });
+			const binding = createRestRegistrationSyncBinding(deps);
+			const err = await binding.syncNow({ authorityId: AUTHORITY_ID }).then(
+				() => undefined,
+				(e: Error) => e,
+			);
+			expect(err).toBeInstanceOf(Error);
+			expect(err!.message).toBe(`registration bridge listing failed (status ${status})`);
+			expect(err!.message).not.toContain("bridge.example");
+		}
 
 		const { deps: deps2 } = makeDeps({ restBridgeUrl: "https://bridge.example", stagedResponse: { ok: true, throws: true } });
 		const binding2 = createRestRegistrationSyncBinding(deps2);
-		const report2 = await binding2.syncNow({ authorityId: AUTHORITY_ID });
-		expect(report2.imported).toBe(0);
+		const err2 = await binding2.syncNow({ authorityId: AUTHORITY_ID }).then(
+			() => undefined,
+			(e: Error) => e,
+		);
+		expect(err2).toBeInstanceOf(Error);
+		expect(err2!.message).toBe("registration bridge listing failed");
+		expect(err2!.message).not.toContain("fetch failed");
+	});
+
+	it("R9b: a 200 body without a staged array is an honest empty listing", async () => {
+		const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example", stagedResponse: { ok: true, body: {} } });
+		const report = await createRestRegistrationSyncBinding(deps).syncNow({ authorityId: AUTHORITY_ID });
+		expect(report.imported).toBe(0);
+	});
+
+	it("S-2: the default fetch times out a hung bridge, aborts the request, and still calls fetch as a plain call", async () => {
+		jest.useFakeTimers();
+		const priorFetch = (global as any).fetch;
+		let seenSignal: AbortSignal | undefined;
+		(global as any).fetch = jest.fn((_url: string, init?: { signal?: AbortSignal }) => {
+			seenSignal = init?.signal;
+			return new Promise(() => undefined);
+		});
+		try {
+			const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example" });
+			delete (deps as any).fetchJson;
+			const binding = createRestRegistrationSyncBinding(deps);
+			const outcome = binding.syncNow({ authorityId: AUTHORITY_ID }).then(
+				() => undefined,
+				(e: Error) => e,
+			);
+			await jest.advanceTimersByTimeAsync(REST_BRIDGE_FETCH_TIMEOUT_MS + 1);
+			const err = await outcome;
+			expect(err).toBeInstanceOf(Error);
+			expect(seenSignal).toBeDefined();
+			expect(seenSignal!.aborted).toBe(true);
+		} finally {
+			(global as any).fetch = priorFetch;
+			jest.useRealTimers();
+		}
 	});
 
 	it("R10: attachSyncBindings registers a handle with id 'rest' outside __DEV__", async () => {

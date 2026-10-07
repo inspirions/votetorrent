@@ -393,6 +393,19 @@ describe("BulkImportSyncScreen — Filesystem/REST cards invoke a real attached 
 			expect(treeText(tr)).not.toContain("SSN-123-45-6789-LEAKED");
 		});
 
+		it(`Sync Now (${id}) renders a bridge-listing failure as the error state, never a healthy sync, and never its text (S-3)`, async () => {
+			const syncNow = jest.fn(async () => {
+				throw new Error("registration bridge listing failed (status 401)");
+			});
+			registerSyncBinding({ id, syncNow });
+			const tr = await renderScreen();
+
+			await press(tr, `transport-sync-now-${id}`);
+
+			present(tr, `transport-status-${id}-error-heading`);
+			expect(treeText(tr)).not.toContain("registration bridge listing failed");
+		});
+
 		it(`Sync Now (${id}) with no binding registered renders the error variant without throwing`, async () => {
 			const tr = await renderScreen();
 

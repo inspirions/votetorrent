@@ -90,7 +90,9 @@ function mapOutcome(err: unknown): RegistrationBridgeSaveOutcome {
 	if (isIntakeError(err)) {
 		switch (err.code) {
 			case "invalid-policy":
-				return "invalid-url";
+				// "invalid-url" now means ONLY the local pre-check (the card shows that itself); an
+				// engine refusal of the policy must be visible as a save error.
+				return "failed";
 			case "threshold-requires-co-sign":
 				return "co-sign-required";
 			case "not-authorized":
