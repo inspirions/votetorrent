@@ -235,9 +235,13 @@ export default function AuthorityDetailsScreen() {
 		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}>
 			<InlineError message={errorMessage} />
 			<View style={styles.section}>
-				<View style={styles.imageContainer}>
-					<Image source={{ uri: authority.imageRef?.url }} style={styles.authorityImage} />
-				</View>
+				{/* The 200x200 box renders only when there is an image; without one it was a large
+				    blank space above the name. */}
+				{authority.imageRef?.url ? (
+					<View testID="authority-details-image" style={styles.imageContainer}>
+						<Image source={{ uri: authority.imageRef.url }} style={styles.authorityImage} />
+					</View>
+				) : null}
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
 					<ThemedText numberOfLines={1} ellipsizeMode="tail" style={styles.detailValue}>
