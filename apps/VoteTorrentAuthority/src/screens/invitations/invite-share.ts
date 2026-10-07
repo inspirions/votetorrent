@@ -191,3 +191,16 @@ export function inviteAcceptErrorKey(err: unknown): string | undefined {
 	const code = (err as { code?: unknown } | null | undefined)?.code;
 	return typeof code === 'string' && Object.prototype.hasOwnProperty.call(ENGINE_CODE_KEYS, code) ? ENGINE_CODE_KEYS[code] : undefined;
 }
+
+/**
+ * Copy key for a failure to LOAD an invitation (the resolve effect): the specific share / coded
+ * refusal copy when there is one, "select a network first" for the no-network state, otherwise the
+ * load-failure copy (never the "could not respond" copy). Structural no-network check, as in
+ * engine-factory's isNoNetworkEstablishedError, so it survives Metro module duplication.
+ */
+export function inviteLoadErrorKey(err: unknown): string {
+	const specific = inviteAcceptErrorKey(err);
+	if (specific) return specific;
+	if ((err as { noNetworkEstablished?: unknown } | null | undefined)?.noNetworkEstablished === true) return 'invitationNeedsNetwork';
+	return 'invitationLoadFailed';
+}

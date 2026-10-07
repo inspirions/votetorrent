@@ -3,7 +3,7 @@ import { bytesToHex } from '@noble/curves/utils.js';
 import { InvitationEngine } from '@votetorrent/vote-engine/rn';
 import { addTestAuthority, createTestNetwork, makeTestSignCallback } from '@votetorrent/vote-engine/test/fixtures/test-context';
 import type { InviteSlotResolution } from '@votetorrent/vote-core';
-import { InviteShareError, inviteAcceptErrorKey, inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from '../invite-share';
+import { InviteShareError, inviteAcceptErrorKey, inviteLoadErrorKey, inviteShareErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from '../invite-share';
 
 function kp() {
 	const priv = secp256k1.utils.randomSecretKey();
@@ -240,5 +240,17 @@ describe('inviteAcceptErrorKey', () => {
 		expect(inviteAcceptErrorKey(new Error('plain'))).toBeUndefined();
 		expect(inviteAcceptErrorKey('str')).toBeUndefined();
 		expect(inviteAcceptErrorKey(undefined)).toBeUndefined();
+	});
+});
+
+describe('inviteLoadErrorKey', () => {
+	it('keeps the specific copy for share and coded refusals', () => {
+		expect(inviteLoadErrorKey(new InviteShareError('not-found'))).toBe('invitationAcceptNotFound');
+		expect(inviteLoadErrorKey(Object.assign(new Error('x'), { code: 'invite-superseded' }))).toBe('invitationAcceptSuperseded');
+	});
+	it('a no-network error asks for a network, anything else is a load failure', () => {
+		expect(inviteLoadErrorKey(Object.assign(new Error('n'), { noNetworkEstablished: true }))).toBe('invitationNeedsNetwork');
+		expect(inviteLoadErrorKey(new Error('boom'))).toBe('invitationLoadFailed');
+		expect(inviteLoadErrorKey(undefined)).toBe('invitationLoadFailed');
 	});
 });

@@ -25,6 +25,7 @@ import { StyleSheet } from 'react-native';
 import { globalStyles } from '../../../theme/styles';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
+import { stashInviteShare } from '../../invitations/invite-share-handoff';
 
 // ---------------------------------------------------------------------------
 // Mutable module-level slots (prefixed `mock` so jest.mock factories may
@@ -43,7 +44,7 @@ const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promi
 const mockGoBack = jest.fn();
 const mockSetOptions = jest.fn();
 
-let mockRouteParams: { mode: 'send' | 'accept'; initialShare?: string } = { mode: 'send' };
+let mockRouteParams: { mode: 'send' | 'accept'; shareToken?: string } = { mode: 'send' };
 
 // Signer echoes nothing meaningful — INV-02 only asserts on the CALL, not the
 // signature bytes (that binding is covered engine-side).
@@ -54,7 +55,7 @@ const mockSigner = jest.fn(async () => ({
 }));
 
 const mockCreateAuthorityInvite = jest.fn();
-const mockSaveInviteWithSigning = jest.fn(async () => {});
+const mockSaveInviteWithSigning = jest.fn(async (..._args: any[]) => {});
 const mockAuthorityEngine = {
   createAuthorityInvite: mockCreateAuthorityInvite,
   saveInviteWithSigning: mockSaveInviteWithSigning,
@@ -96,6 +97,7 @@ const mockGetEngine = jest.fn(async (name: string) => {
 // Module mocks
 // ---------------------------------------------------------------------------
 jest.mock('react-native-vector-icons/FontAwesome6', () => 'FontAwesome6');
+jest.mock('@votetorrent/attestation-native', () => ({ setSecureScreen: jest.fn(async () => true) }));
 
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -135,6 +137,10 @@ jest.mock('@react-navigation/native', () => ({
       success: '#34C759',
     },
   }),
+  useFocusEffect: (cb: () => void | (() => void)) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('react').useEffect(cb, [cb]);
+  },
   useRoute: () => ({ params: mockRouteParams }),
   useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), setOptions: mockSetOptions }),
 }));
@@ -216,7 +222,7 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   let share!: { invitePrivate: string; text: string };
   beforeEach(() => {
     share = makeShare('au');
-    mockRouteParams = { mode: 'accept', initialShare: share.text };
+    mockRouteParams = { mode: 'accept', shareToken: stashInviteShare(share.text) };
     mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: SLOT });
     mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee' } });
   });
@@ -312,7 +318,7 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   });
 
   it('a share of another type renders invitationAcceptWrongType and never signs', async () => {
-    mockRouteParams = { mode: 'accept', initialShare: makeShare('k').text };
+    mockRouteParams = { mode: 'accept', shareToken: stashInviteShare(makeShare('k').text) };
     const tr = await render();
     await renderer.act(async () => {
       await buttonByTitle(tr, 'accept').props.onPress();
@@ -333,6 +339,7 @@ describe('AuthorityInvitationScreen - accept mode resolves the slot from the pas
   });
 
   it('uses the shared paste placeholder, not hardcoded English', async () => {
+    mockRouteParams = { mode: 'accept' };
     const tr = await render();
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptPastePlaceholder');
   });
@@ -348,7 +355,7 @@ describe('AuthorityInvitationScreen - expired share', () => {
   const withExp = (text: string, expiration: string) => JSON.stringify({ ...JSON.parse(text), expiration });
 
   it('shows the expired notice and disables Accept for a past, Z-less (UTC) expiration; no lookup, no signing', async () => {
-    mockRouteParams = { mode: 'accept', initialShare: withExp(makeShare('au').text, '2020-01-01T00:00:00.000') };
+    mockRouteParams = { mode: 'accept', shareToken: stashInviteShare(withExp(makeShare('au').text, '2020-01-01T00:00:00.000')) };
     const tr = await render();
     expect(tr.root.findAll((n) => n.props?.testID === 'invitation-expired-notice').length).toBeGreaterThan(0);
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptExpired');
@@ -363,7 +370,7 @@ describe('AuthorityInvitationScreen - expired share', () => {
   });
 
   it('a future expiration (Z-less) still resolves and stays acceptable', async () => {
-    mockRouteParams = { mode: 'accept', initialShare: withExp(makeShare('au').text, new Date(Date.now() + 3_600_000).toISOString().replace('Z', '')) };
+    mockRouteParams = { mode: 'accept', shareToken: stashInviteShare(withExp(makeShare('au').text, new Date(Date.now() + 3_600_000).toISOString().replace('Z', ''))) };
     mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee', title: 'Clerk', scopes: [] } });
     mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: 'slot-cid-1' });
     const tr = await render();
@@ -384,5 +391,118 @@ describe('AuthorityInvitationScreen - create mode error placement (UAT gap 4 ite
     const wrapper = tr.root.findByProps({ testID: 'authority-invitation-error' });
     expect(StyleSheet.flatten(wrapper.props.style).paddingHorizontal).toBe(globalStyles.container.padding);
     expect(JSON.stringify(tr.toJSON())).toContain('errAuthorityNameRequired');
+  });
+});
+
+describe('AuthorityInvitationScreen - hardened accept (masked share, press-time resolve, latch, honest copy)', () => {
+  const SLOT = 'slot-cid-1';
+  const originalGetEngine = mockGetEngine.getMockImplementation() as any;
+  let share!: { invitePrivate: string; text: string };
+  const coded = (code: string) => Object.assign(new Error('engine text'), { code });
+  const textInputs = (tr: renderer.ReactTestRenderer) => tr.root.findAll((n) => String(n.type) === 'TextInput');
+  const byTestId = (tr: renderer.ReactTestRenderer, id: string) =>
+    tr.root.findAll((n) => n.props?.testID === id && typeof n.props?.onPress === 'function')[0];
+  const press = async (tr: renderer.ReactTestRenderer, title: string) => {
+    await renderer.act(async () => {
+      await buttonByTitle(tr, title).props.onPress();
+      await Promise.resolve();
+    });
+  };
+  beforeEach(() => {
+    share = makeShare('au');
+    mockRouteParams = { mode: 'accept', shareToken: stashInviteShare(share.text) };
+    mockResolveInviteSlot.mockResolvedValue({ status: 'live', cid: SLOT });
+    mockGetAuthorityInvite.mockResolvedValue({ invite: { name: 'Invitee', title: 'Clerk', scopes: [] } });
+  });
+  afterEach(() => {
+    mockGetEngine.mockImplementation(originalGetEngine);
+  });
+
+  it('opened with a shareToken: loads the share, shows only the summary, no field or param holds the private key', async () => {
+    const tr = await render();
+    expect(mockResolveInviteSlot).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationPastedSummary');
+    expect(textInputs(tr).filter((n) => String(n.props.value ?? '').includes(share.invitePrivate))).toHaveLength(0);
+    expect(JSON.stringify(tr.toJSON())).not.toContain(share.invitePrivate);
+    expect(JSON.stringify(mockRouteParams)).not.toMatch(/[0-9a-f]{64}/i);
+    expect(mockGetAuthorityInvite).toHaveBeenCalledTimes(1);
+  });
+
+  it('gap7/WR-01: accept re-resolves at press time so a resend made while open is answered on the new head', async () => {
+    mockResolveInviteSlot.mockReset();
+    mockResolveInviteSlot.mockResolvedValueOnce({ status: 'live', cid: 'head-A' }).mockResolvedValue({ status: 'live', cid: 'head-B' });
+    const tr = await render();
+    await press(tr, 'accept');
+    expect(mockRespondToInvite).toHaveBeenCalledWith('head-B', true, share.invitePrivate);
+  });
+
+  it.each([
+    ['invite-no-longer-valid', 'invitationAcceptNoLongerValid'],
+    ['invite-superseded', 'invitationAcceptSuperseded'],
+    ['invite-already-answered', 'invitationAcceptAlreadyAnswered'],
+  ])('a respondToInvite refusal coded %s renders %s', async (code, key) => {
+    mockRespondToInvite.mockRejectedValueOnce(coded(code));
+    const tr = await render();
+    await press(tr, 'accept');
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain(key);
+    expect(rendered).not.toContain('engine text');
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
+  it('gap6/IN-04: a double tap sends one respondToInvite and the footer is disabled while it is in flight', async () => {
+    let release!: () => void;
+    mockRespondToInvite.mockImplementationOnce(() => new Promise<void>((r) => { release = r; }));
+    const tr = await render();
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    await renderer.act(async () => {
+      first = buttonByTitle(tr, 'accept').props.onPress();
+      second = buttonByTitle(tr, 'accept').props.onPress();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(buttonByTitle(tr, 'accept').props.disabled).toBe(true);
+    await renderer.act(async () => {
+      release();
+      await Promise.all([first, second]);
+    });
+    expect(mockRespondToInvite).toHaveBeenCalledTimes(1);
+  });
+
+  it('gap9/IN-08: a stale error is cleared when an expired share is pasted after Clear', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await press(tr, 'accept');
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptFailed');
+    await renderer.act(async () => {
+      byTestId(tr, 'authority-invitation-paste-clear').props.onPress();
+    });
+    expect(JSON.stringify(tr.toJSON())).not.toContain('invitationAcceptFailed');
+    // a parse-failing paste keeps it clear, then an expired share shows the expired notice only
+    const expired = JSON.stringify({ ...JSON.parse(makeShare('au').text), expiration: '2020-01-01T00:00:00.000' });
+    await renderer.act(async () => {
+      tr.root.findAll((n) => n.props?.testID === 'authority-invitation-paste-input' && typeof n.props?.onChangeText === 'function')[0].props.onChangeText(expired);
+    });
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).not.toContain('invitationAcceptFailed');
+    expect(rendered).toContain('invitationAcceptExpired');
+  });
+
+  it('gap6/IN-03: a non-share load failure shows the load copy, not "could not respond"', async () => {
+    mockResolveInviteSlot.mockRejectedValue(new Error('disk exploded'));
+    const tr = await render();
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).toContain('invitationLoadFailed');
+    expect(rendered).not.toContain('invitationAcceptFailed');
+    expect(rendered).not.toContain('disk exploded');
+  });
+
+  it('gap6/IN-03: the no-network error shows invitationNeedsNetwork', async () => {
+    mockGetEngine.mockImplementation(async (name: string) => {
+      if (name === 'invitations') throw Object.assign(new Error('no network'), { noNetworkEstablished: true });
+      return originalGetEngine(name);
+    });
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationNeedsNetwork');
   });
 });

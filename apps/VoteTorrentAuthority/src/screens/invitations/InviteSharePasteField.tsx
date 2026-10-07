@@ -74,6 +74,7 @@ export function InviteSharePasteField({ value, onChangeText, title, placeholder,
 		const role = roleKey ? t(roleKey) : t("invitation");
 		return (
 			<View testID={`${testIDPrefix}-summary`} style={styles.summary}>
+				{title ? <ThemedText type="defaultSemiBold">{title}</ThemedText> : null}
 				<ThemedText>{t("invitationPastedSummary", { role })}</ThemedText>
 				<CustomButton testID={`${testIDPrefix}-clear`} title={t("invitationPastedClear")} size="thin" onPress={() => onChangeText("")} />
 			</View>
