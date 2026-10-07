@@ -14,9 +14,11 @@ import {
   ENCRYPTION_KEY_ALG,
   encryptionPublicKeyFromSecret,
   generateEncryptionKeyPair,
-  officerEncryptionKeyAlias,
+  MAX_OFFICER_KEY_GENERATIONS,
+  officerEncryptionKeyGenerationAlias,
   OFFICER_ENCRYPTION_KEY_POLICY
 } from '../crypto/index.js'
+import { listHeldOfficerKeyGenerations } from '../crypto/vault.js'
 import type { IKeyVault } from '../crypto/index.js'
 import { digestToBytes } from '../utils.js'
 import { requireCtx as requireCtxHelper, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
@@ -37,7 +39,8 @@ import type {
   IntakeSealer,
   IntakeSignCallback,
   OfficerEncryptionKeyRegistration,
-  OfficerEncryptionKeyStatus
+  OfficerEncryptionKeyStatus,
+  OfficerKeyRenewalOutcome
 } from './types.js'
 
 function describeThrown (err: unknown): string {
@@ -118,44 +121,65 @@ export class IntakeEngine {
       )
     }
 
-    let alias: string
+    return this.registerOrRenew(authorityId, userId, vault, sign)
+  }
+
+  /**
+   * O-01: the shared decision behind `registerOfficerEncryptionKey` and `renewStrandedOfficerEncryptionKey`.
+   * The newest held vault generation is the local key. Not held at all: mint generation 0 (legacy alias).
+   * Held but unpublished: publish it. Published and usable: `already-registered` (`superseded` when the
+   * officer's other device published a newer usable key). STRANDED (see `isStranded`): mint generation n+1.
+   * Older generations are never deleted or overwritten (D-51).
+   */
+  private async registerOrRenew (
+    authorityId: string,
+    userId: string,
+    vault: IKeyVault,
+    sign: IntakeSignCallback
+  ): Promise<OfficerEncryptionKeyRegistration> {
+    const ctx = this.ctx!
+    const method = 'registerOfficerEncryptionKey'
+    let publicKey: string
+    let minted = false
+    let held: number[]
     try {
-      alias = officerEncryptionKeyAlias(userId)
+      held = await listHeldOfficerKeyGenerations(vault, userId)
     } catch (err) {
-      throw new IntakeError('invalid-argument', `registerOfficerEncryptionKey: invalid vault alias (${describeThrown(err)})`)
+      throw new IntakeError('vault-error', `${method}: ${describeThrown(err)}`)
     }
 
-    let publicKey: string
-    let secretCopy: Uint8Array | null = null
-    try {
-      const existing = await vault.hasSecret(alias)
-      if (existing) {
-        const secret = await vault.getSecret(alias)
-        if (secret === null) {
-          throw new IntakeError('vault-error', 'registerOfficerEncryptionKey: vault reports the alias exists but returned no secret')
-        }
-        secretCopy = secret
-        publicKey = encryptionPublicKeyFromSecret(secret)
-      } else {
-        // The vault write ALWAYS precedes the row insert, so a published key
-        // always has a held secret (D-04 custody invariant).
-        const generated = generateEncryptionKeyPair()
-        await vault.putSecret(alias, generated.secretKey, OFFICER_ENCRYPTION_KEY_POLICY)
-        secretCopy = generated.secretKey
-        publicKey = generated.publicKey
-      }
-    } catch (err) {
-      if (err instanceof IntakeError) throw err
-      throw new IntakeError('vault-error', `registerOfficerEncryptionKey: ${describeThrown(err)}`)
-    } finally {
-      // Best-effort local-copy zeroization once the public key is derived.
-      // Never calls deleteSecret — the vault's own copy is never touched here.
-      secretCopy?.fill(0)
+    if (held.length === 0) {
+      publicKey = await this.mintGeneration(vault, userId, 0, method)
+      minted = true
+    } else {
+      publicKey = await this.readGenerationPublicKey(vault, userId, held[held.length - 1]!, method)
     }
 
     const existingRow = await ctx.db
       .prepare('select RegisteredAt from UserEncryptionKey where UserId = :userId and PubKey = :pubKey')
       .get({ userId, pubKey: publicKey })
+
+    if (existingRow && !minted) {
+      const { usable, dropped } = await readUsableEncryptionKeys(intakeQueryPortFromDb(ctx.db), userId)
+      if (this.isStranded(publicKey, dropped)) {
+        if (held.length >= MAX_OFFICER_KEY_GENERATIONS) {
+          throw new IntakeError('vault-error', `${method}: the vault already holds the maximum ${MAX_OFFICER_KEY_GENERATIONS} key generations`)
+        }
+        const renewedKey = await this.mintGeneration(vault, userId, held.length, method)
+        const registeredAt = await this.publishKey(userId, renewedKey, sign, method)
+        return { userId, authorityId, publicKey: renewedKey, registeredAt, status: 'renewed' }
+      }
+      const current = pickCurrentEncryptionKey(usable)
+      const superseded = current !== undefined && current.publicKey !== publicKey
+      return {
+        userId,
+        authorityId,
+        publicKey,
+        registeredAt: existingRow.RegisteredAt as string,
+        status: 'already-registered',
+        ...(superseded ? { superseded: true } : {})
+      }
+    }
     if (existingRow) {
       return {
         userId,
@@ -166,13 +190,67 @@ export class IntakeEngine {
       }
     }
 
+    const registeredAt = await this.publishKey(userId, publicKey, sign, method)
+    return { userId, authorityId, publicKey, registeredAt, status: 'registered' }
+  }
+
+  /**
+   * STRANDED is deliberately narrow: the newest local key's `(UserId, PubKey)` row was dropped by
+   * `readUsableEncryptionKeys` with reason exactly `'signer-key-revoked'`. Every other drop reason
+   * (`invalid-public-key`; `duplicate-public-key`, no longer produced - contested keys stay usable and
+   * are reported in `contestedKeys`, never dropped) and every usable row is NOT stranded and never renews.
+   */
+  private isStranded (publicKey: string, dropped: ReadonlyArray<{ publicKey: string, reason: string }>): boolean {
+    return dropped.some((d) => d.publicKey === publicKey && d.reason === 'signer-key-revoked')
+  }
+
+  /** Generates a key pair, stores the secret under `generation` BEFORE anything is published (D-04 custody order). */
+  private async mintGeneration (vault: IKeyVault, userId: string, generation: number, method: string): Promise<string> {
+    let alias: string
+    try {
+      alias = officerEncryptionKeyGenerationAlias(userId, generation)
+    } catch (err) {
+      throw new IntakeError('invalid-argument', `${method}: invalid vault alias (${describeThrown(err)})`)
+    }
+    const generated = generateEncryptionKeyPair()
+    try {
+      await vault.putSecret(alias, generated.secretKey, OFFICER_ENCRYPTION_KEY_POLICY)
+      return generated.publicKey
+    } catch (err) {
+      throw new IntakeError('vault-error', `${method}: ${describeThrown(err)}`)
+    } finally {
+      generated.secretKey.fill(0)
+    }
+  }
+
+  private async readGenerationPublicKey (vault: IKeyVault, userId: string, generation: number, method: string): Promise<string> {
+    let secretCopy: Uint8Array | null = null
+    try {
+      const secret = await vault.getSecret(officerEncryptionKeyGenerationAlias(userId, generation))
+      if (secret === null) {
+        throw new IntakeError('vault-error', `${method}: vault reports the alias exists but returned no secret`)
+      }
+      secretCopy = secret
+      return encryptionPublicKeyFromSecret(secret)
+    } catch (err) {
+      if (err instanceof IntakeError) throw err
+      throw new IntakeError('vault-error', `${method}: ${describeThrown(err)}`)
+    } finally {
+      // Best-effort local-copy zeroization; the vault's own copy is never touched here.
+      secretCopy?.fill(0)
+    }
+  }
+
+  /** Signs and inserts the self-signed `UserEncryptionKey` row; returns its RegisteredAt. */
+  private async publishKey (userId: string, publicKey: string, sign: IntakeSignCallback, method: string): Promise<string> {
+    const ctx = this.ctx!
     const registeredAt = new Date().toISOString()
     try {
       const digestRow = await ctx.db
         .prepare("select Digest('UserEncryptionKey', :userId, :alg, :pubKey, :registeredAt) as d")
         .get({ userId, alg: ENCRYPTION_KEY_ALG, pubKey: publicKey, registeredAt })
       if (!digestRow || digestRow.d == null) {
-        throw new Error('registerOfficerEncryptionKey: Digest() returned null — crypto plugin not registered?')
+        throw new Error(`${method}: Digest() returned null — crypto plugin not registered?`)
       }
       const digestBytes = digestToBytes(digestRow.d)
       const signature = await sign(digestBytes)
@@ -190,10 +268,47 @@ export class IntakeEngine {
       )
     } catch (err) {
       if (err instanceof IntakeError) throw err
-      this.rethrow(err, 'registerOfficerEncryptionKey')
+      this.rethrow(err, method)
     }
+    return registeredAt
+  }
 
-    return { userId, authorityId, publicKey, registeredAt, status: 'registered' }
+  /**
+   * O-01: renew the caller's intake key when (and only when) it is stranded, with no authority id.
+   * `'not-an-officer'` touches nothing in the vault; `sign` is called only when renewing.
+   */
+  async renewStrandedOfficerEncryptionKey (vault: IKeyVault, sign: IntakeSignCallback): Promise<OfficerKeyRenewalOutcome> {
+    this.requireCtx('renewStrandedOfficerEncryptionKey')
+    const ctx = this.ctx!
+    const userId = this.requireUserId()
+    const officerRow = await ctx.db
+      .prepare(
+        `select O.AuthorityId as authorityId
+           from Officer O
+           join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+          where O.UserId = :userId
+          limit 1`
+      )
+      .get({ userId })
+    if (officerRow == null) return 'not-an-officer'
+
+    let held: number[]
+    try {
+      held = await listHeldOfficerKeyGenerations(vault, userId)
+    } catch (err) {
+      throw new IntakeError('vault-error', `renewStrandedOfficerEncryptionKey: ${describeThrown(err)}`)
+    }
+    if (held.length === 0) return 'no-local-key'
+
+    const publicKey = await this.readGenerationPublicKey(vault, userId, held[held.length - 1]!, 'renewStrandedOfficerEncryptionKey')
+    const { dropped } = await readUsableEncryptionKeys(intakeQueryPortFromDb(ctx.db), userId)
+    if (!this.isStranded(publicKey, dropped)) return 'not-needed'
+    if (held.length >= MAX_OFFICER_KEY_GENERATIONS) {
+      throw new IntakeError('vault-error', `renewStrandedOfficerEncryptionKey: the vault already holds the maximum ${MAX_OFFICER_KEY_GENERATIONS} key generations`)
+    }
+    const renewedKey = await this.mintGeneration(vault, userId, held.length, 'renewStrandedOfficerEncryptionKey')
+    await this.publishKey(userId, renewedKey, sign, 'renewStrandedOfficerEncryptionKey')
+    return 'renewed'
   }
 
   /** Read-only snapshot of the caller's own officer encryption key for `authorityId`. */
@@ -205,24 +320,13 @@ export class IntakeEngine {
       throw new IntakeError('invalid-argument', 'getOfficerEncryptionKeyStatus: authorityId must be a non-empty string')
     }
 
-    let alias: string
-    try {
-      alias = officerEncryptionKeyAlias(userId)
-    } catch (err) {
-      throw new IntakeError('invalid-argument', `getOfficerEncryptionKeyStatus: invalid vault alias (${describeThrown(err)})`)
-    }
-
     let hasLocalKey = false
     let localPublicKey: string | null = null
     try {
-      hasLocalKey = await vault.hasSecret(alias)
+      const held = await listHeldOfficerKeyGenerations(vault, userId)
+      hasLocalKey = held.length > 0
       if (hasLocalKey) {
-        const secret = await vault.getSecret(alias)
-        if (secret === null) {
-          throw new IntakeError('vault-error', 'getOfficerEncryptionKeyStatus: vault reports the alias exists but returned no secret')
-        }
-        localPublicKey = encryptionPublicKeyFromSecret(secret)
-        secret.fill(0)
+        localPublicKey = await this.readGenerationPublicKey(vault, userId, held[held.length - 1]!, 'getOfficerEncryptionKeyStatus')
       }
     } catch (err) {
       if (err instanceof IntakeError) throw err
@@ -239,7 +343,8 @@ export class IntakeEngine {
       published = row != null
     }
 
-    const { usable } = await readUsableEncryptionKeys(port, userId)
+    const { usable, dropped } = await readUsableEncryptionKeys(port, userId)
+    const stranded = localPublicKey !== null && this.isStranded(localPublicKey, dropped)
     const current = pickCurrentEncryptionKey(usable)
     const isCurrent = localPublicKey !== null && current !== undefined && current.publicKey === localPublicKey
     const isIntakeRecipient = isCurrent && (await this.isCurrentOfficer(authorityId, userId))
@@ -252,7 +357,7 @@ export class IntakeEngine {
       )
     }
 
-    return { userId, authorityId, hasLocalKey, localPublicKey, published, isCurrent, isIntakeRecipient, isContested }
+    return { userId, authorityId, hasLocalKey, localPublicKey, published, isCurrent, isIntakeRecipient, isContested, stranded }
   }
 
   /** `resolveIntakeRecipients` over this engine's own DB handle (D-04/D-32). */

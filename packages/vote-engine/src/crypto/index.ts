@@ -66,11 +66,13 @@ export {
   KEYHOLDER_DKG_RECEIVING_KEY_POLICY,
   KEYHOLDER_SHARE_POLICY,
   KeyVaultError,
+  MAX_OFFICER_KEY_GENERATIONS,
   OFFICER_ENCRYPTION_KEY_POLICY,
   assertKeyVaultAlias,
   keyholderDkgReceivingKeyAlias,
   keyholderDkgShareAlias,
-  officerEncryptionKeyAlias
+  officerEncryptionKeyAlias,
+  officerEncryptionKeyGenerationAlias
 } from './vault.js'
 export type { IKeyVault, KeyVaultErrorCode, KeyVaultPolicy } from './vault.js'
 

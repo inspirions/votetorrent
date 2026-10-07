@@ -92,8 +92,14 @@ export interface OfficerEncryptionKeyRegistration {
   readonly authorityId: string
   readonly publicKey: string
   readonly registeredAt: string
-  readonly status: 'registered' | 'already-registered'
+  /** 'renewed': the previous key was stranded by a signing-key replacement and a new generation was published (O-01). */
+  readonly status: 'registered' | 'already-registered' | 'renewed'
+  /** With 'already-registered': the officer's other device published a newer usable key, so this one is not current. */
+  readonly superseded?: boolean
 }
+
+/** Closed outcome of `IntakeEngine.renewStrandedOfficerEncryptionKey` (O-01). */
+export type OfficerKeyRenewalOutcome = 'not-an-officer' | 'no-local-key' | 'not-needed' | 'renewed'
 
 /**
  * `published` = a `UserEncryptionKey` row exists for (userId, localPublicKey).
@@ -114,6 +120,11 @@ export interface OfficerEncryptionKeyStatus {
    * The officer still receives every request.
    */
   readonly isContested: boolean
+  /**
+   * True only when the newest local key's published row was signed by a signing key that is no longer
+   * a UserKey (`signer-key-revoked`). A contested, superseded or invalid key is never stranded (O-01).
+   */
+  readonly stranded: boolean
 }
 
 /** Resolves recipients on EVERY call, so officer changes replicated in between calls are honoured. */

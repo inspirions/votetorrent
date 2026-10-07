@@ -10,12 +10,13 @@ import { utf8ToBytes } from '@noble/hashes/utils.js'
 import {
   EnvelopeSealError,
   KeyVaultError,
-  officerEncryptionKeyAlias,
+  officerEncryptionKeyGenerationAlias,
   openEnvelope,
   sealToRecipients,
   serializeEnvelope
 } from '../crypto/index.js'
 import type { EnvelopeBinding, IKeyVault } from '../crypto/index.js'
+import { listHeldOfficerKeyGenerations } from '../crypto/vault.js'
 import { resolveIntakeRecipients } from './recipients.js'
 import { IntakeError } from './types.js'
 import type { IntakeOpener, IntakeOpenResult, IntakeSealer } from './types.js'
@@ -23,6 +24,12 @@ import type { IntakeQueryPort } from './query-port.js'
 
 function isNonEmptyString (value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+function vaultErrorDetail (err: unknown): string {
+  return err instanceof KeyVaultError
+    ? `createIntakeOpener.open: vault error (${err.code})`
+    : 'createIntakeOpener.open: vault error'
 }
 
 function isValidBinding (binding: unknown): binding is EnvelopeBinding {
@@ -94,37 +101,50 @@ export function createIntakeOpener (options: { readonly vault: IKeyVault, readon
           return { ok: false, reason: 'invalid-argument', detail: 'createIntakeOpener.open: binding must carry non-empty requestId and digest' }
         }
 
-        let alias: string
+        let generations: number[]
         try {
-          alias = officerEncryptionKeyAlias(userId)
-        } catch {
-          return { ok: false, reason: 'invalid-argument', detail: 'createIntakeOpener.open: invalid userId' }
-        }
-
-        let secretKey: Uint8Array | null
-        try {
-          secretKey = await vault.getSecret(alias)
+          generations = await listHeldOfficerKeyGenerations(vault, userId)
         } catch (err) {
-          const detail = err instanceof KeyVaultError
-            ? `createIntakeOpener.open: vault error (${err.code})`
-            : 'createIntakeOpener.open: vault error'
-          return { ok: false, reason: 'vault-error', detail }
+          if (err instanceof KeyVaultError && err.code === 'invalid-alias') {
+            return { ok: false, reason: 'invalid-argument', detail: 'createIntakeOpener.open: invalid userId' }
+          }
+          return { ok: false, reason: 'vault-error', detail: vaultErrorDetail(err) }
         }
-        if (secretKey === null) {
+        if (generations.length === 0) {
           return { ok: false, reason: 'no-local-key', detail: 'createIntakeOpener.open: no local key for this alias' }
         }
 
-        try {
-          const result = openEnvelope(sealed, { userId, secretKey }, binding)
-          if (!result.ok) return result
-          const plaintext = bytesToUtf8(result.plaintext)
-          // Best-effort zeroization only — not a security claim (bigint/JIT
-          // copies may still survive outside these arrays).
-          result.plaintext.fill(0)
-          return { ok: true, plaintext }
-        } finally {
-          secretKey.fill(0)
+        // O-01/D-51: newest to oldest, so an envelope sealed before a key renewal still opens. The
+        // NEWEST generation's failure is what a total miss reports.
+        let newestFailure: IntakeOpenResult | undefined
+        for (let i = generations.length - 1; i >= 0; i--) {
+          let secretKey: Uint8Array | null
+          try {
+            secretKey = await vault.getSecret(officerEncryptionKeyGenerationAlias(userId, generations[i]!))
+          } catch (err) {
+            const failure: IntakeOpenResult = { ok: false, reason: 'vault-error', detail: vaultErrorDetail(err) }
+            newestFailure ??= failure
+            continue
+          }
+          if (secretKey === null) {
+            newestFailure ??= { ok: false, reason: 'no-local-key', detail: 'createIntakeOpener.open: no local key for this alias' }
+            continue
+          }
+          try {
+            const result = openEnvelope(sealed, { userId, secretKey }, binding)
+            if (result.ok) {
+              const plaintext = bytesToUtf8(result.plaintext)
+              // Best-effort zeroization only — not a security claim (bigint/JIT
+              // copies may still survive outside these arrays).
+              result.plaintext.fill(0)
+              return { ok: true, plaintext }
+            }
+            newestFailure ??= result
+          } finally {
+            secretKey.fill(0)
+          }
         }
+        return newestFailure ?? { ok: false, reason: 'no-local-key', detail: 'createIntakeOpener.open: no local key for this alias' }
       } catch {
         return { ok: false, reason: 'authentication-failed', detail: 'createIntakeOpener.open: unexpected failure' }
       }

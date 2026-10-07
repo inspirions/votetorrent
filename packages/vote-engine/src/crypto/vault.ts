@@ -75,6 +75,40 @@ export function officerEncryptionKeyAlias (userId: string): string {
   return alias
 }
 
+/** Upper bound on officer encryption-key vault generations (O-01): keeps every generation scan finite. */
+export const MAX_OFFICER_KEY_GENERATIONS = 16
+
+/**
+ * O-01: the vault alias of an officer's encryption key at `generation`. Generation 0 is the legacy
+ * alias (`officerEncryptionKeyAlias`) so a vault written before generations existed stays valid;
+ * n >= 1 is `vt.officer-enc.<userId>.g<n>`. Older generations are never deleted (D-51).
+ */
+export function officerEncryptionKeyGenerationAlias (userId: string, generation: number): string {
+  if (!Number.isInteger(generation) || generation < 0 || generation >= MAX_OFFICER_KEY_GENERATIONS) {
+    throw new KeyVaultError(
+      'invalid-alias',
+      `officerEncryptionKeyGenerationAlias: generation must be an integer in [0, ${MAX_OFFICER_KEY_GENERATIONS - 1}]`
+    )
+  }
+  if (generation === 0) return officerEncryptionKeyAlias(userId)
+  const alias = `vt.officer-enc.${userId}.g${generation}`
+  assertKeyVaultAlias(alias)
+  return alias
+}
+
+/**
+ * O-01: the generations this vault holds for `userId`, ascending and contiguous from 0 (the scan
+ * stops at the first gap). Uses `hasSecret` only, so it never prompts.
+ */
+export async function listHeldOfficerKeyGenerations (vault: IKeyVault, userId: string): Promise<number[]> {
+  const held: number[] = []
+  for (let generation = 0; generation < MAX_OFFICER_KEY_GENERATIONS; generation++) {
+    if (!(await vault.hasSecret(officerEncryptionKeyGenerationAlias(userId, generation)))) break
+    held.push(generation)
+  }
+  return held
+}
+
 export function keyholderDkgReceivingKeyAlias (userId: string): string {
   const alias = `vt.keyholder-dkg-recv.${userId}`
   assertKeyVaultAlias(alias)

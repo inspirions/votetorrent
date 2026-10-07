@@ -288,7 +288,8 @@ describe('src/intake/* — officer encryption-key registration (D-04) and recipi
         published: false,
         isCurrent: false,
         isIntakeRecipient: false,
-        isContested: false
+        isContested: false,
+        stranded: false
       })
     })
 
