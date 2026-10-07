@@ -87,6 +87,18 @@ const GROUPS: readonly Group[] = [
 			"networkFoundingExportSaved",
 			"networkFoundingExportDoneButton",
 			"networkFoundingExportTextFallback",
+			// Founding-file fingerprint check and share/save failure copy (ImportFoundingBundleScreen, FoundingBundleExportCard).
+			"networkFoundingExportFingerprintLabel",
+			"networkFoundingExportFingerprintHelp",
+			"networkFoundingImportFingerprintHeading",
+			"networkFoundingImportFingerprintBody",
+			"networkFoundingImportFingerprintConfirmed",
+			"networkFoundingImportFingerprintInputLabel",
+			"networkFoundingImportFingerprintMismatch",
+			"networkFoundingImportJoinButton",
+			"networkFoundingImportAnchorRequired",
+			"networkFoundingExportShareFailed",
+			"networkFoundingExportSaveFailed",
 		],
 	],
 	[
@@ -161,6 +173,9 @@ const GROUPS: readonly Group[] = [
 			"keyholderDkgStatusHeading",
 			// UAT 62 M: a blocked DKG whose policy threshold is below 2 (1-of-1) can never start.
 			"keyholderDkgStatusThresholdTooLow",
+			// KeyholderScreen row: load failure and driver failure copy.
+			"keyholderDkgLoadError",
+			"keyholderDkgError",
 		],
 	],
 	[
@@ -184,6 +199,8 @@ const GROUPS: readonly Group[] = [
 			"officerIntakeKeyEnableButton",
 			"officerIntakeKeyEnabledConfirm",
 			"officerIntakeKeyError",
+			// OfficerIntakeKey screen: another officer published the same key.
+			"officerIntakeKeyContestedWarning",
 		],
 	],
 	[
@@ -253,8 +270,8 @@ describe("multipeer-continuity-keys (62-10, D-31/D-36/D-41/D-43/D-45/D-46/D-49/D
 		});
 	});
 
-	test("the total catalog is 100 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62, + 5 founding-export file-handoff keys)", () => {
-		expect(ALL_CATALOG_KEYS).toHaveLength(100);
+	test("the total catalog is 114 keys per locale (94 + keyholderDkgStatusThresholdTooLow, UAT 62, + 5 founding-export file-handoff keys, + 14 invitation/security keys)", () => {
+		expect(ALL_CATALOG_KEYS).toHaveLength(114);
 	});
 
 	test.each(ALL_CATALOG_KEYS)("%s: non-empty value in both locales, EN !== ES", (key) => {
