@@ -19,7 +19,9 @@ export interface INetworksEngine {
    * UserKey, Authority, Admin, Officer and Network, read verbatim from the
    * exporting device's database), signed by a founding officer's own
    * unexpired key. Rejects with a `FoundingBundleExportError` (vote-engine)
-   * and never returns a partial bundle.
+   * for the engine's own refusals, including the two signature self-checks,
+   * and never returns a partial bundle. A signer error carrying a string
+   * `code` (user cancel, lockout, key invalidated) is rethrown unchanged.
    */
   exportFoundingBundle(networkHash: string, exporter: FoundingBundleExporter): Promise<FoundingBundleExport>
   /**

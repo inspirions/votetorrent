@@ -388,8 +388,15 @@ export class NetworksEngine implements INetworksEngine {
 		let signature: Awaited<ReturnType<FoundingBundleExporter['sign']>>;
 		try {
 			signature = await exporter.sign(signingDigest.bytes);
-		} catch {
-			throw new FoundingBundleExportError('signature-self-check');
+		} catch (err) {
+			// The biometric prompt and the device signer's desync check run inside sign(), so a
+			// typed code (CANCELED, LOCKOUT, KEY_INVALIDATED_REASSOCIATE, ...) must reach the caller (UAT 62 test 22).
+			if (typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'string') {
+				throw err;
+			}
+			const wrapped = new FoundingBundleExportError('signature-self-check');
+			(wrapped as { cause?: unknown }).cause = err;
+			throw wrapped;
 		}
 		if (signature.signerUserId !== exporter.userId || signature.signerKey !== exporter.signerKey) {
 			throw new FoundingBundleExportError('signature-self-check');

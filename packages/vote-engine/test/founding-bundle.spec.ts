@@ -664,6 +664,60 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       expect(caught).to.be.instanceOf(FoundingBundleExportError)
       expect((caught as FoundingBundleExportError).code).to.equal('signature-self-check')
     })
+
+    async function exportWithThrowingSigner (thrown: unknown): Promise<unknown> {
+      const net = await createTestNetwork()
+      const exporter = {
+        ...(await exporterFor(net)),
+        sign: async (_digest: Uint8Array): Promise<Signature> => { throw thrown }
+      }
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { return err }
+      return undefined
+    }
+
+    for (const [id, code] of [['E-2f', 'CANCELED'], ['E-2g', 'KEY_INVALIDATED_REASSOCIATE'], ['E-2h', 'LOCKOUT']] as const) {
+      it(`${id}: a signer error with code ${code} is rethrown unchanged`, async () => {
+        const original = Object.assign(new Error('signer failure'), { code })
+        const caught = await exportWithThrowingSigner(original)
+        expect(caught).to.equal(original)
+        expect(caught).to.not.be.instanceOf(FoundingBundleExportError)
+        expect((caught as { code: string }).code).to.equal(code)
+      })
+    }
+
+    it('E-2i: a codeless signer error is wrapped as signature-self-check with the cause kept', async () => {
+      const original = new Error('boom')
+      const caught = await exportWithThrowingSigner(original)
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('signature-self-check')
+      expect((caught as { cause?: unknown }).cause).to.equal(original)
+    })
+
+    it('E-2j: a non-Error thrown value with a string code is rethrown unchanged', async () => {
+      const original = { code: 'CANCELED' }
+      const caught = await exportWithThrowingSigner(original)
+      expect(caught).to.equal(original)
+    })
+
+    it('E-2k: a signature whose signerKey differs from the exporter is signature-self-check', async () => {
+      const net = await createTestNetwork()
+      const base = await exporterFor(net)
+      const exporter = {
+        ...base,
+        sign: async (digest: Uint8Array): Promise<Signature> => {
+          const real = await base.sign(digest)
+          return { ...real, signerKey: real.signerKey + 'x' }
+        }
+      }
+      let caught: unknown
+      try {
+        await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter)
+      } catch (err) { caught = err }
+      expect(caught).to.be.instanceOf(FoundingBundleExportError)
+      expect((caught as FoundingBundleExportError).code).to.equal('signature-self-check')
+    })
   })
 
   describe('I: importFoundingBundle on a second in-memory device', () => {
