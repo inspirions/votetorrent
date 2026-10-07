@@ -11,6 +11,7 @@ import renderer from 'react-test-renderer';
 
 let mockCurrentElectionEngine: unknown = null;
 let mockReadOnly = false;
+let mockNetworkEngine: unknown = null;
 const mockBallotId = 'mock-ballot-id';
 const BALLOT_ID = mockBallotId;
 
@@ -25,8 +26,11 @@ jest.mock('@votetorrent/vote-engine/rn', () => ({}), { virtual: true });
 jest.mock('../../../providers/SettingsProvider', () => ({
   useSettings: () => ({ showHelpIcons: false }),
 }));
+// A STABLE getEngine: the screen's authority-load effect depends on it, so a fresh function per
+// render would re-run the load forever.
+const mockGetEngine = jest.fn(async () => mockNetworkEngine);
 jest.mock('../../../providers/AppProvider', () => ({
-  useApp: () => ({ getEngine: jest.fn(async () => null) }),
+  useApp: () => ({ getEngine: mockGetEngine }),
 }));
 const mockCreateDeviceSigner = jest.fn();
 jest.mock('../../../engines/device-signer', () => ({
@@ -170,6 +174,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockCurrentElectionEngine = null;
   mockReadOnly = false;
+  mockNetworkEngine = null;
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -392,5 +397,127 @@ describe('R2-7 the screen logs only fixed tags and error class names (O-09)', ()
         expect(arg).not.toContain('requestId');
       }
     }
+  });
+});
+
+describe('R2-8/R2-9 an unsaved ballot cannot be submitted (gap6/WR-01)', () => {
+  it('R2-8 editing disables Submit with a hint to Propose first; reverting re-enables it', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    const submitSpy = jest.spyOn(engine, 'submitBallotForConfirmation');
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen();
+    expect(tr.root.findAllByProps({ testID: 'edit-ballot-submit' })[0].props.disabled).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit-needs-propose')).toBe(false);
+
+    await editDescription(tr, 'edited');
+    expect(tr.root.findAllByProps({ testID: 'edit-ballot-submit' })[0].props.disabled).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-submit-needs-propose')).toBe(true);
+    expect(treeContainsText(tr, 'ballotSubmitNeedsPropose')).toBe(true);
+    await press(tr, 'edit-ballot-submit');
+    expect(submitSpy).not.toHaveBeenCalled();
+
+    await editDescription(tr, STORED_DESCRIPTION);
+    expect(tr.root.findAllByProps({ testID: 'edit-ballot-submit' })[0].props.disabled).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit-needs-propose')).toBe(false);
+  });
+
+  it('R2-9 negative control: seeding the primary authority into a ballot with no stored authority is not an edit', async () => {
+    const { engine } = newEngine();
+    await propose(engine, '');
+    mockCurrentElectionEngine = engine;
+    mockNetworkEngine = {
+      getAuthoritiesByName: jest.fn(async () => ({ buffer: [{ id: 'auth-primary', name: 'Primary' }] })),
+      getDetails: jest.fn(async () => ({ network: { primaryAuthorityId: 'auth-primary' } })),
+    };
+    const tr = await renderScreen();
+    await flush();
+    expect(form(tr).props.authority).toBe('auth-primary'); // the seeding really happened
+    expect(tr.root.findAllByProps({ testID: 'edit-ballot-submit' })[0].props.disabled).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-submit-needs-propose')).toBe(false);
+
+    // and a real authority change IS an edit
+    await renderer.act(async () => {
+      form(tr).props.onAuthorityChange('auth-other');
+    });
+    expect(hasTestID(tr, 'edit-ballot-submit-needs-propose')).toBe(true);
+  });
+});
+
+describe('R2-10 after a submit the officer sees where confirmation happens (gap6/WR-02)', () => {
+  it('own task open: hint plus an Open Tasks control that opens the Tasks tab', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    const spy = jest.spyOn(engine, 'getBallotConfirmationState');
+    spy.mockResolvedValueOnce(state({}));
+    spy.mockResolvedValue(state({ locked: true, canWithdraw: true, ownTaskOpen: true }));
+    engine.submitBallotForConfirmation = jest.fn(async () => {});
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen();
+    await press(tr, 'edit-ballot-submit');
+
+    expect(hasTestID(tr, 'edit-ballot-submitted-task-hint')).toBe(true);
+    expect(treeContainsText(tr, 'ballotSubmittedOwnTaskHint')).toBe(true);
+    expect(treeContainsText(tr, 'ballotOpenTasksLink')).toBe(true);
+    await press(tr, 'edit-ballot-open-tasks');
+    expect(mockDispatch).toHaveBeenCalledWith({ type: 'NAVIGATE', payload: { name: 'Home', params: { screen: 'Tasks' } } });
+  });
+
+  it('no own task: the others-confirm hint and no link', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    const spy = jest.spyOn(engine, 'getBallotConfirmationState');
+    spy.mockResolvedValueOnce(state({}));
+    spy.mockResolvedValue(state({ locked: true, canWithdraw: true, ownTaskOpen: false }));
+    engine.submitBallotForConfirmation = jest.fn(async () => {});
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen();
+    await press(tr, 'edit-ballot-submit');
+
+    expect(treeContainsText(tr, 'ballotSubmittedOthersHint')).toBe(true);
+    expect(treeContainsText(tr, 'ballotSubmittedOwnTaskHint')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-open-tasks')).toBe(false);
+  });
+});
+
+describe('R2-11/R2-12 Withdraw is offered only to the officer who submitted (gap8/WR-03)', () => {
+  it('R2-11 locked with canWithdraw false shows the note, true shows Withdraw', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue(state({ locked: true, canWithdraw: false }));
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen();
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-out-for-confirmation')).toBe(true);
+    expect(treeContainsText(tr, 'ballotOutForConfirmationNote')).toBe(true);
+
+    const { engine: e2 } = newEngine();
+    await propose(e2);
+    jest.spyOn(e2, 'getBallotConfirmationState').mockResolvedValue(state({ locked: true, canWithdraw: true }));
+    mockCurrentElectionEngine = e2;
+    const tr2 = await renderScreen();
+    expect(hasTestID(tr2, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr2, 'edit-ballot-out-for-confirmation')).toBe(false);
+  });
+
+  it('R2-12 through the mock: another officer submits behind the screen, this officer sees the note; the submitter still sees Withdraw', async () => {
+    const { engine } = newEngine();
+    await propose(engine);
+    mockCurrentElectionEngine = engine;
+    const tr = await renderScreen();
+    engine.setCurrentUser('officer-b');
+    await engine.submitBallotForConfirmation(BALLOT_ID);
+    engine.setCurrentUser('officer-a');
+    await press(tr, 'edit-ballot-submit');
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-out-for-confirmation')).toBe(true);
+
+    const { engine: own } = newEngine();
+    await propose(own);
+    mockCurrentElectionEngine = own;
+    const tr2 = await renderScreen();
+    await press(tr2, 'edit-ballot-submit');
+    expect(hasTestID(tr2, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr2, 'edit-ballot-out-for-confirmation')).toBe(false);
   });
 });

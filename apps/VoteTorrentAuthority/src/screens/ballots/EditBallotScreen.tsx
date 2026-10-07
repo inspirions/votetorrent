@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { View } from "react-native";
-import { ExtendedTheme, useTheme, useNavigation, useRoute, useFocusEffect } from "@react-navigation/native";
+import { CommonActions, ExtendedTheme, useTheme, useNavigation, useRoute, useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import type { Question } from "@votetorrent/vote-core";
@@ -12,6 +12,7 @@ import { useBallotDraft } from "./providers/BallotDraftProvider";
 import { BallotTemplateForm } from "./components/BallotTemplateForm";
 import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
+import { ThemedText } from "../../components/ThemedText";
 import { useApp } from "../../providers/AppProvider";
 import { loadAuthoritiesWithRetry } from "../../utils/loadAuthoritiesWithRetry";
 import { createDeviceSigner } from "../../engines/device-signer";
@@ -46,6 +47,15 @@ const BALLOT_STATE_READ_TIMEOUT_MS = 30_000;
 
 type BallotConfirmationView = { locked: boolean; confirmed: boolean; canWithdraw: boolean; ownTaskOpen: boolean };
 
+/** The comparable form of a ballot: what Propose stores and what Submit would send out. */
+const comparableBallot = (b: { authorityId?: string; description?: string; districts?: string[]; questions?: unknown[] }) =>
+	JSON.stringify({
+		authorityId: b.authorityId ?? "",
+		description: b.description ?? "",
+		districts: b.districts ?? [],
+		questions: b.questions ?? [],
+	});
+
 const errorClass = (error: unknown): string => (error instanceof Error ? error.name : typeof error);
 
 const EditBallotScreen = () => {
@@ -69,6 +79,10 @@ const EditBallotScreen = () => {
 	const readSeqRef = useRef(0);
 	const retryingRef = useRef(false);
 	const [retrying, setRetrying] = useState(false);
+	// gap6/WR-01: the stored ballot as last loaded, in comparable form, to detect unsaved edits.
+	const storedBallotRef = useRef<{ authorityId: string; comparable: (authorityId: string) => string } | null>(null);
+	// gap6/WR-02: where confirmation happens after a submit; cleared on the next focus read.
+	const [submittedHint, setSubmittedHint] = useState<"own" | "others" | null>(null);
 	// CR-03 (62-REVIEW.md): a failed confirmation-state read must FAIL CLOSED. The edit lock
 	// is unknown, so the form is disabled and the footer shows Retry only.
 	const [stateReadFailed, setStateReadFailed] = useState(false);
@@ -132,6 +146,11 @@ const EditBallotScreen = () => {
 		try {
 			const details = await electionEngine.getBallotDetails(ballotId);
 			if (details?.ballot) {
+				const stored = details.ballot as any;
+				storedBallotRef.current = {
+					authorityId: stored.authorityId ?? "",
+					comparable: (authorityId: string) => comparableBallot({ ...stored, authorityId }),
+				};
 				// WR-06: the async load replaces the whole draft, so it must not drop
 				// the electionId that the synchronous seed effect set. setBallotDraft
 				// is a plain setter (no functional updater), so fall back explicitly to
@@ -218,6 +237,7 @@ const EditBallotScreen = () => {
 	useFocusEffect(
 		useCallback(() => {
 			if (!electionEngine || !ballotId) return;
+			setSubmittedHint(null);
 			readConfirmationState();
 		}, [electionEngine, ballotId, readConfirmationState])
 	);
@@ -230,16 +250,24 @@ const EditBallotScreen = () => {
 	const confirmed = confirmationState?.confirmed === true;
 	const stateUnknown = !!electionEngine && !!ballotId && (confirmationState === null || stateReadFailed);
 	const editingDisabled = readOnly || locked || confirmed || stateUnknown;
+	// gap6/WR-01: the form differs from the stored ballot. An empty stored authority matches the
+	// primary-authority default the seeding effect writes into the draft, so that is not an edit.
+	const draftAuthority = (ballotDraft as any).authority ?? (ballotDraft as any).authorityId ?? "";
+	const storedBallot = storedBallotRef.current;
+	const draftDirty =
+		storedBallot !== null &&
+		comparableBallot({ ...ballotDraft, authorityId: draftAuthority }) !==
+			storedBallot.comparable(storedBallot.authorityId || (primaryAuthorityId && draftAuthority === primaryAuthorityId ? draftAuthority : storedBallot.authorityId));
 
 	// D-03/D-08: Submit the persisted ballot for confirmation.
 	// `lazySign` is a LAZY factory thunk: `createDeviceSigner` is only invoked if the engine
 	// actually calls this callback, which happens only when the authority's ceb threshold is
 	// above 1 (IElectionEngine.submitBallotForConfirmation's own doc comment). A threshold-1
-	// authority therefore needs neither a provisioned key nor a biometric prompt to submit
-	// (it self-confirms), exactly as before 62-11.
+	// authority therefore needs neither a provisioned key nor a biometric prompt to submit; the
+	// engine opens a confirmation Task for the submitting officer instead.
 	const handleSubmitForConfirmation = async () => {
 		if (!electionEngine || !ballotId) return;
-		if (stateUnknown || locked || confirmed) return;
+		if (stateUnknown || locked || confirmed || draftDirty) return;
 		if (submittingRef.current) return;
 		submittingRef.current = true;
 		setErrorMessage("");
@@ -247,8 +275,10 @@ const EditBallotScreen = () => {
 		try {
 			const lazySign = async (digest: Uint8Array) => (await createDeviceSigner("Device User"))(digest);
 			await electionEngine.submitBallotForConfirmation(ballotId, lazySign);
-			// Re-read rather than guess: threshold 1 returns confirmed, higher thresholds locked.
-			await refreshConfirmationState();
+			// Re-read rather than guess. A submitted ballot reads locked until its confirmation
+			// Task is accepted (threshold 1 opens that Task for this officer; it does not self-confirm).
+			const after = await refreshConfirmationState();
+			if (after?.locked) setSubmittedHint(after.ownTaskOpen ? "own" : "others");
 		} catch (error) {
 			console.warn("submitBallotForConfirmation error", errorClass(error));
 			const outcome = handleDeviceSigningError(error);
@@ -357,6 +387,11 @@ const EditBallotScreen = () => {
 		}
 	};
 
+	// gap6/WR-02: the Tasks tab lives under the Home tab navigator (same form as EditElectionScreen).
+	const openTasks = () => {
+		navigation.dispatch(CommonActions.navigate({ name: "Home", params: { screen: "Tasks" } }));
+	};
+
 	const handleAuthorityChange = (authority: string) => {
 		setBallotDraft({ ...ballotDraft, authority } as any);
 	};
@@ -425,14 +460,37 @@ const EditBallotScreen = () => {
 			{!readOnly && !stateUnknown && !confirmed && (
 				<View style={[globalStyles.footer, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }]}>
 					{locked ? (
-						<CustomButton
-							testID="edit-ballot-withdraw"
-							title={t("withdrawConfirmation")}
-							icon="rotate-left"
-							onPress={handleWithdrawConfirmation}
-							backgroundColor={colors.warning ?? colors.accent}
-							disabled={withdrawing}
-						/>
+						<>
+							{submittedHint && (
+								<View testID="edit-ballot-submitted-task-hint">
+									<ThemedText>{t(submittedHint === "own" ? "ballotSubmittedOwnTaskHint" : "ballotSubmittedOthersHint")}</ThemedText>
+									{submittedHint === "own" && (
+										<CustomButton
+											testID="edit-ballot-open-tasks"
+											title={t("ballotOpenTasksLink")}
+											icon="list-check"
+											size="thin"
+											onPress={openTasks}
+											backgroundColor={colors.accent}
+										/>
+									)}
+								</View>
+							)}
+							{confirmationState?.canWithdraw === true ? (
+								<CustomButton
+									testID="edit-ballot-withdraw"
+									title={t("withdrawConfirmation")}
+									icon="rotate-left"
+									onPress={handleWithdrawConfirmation}
+									backgroundColor={colors.warning ?? colors.accent}
+									disabled={withdrawing}
+								/>
+							) : (
+								<View testID="edit-ballot-out-for-confirmation">
+									<ThemedText>{t("ballotOutForConfirmationNote")}</ThemedText>
+								</View>
+							)}
+						</>
 					) : (
 						<>
 							<CustomButton
@@ -450,8 +508,13 @@ const EditBallotScreen = () => {
 								icon="paper-plane"
 								onPress={handleSubmitForConfirmation}
 								backgroundColor={colors.accent}
-								disabled={submitting || proposing}
+								disabled={submitting || proposing || draftDirty}
 							/>
+							{draftDirty && (
+								<View testID="edit-ballot-submit-needs-propose">
+									<ThemedText>{t("ballotSubmitNeedsPropose")}</ThemedText>
+								</View>
+							)}
 						</>
 					)}
 				</View>

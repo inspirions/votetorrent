@@ -590,17 +590,20 @@ describe('EditBallotScreen — re-reads the lock after a refused Propose or Subm
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
   });
 
-  it('E5 through the real mock engine: another officer submits, then Submit is refused and the footer flips to Withdraw', async () => {
+  it('E5 through the real mock engine: another officer submits, then Submit is refused and this officer sees the note, not Withdraw (gap8/WR-03)', async () => {
     const { engine } = newEngine();
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen('Edit');
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
 
+    engine.setCurrentUser('officer-b');
     await engine.submitBallotForConfirmation(BALLOT_ID); // another officer, behind the screen's back
+    engine.setCurrentUser('mock-officer');
     await press(tr, 'edit-ballot-submit');
 
-    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(hasTestID(tr, 'edit-ballot-out-for-confirmation')).toBe(true);
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
     expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
