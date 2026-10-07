@@ -6,6 +6,7 @@ import {
 } from "@react-navigation/native";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import {
 	Image,
 	ScrollView,
@@ -68,7 +69,7 @@ export default function NetworkRevisionScreen() {
 				setTsaUrls(tsas.length > 0 ? tsas.map(tsa => tsa.url) : [""]);
 			} catch (error) {
 				console.warn("Failed to load network details for revision:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		};
 		load();
@@ -127,7 +128,7 @@ export default function NetworkRevisionScreen() {
 			navigation.goBack();
 		} catch (error) {
 			console.warn("networkRevision-propose error:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setErrorMessage(peerUnavailableMessage(error, t, "write") ?? (error instanceof Error ? error.message : String(error)));
 		} finally {
 			setProposing(false);
 		}

@@ -11,6 +11,7 @@ import { User, IUserEngine, UserHistory } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { CustomButton } from "../../components/CustomButton";
 import { useState, useCallback } from "react";
 import { getKeyTypeDisplayName, formatDate } from "../../utils/displayUtils";
@@ -50,7 +51,7 @@ export function UserDetailsScreen() {
 					}
 				} catch (error) {
 					console.warn("Failed to fetch latest user data:", error);
-					setLoadError(error instanceof Error ? error.message : String(error));
+					setLoadError(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 				} finally {
 					setIsLoadingUser(false);
 				}
@@ -72,7 +73,7 @@ export function UserDetailsScreen() {
 					setUserHistoryList(historyArray);
 				} catch (error) {
 					console.warn("Failed to fetch user history:", error);
-					setLoadError(error instanceof Error ? error.message : String(error));
+					setLoadError(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 				} finally {
 					setIsLoadingHistory(false);
 				}

@@ -3,6 +3,7 @@ import { View, ScrollView, StyleSheet, Share } from "react-native";
 import { ExtendedTheme, useRoute, useTheme, useNavigation, useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { ThemedText } from "../../components/ThemedText";
 import type { BallotSummary, ElectionDetails, IElectionEngine, ElectionRevisionSignatureTask } from "@votetorrent/vote-core";
 import { globalStyles } from "../../theme/styles";
@@ -108,7 +109,7 @@ export default function ElectionDetailsScreen() {
 					return;
 				}
 				console.warn("Error loading election details:", error);
-				if (isActive()) setErrorMessage(error instanceof Error ? error.message : String(error));
+				if (isActive()) setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		},
 		[electionEngine]
@@ -180,7 +181,7 @@ export default function ElectionDetailsScreen() {
 					return;
 				}
 				console.warn("Error loading ballots:", error);
-				if (isActive()) setErrorMessage(error instanceof Error ? error.message : String(error));
+				if (isActive()) setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		},
 		[electionEngine]

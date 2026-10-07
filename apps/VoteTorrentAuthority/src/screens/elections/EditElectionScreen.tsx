@@ -2,6 +2,7 @@ import { ExtendedTheme, useTheme, useNavigation, useRoute } from "@react-navigat
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
@@ -106,7 +107,7 @@ export default function EditElectionScreen() {
 				});
 			} catch (error) {
 				console.warn("Error loading election for edit:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		}
 		loadElection();

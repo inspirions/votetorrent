@@ -6,6 +6,7 @@ import {
 } from "@react-navigation/native";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { CustomButton } from "../../components/CustomButton";
 import { ThemedText } from "../../components/ThemedText";
@@ -50,7 +51,7 @@ export default function NetworkStatisticsScreen() {
 				setStats(s);
 			} catch (error) {
 				console.warn("Failed to load network statistics:", error);
-				setLoadError(error instanceof Error ? error.message : String(error));
+				setLoadError(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
 			}
 		};
 		load();
