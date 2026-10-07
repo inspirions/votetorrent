@@ -17,6 +17,11 @@ import type {
   InviteType,
 } from '@votetorrent/vote-core'
 
+/** An Error carrying a stable string `code` the app routes on (rethrow keeps it across the engine boundary). */
+function coded (message: string, code: string): Error {
+  return Object.assign(new Error(message), { code })
+}
+
 /**
  * Real InvitationEngine — Phase 15 (D-08 / SWAP-04).
  *
@@ -265,7 +270,12 @@ export class InvitationEngine implements IInvitationEngine {
    * signing prompt and before any write.
    *
    * The device user's private key MUST NOT enter this method (T-21-04-05).
-   * Only the ephemeral one-time invite key (from D-06 paste) is permitted.
+   * Only the ephemeral one-time invite key (from D-06 paste) is permitted, and it is REQUIRED
+   * (gap7/WR-05): without a well-formed key the call throws code `invite-key-required` before any
+   * read; a key that does not verify against the slot's InviteKey throws `invite-signature-invalid`
+   * before the keyholder binding signature and before any write. Refusals of a slot that is not the
+   * live head carry codes: invite-already-answered, invite-no-longer-valid, invite-superseded,
+   * invite-unverifiable.
    *
    * Phase-22 cross-device P2P transport: disabled boundary (D-08). The
    * cross-device "send over network" hop is deferred to the P2P transport
@@ -286,7 +296,7 @@ export class InvitationEngine implements IInvitationEngine {
   async respondToInvite (
     invitationId: string,
     accept: boolean,
-    invitePrivate?: string,
+    invitePrivate: string,
     digest?: string,
     invokedId?: string,
     keyholder?: KeyholderAcceptProvisioning,
@@ -294,6 +304,12 @@ export class InvitationEngine implements IInvitationEngine {
     // invitationId is the InviteSlot Cid in the thin IInvitationEngine surface
     // (as used by the accept/decline screens per D-06 paste flow).
     const slotCid = invitationId
+
+    // gap7/WR-05: an invitation is answered only by whoever holds its one-time key. Refused before
+    // any read, signing prompt or write; there is no keyless path.
+    if (typeof invitePrivate !== 'string' || !/^[0-9a-fA-F]{64}$/.test(invitePrivate)) {
+      throw coded('An invitation key is required to answer an invitation', 'invite-key-required')
+    }
 
     try {
       // Step 1: Resolve the slot to confirm it exists (fail fast with a clear error).
@@ -344,22 +360,10 @@ export class InvitationEngine implements IInvitationEngine {
       // plan 21-02's <a1_resolution> and the decline test fixture.
       const digestToken = digestValue ?? 'null'
 
-      // Step 4: Produce the ephemeral-key InviteSignature (A1 LOCKED encoding).
-      // If the caller supplies invitePrivate (from D-06 paste), use it to produce a
-      // signature verifiable against the slot's InviteKey. Otherwise generate a fresh
-      // ephemeral key pair so the signature is still a real secp256k1 value (not a
-      // placeholder) but without slot-key binding — this path serves the offline /
-      // test use-case where the private key is not available at the call site.
-      // SECURITY: The device user's private key MUST NOT be passed here (T-21-04-05).
-      let invitePrivBytes: Uint8Array
-      if (invitePrivate !== undefined) {
-        // Real app path (D-06): use the ephemeral invite key from the pasted share.
-        invitePrivBytes = hexToBytes(invitePrivate)
-      } else {
-        // Test / offline path: generate a fresh one-time key so the signature
-        // is cryptographically valid (real secp256k1) even without slot binding.
-        invitePrivBytes = secp256k1.utils.randomSecretKey()
-      }
+      // Step 4: Produce the ephemeral-key InviteSignature (A1 LOCKED encoding) with the invite
+      // key from the pasted share (D-06). SECURITY: the device user's private key MUST NOT be
+      // passed here (T-21-04-05).
+      const invitePrivBytes = hexToBytes(invitePrivate)
 
       // A1 LOCKED ENCODING (verbatim from plan 21-02 <a1_resolution>):
       //   signedBytes = TextEncoder.encode([slotCid, digestToken, String(accept)].join('|'))
@@ -369,17 +373,13 @@ export class InvitationEngine implements IInvitationEngine {
       const signedBytes = inviteResultSignedBytes({ slotCid, digestToken, accept })
       const inviteSignature = bytesToHex(secp256k1.sign(sha256(signedBytes), invitePrivBytes))
 
-      // 999.1 R-03: verify the signature engine-side against the exact A1
-      // LOCKED byte domain above (NOT SQL Digest() — Pitfall 2), using the
-      // slot's own InviteKey. When `invitePrivate` was not supplied (the
-      // documented offline/test path above), the signature is intentionally
-      // NOT bound to the slot's key — there is no real signature to verify
-      // (a legitimate no-signature-required path, not a fabricated `true`;
-      // see the doc comment on invitePrivBytes above), so IsSignatureValid
-      // stays `true` for that branch only.
-      const isSignatureValid = invitePrivate !== undefined
-        ? verifyAdHocInviteSignature(signedBytes, inviteSignature, slotRow.InviteKey)
-        : true
+      // 999.1 R-03 / gap7/WR-05: verify engine-side against the exact A1 LOCKED byte domain above
+      // (NOT SQL Digest() — Pitfall 2), using the slot's own InviteKey. A key that is not the
+      // slot's is refused here, before the keyholder binding signature and before any write.
+      if (!verifyAdHocInviteSignature(signedBytes, inviteSignature, slotRow.InviteKey)) {
+        throw coded('The invitation key does not match this invitation', 'invite-signature-invalid')
+      }
+      const isSignatureValid = true
 
       // 62-02 (D-21, D-26): a Type 'k' accept needs provisioning validated and its binding
       // digest signed BEFORE anything is written — never hold a transaction open across a
@@ -597,13 +597,13 @@ export class InvitationEngine implements IInvitationEngine {
     if (chain.status === 'live' && chain.cid === slot.Cid) return
     switch (chain.status) {
       case 'answered':
-        throw new Error('This invitation has already been answered')
+        throw coded('This invitation has already been answered', 'invite-already-answered')
       case 'no-longer-valid':
-        throw new Error('This invitation was withdrawn or has expired')
+        throw coded('This invitation was withdrawn or has expired', 'invite-no-longer-valid')
       case 'live':
-        throw new Error('This invitation was replaced by a newer copy')
+        throw coded('This invitation was replaced by a newer copy', 'invite-superseded')
       default:
-        throw new Error('This invitation cannot be verified on this device')
+        throw coded('This invitation cannot be verified on this device', 'invite-unverifiable')
     }
   }
 

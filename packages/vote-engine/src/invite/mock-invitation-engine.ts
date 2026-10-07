@@ -77,7 +77,10 @@ export class MockInvitationEngine implements IInvitationEngine {
     return { invite: { name: 'Some Keyholder' } }
   }
 
-  async respondToInvite (invitationId: string, accept: boolean, _invitePrivate?: string, _digest?: string, _invokedId?: string): Promise<void> {
+  async respondToInvite (invitationId: string, accept: boolean, invitePrivate: string, _digest?: string, _invokedId?: string): Promise<void> {
+    if (typeof invitePrivate !== 'string' || !/^[0-9a-fA-F]{64}$/.test(invitePrivate)) {
+      throw Object.assign(new Error('An invitation key is required to answer an invitation'), { code: 'invite-key-required' })
+    }
     console.log(`MockInvitationEngine: ${accept ? 'accepted' : 'declined'} invitation ${invitationId}`)
   }
 }
