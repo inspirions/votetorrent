@@ -183,7 +183,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// Classified boot failure. The raw error object (engine messages carry block ids and
 	// table names) never reaches state or render; only the closed kind does.
 	const [initError, setInitError] = useState<BootError>(null);
-	// CR-02: bump this to re-run the init effect ("Try Again"). The init effect's
+	// CR-02: bump this to re-run the init effect (Try Again). The init effect's
 	// dep array is [initNonce]; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
 	// Quick task 260928-kkf ("Syncing + escape button", locked decision): flips true
@@ -382,7 +382,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
 	// Quick task 260928-kkf: register the "first wait budget elapsed" listener for the
 	// lifetime of this provider (not just the current init run) — a listener registered
-	// only inside the init effect would be torn down and re-created on every "Try Again",
+	// only inside the init effect would be torn down and re-created on every Try Again,
 	// and the factory only ever holds ONE listener at a time (setFirstSyncListener
 	// overwrites, it does not accumulate). Deregistered on unmount.
 	useEffect(() => {
@@ -584,10 +584,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 			// in-flight first-sync gate so nothing keeps polling in the background.
 			engineFactoryRef.current?.cancelPendingStrandWaits();
 		};
-		// CR-02: re-run when initNonce changes so "Try Again" can re-attempt init.
+		// CR-02: re-run when initNonce changes so Try Again can re-attempt init.
 		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
 		// for the implicit second attempt the settle-then-dispatch fix above
-		// removes. `initNonce` stays: it is the CR-02 "Try Again" affordance and is
+		// removes. `initNonce` stays: it is the CR-02 Try Again affordance and is
 		// now also the recovery path for the (rare) timeout branch, since a bump
 		// re-awaits the by-then-settled `nodeSettled` promise and gets the correct
 		// backend. `nodeSettled` itself is NOT in this array either — it is a
