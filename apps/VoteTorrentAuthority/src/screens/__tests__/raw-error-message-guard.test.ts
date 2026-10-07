@@ -83,7 +83,7 @@ describe('raw error message guard', () => {
 		const { used } = scan(allFiles());
 		const stale = EXCEPTIONS.filter((_, i) => !used.has(i)).map((x) => `${x.file}: ${x.text}`);
 		expect(stale).toEqual([]);
-		expect(EXCEPTIONS).toHaveLength(3);
+		expect(EXCEPTIONS).toHaveLength(2);
 		for (const x of EXCEPTIONS) expect(x.reason.length).toBeGreaterThan(0);
 	});
 });
