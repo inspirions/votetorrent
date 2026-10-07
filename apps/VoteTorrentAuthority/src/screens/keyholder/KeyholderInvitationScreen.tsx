@@ -118,7 +118,7 @@ export function KeyholderInvitationScreen() {
 		setIsSending(true);
 		try {
 			if (!electionEngine) {
-				setErrorMessage(t("keyholderInviteSendFailed"));
+				setErrorMessage(t("invitationNeedsElection"));
 				return;
 			}
 			if (!name) return;
