@@ -52,7 +52,7 @@ import {BallotSelectionProvider} from '../providers/BallotSelectionProvider';
 // CloseButton (D-16) — byte-identical mechanics to Authority's `navigation/index.tsx` CloseButton
 // (lines 249-256): a Pressable with hitSlop=8 wrapping a FontAwesome6 "xmark" glyph, calling the
 // caller-supplied onPress (always `navigation.goBack()` at each modal's options callsite below).
-function CloseButton({onPress}: {onPress: () => void}) {
+export function CloseButton({onPress}: {onPress: () => void}) {
 	const {colors} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('common');
 	return (
@@ -60,6 +60,7 @@ function CloseButton({onPress}: {onPress: () => void}) {
 			onPress={onPress}
 			style={styles.headerButton}
 			hitSlop={8}
+			accessibilityRole="button"
 			accessibilityLabel={t('close')}>
 			<FontAwesome6 name="xmark" size={22} color={colors.text} />
 		</Pressable>
@@ -502,5 +503,9 @@ const styles = StyleSheet.create({
 		padding: 8,
 		marginHorizontal: 4,
 		marginVertical: -2,
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: 'center',
+		justifyContent: 'center',
 	},
 });

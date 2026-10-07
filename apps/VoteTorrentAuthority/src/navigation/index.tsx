@@ -271,6 +271,10 @@ const styles = StyleSheet.create({
 		padding: 8,
 		marginHorizontal: 4,
 		marginVertical: -2,
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: "center",
+		justifyContent: "center",
 	},
 	headerRightContainer: {
 		flexDirection: "row",
@@ -279,10 +283,17 @@ const styles = StyleSheet.create({
 	},
 });
 
-function CloseButton({ onPress }: { onPress: () => void }) {
+export function CloseButton({ onPress }: { onPress: () => void }) {
 	const { colors } = useTheme() as ExtendedTheme;
+	const { t } = useTranslation();
 	return (
-		<Pressable onPress={onPress} style={styles.headerButton} hitSlop={8}>
+		<Pressable
+			onPress={onPress}
+			style={styles.headerButton}
+			hitSlop={8}
+			accessibilityRole="button"
+			accessibilityLabel={t("close")}
+		>
 			<FontAwesome6 name="xmark" size={22} color={colors.text} />
 		</Pressable>
 	);
