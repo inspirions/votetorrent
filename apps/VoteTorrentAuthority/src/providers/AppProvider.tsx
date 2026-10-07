@@ -13,6 +13,7 @@ import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
+import { classifyPeerReadFailure } from "../engines/peer-read-unavailable";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachPeerSyncBinding } from "../screens/registration/attach-peer-sync-binding";
 import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
@@ -108,7 +109,7 @@ export function useApp() {
 // the answer, not a retry knob: `nodeSettled` awaited unbounded would be a
 // NEW availability defect — a hung `CadreNode.start()` would strand the
 // officer on the splash screen forever, with no error view and therefore
-// no "Try Again" (T-58-05-02). `NODE_SETTLE_TIMEOUT_MS` bounds the wait;
+// no Try Again (T-58-05-02). `NODE_SETTLE_TIMEOUT_MS` bounds the wait;
 // the loser of the race RESOLVES to a `'timeout'` status (never rejects),
 // so a merely-slow boot degrades to the solo backend instead of surfacing
 // "Failed to load network" — a worse outcome than attempting solo. 15000ms
@@ -165,12 +166,23 @@ async function resolveNodeDispatch(
 	}
 }
 
+type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic" } | null;
+
+// Automatic re-open delays after a peer-unavailable failure (5 s, then 15 s). This covers
+// short blips only: FRET marks a restored silent peer dead after 3 contact failures, but each
+// probe dial can take up to the libp2p dial timeout with backoff up to 32 s, so a long outage
+// takes minutes. It is deliberately NOT widened to minutes: the officer would sit on a spinner
+// with no explanation; the classified error view with Try Again is the path for the long case.
+const PEER_RETRY_DELAYS_MS = [5000, 15000];
+
 export function AppProvider({ children }: PropsWithChildren) {
 	const { t } = useTranslation();
 	const [isInitialized, setIsInitialized] = useState(false);
 	const [hasNetwork, setHasNetwork] = useState(false);
 	const [networksEngine, setNetworksEngine] = useState<INetworksEngine | null>(null);
-	const [initError, setInitError] = useState<string | null>(null);
+	// Classified boot failure. The raw error object (engine messages carry block ids and
+	// table names) never reaches state or render; only the closed kind does.
+	const [initError, setInitError] = useState<BootError>(null);
 	// CR-02: bump this to re-run the init effect ("Try Again"). The init effect's
 	// dep array is [initNonce]; setIsInitialized(false) alone cannot re-fire it.
 	const [initNonce, setInitNonce] = useState(0);
@@ -398,8 +410,39 @@ export function AppProvider({ children }: PropsWithChildren) {
 		// NOT stop the background strand wait itself (only cancelPendingStrandWaits does
 		// that, in the cleanup below); it stops THIS run's reaction to it.
 		let cancelled = false;
+		let cancelDelay: (() => void) | undefined;
 		cancelInitRunRef.current = () => {
 			cancelled = true;
+			cancelDelay?.();
+		};
+		const wait = (ms: number) =>
+			new Promise<void>((resolve) => {
+				const timer = setTimeout(() => {
+					cancelDelay = undefined;
+					resolve();
+				}, ms);
+				cancelDelay = () => {
+					clearTimeout(timer);
+					cancelDelay = undefined;
+					resolve();
+				};
+			});
+		// Bounded retry around the open only: a peer-unavailable rejection is retried after each
+		// delay; any other rejection (or exhausting the delays) propagates. Never retries once
+		// cancelled (unmount, escape, Start Fresh).
+		const openWithRetry = async (engine: INetworksEngine, network: any, user: any) => {
+			for (let attempt = 0; ; attempt++) {
+				try {
+					await engine.open(network, user);
+					return;
+				} catch (openError) {
+					if (cancelled || attempt >= PEER_RETRY_DELAYS_MS.length || !classifyPeerReadFailure(openError)) {
+						throw openError;
+					}
+					await wait(PEER_RETRY_DELAYS_MS[attempt]);
+					if (cancelled) throw openError;
+				}
+			}
 		};
 
 		async function initialize() {
@@ -461,7 +504,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// Bind the resolved user into the factory BEFORE getEngine("network", ...) so
 						// the factory's internal open() (which wins for the hash) also uses the real user.
 						factory.setCurrentUser(user);
-						await networksEng.open(network, user);
+						await openWithRetry(networksEng, network, user);
 						await factory.getEngine("network", network);
 						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
 						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
@@ -495,8 +538,15 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// as an error view — the escape action already resolved the UI.
 						if (cancelled) return;
 						// D-15: surface the recoverable error; spinner resolves to an error view.
-						console.error("Re-attach failed:", reattachError);
-						setInitError(String(reattachError));
+						const peerFailure = classifyPeerReadFailure(reattachError);
+						if (peerFailure) {
+							// Closed token only: the message carries block ids and table names.
+							console.warn("[AppProvider] re-attach peer read unavailable:", peerFailure.reason);
+							setInitError({ kind: "peer-unavailable", reason: peerFailure.reason });
+						} else {
+							console.error("Re-attach failed:", reattachError);
+							setInitError({ kind: "generic" });
+						}
 						// fall through to setIsInitialized(true) below so the spinner never hangs.
 					}
 				}
@@ -512,8 +562,14 @@ export function AppProvider({ children }: PropsWithChildren) {
 				if (cancelled) return;
 				// Outer catch handles failures before/after the re-attach block
 				// (e.g. getRecentNetworks() failure, LocalStorageReact init failure).
-				console.error("Fatal init error:", fatalError);
-				setInitError(String(fatalError));
+				const fatalPeer = classifyPeerReadFailure(fatalError);
+				if (fatalPeer) {
+					console.warn("[AppProvider] fatal init peer read unavailable:", fatalPeer.reason);
+					setInitError({ kind: "peer-unavailable", reason: fatalPeer.reason });
+				} else {
+					console.error("Fatal init error:", fatalError);
+					setInitError({ kind: "generic" });
+				}
 				setIsInitialized(true);
 				hideSplash();
 			}
@@ -523,6 +579,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
 		return () => {
 			cancelled = true;
+			cancelDelay?.();
 			// Unmount, network switch, or a superseded boot run: stop waiting on any
 			// in-flight first-sync gate so nothing keeps polling in the background.
 			engineFactoryRef.current?.cancelPendingStrandWaits();
@@ -572,6 +629,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				)}
 				{firstSyncBudgetElapsed && (
 					<TouchableOpacity
+						testID="boot-syncing-start-fresh"
 						onPress={() => {
 							// Mark THIS boot run cancelled before startFresh() clears the
 							// engine cache — so its (now-orphaned) pending open() never
@@ -581,7 +639,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						}}
 						style={{ marginTop: 8 }}
 					>
-						<Text>{"Start Fresh"}</Text>
+						<Text>{t("bootStartFresh")}</Text>
 					</TouchableOpacity>
 				)}
 			</View>
@@ -593,11 +651,19 @@ export function AppProvider({ children }: PropsWithChildren) {
 	// T-15-03-01: never fabricate an empty in-memory context; user must retry or start fresh.
 	if (initError && !hasNetwork) {
 		return (
-			<View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
-				<Text style={{ marginBottom: 16, textAlign: "center" }}>
-					{"Failed to load network: " + initError}
-				</Text>
+			<View testID="boot-error-view" style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+				{initError.kind === "peer-unavailable" ? (
+					<>
+						<Text style={{ marginBottom: 8, textAlign: "center", fontWeight: "bold" }}>
+							{t("peerReadUnavailableTitle")}
+						</Text>
+						<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("peerReadUnavailableBody")}</Text>
+					</>
+				) : (
+					<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("bootNetworkLoadFailed")}</Text>
+				)}
 				<TouchableOpacity
+					testID="boot-error-try-again"
 					onPress={() => {
 						// Try Again: reset error state and re-run initialize().
 						// CR-02: bumping initNonce re-triggers the init effect (its dep
@@ -609,10 +675,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 					}}
 					style={{ marginBottom: 8 }}
 				>
-					<Text>{"Try Again"}</Text>
+					<Text>{initError.kind === "peer-unavailable" ? t("peerReadUnavailableRetry") : t("bootTryAgain")}</Text>
 				</TouchableOpacity>
-				<TouchableOpacity onPress={startFresh}>
-					<Text>{"Start Fresh"}</Text>
+				<TouchableOpacity testID="boot-error-start-fresh" onPress={startFresh}>
+					<Text>{t("bootStartFresh")}</Text>
 				</TouchableOpacity>
 			</View>
 		);

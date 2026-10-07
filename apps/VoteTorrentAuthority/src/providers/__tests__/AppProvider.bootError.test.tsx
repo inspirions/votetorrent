@@ -114,10 +114,12 @@ interface FakeEngineFactoryInstance {
 
 const mockEngineFactoryInstances: FakeEngineFactoryInstance[] = [];
 let mockNetworksToReturn: unknown[] = [{ id: "net1" }];
-let mockOpenShouldReject = false;
+// Queue of errors open() throws; the LAST entry repeats forever.
+let mockOpenErrors: unknown[] = [];
 // When true, getNetworksEngine().open() returns a promise the test resolves/rejects
 // itself via mockOpenController — lets a test observe the PENDING (syncing) state and
 // control exactly when/how the boot re-attach settles (escape / cleanup cases).
+let mockRecentNetworksError: unknown = null;
 let mockOpenDeferred = false;
 let mockOpenController: { resolve: () => void; reject: (err: unknown) => void } | null = null;
 
@@ -147,7 +149,10 @@ jest.mock("../../engines/engine-factory", () => {
 		}
 
 		private fakeNetworksEngine = {
-			getRecentNetworks: jest.fn(async () => mockNetworksToReturn),
+			getRecentNetworks: jest.fn(async () => {
+				if (mockRecentNetworksError) throw mockRecentNetworksError;
+				return mockNetworksToReturn;
+			}),
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			open: jest.fn(async (_network: any, _user: any) => {
 				// Record the node the factory holds RIGHT NOW — the whole point of
@@ -159,8 +164,8 @@ jest.mock("../../engines/engine-factory", () => {
 						mockOpenController = { resolve, reject };
 					});
 				}
-				if (mockOpenShouldReject) {
-					throw new Error("open failed");
+				if (mockOpenErrors.length > 0) {
+					throw mockOpenErrors.length === 1 ? mockOpenErrors[0] : mockOpenErrors.shift();
 				}
 			}),
 		};
@@ -224,7 +229,7 @@ jest.mock("../../services/dashboard-signin-code", () => ({
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const renderer = require("react-test-renderer");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { Text, TouchableOpacity } = require("react-native");
+const { Text } = require("react-native");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { AppProvider } = require("../AppProvider");
 
@@ -255,32 +260,8 @@ async function flushMicrotasks(turns = 10) {
 	});
 }
 
-function findByTestId(tr: import("react-test-renderer").ReactTestRenderer, id: string) {
-	return tr.root.findAll(
-		(n: import("react-test-renderer").ReactTestInstance) => n.props.testID === id && typeof n.type !== "string",
-	)[0];
-}
-
-function findTryAgainButton(tr: import("react-test-renderer").ReactTestRenderer) {
-	return findByTestId(tr, "boot-error-try-again");
-}
-
-function findStartFreshButton(tr: import("react-test-renderer").ReactTestRenderer) {
-	return findByTestId(tr, "boot-syncing-start-fresh");
-}
-
-/** True when the boot error view is rendered (non-vacuous replacement for the old copy absence checks). */
-function hasBootErrorView(tr: import("react-test-renderer").ReactTestRenderer): boolean {
-	return findByTestId(tr, "boot-error-view") !== undefined;
-}
-
-function findTouchableWithText(tr: import("react-test-renderer").ReactTestRenderer, text: string) {
-	const touchables = tr.root.findAllByType(TouchableOpacity);
-	return touchables.find(
-		(t: import("react-test-renderer").ReactTestInstance) =>
-			t.findAll((n: import("react-test-renderer").ReactTestInstance) => n.type === Text && n.props.children === text)
-				.length > 0,
-	);
+function byTestId(tr: import("react-test-renderer").ReactTestRenderer, id: string) {
+	return tr.root.findAll((n: import("react-test-renderer").ReactTestInstance) => n.props.testID === id && typeof n.type !== "string");
 }
 
 /** True if the localized Syncing label (echoed key 'syncSyncing') is rendered anywhere. */
@@ -288,301 +269,135 @@ function hasSyncingLabel(tr: import("react-test-renderer").ReactTestRenderer): b
 	return JSON.stringify(tr.toJSON()).includes("syncSyncing");
 }
 
+
+const TEST19 =
+	"QuereusError: Module 'optimystic' connect failed for table 'TidHighWater': Failed to initialize Optimystic table: Block default/app/TidHighWater is unavailable (cohort-unreachable): the repo could not determine whether it exists";
+
 beforeEach(() => {
 	jest.clearAllMocks();
 	mockEngineFactoryInstances.length = 0;
 	mockNetworksToReturn = [{ id: "net1" }];
-	mockOpenShouldReject = false;
+	mockOpenErrors = [];
+	mockRecentNetworksError = null;
 	mockOpenDeferred = false;
 	mockOpenController = null;
 	mockCadreHook.current = defaultCadreHookValue();
+	jest.useFakeTimers();
 });
 
 afterEach(() => {
 	jest.useRealTimers();
 });
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe("AppProvider cold-start re-attach — D-08/D-09/D-10 (58-05)", () => {
-	it(
-		'boot settles "ready": the first (and only) open() observes the live node already ' +
-			"dispatched into the factory — never null ahead of it (RED today: opens with null)",
-		async () => {
-			const fakeNode: FakeNode = { tag: "live-node" };
-			mockCadreHook.current = {
-				...defaultCadreHookValue(),
-				nodeSettled: Promise.resolve({ status: "ready", node: fakeNode }),
-			};
-
-			renderApp();
-			await flushMicrotasks();
-
-			const factory = mockEngineFactoryInstances[0];
-			expect(factory.openCalls.length).toBe(1);
-			expect(factory.openCalls[0].node).toBe(fakeNode);
-			expect(mockHideSplash).toHaveBeenCalledTimes(1);
-		},
-	);
-
-	it('boot settles "failed": setNode(null), open() still runs on the solo backend, init completes (no hang)', async () => {
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
-		renderApp();
-		await flushMicrotasks();
-
-		const factory = mockEngineFactoryInstances[0];
-		expect(factory.openCalls.length).toBe(1);
-		expect(factory.openCalls[0].node).toBeNull();
-		expect(mockHideSplash).toHaveBeenCalledTimes(1);
+async function advance(ms: number) {
+	await renderer.act(async () => {
+		jest.advanceTimersByTime(ms);
+		for (let i = 0; i < 20; i++) await Promise.resolve();
 	});
+}
 
-	it(
-		"nodeSettled never settles: no open() before the bound elapses (RED today: opens immediately); " +
-			"after NODE_SETTLE_TIMEOUT_MS, init completes on the solo default",
-		async () => {
-			jest.useFakeTimers();
-			mockCadreHook.current = {
-				...defaultCadreHookValue(),
-				// eslint-disable-next-line @typescript-eslint/no-empty-function
-				nodeSettled: new Promise<{ status: "ready" | "failed"; node: FakeNode | null }>(() => {}),
-			};
+const RAW = ["QuereusError", "TidHighWater", "Block ", "cohort-unreachable", "disk corrupt", "Failed to load network"];
+function expectNoRaw(tr: import("react-test-renderer").ReactTestRenderer) {
+	const json = JSON.stringify(tr.toJSON());
+	for (const s of RAW) expect(json).not.toContain(s);
+}
 
-			renderApp();
-			await renderer.act(async () => {
-				await Promise.resolve();
-				await Promise.resolve();
-			});
-
-			const factory = mockEngineFactoryInstances[0];
-			expect(factory.openCalls.length).toBe(0);
-			expect(mockHideSplash).not.toHaveBeenCalled();
-
-			// NODE_SETTLE_TIMEOUT_MS = 15000 (AppProvider.tsx, module-scope, not exported).
-			await renderer.act(async () => {
-				await jest.advanceTimersByTimeAsync(15000);
-			});
-
-			expect(factory.openCalls.length).toBe(1);
-			expect(factory.openCalls[0].node).toBeNull();
-			expect(mockHideSplash).toHaveBeenCalledTimes(1);
-		},
-	);
-
-	it(
-		"a re-render in which node changes from null to a live node produces no second open() " +
-			"(RED today: the [initNonce, node] dep array fires a second init)",
-		async () => {
-			const fakeNode: FakeNode = { tag: "live-node" };
-			mockCadreHook.current = {
-				...defaultCadreHookValue(),
-				nodeSettled: Promise.resolve({ status: "ready", node: fakeNode }),
-			};
-
-			function Harness({ generation }: { generation: number }) {
-				// `generation` exists only to force React to re-render this subtree —
-				// AppProvider reads the mocked hook fresh on every render.
-				void generation;
-				return (
-					<AppProvider>
-						<Text>child-rendered</Text>
-					</AppProvider>
-				);
-			}
-
-			let tr: import("react-test-renderer").ReactTestRenderer;
-			renderer.act(() => {
-				tr = renderer.create(<Harness generation={0} />);
-			});
-			await flushMicrotasks();
-
-			const factory = mockEngineFactoryInstances[0];
-			expect(factory.openCalls.length).toBe(1);
-
-			// Simulate CadreNode boot completing AFTER the settle already ran: the
-			// hook's `node` transitions null -> live, forcing AppProvider to
-			// re-render (mirrors the real peer-count effect committing `node`).
-			mockCadreHook.current = { ...mockCadreHook.current, node: fakeNode };
-			renderer.act(() => {
-				// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-				tr!.update(<Harness generation={1} />);
-			});
-			await flushMicrotasks();
-
-			expect(factory.openCalls.length).toBe(1);
-		},
-	);
-
-	it('CR-02 "Try Again" survives: when open() rejects, the error view renders, and pressing it runs a second init (second open())', async () => {
-		mockOpenShouldReject = true;
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
+describe("AppProvider boot error classification (gap 4)", () => {
+	it("B-1: peer-unavailable after two retries shows the translated peer view", async () => {
+		mockOpenErrors = [new Error(TEST19)];
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
 		const tr = renderApp();
 		await flushMicrotasks();
-
+		expect(byTestId(tr, "boot-error-view").length).toBe(0);
+		await advance(5000);
+		await advance(15000);
 		const factory = mockEngineFactoryInstances[0];
-		expect(factory.openCalls.length).toBe(1);
-
-		const tryAgain = findTryAgainButton(tr);
-		expect(tryAgain).toBeDefined();
-
-		renderer.act(() => {
-			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-			tryAgain!.props.onPress();
-		});
-		await flushMicrotasks();
-
-		expect(factory.openCalls.length).toBe(2);
+		expect(factory.openCalls.length).toBe(3);
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("peerReadUnavailableTitle");
+		expect(json).toContain("peerReadUnavailableBody");
+		expect(json).toContain("peerReadUnavailableRetry");
+		expect(json).toContain("bootStartFresh");
+		expectNoRaw(tr);
+		expect(warn).toHaveBeenCalledWith("[AppProvider] re-attach peer read unavailable:", "cohort-unreachable");
+		warn.mockRestore();
 	});
-});
 
-// ---------------------------------------------------------------------------
-// Quick task 260928-kkf — "Syncing + escape button" (locked decision).
-//
-// A pending boot re-attach (open() deferred via mockOpenDeferred) surfaces the
-// localized Syncing label as soon as syncState is 'syncing', and — ONLY once the
-// factory's first-sync listener has fired once (simulating the first
-// StrandAwaitingFirstSyncError budget elapsing) — the existing Start Fresh action
-// under it. Pressing that escape marks the run cancelled and runs the SAME
-// clearEngineCache()-based handler as the error view.
-// ---------------------------------------------------------------------------
-describe("AppProvider boot 'still syncing' surface + escape — quick task 260928-kkf", () => {
-	it("hides the splash and shows the Syncing label while a boot re-attach is pending; resolves to isInitialized with no error once open() settles", async () => {
-		mockOpenDeferred = true;
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			syncState: "syncing",
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
+	it("B-2: a generic failure is not retried and shows generic translated copy", async () => {
+		mockOpenErrors = [new Error("disk corrupt")];
+		const err = jest.spyOn(console, "error").mockImplementation(() => undefined);
 		const tr = renderApp();
 		await flushMicrotasks();
+		await advance(30000);
+		expect(mockEngineFactoryInstances[0].openCalls.length).toBe(1);
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("bootNetworkLoadFailed");
+		expect(json).toContain("bootTryAgain");
+		expect(json).toContain("bootStartFresh");
+		expectNoRaw(tr);
+		// B-6: generic keeps console.error with the error object
+		expect(err.mock.calls.some((c) => c[0] === "Re-attach failed:")).toBe(true);
+		err.mockRestore();
+	});
 
-		expect(mockHideSplash).toHaveBeenCalledTimes(1);
-		expect(hasSyncingLabel(tr)).toBe(true);
-		expect(findStartFreshButton(tr)).toBeUndefined();
-
-		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-		mockOpenController!.resolve();
+	it("B-3: peer-unavailable twice then success heals with no error view", async () => {
+		mockOpenErrors = [new Error(TEST19)];
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+		const tr = renderApp();
 		await flushMicrotasks();
-
-		const factory = mockEngineFactoryInstances[0];
-		expect(factory.openCalls.length).toBe(1);
+		expect(byTestId(tr, "boot-error-view").length).toBe(0);
+		expect(JSON.stringify(tr.toJSON())).not.toContain("child-rendered");
+		await advance(5000); // second call fails too
+		expect(mockEngineFactoryInstances[0].openCalls.length).toBe(2);
+		mockOpenErrors = []; // third call succeeds
+		await advance(15000);
+		expect(mockEngineFactoryInstances[0].openCalls.length).toBe(3);
+		expect(byTestId(tr, "boot-error-view").length).toBe(0);
 		expect(JSON.stringify(tr.toJSON())).toContain("child-rendered");
-		expect(hasBootErrorView(tr)).toBe(false);
+		warn.mockRestore();
 	});
 
-	it("(d) hides Start Fresh until the first-sync listener fires once, then shows it under the Syncing label", async () => {
-		mockOpenDeferred = true;
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			syncState: "syncing",
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
+	it("B-4: unmount during a retry delay stops further open() calls", async () => {
+		mockOpenErrors = [new Error(TEST19)];
+		const err = jest.spyOn(console, "error").mockImplementation(() => undefined);
 		const tr = renderApp();
 		await flushMicrotasks();
-
-		expect(findStartFreshButton(tr)).toBeUndefined();
-
-		const factory = mockEngineFactoryInstances[0];
-		renderer.act(() => {
-			factory.triggerFirstSync("networkhash123");
-		});
-		await flushMicrotasks();
-
-		expect(hasSyncingLabel(tr)).toBe(true);
-		expect(findStartFreshButton(tr)).toBeDefined();
-	});
-
-	it("(e) pressing the syncing-view Start Fresh runs clearEngineCache and resolves to isInitialized with no error, even if the pending open() later rejects", async () => {
-		mockOpenDeferred = true;
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			syncState: "syncing",
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
-		const tr = renderApp();
-		await flushMicrotasks();
-
-		const factory = mockEngineFactoryInstances[0];
-		renderer.act(() => {
-			factory.triggerFirstSync("networkhash123");
-		});
-		await flushMicrotasks();
-
-		const startFresh = findStartFreshButton(tr);
-		expect(startFresh).toBeDefined();
-
-		renderer.act(() => {
-			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-			startFresh!.props.onPress();
-		});
-		await flushMicrotasks();
-
-		expect(factory.clearEngineCache).toHaveBeenCalledTimes(1);
-		expect(JSON.stringify(tr.toJSON())).toContain("child-rendered");
-		expect(hasBootErrorView(tr)).toBe(false);
-
-		// The superseded open() rejecting AFTER the escape must write no state —
-		// no error view, no console noise.
-		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-		renderer.act(() => {
-			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-			mockOpenController!.reject(new Error("open failed after escape"));
-		});
-		await flushMicrotasks();
-
-		expect(hasBootErrorView(tr)).toBe(false);
-		for (const call of errorSpy.mock.calls) {
-			expect(String(call[0])).not.toContain("not wrapped in act");
-		}
-		errorSpy.mockRestore();
-	});
-
-	it("(c) unmounting while open() is pending cancels the wait and deregisters the listener; a later rejection writes no state", async () => {
-		mockOpenDeferred = true;
-		mockCadreHook.current = {
-			...defaultCadreHookValue(),
-			syncState: "syncing",
-			nodeSettled: Promise.resolve({ status: "failed", node: null }),
-		};
-
-		const tr = renderApp();
-		await flushMicrotasks();
-
 		const factory = mockEngineFactoryInstances[0];
 		expect(factory.openCalls.length).toBe(1);
+		renderer.act(() => tr.unmount());
+		await advance(30000);
+		expect(factory.openCalls.length).toBe(1);
+		for (const c of err.mock.calls) expect(String(c[0])).not.toContain("not wrapped in act");
+		err.mockRestore();
+	});
 
-		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+	it("B-4b: Start Fresh from the syncing view during a delay cancels the retry", async () => {
+		mockOpenErrors = [new Error(TEST19)];
+		mockCadreHook.current = { ...defaultCadreHookValue(), syncState: "syncing" };
+		const tr = renderApp();
+		await flushMicrotasks();
+		const factory = mockEngineFactoryInstances[0];
 		renderer.act(() => {
-			tr.unmount();
-		});
-
-		expect(factory.cancelPendingStrandWaits).toHaveBeenCalledTimes(1);
-		// The listener registration effect's cleanup deregisters LAST with undefined.
-		expect(
-			factory.setFirstSyncListenerCalls[factory.setFirstSyncListenerCalls.length - 1],
-		).toBeUndefined();
-
-		renderer.act(() => {
-			// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-			mockOpenController!.reject(new Error("open failed after unmount"));
+			factory.triggerFirstSync("h");
 		});
 		await flushMicrotasks();
+		const btn = byTestId(tr, "boot-syncing-start-fresh")[0];
+		expect(btn).toBeDefined();
+		renderer.act(() => btn.props.onPress());
+		await advance(30000);
+		expect(factory.openCalls.length).toBe(1);
+		expect(byTestId(tr, "boot-error-view").length).toBe(0);
+	});
 
-		for (const call of errorSpy.mock.calls) {
-			expect(String(call[0])).not.toContain("not wrapped in act");
-		}
-		errorSpy.mockRestore();
+	it("B-5: the outer fatal path shows generic copy, never raw text", async () => {
+		mockRecentNetworksError = new Error(TEST19);
+		const err = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+		const tr = renderApp();
+		await flushMicrotasks();
+		expectNoRaw(tr);
+		expect(byTestId(tr, "boot-error-view").length).toBeGreaterThan(0);
+		err.mockRestore();
+		warn.mockRestore();
 	});
 });
