@@ -24,6 +24,13 @@ import { acceptKeyholderInvitation } from '../keyholder-accept';
 import { driveKeyholderDkg } from '../keyholder-dkg-driver';
 import { releaseKeyholderShare } from '../key-release-ceremony';
 
+/**
+ * A keyholder's own device context: the same strand db, no officer identity. The keyholder who accepts is never
+ * the inviting officer (self-invite refusal, 62-103), so every 'k' accept runs on this context; slot creation
+ * and reads may keep the inviter's context.
+ */
+const inviteeCtx = <C extends { db: unknown }>(ctx: C): C => ({ db: ctx.db }) as unknown as C;
+
 jest.setTimeout(120_000);
 
 function asGetEngine<E>(engine: E): <T>(engineName: string) => Promise<T> {
@@ -92,7 +99,7 @@ interface Device {
 }
 
 async function acceptOnDevice(seeded: Awaited<ReturnType<typeof seedElectionWithThreshold>>, name: string): Promise<Device> {
-	const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+	const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 	const privBytes = secp256k1.utils.randomSecretKey();
 	const invitePrivate = bytesToHex(privBytes);
 	const inviteKey = bytesToHex(secp256k1.getPublicKey(privBytes));

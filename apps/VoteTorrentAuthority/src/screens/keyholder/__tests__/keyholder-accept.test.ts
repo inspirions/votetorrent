@@ -23,6 +23,13 @@ import type { KeyVaultStorage } from '../../../engines/key-vault';
 import { acceptKeyholderInvitation } from '../keyholder-accept';
 import { InviteShareError, inviteShareErrorKey } from '../../invitations/invite-share';
 
+/**
+ * A keyholder's own device context: the same strand db, no officer identity. The keyholder who accepts is never
+ * the inviting officer (self-invite refusal, 62-103), so every 'k' accept runs on this context; slot creation
+ * and reads may keep the inviter's context.
+ */
+const inviteeCtx = <C extends { db: unknown }>(ctx: C): C => ({ db: ctx.db }) as unknown as C;
+
 async function seedElection() {
 	const net = await createTestNetwork();
 	const auth = await addTestAuthority(net);
@@ -73,7 +80,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Alice');
 		const { vault, storage } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		const result = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 
@@ -99,7 +106,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const Alice = await inviteKeyholder(seeded, 'Alice');
 		const Carol = await inviteKeyholder(seeded, 'Carol');
 		const { vault, storage } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		const alice = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Alice.shareText);
 		const carol = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, Carol.shareText);
@@ -119,11 +126,12 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Dana');
 		const { vault, storage } = makeVaultHarness();
 		const failingEngine = {
-			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(inviteeCtx(seeded.auth.ctx)).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('bad invitePrivate');
 			}),
 			getKeyholderInvite: jest.fn(async () => undefined),
+			getKeyholderSlotSeat: jest.fn(async (id: string) => new InvitationEngine(inviteeCtx(seeded.auth.ctx)).getKeyholderSlotSeat(id)),
 		};
 
 		await expect(acceptKeyholderInvitation({ invitationEngine: failingEngine as never, vault, storage }, shareText)).rejects.toThrow(
@@ -139,7 +147,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Erin');
 		const { vault, storage } = makeVaultHarness();
-		const realEngine = new InvitationEngine(seeded.auth.ctx);
+		const realEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 		let committedUserId: string | undefined;
 		const reconcileEngine = {
 			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
@@ -149,6 +157,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 				throw new Error('post-commit transport hiccup');
 			}),
 			getKeyholderInvite: jest.fn(async (id: string) => realEngine.getKeyholderInvite(id)),
+			getKeyholderSlotSeat: jest.fn(async (id: string) => realEngine.getKeyholderSlotSeat(id)),
 		};
 
 		const result = await acceptKeyholderInvitation({ invitationEngine: reconcileEngine as never, vault, storage }, shareText);
@@ -164,15 +173,16 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const { vault, storage } = makeVaultHarness();
 		let statusCalls = 0;
 		const unknownOutcomeEngine = {
-			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(seeded.auth.ctx).resolveInviteSlot(k, t)),
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => new InvitationEngine(inviteeCtx(seeded.auth.ctx)).resolveInviteSlot(k, t)),
 			respondToInvite: jest.fn(async () => {
 				throw new Error('original failure');
 			}),
 			// The first read is the answered-slot pre-check (must succeed); the reconcile re-read fails.
 			getKeyholderInvite: jest.fn(async (id: string) => {
-				if (++statusCalls === 1) return new InvitationEngine(seeded.auth.ctx).getKeyholderInvite(id);
+				if (++statusCalls === 1) return new InvitationEngine(inviteeCtx(seeded.auth.ctx)).getKeyholderInvite(id);
 				throw new Error('re-read also failed');
 			}),
+			getKeyholderSlotSeat: jest.fn(async (id: string) => new InvitationEngine(inviteeCtx(seeded.auth.ctx)).getKeyholderSlotSeat(id)),
 		};
 
 		await expect(
@@ -187,7 +197,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Hank');
 		const { vault, storage } = makeVaultHarness();
-		const realEngine = new InvitationEngine(seeded.auth.ctx);
+		const realEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 		let capturedArgs: unknown[] | undefined;
 		const capturingEngine = {
 			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
@@ -196,6 +206,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 				return realEngine.respondToInvite(...args);
 			}),
 			getKeyholderInvite: jest.fn(async (id: string) => realEngine.getKeyholderInvite(id)),
+			getKeyholderSlotSeat: jest.fn(async (id: string) => realEngine.getKeyholderSlotSeat(id)),
 		};
 
 		const result = await acceptKeyholderInvitation({ invitationEngine: capturingEngine as never, vault, storage }, shareText);
@@ -214,7 +225,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText, slotCid } = await inviteKeyholder(seeded, 'Grace');
 		const { vault, storage, wrapper } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 
@@ -225,7 +236,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 	it('A8: a share for an invite that does not exist rejects not-found with 0 auth wraps and 0 identities', async () => {
 		const seeded = await seedElection();
 		const { vault, storage, wrapper } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		const err = await acceptKeyholderInvitation({ invitationEngine, vault, storage }, makeShare('Ghost').text).catch((e) => e);
 
@@ -238,7 +249,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 	it('A9: an officer share pasted into keyholder accept rejects wrong-type with 0 wraps', async () => {
 		const seeded = await seedElection();
 		const { vault, storage, wrapper } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		await expect(
 			acceptKeyholderInvitation({ invitationEngine, vault, storage }, makeShare('Officer', 'of').text)
@@ -252,7 +263,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 		const seeded = await seedElection();
 		const { shareText } = await inviteKeyholder(seeded, 'Kay Two');
 		const { vault, storage, wrapper } = makeVaultHarness();
-		const invitationEngine = new InvitationEngine(seeded.auth.ctx);
+		const invitationEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
 
 		await acceptKeyholderInvitation({ invitationEngine, vault, storage }, shareText);
 		expect(wrapper.authWraps).toBe(2);
