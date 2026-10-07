@@ -173,9 +173,10 @@ describe("H-4 KeyholderScreen DKG error", () => {
 		const Screen = mod.default ?? mod.KeyholderScreen;
 		return mount(<Screen />);
 	}
-	it("a peer-unavailable DKG message renders translated write copy", async () => {
+	// 62-137: the driver outcome error is { code, authDenied } only; peer-unavailable arrives as a code.
+	it("a peer-unavailable DKG code renders translated write copy", async () => {
 		const text = allText(
-			await run({ status: null, error: { code: "unknown", authDenied: false, message: RAW } }),
+			await run({ status: null, error: { code: "peer-unavailable", authDenied: false } }),
 		);
 		expect(text).toContain("peerWriteUnavailable");
 		expect(text).not.toContain("cohort-unreachable");
@@ -187,11 +188,13 @@ describe("H-4 KeyholderScreen DKG error", () => {
 		expect(text).toContain("deviceSigningErrorGeneric");
 		expect(text).not.toContain("peerWriteUnavailable");
 	});
-	it("negative control: a generic message renders as before", async () => {
+	it("negative control: any other code renders the generic DKG copy, never engine text", async () => {
 		const text = allText(
 			await run({ status: null, error: { code: "unknown", authDenied: false, message: "disk corrupt" } }),
 		);
-		expect(text).toContain("disk corrupt");
+		expect(text).toContain("keyholderDkgError");
+		expect(text).not.toContain("peerWriteUnavailable");
+		expect(text).not.toContain("disk corrupt");
 	});
 });
 

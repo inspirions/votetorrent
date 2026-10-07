@@ -161,7 +161,7 @@ describe.each(SCREENS)('$name invitation send mode', (screen) => {
     const tr = await render(screen);
     await fillName(tr);
     await pressSend(tr);
-    expect(text(tr)).toContain('invitationSendFailed');
+    expect(text(tr)).toContain(screen.name === 'Keyholder' ? 'keyholderInviteSendFailed' : 'invitationSendFailed');
     expectNoLeak(tr);
   });
 
