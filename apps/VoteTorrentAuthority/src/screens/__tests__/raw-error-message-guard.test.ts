@@ -302,8 +302,6 @@ export const EXEMPT_LINES: ExemptLine[] = [
 	{ file: 'services/bootstrap-upload.ts', key: '4262eefed532b800', count: 1, reason: 'error subclass constructor whose reason is a closed union of fixed tokens; the message is never rendered' },
 ];
 export const RESIDUE: ResidueEntry[] = [
-	{ file: 'screens/elections/election-error-messages.ts', key: '7926ccbfd85c15ef', count: 2, owner: '62-135', site: 'builder validation text' },
-	{ file: 'screens/networks/AddNetworkScreen.tsx', key: 'e007f9059ff06149', count: 1, owner: '62-135', site: 'builder validation text' },
 ];
 
 describe('strict: no raw error text anywhere in the Authority app', () => {

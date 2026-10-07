@@ -4,6 +4,7 @@
 // an organizer. This maps them to plain-language copy, with special care for the
 // deadline/timeline rules that are easy to trip.
 
+import { builderErrorLineCopy } from "../../utils/errorCopy";
 import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
 
 /** Minimal translate signature — avoids importing i18next types into screens. */
@@ -44,9 +45,9 @@ function friendlyBuilderError(e: BuilderErrorLike, t: Translate): string {
 			if (e.path.includes("revisionDeadline")) return t("errRevisionDeadlineInvalid");
 			if (e.path.includes("date")) return t("errElectionDateInvalid");
 			if (e.path.includes("title")) return t("errTitleRequired");
-			return e.message;
+			return builderErrorLineCopy(e, t);
 		default:
-			return e.message;
+			return builderErrorLineCopy(e, t);
 	}
 }
 

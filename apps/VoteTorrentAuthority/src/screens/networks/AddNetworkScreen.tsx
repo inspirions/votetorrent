@@ -17,6 +17,7 @@ import type { IDefaultUserEngine, INetworksEngine, NetworkInit, NetworkReference
 import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
+import { builderErrorsCopy } from "../../utils/errorCopy";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
@@ -302,7 +303,7 @@ export default function AddNetworkScreen() {
 			// (setNetworkInit/setUser are on the concrete class, not the interface).
 			const builder = networksEng.buildCreate().update({ networkInit, user });
 			if (!builder.isValid()) {
-				console.error("handleCreate: validation errors", builder.errors());
+				console.error("handleCreate: validation errors", builder.errors().map((e) => e.code));
 				const relayMissing = builder.errors().some((e) => e.path === "networkInit.relays");
 				setErrorMessage(
 					// network-create-release-hang: replace the raw "networkInit.relays must not be
@@ -310,7 +311,7 @@ export default function AddNetworkScreen() {
 					// section. Other validation errors fall through unchanged.
 					relayMissing
 						? t("errRelayRequired")
-						: builder.errors().map((e) => e.message).join("\n") || t("validationFailed"),
+						: builderErrorsCopy([...builder.errors()], t),
 				);
 				if (relayMissing) scrollToRelays();
 				return;
