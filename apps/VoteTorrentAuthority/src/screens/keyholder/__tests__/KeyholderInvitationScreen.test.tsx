@@ -391,16 +391,21 @@ describe('KeyholderInvitationScreen - expired share', () => {
   });
 });
 
-describe('KeyholderInvitationScreen - send mode (UAT 62 L)', () => {
+describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, invitee binding)', () => {
+  const NOW = Date.UTC(2026, 9, 8, 12, 0, 0);
   const mockInviteKeyholder = jest.fn(async (..._args: unknown[]) => undefined);
+  const mockGetElectionDetails = jest.fn(async (): Promise<any> => ({ election: { id: 'election-1' }, current: { keyholders: [] } }));
   const electionEngine = {
-    getElectionDetails: jest.fn(async () => ({ election: { id: 'election-1' } })),
+    getElectionDetails: () => mockGetElectionDetails(),
     inviteKeyholder: (...args: unknown[]) => mockInviteKeyholder(...args),
   };
+  const invitee = (name: string, accepted = false) => ({ invite: { name }, result: accepted ? { isAccepted: true } : undefined });
 
   beforeEach(() => {
+    jest.spyOn(Date, 'now').mockReturnValue(NOW);
     mockRouteParams.mode = 'send';
     mockRouteParams.electionEngine = electionEngine;
+    mockGetElectionDetails.mockResolvedValue({ election: { id: 'election-1' }, current: { keyholders: [] } });
     mockGetEngine.mockImplementation(async (name: string): Promise<any> => {
       if (name === 'defaultUser') return { get: async () => ({ name: 'Officer' }) };
       if (name === 'invitations') return mockInvitationEngine;
@@ -408,30 +413,113 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L)', () => {
     });
   });
 
-  function nameInput(tr: renderer.ReactTestRenderer) {
-    return tr.root.findAll((n) => (n.type as unknown) === 'TextInput' && n.props.accessibilityLabel === 'name')[0];
-  }
-
-  it('prefills Name from the route keyholder', async () => {
-    mockRouteParams.keyholder = { invite: { name: 'Kay Holder' } };
-    const tr = await render();
-    expect(nameInput(tr).props.value).toBe('Kay Holder');
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
-  it('after SEND the full invite text renders in the share block with SHARE and COPY', async () => {
-    mockRouteParams.keyholder = { invite: { name: 'Kay Holder' } };
-    const tr = await render();
+  const radio = (tr: renderer.ReactTestRenderer, testID: string) =>
+    tr.root.findAll((n) => n.props?.testID === testID && n.props?.accessibilityRole === 'radio')[0];
+  const press = async (tr: renderer.ReactTestRenderer, testID: string) => {
+    await renderer.act(async () => {
+      radio(tr, testID).props.onPress();
+    });
+  };
+  const send = async (tr: renderer.ReactTestRenderer) => {
     await renderer.act(async () => {
       await buttonByTitle(tr, 'send').props.onPress();
     });
-    expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
-    const text = tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-text' && typeof n.props?.children === 'string')[0];
-    expect(text.props.numberOfLines).toBeUndefined();
-    const payload = JSON.parse(text.props.children);
+  };
+  const nameInputs = (tr: renderer.ReactTestRenderer) => tr.root.findAll((n) => (n.type as unknown) === 'TextInput');
+  const sharedPayload = (tr: renderer.ReactTestRenderer) =>
+    JSON.parse(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-text' && typeof n.props?.children === 'string')[0].props.children);
+
+  it('shows the five validity presets as radios with 24 hours selected', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    const tr = await render();
+    for (const h of [1, 12, 24, 72, 168]) expect(radio(tr, `keyholder-invite-expiry-${h}`)).toBeDefined();
+    expect(radio(tr, 'keyholder-invite-expiry-24').props.accessibilityState.selected).toBe(true);
+    expect(radio(tr, 'keyholder-invite-expiry-168').props.accessibilityState.selected).toBe(false);
+  });
+
+  it('default send carries now + 24 h in the call and the share; the free-text name field is gone', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    const tr = await render();
+    expect(nameInputs(tr)).toHaveLength(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('Kay Holder');
+    await send(tr);
+    const expected = new Date(NOW + 24 * 3_600_000).toISOString();
+    expect((mockInviteKeyholder.mock.calls[0]![0] as { expiration: string; name: string }).expiration).toBe(expected);
+    expect((mockInviteKeyholder.mock.calls[0]![0] as { name: string }).name).toBe('Kay Holder');
+    const payload = sharedPayload(tr);
     expect(payload.name).toBe('Kay Holder');
+    expect(payload.expiration).toBe(expected);
     expect(payload.invitePrivate).toMatch(/^[0-9a-f]{64}$/);
     expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-share').length).toBeGreaterThan(0);
     expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-copy').length).toBeGreaterThan(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderInviteExpiresAt');
+  });
+
+  it('choosing 7 days sends now + 168 h', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    const tr = await render();
+    await press(tr, 'keyholder-invite-expiry-168');
+    await send(tr);
+    const expected = new Date(NOW + 168 * 3_600_000).toISOString();
+    expect((mockInviteKeyholder.mock.calls[0]![0] as { expiration: string }).expiration).toBe(expected);
+    expect(sharedPayload(tr).expiration).toBe(expected);
+  });
+
+  it('never calls resendInvite', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    const resend = jest.fn();
+    (mockInvitationEngine as Record<string, unknown>).resendInvite = resend;
+    const tr = await render();
+    await send(tr);
+    expect(resend).not.toHaveBeenCalled();
+    delete (mockInvitationEngine as Record<string, unknown>).resendInvite;
+  });
+
+  it('without a keyholder param lists only pending invitees; Send waits for a choice', async () => {
+    mockGetElectionDetails.mockResolvedValue({
+      election: { id: 'election-1' },
+      current: { keyholders: [invitee('Alice', true), invitee('Bob'), invitee('Cara')] },
+    });
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderInvitePickInvitee');
+    expect(radio(tr, 'keyholder-invite-invitee-Alice')).toBeUndefined();
+    expect(radio(tr, 'keyholder-invite-invitee-Bob')).toBeDefined();
+    expect(buttonByTitle(tr, 'send').props.disabled).toBe(true);
+    await press(tr, 'keyholder-invite-invitee-Cara');
+    expect(buttonByTitle(tr, 'send').props.disabled).toBe(false);
+    await send(tr);
+    expect((mockInviteKeyholder.mock.calls[0]![0] as { name: string }).name).toBe('Cara');
+  });
+
+  it('with nobody pending shows the empty copy and no Send', async () => {
+    mockGetElectionDetails.mockResolvedValue({ election: { id: 'election-1' }, current: { keyholders: [invitee('Alice', true)] } });
+    const tr = await render();
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderInviteNoPendingInvitees');
+    expect(buttonByTitle(tr, 'send')).toBeUndefined();
+  });
+
+  it('invite-expiration-out-of-range renders its copy and no engine text', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    mockInviteKeyholder.mockRejectedValueOnce(Object.assign(new Error('raw engine text'), { code: 'invite-expiration-out-of-range' }));
+    const tr = await render();
+    await send(tr);
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain('keyholderInviteExpiryOutOfRange');
+    expect(json).not.toContain('raw engine text');
+  });
+
+  it('any other send failure renders keyholderInviteSendFailed, never the raw message', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    mockInviteKeyholder.mockRejectedValueOnce(new Error('raw engine text'));
+    const tr = await render();
+    await send(tr);
+    const json = JSON.stringify(tr.toJSON());
+    expect(json).toContain('keyholderInviteSendFailed');
+    expect(json).not.toContain('raw engine text');
   });
 });
 
@@ -522,10 +610,10 @@ describe('KeyholderInvitationScreen - hardened accept (stored name, masked share
     expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptSuperseded');
   });
 
-  it('send mode still renders the Name field and the Send button', async () => {
+  it('send mode renders the Send button for a fixed invitee', async () => {
     mockRouteParams.mode = 'send';
+    mockRouteParams.keyholder = { invite: { name: 'Kay Holder' } };
     const tr = await render();
-    expect(tr.root.findAll((n) => (n.type as unknown) === 'TextInput' && n.props.accessibilityLabel === 'name').length).toBeGreaterThan(0);
     expect(buttonByTitle(tr, 'send')).toBeDefined();
   });
 });

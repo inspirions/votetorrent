@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, View } from "react-native";
+import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
+import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import type {
@@ -16,7 +17,6 @@ import { bytesToHex } from "@noble/curves/utils.js";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
-import { CustomTextInput } from "../../components/CustomTextInput";
 import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { InlineError } from "../../components/InlineError";
 import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
@@ -25,6 +25,12 @@ import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { acceptKeyholderInvitation } from "./keyholder-accept";
+import {
+	DEFAULT_KEYHOLDER_INVITE_EXPIRY_HOURS,
+	KEYHOLDER_INVITE_EXPIRY_HOURS,
+	keyholderInviteExpiration,
+	keyholderInviteExpiryLabel,
+} from "./keyholder-invite-expiry";
 import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { takeInviteShare } from "../invitations/invite-share-handoff";
 import { InviteSharePasteField } from "../invitations/InviteSharePasteField";
@@ -46,8 +52,15 @@ export function KeyholderInvitationScreen() {
 	const { mode, shareToken, electionEngine, keyholder } = useRoute().params as KeyholderInvitationParams;
 	const { getEngine } = useApp();
 
-	// Send-mode form state
-	const [name, setName] = useState(keyholder?.invite?.name ?? "");
+	// Send-mode form state. The invitation always goes to one of the election's invitees (REVIEW/IN-06): the
+	// name is fixed when opened from a keyholder, otherwise picked from the invitees who have not accepted.
+	const fixedName = keyholder?.invite?.name;
+	const [pickedName, setPickedName] = useState<string | undefined>(undefined);
+	const name = fixedName ?? pickedName ?? "";
+	const [pendingNames, setPendingNames] = useState<string[] | undefined>(undefined);
+	// O-11: the sending officer chooses how long the invitation stays valid (default 24 hours).
+	const [expiryHours, setExpiryHours] = useState<number>(DEFAULT_KEYHOLDER_INVITE_EXPIRY_HOURS);
+	const [sentExpiration, setSentExpiration] = useState<string>("");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
@@ -75,6 +88,29 @@ export function KeyholderInvitationScreen() {
 		});
 	}, [navigation, t, mode]);
 
+	// Send mode without a fixed invitee: list the invitees who have not accepted (read once).
+	useEffect(() => {
+		if (mode !== "send" || fixedName !== undefined || !electionEngine) return;
+		let cancelled = false;
+		(async () => {
+			try {
+				const details = await electionEngine.getElectionDetails();
+				if (cancelled) return;
+				const names = (details.current?.keyholders ?? [])
+					.filter((k: InviteStatus<SentKeyholderInvite>) => !k.result && k.invite?.name)
+					.map((k: InviteStatus<SentKeyholderInvite>) => k.invite.name);
+				setPendingNames(names);
+			} catch (error) {
+				if (cancelled) return;
+				console.warn("Error loading keyholder invitees:", error instanceof Error ? error.name : "unknown");
+				setPendingNames([]);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [mode, fixedName, electionEngine]);
+
 	// INV-03: real keyholder invite send via un-gated inviteKeyholder (21-05)
 	const onSend = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
@@ -82,9 +118,10 @@ export function KeyholderInvitationScreen() {
 		setIsSending(true);
 		try {
 			if (!electionEngine) {
-				setErrorMessage(t("invitationNeedsElection"));
+				setErrorMessage(t("keyholderInviteSendFailed"));
 				return;
 			}
+			if (!name) return;
 
 			// Build the ephemeral secp256k1 key material for this keyholder invite.
 			// AUTH-01 (D-01): hex-encoded secp256k1 key material at the screen surface.
@@ -103,7 +140,7 @@ export function KeyholderInvitationScreen() {
 			const invitePrivate = bytesToHex(invitePrivateBytes);
 			const inviteKey = bytesToHex(secp256k1.getPublicKey(invitePrivateBytes));
 			const type = "k" as const;
-			const expiration = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+			const expiration = keyholderInviteExpiration(Date.now(), expiryHours);
 
 			const keyholderInvite: KeyholderInvite = {
 				type,
@@ -142,12 +179,18 @@ export function KeyholderInvitationScreen() {
 				name,
 			});
 			setShareText(sharePayload);
+			setSentExpiration(expiration);
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
 			console.warn("onSend error:", error instanceof Error ? error.name : "unknown");
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
+			const code = (error as { code?: unknown } | null | undefined)?.code;
+			setErrorMessage(
+				code === "invite-expiration-out-of-range"
+					? t("keyholderInviteExpiryOutOfRange")
+					: (outcome.message ?? t("keyholderInviteSendFailed")),
+			);
 		} finally {
 			setIsSending(false);
 		}
@@ -243,7 +286,48 @@ export function KeyholderInvitationScreen() {
 						<ThemedText type="title" style={styles.sectionTitle}>
 							{t("keyholderInvitation")}
 						</ThemedText>
-						<CustomTextInput title={t("name")} value={name} onChangeText={setName} />
+						{fixedName !== undefined ? (
+							<View style={styles.detailRow}>
+								<ThemedText type="defaultSemiBold">{t("name")}: </ThemedText>
+								<ThemedText testID="keyholder-invitation-send-name">{fixedName}</ThemedText>
+							</View>
+						) : pendingNames === undefined ? null : pendingNames.length === 0 ? (
+							<ThemedText testID="keyholder-invite-no-pending">{t("keyholderInviteNoPendingInvitees")}</ThemedText>
+						) : (
+							<View>
+								<ThemedText type="defaultSemiBold">{t("keyholderInvitePickInvitee")}</ThemedText>
+								{pendingNames.map((n) => (
+									<RadioRow
+										key={n}
+										testID={`keyholder-invite-invitee-${n}`}
+										label={n}
+										selected={pickedName === n}
+										disabled={isSending || !!shareText}
+										onPress={() => setPickedName(n)}
+									/>
+								))}
+							</View>
+						)}
+
+						{!shareText ? (
+							<View>
+								<ThemedText type="defaultSemiBold">{t("keyholderInviteExpiryLabel")}</ThemedText>
+								{KEYHOLDER_INVITE_EXPIRY_HOURS.map((h) => (
+									<RadioRow
+										key={h}
+										testID={`keyholder-invite-expiry-${h}`}
+										label={keyholderInviteExpiryLabel(h, t)}
+										selected={expiryHours === h}
+										disabled={isSending}
+										onPress={() => setExpiryHours(h)}
+									/>
+								))}
+							</View>
+						) : (
+							<ThemedText testID="keyholder-invite-expires-at">
+								{t("keyholderInviteExpiresAt", { when: new Date(sentExpiration).toLocaleString() })}
+							</ThemedText>
+						)}
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
@@ -254,12 +338,12 @@ export function KeyholderInvitationScreen() {
 						<InlineError message={errorMessage} />
 					</View>
 				</ScrollView>
-				{!shareText ? (
+				{!shareText && (fixedName !== undefined || (pendingNames !== undefined && pendingNames.length > 0)) ? (
 					<Footer>
 						<CustomButton
 							title={isSending ? `${t("send")}…` : t("send")}
 							icon="paper-plane"
-							disabled={isSending}
+							disabled={isSending || !name}
 							backgroundColor={colors.success}
 							forceDarkText={true}
 							onPress={onSend}
@@ -314,7 +398,49 @@ export function KeyholderInvitationScreen() {
 	);
 }
 
+/** One radio option (the ReassociationReviewToggle pattern, >= 48 dp touch target). */
+function RadioRow({
+	testID,
+	label,
+	selected,
+	disabled,
+	onPress,
+}: {
+	testID: string;
+	label: string;
+	selected: boolean;
+	disabled?: boolean;
+	onPress: () => void;
+}) {
+	const { colors } = useTheme() as ExtendedTheme;
+	return (
+		<TouchableOpacity
+			testID={testID}
+			accessibilityRole="radio"
+			accessibilityState={{ selected, disabled: !!disabled }}
+			disabled={disabled}
+			onPress={onPress}
+			style={localStyles.option}
+		>
+			<FontAwesome6 name={selected ? "circle-dot" : "circle"} size={20} color={selected ? colors.accent : colors.textSecondary} />
+			<ThemedText type="default" style={localStyles.optionLabel}>
+				{label}
+			</ThemedText>
+		</TouchableOpacity>
+	);
+}
+
 const localStyles = StyleSheet.create({
+	option: {
+		flexDirection: "row",
+		alignItems: "center",
+		alignSelf: "stretch",
+		minHeight: 48,
+		gap: 8,
+	},
+	optionLabel: {
+		flexShrink: 1,
+	},
 	detailRow: {
 		flexDirection: "row",
 		marginBottom: 8,

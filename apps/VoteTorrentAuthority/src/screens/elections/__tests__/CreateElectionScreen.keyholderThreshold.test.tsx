@@ -243,6 +243,12 @@ describe("CreateElectionScreen - keyholder policy guard", () => {
     expectNoWrite();
   });
 
+  it("refuses two keyholders with the same name before any engine call", async () => {
+    const tree = await renderAndSubmit({ ...orderedForm(), keyholders: ["Kay", " kay "] });
+    expect(inlineErrors(tree)).toEqual(["keyholderPolicyDuplicateName"]);
+    expectNoWrite();
+  });
+
   it("control: 2-of-2 reaches the engine", async () => {
     const tree = await renderAndSubmit(orderedForm());
     expect(inlineErrors(tree)).toEqual([]);
