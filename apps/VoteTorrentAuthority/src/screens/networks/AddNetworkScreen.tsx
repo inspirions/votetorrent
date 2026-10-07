@@ -34,7 +34,7 @@ import { normalizeRelayAddresses, findInvalidRelayAddress } from "../../utils/re
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
-	const { getEngine, networksEngine, selectNetwork } = useApp();
+	const { getEngine, networksEngine, selectNetwork, isNetworkSelected } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
@@ -64,8 +64,10 @@ export default function AddNetworkScreen() {
 	const [creating, setCreating] = useState(false);
 	// Neutral status shown while a commit that missed its 45 s deadline is still being awaited.
 	const [stillFinishing, setStillFinishing] = useState(false);
-	// A late commit can land after the officer left this screen. selectNetwork must still run then
-	// (it gives the session its user) but nothing may setState or navigate.
+	// A late commit can land after the officer left this screen. When the session has NO selected
+	// network it is selected then (and the recovery-key gate runs); when another network is already
+	// selected it is left alone for the officer to pick from Networks. Either way nothing may
+	// setState or goBack after unmount.
 	const mountedRef = useRef(true);
 	useEffect(() => {
 		mountedRef.current = true;
@@ -326,7 +328,10 @@ export default function AddNetworkScreen() {
 					RECONCILE_TIMEOUT_MS,
 				);
 			} catch (snapshotErr) {
-				console.info("[network-create] snapshot() failed", snapshotErr);
+				console.info(
+					"[network-create] snapshot() failed",
+					snapshotErr instanceof Error ? snapshotErr.name : typeof snapshotErr,
+				);
 				recentsSnapshot = undefined;
 			}
 
@@ -387,8 +392,27 @@ export default function AddNetworkScreen() {
 			// WR-01 (62-88): a commit that lands after the officer left Add Network must NOT re-point
 			// the session behind their back (up to LATE_COMMIT_BUDGET_MS later, they may already be
 			// working in another network). The network is in recents; they select it from Networks.
+			// The one exception: when the session has NO network selected, nothing is re-pointed, and
+			// leaving the officer on "No network selected" with a network they just created would lose
+			// it. An unknown answer (no accessor) counts as "selected": the safe default.
 			if (!mountedRef.current) {
-				console.info("[network-create] late commit landed after leave; not auto-selecting");
+				if (isNetworkSelected?.() === false) {
+					console.info("[network-create] late commit landed after leave; selecting (no network selected)");
+					try {
+						await selectNetwork(networkRef);
+						// Same recovery-key path as the in-screen tail (49-19): skipping it here would leave
+						// the founder's recovery key unregistered with no prompt. The gate navigates only
+						// when registration is needed. No goBack: this screen is gone.
+						await promptRecoveryKeyRegistrationIfNeeded();
+					} catch (lateErr) {
+						console.info(
+							"[network-create] late recovery-key gate failed:",
+							lateErr instanceof Error ? lateErr.name : typeof lateErr,
+						);
+					}
+				} else {
+					console.info("[network-create] late commit landed after leave; not auto-selecting");
+				}
 				return;
 			}
 			console.info("[network-create] selectNetwork() start");
@@ -432,7 +456,7 @@ export default function AddNetworkScreen() {
 				);
 				return;
 			}
-			console.error("handleCreate error:", err);
+			console.error("handleCreate error:", err instanceof Error ? err.name : typeof err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
 			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
 			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
@@ -444,7 +468,9 @@ export default function AddNetworkScreen() {
 			// screen's own raw-message handling unchanged.
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			// Engine text carries ids and table names: never rendered. 62-96's peer copy arrives
+			// through outcome.message.
+			setErrorMessage(outcome.message ?? t("networkCreateFailed"));
 			return;
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout

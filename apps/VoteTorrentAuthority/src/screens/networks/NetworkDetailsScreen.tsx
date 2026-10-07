@@ -39,6 +39,9 @@ export function NetworkDetailsScreen() {
 	const [primaryAuthorityDetails, setPrimaryAuthorityDetails] = useState<AuthorityDetails>();
 	const [primaryAuthorityAdmin, setPrimaryAuthorityAdmin] = useState<AdminDetails>();
 	const [loadError, setLoadError] = useState("");
+	// Bumped by Try Again; both load effects depend on it so a retry re-runs the network load and
+	// then (through the new details) the primary-authority load.
+	const [reloadNonce, setReloadNonce] = useState(0);
 	const [selectError, setSelectError] = useState("");
 	const [currentUserId, setCurrentUserId] = useState<string>();
 	const [applying, setApplying] = useState(false);
@@ -68,7 +71,7 @@ export function NetworkDetailsScreen() {
 			}
 		};
 		loadNetwork();
-	}, []);
+	}, [reloadNonce]);
 
 	// Phase 8 plan 08-05 (D-14): compute a flat list of changed fields between
 	// the current network and the proposed revision. Each entry is rendered as
@@ -119,6 +122,7 @@ export function NetworkDetailsScreen() {
 			if (!networkDetails) return;
 			const primaryAuthorityId = networkDetails.network.primaryAuthorityId;
 			if (!primaryAuthorityId) return;
+			setLoadError("");
 			try {
 				const authorityEngine = await getEngine<IAuthorityEngine>(
 					"authority",
@@ -136,7 +140,7 @@ export function NetworkDetailsScreen() {
 			}
 		};
 		loadPrimaryAuthority();
-	}, [networkEngine, networkDetails]);
+	}, [networkEngine, networkDetails, reloadNonce]);
 
 	// Phase 16 plan 08 (item 2): make the tapped network the active/current network.
 	// Re-resolving via getEngine("network", networkRef) re-points the EngineFactory's
@@ -208,6 +212,15 @@ export function NetworkDetailsScreen() {
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}
 		>
 			<InlineError message={loadError} />
+			{!!loadError && (
+				<CustomButton
+					testID="network-details-retry"
+					title={t("loadRetryButton")}
+					icon="rotate"
+					size="thin"
+					onPress={() => setReloadNonce((n) => n + 1)}
+				/>
+			)}
 			<View style={styles.section}>
 				<ThemedText type="header">{networkDetails?.network.name}</ThemedText>
 				<CustomButton

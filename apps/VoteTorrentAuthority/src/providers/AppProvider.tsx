@@ -42,6 +42,13 @@ interface AppContextType {
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
 	/**
+	 * LIVE answer to "does this session have a selected network right now?" -- read from a ref,
+	 * so a caller holding a stale context value (a screen that has since unmounted, such as Add
+	 * Network finishing a slow create) still gets the current truth. `hasNetwork` itself is a
+	 * render-time snapshot and cannot answer that.
+	 */
+	isNetworkSelected: () => boolean;
+	/**
 	 * 50-07 (D-07/D-09/D-13): export the whole local database, for the currently
 	 * established network, as a verified 50-02 snapshot envelope. Consumed by
 	 * `DashboardSignInCodeScreen`, which never imports `EngineFactory` directly —
@@ -178,7 +185,14 @@ const PEER_RETRY_DELAYS_MS = [5000, 15000];
 export function AppProvider({ children }: PropsWithChildren) {
 	const { t } = useTranslation();
 	const [isInitialized, setIsInitialized] = useState(false);
-	const [hasNetwork, setHasNetwork] = useState(false);
+	const [hasNetwork, setHasNetworkState] = useState(false);
+	// Ref mirror of hasNetwork for isNetworkSelected(); updated in the same call as the state.
+	const hasNetworkRef = useRef(false);
+	const setHasNetwork = useCallback((value: boolean) => {
+		hasNetworkRef.current = value;
+		setHasNetworkState(value);
+	}, []);
+	const isNetworkSelected = useCallback(() => hasNetworkRef.current, []);
 	const [networksEngine, setNetworksEngine] = useState<INetworksEngine | null>(null);
 	// Classified boot failure. The raw error object (engine messages carry block ids and
 	// table names) never reaches state or render; only the closed kind does.
@@ -364,7 +378,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 		await factory.getNetworksEngine().open(networkRef, user);
 		await factory.getEngine("network", networkRef);
 		setHasNetwork(true);
-	}, []);
+	}, [setHasNetwork]);
 
 	// ENG-05: register the CadreNode live peer-count source with the factory so
 	// NetworkEngine.getStatistics reports connected peers. connectedPeers is keyed
@@ -694,6 +708,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 				isInitialized,
 				hasNetwork,
 				selectNetwork,
+				isNetworkSelected,
 				exportDashboardSnapshot,
 				resolveDeviceSigner,
 				createPeerStagingTransports,
