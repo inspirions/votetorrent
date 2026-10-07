@@ -353,6 +353,94 @@ export async function getReassociationReview (
   }
 }
 
+/** A `duplicate-decision` refusal means the decision is already on the strand: success, not failure. */
+function isDuplicateDecision (err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { code?: unknown }).code === 'duplicate-decision'
+}
+
+/**
+ * WR-02 — republishes every sentinel re-association transition (`'c'`, `'a'`, `'r'`) this authority
+ * has written locally but never published. Each flow writes the local transition and THEN
+ * publishes, so a publish that failed left the row past `'p'` with no decision, and nothing else
+ * ever looks at it again — the waiting voter device polls forever. This drain closes that gap.
+ *
+ * Idempotent and signature-frugal: the local `AssociationDecision` table is read FIRST (one
+ * query) and only a row with NO decision at its CURRENT status is published, so an already
+ * published row costs no officer signature; a `duplicate-decision` refusal (another session
+ * published it between the read and the write) counts as success. Synthetic-rejection `'c'` rows
+ * are skipped: no `'c'` notice is ever published for them (their `'r'` is the visible decision).
+ *
+ * A republished `'a'` carries NO `revokesDeviceKey`: once the compound commit ran, the retired
+ * key is gone from `Association`, so it can no longer be recomputed (accepted residual T-62-113-03;
+ * the security effect — the old Association row is deleted — is already in force).
+ *
+ * Counts only; never logs (this module's no-console rule).
+ */
+export async function republishUndecided (
+  host: ReassociationHost,
+  authorityId: string,
+  intake: ReassociationIntake,
+  opener: ReassociationOpener
+): Promise<{ readonly republished: number; readonly failures: number }> {
+  // `Status <> 'p'`, never `in (...)` next to an AuthorityId equality (Quereus AND+IN trap).
+  const rows: Array<{ id: string; deviceKey: string; status: string; challengeNonce?: string; rejectionReason?: string; decidedAt?: string }> = []
+  for await (const row of host.ctx.db.eval(
+    "select Id, DeviceKey, Status, ChallengeNonce, RejectionReason, DecidedAt from AssociationRequest where AuthorityId = :rowAuthorityId and RegistrantId = :sentinel and Status <> 'p'",
+    { rowAuthorityId: authorityId, sentinel: REASSOCIATION_UNRESOLVED_REGISTRANT_ID }
+  )) {
+    rows.push({
+      id: asText(row.Id, 'AssociationRequest.Id'),
+      deviceKey: asText(row.DeviceKey, 'AssociationRequest.DeviceKey'),
+      status: asText(row.Status, 'AssociationRequest.Status'),
+      challengeNonce: row.ChallengeNonce == null ? undefined : asText(row.ChallengeNonce, 'AssociationRequest.ChallengeNonce'),
+      rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'AssociationRequest.RejectionReason'),
+      decidedAt: row.DecidedAt == null ? undefined : reZulu(asText(row.DecidedAt, 'AssociationRequest.DecidedAt'))
+    })
+  }
+  if (rows.length === 0) return { republished: 0, failures: 0 }
+
+  const decided = new Set<string>()
+  for await (const row of host.ctx.db.eval(
+    'select RequestId, Status from AssociationDecision where AuthorityId = :rowAuthorityId',
+    { rowAuthorityId: authorityId }
+  )) {
+    decided.add(`${asText(row.RequestId, 'AssociationDecision.RequestId')}\u0000${asText(row.Status, 'AssociationDecision.Status')}`)
+  }
+
+  let republished = 0
+  let failures = 0
+  for (const row of rows) {
+    if (decided.has(`${row.id}\u0000${row.status}`)) continue
+    try {
+      const decidedAt = row.decidedAt ?? new Date().toISOString()
+      if (row.status === 'c') {
+        if (row.challengeNonce === undefined || row.challengeNonce.startsWith(REASSOCIATION_REJECTION_NONCE_PREFIX)) continue
+        await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: row.challengeNonce, decidedAt })
+      } else if (row.status === 'r') {
+        await intake.publishDecision({ requestId: row.id, status: 'r', reason: row.rejectionReason, decidedAt })
+      } else if (row.status === 'a') {
+        const associations = await host.getAssociationsByDeviceKey(row.deviceKey)
+        const registrantId = associations[0]?.registrantId
+        if (registrantId === undefined) continue
+        let matchMethod: AssociationMatchMethod = 'identity'
+        const raw = await rawEvidenceFor(row.id, intake)
+        if (raw.kind === 'code') {
+          const approved = await listApprovedRegistrations(host.ctx.db, authorityId, opener)
+          const verdict = await verifyRegistrationCode(host.ctx.db, opener, raw.code, registrantId, approved, new Map<string, OpenedCode>())
+          matchMethod = verdict === 'matched' ? 'code' : 'identity'
+        }
+        await intake.publishDecision({ requestId: row.id, status: 'a', decidedAt, matchMethod })
+      } else {
+        continue
+      }
+      republished++
+    } catch (err) {
+      if (!isDuplicateDecision(err)) failures++
+    }
+  }
+  return { republished, failures }
+}
+
 /** R0/R1/R2 — the automatic authority-side re-association sync driver (D-41, D-46). */
 export async function processPendingReassociations (
   host: ReassociationHost,
@@ -363,6 +451,10 @@ export async function processPendingReassociations (
 ): Promise<ReassociationProcessingSummary> {
   // R0 — finish any interrupted synthetic rejection first (idempotent).
   const interruptedCompleted = await host.completeInterruptedRejections(authorityId, signatureOrCallback, intake)
+
+  // WR-02 — republish any local transition whose decision never reached the strand.
+  const drained = await republishUndecided(host, authorityId, intake, opener)
+  let publishFailures = drained.failures
 
   let challengesIssued = 0
   let associated = 0
@@ -396,8 +488,13 @@ export async function processPendingReassociations (
       if (review.route === 'automatic' && review.matchMethod === 'code' && review.resolvedRegistrantId !== undefined) {
         const challenge = await host.issueAttestationChallenge(review.resolvedRegistrantId, row.deviceKey, signatureOrCallback, row.electionId)
         await host.writeChallengeTransition(row.id, authorityId, challenge.nonce, signatureOrCallback)
-        await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: new Date().toISOString() })
         challengesIssued++
+        try {
+          await intake.publishDecision({ requestId: row.id, status: 'c', challengeNonce: challenge.nonce, decidedAt: new Date().toISOString() })
+        } catch {
+          // The 'c' transition is written; republishUndecided retries the publish on the next sync.
+          publishFailures++
+        }
       } else {
         awaitingReview++
       }
@@ -471,8 +568,12 @@ export async function processPendingReassociations (
         })
       } catch {
         const decidedAt = await host.writeTerminalTransition(doc.requestId, authorityId, 'r', 'attestation-verification-failed', signatureOrCallback)
-        await intake.publishDecision({ requestId: doc.requestId, status: 'r', reason: 'attestation-verification-failed', decidedAt })
         rejected++
+        try {
+          await intake.publishDecision({ requestId: doc.requestId, status: 'r', reason: 'attestation-verification-failed', decidedAt })
+        } catch {
+          publishFailures++ // drained next sync
+        }
         continue
       }
 
@@ -486,23 +587,38 @@ export async function processPendingReassociations (
       }
 
       const decidedAt = await host.writeTerminalTransition(doc.requestId, authorityId, 'a', null, signatureOrCallback)
-      await intake.publishDecision({
-        requestId: doc.requestId,
-        status: 'a',
-        decidedAt,
-        revokesDeviceKey: devicesToRetire[0],
-        matchMethod
-      })
       associated++
+      try {
+        await intake.publishDecision({
+          requestId: doc.requestId,
+          status: 'a',
+          decidedAt,
+          revokesDeviceKey: devicesToRetire[0],
+          matchMethod
+        })
+      } catch {
+        publishFailures++ // drained next sync (without revokesDeviceKey, T-62-113-03)
+      }
     } catch {
       continue
     }
   }
 
-  return { challengesIssued, associated, rejected, awaitingReview }
+  return {
+    challengesIssued,
+    associated,
+    rejected,
+    awaitingReview,
+    ...(drained.republished > 0 ? { republished: drained.republished } : {}),
+    ...(publishFailures > 0 ? { publishFailures } : {})
+  }
 }
 
-/** Officer approval — every check runs before the first write. */
+/**
+ * Officer approval — every check runs before the first write. The `'c'` transition is written
+ * before its decision is published; if that publish fails, `processPendingReassociations`'s
+ * republish drain publishes it on the next sync (WR-02), so the caller need not retry.
+ */
 export async function approveReassociation (
   host: ReassociationHost,
   requestId: string,
@@ -570,7 +686,8 @@ export async function approveReassociation (
   }
 }
 
-/** Officer rejection — the same row checks as approval, then the synthetic `'p'->'c'->'r'`. */
+/** Officer rejection — the same row checks as approval, then the synthetic `'p'->'c'->'r'`. A failed
+ * publish of the final `'r'` is republished by the next sync's drain (WR-02). */
 export async function rejectReassociation (
   host: ReassociationHost,
   requestId: string,

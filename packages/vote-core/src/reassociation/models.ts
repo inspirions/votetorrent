@@ -153,4 +153,9 @@ export interface ReassociationProcessingSummary {
   readonly associated: number
   readonly rejected: number
   readonly awaitingReview: number
+  /** WR-02 — decisions written locally on an earlier run but never published, published now.
+   * Present ONLY when > 0 (like `closedAsDuplicate`), so a quiet run keeps the four-field shape. */
+  readonly republished?: number
+  /** WR-02 — publishes that failed this run (retried on the next sync). Present ONLY when > 0. */
+  readonly publishFailures?: number
 }
