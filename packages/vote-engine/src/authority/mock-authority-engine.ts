@@ -92,6 +92,10 @@ export class MockAuthorityEngine implements IAuthorityEngine {
     console.log(`MockAuthorityEngine: cancelInvite(${slotCid}) for ${this.authority.name}.`)
   }
 
+  async getPendingInviteCids (): Promise<string[]> {
+    return []
+  }
+
   async resendInvite (slotCid: string): Promise<string> {
     console.log(`MockAuthorityEngine: resendInvite(${slotCid}) for ${this.authority.name}.`)
     return `mock-resent-${slotCid}`

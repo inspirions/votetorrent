@@ -27,7 +27,7 @@ import type { KeyholderInvite, Signature } from '@votetorrent/vote-core'
 import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { ElectionsEngine, peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { allocateTid } from '../src/database/tid-allocator.js'
-import { toCanonicalDatetime } from '../src/utils.js'
+import { nowCanonicalDatetime, toCanonicalDatetime } from '../src/utils.js'
 import type { AuthorityEngine } from '../src/authority/authority-engine.js'
 import { MockElectionEngine } from '../src/election/mock-election-engine.js'
 import {
@@ -132,6 +132,32 @@ async function projection (fx: Fixture) {
   return (await fx.electionEngine.getElectionDetails()).current.keyholders
 }
 
+/** A resend row for a 'k' slot, written raw (resendInvite refuses 'k'): same fields as the original plus a ResendSalt. */
+async function insertRawResendSlot (fx: Fixture, origCid: string): Promise<string> {
+  const db = fx.auth.ctx.db
+  const orig = await db
+    .prepare('select Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce, ElectionId from InviteSlot where Cid = :cid')
+    .get({ cid: origCid })
+  const tid = await allocateTid(db, 'authority')
+  const now = nowCanonicalDatetime()
+  const resendSalt = `resend|${tid}|${now}`
+  const fields = {
+    expiration: orig!.Expiration as string, inviteKey: orig!.InviteKey as string, inviteSignature: orig!.InviteSignature as string,
+    name: orig!.Name as string, nonce: orig!.SigningNonce as string, type: orig!.Type as string, resendSalt,
+  }
+  const cidRow = await db
+    .prepare('select cid(Digest(:expiration, :inviteKey, :inviteSignature, :name, :nonce, :type, :resendSalt)) as c')
+    .get(fields)
+  const cid = cidRow!.c as string
+  await db.exec(
+    `insert into InviteSlot (Cid, Type, Name, Expiration, InviteKey, InviteSignature, SigningNonce, ElectionId, ResendSalt)
+      with context Tid = ${tid}, now = :now, IsSignatureValid = true, IsInsertValid = true
+      values (:cid, :type, :name, :expiration, :inviteKey, :inviteSignature, :nonce, :electionId, :resendSalt)`,
+    { ...fields, cid, now, electionId: orig!.ElectionId as string },
+  )
+  return cid
+}
+
 describe('keyholder invite sent state (62-76)', () => {
   it('S1: a sent invitee is live, a never-invited invitee has no sent field, neither has a result', async () => {
     const fx = await createElectionWithInvitees(['Kay', 'Lee'])
@@ -191,13 +217,19 @@ describe('keyholder invite sent state (62-76)', () => {
   it('S5: a resent invitation yields exactly one sent entry, live (the head decides)', async () => {
     const fx = await createElectionWithInvitees(['Kay', 'Lee'])
     const cid = await send(fx, makeInvite('Kay'))
-    await (fx.auth.authorityEngine as unknown as AuthorityEngine).cancelInvite(cid)
+    const authorityEngine = fx.auth.authorityEngine as unknown as AuthorityEngine
+    await authorityEngine.cancelInvite(cid)
     expect((await projection(fx))[0]!.sent?.state).to.equal('no-longer-valid')
-    await (fx.auth.authorityEngine as unknown as AuthorityEngine).resendInvite(cid)
+    // 62-104 (gap7/IN-07): AuthorityEngine.resendInvite refuses a 'k' slot, so the resent row arrives the way a
+    // replicated one would: a raw resend-slot insert with resendInvite's column set and Cid formula.
+    await insertRawResendSlot(fx, cid)
     const kh = await projection(fx)
     expect(kh).to.have.length(2)
     expect(kh[0]!.sent?.state).to.equal('live')
     expect(kh[1]!.sent).to.equal(undefined)
+    let code: string | undefined
+    try { await authorityEngine.resendInvite(cid) } catch (err) { code = (err as { code?: string }).code }
+    expect(code).to.equal('invite-type-not-resendable')
   })
 
   it('S6: two invitees with the same Name and one slot - the first absorbs it, no duplicate, no crash', async () => {

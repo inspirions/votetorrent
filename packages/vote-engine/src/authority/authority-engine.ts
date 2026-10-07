@@ -18,7 +18,8 @@ import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { adminSigningKeyValidity } from '../signing/signer-validity.js';
 import { allocateTid } from '../database/tid-allocator.js';
-import { readInviteChain } from '../invite/read-invite-chain.js';
+import { readInviteChain, readInviteChainDetailed } from '../invite/read-invite-chain.js';
+import { withInviteWriteSerial } from '../invite/invite-write-serial.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
 import {
 	adminSignatureTaskExtensionInserter,
@@ -88,6 +89,11 @@ import {
 
 /** Stable code on the refusal of cancelling or re-sending an answered invitation; the app maps it by code, never by message. */
 const INVITE_ALREADY_ANSWERED = 'invite-already-answered';
+const INVITE_NOT_AUTHORIZED = 'invite-not-authorized';
+const INVITE_TYPE_NOT_RESENDABLE = 'invite-type-not-resendable';
+
+/** The scope that issues each invitation type; a type absent here has no administrator scope. */
+const INVITE_ISSUING_SCOPE: Record<string, Scope> = { of: 'rad', au: 'iad', k: 'ik' };
 
 /**
  * 57-01 (D-02): one entry in the admin roster covered by the 'rad' digest.
@@ -1395,6 +1401,45 @@ export class AuthorityEngine implements IAuthorityEngine {
 	}
 
 	/**
+	 * Who may withdraw or re-send an invitation (user decision 8b; re-opens and closes AR-62-141/142):
+	 * the officer who sent it (AdminSigning.UserId of its signing session), or a CURRENT officer of THIS
+	 * authority holding the scope that issues that invitation type (rad for 'of', iad for 'au', ik for
+	 * 'k'). Anyone else, including another authority's engine and a context with no user, is refused with
+	 * code 'invite-not-authorized' before any write.
+	 *
+	 * Residual (T-62-104-02): this governs THIS device's engine only. A forged, unsigned
+	 * InviteCancellation replicating in still closes an invitation; a signed marker is a schema change (D-1).
+	 */
+	private async assertMayManageInvite(slot: { Type: string; SigningNonce: string }): Promise<void> {
+		const refuse = (): never => {
+			throw Object.assign(
+				new Error('Only the officer who sent this invitation, or an administrator of this authority, can withdraw or re-send it'),
+				{ code: INVITE_NOT_AUTHORIZED },
+			);
+		};
+		const userId = this.ctx.user?.id;
+		if (typeof userId !== 'string' || userId.length === 0) return refuse();
+		const signing = await this.ctx.db
+			.prepare('select AuthorityId, UserId from AdminSigning where Nonce = :nonce')
+			.get({ nonce: slot.SigningNonce });
+		if (!signing || signing.AuthorityId !== this.authority.id) return refuse();
+		if (signing.UserId === userId) return;
+		const scope = INVITE_ISSUING_SCOPE[slot.Type];
+		if (scope === undefined) return refuse();
+		const officer = await this.ctx.db
+			.prepare(
+				`select 1 as found
+				   from Officer O
+				   join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+				  where O.AuthorityId = :authorityId and O.UserId = :userId
+				    and exists (select 1 from json_each(O.Scopes) where value = :scopeCode)
+				  limit 1`,
+			)
+			.get({ authorityId: this.authority.id, userId, scopeCode: scope });
+		if (!officer) return refuse();
+	}
+
+	/**
 	 * SURF-03 (D-05/D-06): cancel a pending invitation by inserting append-only
 	 * InviteCancellation markers. NON-signing: the context envelope carries only
 	 * Tid + now. InviteSlot rows are never mutated (InsertOnly).
@@ -1423,53 +1468,52 @@ export class AuthorityEngine implements IAuthorityEngine {
 			if (!slot) {
 				throw new Error(`InviteSlot not found: ${slotCid}`);
 			}
-			await this.assertChainUnanswered({
-				InviteKey: slot.InviteKey as string,
-				Type: slot.Type as string,
-				SigningNonce: slot.SigningNonce as string,
-			});
-			// The chain: two-equality read, SigningNonce filtered in TypeScript so an
-			// unrelated invite that shares a key is never cancelled.
-			const chain: string[] = [];
-			for await (const row of this.ctx.db.eval(
-				'select Cid, SigningNonce from InviteSlot where InviteKey = :inviteKey and Type = :slotType',
-				{ inviteKey: slot.InviteKey as string, slotType: slot.Type as string },
-			)) {
-				if (row.SigningNonce === slot.SigningNonce) chain.push(row.Cid as string);
-			}
-			const toCancel: string[] = [];
-			for (const cid of chain) {
-				const marker = await this.ctx.db
-					.prepare('select 1 as x from InviteCancellation where SlotCid = :slotCid')
-					.get({ slotCid: cid });
-				if (!marker) toCancel.push(cid);
-			}
-			if (toCancel.length === 0) {
-				return;
-			}
-			// Allocate to a local first, then interpolate (the site sits inside a
-			// `with context` string, not a bound param).
-			const tid = await allocateTid(this.ctx.db, 'authority');
-			const now = nowCanonicalDatetime();
-			await this.ctx.db.exec('BEGIN');
-			try {
-				for (const cid of toCancel) {
-					await this.ctx.db.exec(
-						`insert into InviteCancellation (SlotCid, CancelledAt)
-							with context Tid = ${tid}, now = :now
-						values (:slotCid, :now)`,
-						{ slotCid: cid, now },
-					);
-				}
-				await this.ctx.db.exec('COMMIT');
-			} catch (innerErr) {
+			const inviteKey = slot.InviteKey as string;
+			const slotType = slot.Type as string;
+			const nonce = slot.SigningNonce as string;
+			await this.assertMayManageInvite({ Type: slotType, SigningNonce: nonce });
+			const db = this.ctx.db;
+			// The chain read, the 'answered' check and the markers share one serialized transaction
+			// (gap7/IN-04): an InviteResult that lands first makes this refuse, with no marker.
+			await withInviteWriteSerial(db, async () => {
+				// Allocate to a local first, then interpolate (the site sits inside a
+				// `with context` string, not a bound param).
+				const tid = await allocateTid(db, 'authority');
+				const now = nowCanonicalDatetime();
+				await db.exec('BEGIN');
 				try {
-					await this.ctx.db.exec('ROLLBACK');
-				} catch {
-					// already rolled back by the failed statement — the original error is what matters.
+					const detail = await readInviteChainDetailed(db, inviteKey, slotType, nowCanonicalDatetime(), nonce);
+					if (detail.resolution.status === 'answered') {
+						throw Object.assign(
+							new Error('This invitation has already been answered, so it can no longer be withdrawn or re-sent'),
+							{ code: INVITE_ALREADY_ANSWERED },
+						);
+					}
+					for (const row of detail.rows) {
+						if (row.cancelled) continue;
+						await db.exec(
+							`insert into InviteCancellation (SlotCid, CancelledAt)
+								with context Tid = ${tid}, now = :now
+							values (:slotCid, :now)`,
+							{ slotCid: row.cid, now },
+						);
+					}
+					await db.exec('COMMIT');
+				} catch (innerErr) {
+					try {
+						await db.exec('ROLLBACK');
+					} catch {
+						// already rolled back by the failed statement - the original error is what matters.
+					}
+					// A marker replicated in between our read and our insert collides on the primary key:
+					// the withdrawal is then already in place, so resolve when every row now has a marker.
+					if (/InviteCancellation/i.test(String((innerErr as Error)?.message ?? ''))) {
+						const again = await readInviteChainDetailed(db, inviteKey, slotType, nowCanonicalDatetime(), nonce);
+						if (again.rows.length > 0 && again.rows.every(r => r.cancelled)) return;
+					}
+					throw innerErr;
 				}
-				throw innerErr;
-			}
+			});
 		} catch (err) {
 			this.rethrow(err, 'cancelInvite');
 		}
@@ -1505,101 +1549,123 @@ export class AuthorityEngine implements IAuthorityEngine {
 			if (!orig) {
 				throw new Error(`InviteSlot not found: ${slotCid}`);
 			}
-			await this.assertChainUnanswered({
-				InviteKey: orig.InviteKey as string,
-				Type: orig.Type as string,
-				SigningNonce: orig.SigningNonce as string,
-			});
-			const tid = await allocateTid(this.ctx.db, 'authority');
-			const now = nowCanonicalDatetime();
-			const resendSalt = `resend|${tid}|${now}`;
-			// WR-02: pre-compute the new row's Cid deterministically (same
-			// 7-field order the CidValid resend branch re-derives) instead of
-			// discovering it via a post-insert SELECT. Once a SigningNonce
-			// chain has 3+ rows, `Cid <> :origCid` matches more than one row
-			// and a non-unique lookup can non-deterministically return a
-			// stale Cid from an earlier resend in the chain.
-			const newCidRow = await this.ctx.db
-				.prepare(
-					`select cid(Digest(:expiration, :inviteKey, :inviteSignature, :name, :nonce, :type, :resendSalt)) as c`,
-				)
-				.get({
-					expiration: orig.Expiration as string,
-					inviteKey: orig.InviteKey as string,
-					inviteSignature: orig.InviteSignature as string,
-					name: orig.Name as string,
-					nonce: orig.SigningNonce as string,
-					type: orig.Type as string,
-					resendSalt,
-				});
-			const newCid = newCidRow!.c as string;
-			// Fresh, unique Cid: same fields as the original PLUS the resend
-			// timestamp and Tid salt, so the Digest (and therefore the Cid PK)
-			// differs from the original while the approval-bearing SigningNonce /
-			// InviteSignature are reused verbatim (A2 — no new signing round).
-			//
-			// 999.1 R-03: no new signing round happens on resend, so there is no
-			// fresh byte domain to verify against for an 'au' or 'of' invite the
-			// same way saveAuthorityInvite/saveOfficerInvite do. 'au' invites are
-			// fully re-verifiable (InviteSlot persists Type/Name/Expiration —
-			// createAuthorityInvite's whole [type, name, expiration] domain).
-			// 'of' invites are NOT: InviteSlot never persists Title/Scopes (see
-			// the getPendingOfficerInvites doc comment — "InviteSlot stores only
-			// Name"), so createOfficerInvite's [name, title, scopes, type,
-			// expiration, inviteKey] domain cannot be reconstructed from stored
-			// columns alone. This is a genuine data-availability gap, not a
-			// fabricated `true`: the InviteSignature/InviteKey pair being
-			// re-inserted here is copied byte-for-byte from `orig`, an
-			// immutable (InsertOnly CHECK), already-real-signature-verified row
-			// — not a fresh unverified claim. Documented limitation (999.1-09
-			// SUMMARY); a full fix needs InviteSlot to persist Title/Scopes.
-			const isSignatureValid = orig.Type === 'au'
-				? verifyAdHocInviteSignature(
-					authorityInviteSignedBytes({
-						type: orig.Type as string,
-						name: orig.Name as string,
-						expiration: orig.Expiration as string,
-					}),
-					orig.InviteSignature as string,
-					orig.InviteKey as string,
-				)
-				: true;
-			await this.ctx.db.exec(
-				`insert into InviteSlot (
-					Cid,
-					Type,
-					Name,
-					Expiration,
-					InviteKey,
-					InviteSignature,
-					SigningNonce,
-					ResendSalt
+			// Only officer and authority invitations are re-sent (gap7/IN-07): a keyholder slot has no
+			// re-send path (its seat is re-invited by a new inviteKeyholder).
+			if (orig.Type !== 'of' && orig.Type !== 'au') {
+				throw Object.assign(
+					new Error('Only officer and authority invitations can be re-sent'),
+					{ code: INVITE_TYPE_NOT_RESENDABLE },
+				);
+			}
+			await this.assertMayManageInvite({ Type: orig.Type as string, SigningNonce: orig.SigningNonce as string });
+			return await withInviteWriteSerial(this.ctx.db, async () => {
+				const tid = await allocateTid(this.ctx.db, 'authority');
+				const now = nowCanonicalDatetime();
+				const resendSalt = `resend|${tid}|${now}`;
+				// WR-02: pre-compute the new row's Cid deterministically (same
+				// 7-field order the CidValid resend branch re-derives) instead of
+				// discovering it via a post-insert SELECT. Once a SigningNonce
+				// chain has 3+ rows, `Cid <> :origCid` matches more than one row
+				// and a non-unique lookup can non-deterministically return a
+				// stale Cid from an earlier resend in the chain.
+				const newCidRow = await this.ctx.db
+					.prepare(
+						`select cid(Digest(:expiration, :inviteKey, :inviteSignature, :name, :nonce, :type, :resendSalt)) as c`,
 					)
-					with context Tid = ${tid}, now = :now, IsSignatureValid = :isSignatureValid, IsInsertValid = true
-				values (
-					:cid,
-					:type,
-					:name,
-					:expiration,
-					:inviteKey,
-					:inviteSignature,
-					:nonce,
-					:resendSalt
-					)`,
-				{
-					cid: newCid,
-					type: orig.Type as string,
-					name: orig.Name as string,
-					expiration: orig.Expiration as string,
-					inviteKey: orig.InviteKey as string,
-					inviteSignature: orig.InviteSignature as string,
-					nonce: orig.SigningNonce as string,
-					resendSalt,
-					now,
-					isSignatureValid,
-				},
-			);
-			return newCid;
+					.get({
+						expiration: orig.Expiration as string,
+						inviteKey: orig.InviteKey as string,
+						inviteSignature: orig.InviteSignature as string,
+						name: orig.Name as string,
+						nonce: orig.SigningNonce as string,
+						type: orig.Type as string,
+						resendSalt,
+					});
+				const newCid = newCidRow!.c as string;
+				// Fresh, unique Cid: same fields as the original PLUS the resend
+				// timestamp and Tid salt, so the Digest (and therefore the Cid PK)
+				// differs from the original while the approval-bearing SigningNonce /
+				// InviteSignature are reused verbatim (A2 — no new signing round).
+				//
+				// 999.1 R-03: no new signing round happens on resend, so there is no
+				// fresh byte domain to verify against for an 'au' or 'of' invite the
+				// same way saveAuthorityInvite/saveOfficerInvite do. 'au' invites are
+				// fully re-verifiable (InviteSlot persists Type/Name/Expiration —
+				// createAuthorityInvite's whole [type, name, expiration] domain).
+				// 'of' invites are NOT: InviteSlot never persists Title/Scopes (see
+				// the getPendingOfficerInvites doc comment — "InviteSlot stores only
+				// Name"), so createOfficerInvite's [name, title, scopes, type,
+				// expiration, inviteKey] domain cannot be reconstructed from stored
+				// columns alone. This is a genuine data-availability gap, not a
+				// fabricated `true`: the InviteSignature/InviteKey pair being
+				// re-inserted here is copied byte-for-byte from `orig`, an
+				// immutable (InsertOnly CHECK), already-real-signature-verified row
+				// — not a fresh unverified claim. Documented limitation (999.1-09
+				// SUMMARY); a full fix needs InviteSlot to persist Title/Scopes.
+				const isSignatureValid = orig.Type === 'au'
+					? verifyAdHocInviteSignature(
+						authorityInviteSignedBytes({
+							type: orig.Type as string,
+							name: orig.Name as string,
+							expiration: orig.Expiration as string,
+						}),
+						orig.InviteSignature as string,
+						orig.InviteKey as string,
+					)
+					: true;
+				await this.ctx.db.exec('BEGIN');
+				try {
+					await this.assertChainUnanswered({
+						InviteKey: orig.InviteKey as string,
+						Type: orig.Type as string,
+						SigningNonce: orig.SigningNonce as string,
+					});
+					await this.ctx.db.exec(
+						`insert into InviteSlot (
+							Cid,
+							Type,
+							Name,
+							Expiration,
+							InviteKey,
+							InviteSignature,
+							SigningNonce,
+							ResendSalt
+							)
+							with context Tid = ${tid}, now = :now, IsSignatureValid = :isSignatureValid, IsInsertValid = true
+						values (
+							:cid,
+							:type,
+							:name,
+							:expiration,
+							:inviteKey,
+							:inviteSignature,
+							:nonce,
+							:resendSalt
+							)`,
+						{
+							cid: newCid,
+							type: orig.Type as string,
+							name: orig.Name as string,
+							expiration: orig.Expiration as string,
+							inviteKey: orig.InviteKey as string,
+							inviteSignature: orig.InviteSignature as string,
+							nonce: orig.SigningNonce as string,
+							resendSalt,
+							now,
+							isSignatureValid,
+						},
+					);
+					await this.ctx.db.exec('COMMIT');
+				} catch (innerErr) {
+					try {
+						await this.ctx.db.exec('ROLLBACK');
+					} catch {
+						// already rolled back by the failed statement.
+					}
+					throw innerErr;
+				}
+				return newCid;
+			});
 		} catch (err) {
 			this.rethrow(err, 'resendInvite');
 		}

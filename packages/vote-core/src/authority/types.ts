@@ -31,6 +31,12 @@ export interface IAuthorityEngine {
    */
   cancelInvite(slotCid: string): Promise<void>
   /**
+   * The officer-reachable pending list (H-5): the Cids of this authority's officer ('of') invitations
+   * whose share chain is still live (neither answered, withdrawn nor expired). One Cid per share, the
+   * live head.
+   */
+  getPendingInviteCids(): Promise<string[]>
+  /**
    * SURF-03 (D-05/D-07): re-emit a pending invitation as a FRESH InviteSlot.
    * NON-signing this phase — reuses the original slot's already-approved
    * SigningNonce + InviteSignature (A2), so no new signing round is performed.
