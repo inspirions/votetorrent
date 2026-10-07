@@ -1358,11 +1358,56 @@ export class ElectionEngine implements IElectionEngine {
    * but whose finalize failed (AdminSignature committed, Task open, no Ballot row) now reads
    * locked, matching proposeBallot and submitBallotForConfirmation, which refuse it.
    * `confirmed` = a finalized Ballot row exists for this id.
+   * `canWithdraw` (gap8/WR-03) = locked, at least one open session has not reached its threshold,
+   * and every such session was initiated by the calling officer (what withdrawBallotConfirmation
+   * accepts). `ownTaskOpen` (gap6/WR-02) = locked and the caller has an open ballot Task here.
    */
-  async getBallotConfirmationState (ballotId: string): Promise<{ locked: boolean; confirmed: boolean }> {
+  async getBallotConfirmationState (
+    ballotId: string
+  ): Promise<{ locked: boolean; confirmed: boolean; canWithdraw: boolean; ownTaskOpen: boolean }> {
     try {
       const { open, confirmed } = await this.readBallotLock(ballotId)
-      return { locked: open && !confirmed, confirmed }
+      const locked = open && !confirmed
+      if (!locked) {
+        return { locked, confirmed, canWithdraw: false, ownTaskOpen: false }
+      }
+      const userId = this.ctx.user?.id ?? null
+
+      // gap8/WR-03: who may withdraw. Same join and same refusals as withdrawBallotConfirmation:
+      // a session that already reached its threshold (AdminSignature row) can no longer be
+      // withdrawn, and every unreached open session must have been initiated by the caller.
+      // NOT EXISTS (not IN) per the Quereus AND+IN trap.
+      const initiators = new Set<string | null>()
+      for await (const row of this.ctx.db.eval(
+        `select distinct A.UserId as InitiatorUserId
+           from Task T
+             join BallotSignatureTaskExtension B on B.TaskId = T.Id
+             join AdminSigning A on A.Nonce = T.SigningNonce
+           where B.BallotId = :ballotId
+             and T.Type = 'signature'
+             and T.SignatureType = 'ballot'
+             and T.IsCompleted = 0
+             and not exists (select 1 from AdminSignature S where S.SigningNonce = T.SigningNonce)`,
+        { ballotId }
+      )) {
+        initiators.add((row.InitiatorUserId as string | null | undefined) ?? null)
+      }
+      const canWithdraw = userId !== null && initiators.size > 0 && [...initiators].every((i) => i === userId)
+
+      // gap6/WR-02: does THIS officer have an open confirmation task for the ballot? At
+      // threshold 1 the submitter owns one; above 1 the fan-out excludes the initiator.
+      let ownTaskOpen = false
+      if (userId !== null) {
+        const own = await this.ctx.db
+          .prepare(
+            `select 1 as x from Task T join BallotSignatureTaskExtension B on B.TaskId = T.Id
+             where B.BallotId = :ballotId and T.UserId = :userId
+               and T.Type = 'signature' and T.SignatureType = 'ballot' and T.IsCompleted = 0`
+          )
+          .get({ ballotId, userId })
+        ownTaskOpen = own !== undefined
+      }
+      return { locked, confirmed, canWithdraw, ownTaskOpen }
     } catch (err) {
       this.rethrow(err, 'getBallotConfirmationState')
     }

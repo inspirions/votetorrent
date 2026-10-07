@@ -107,7 +107,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 1)', function () {
     const elec = await setupElection()
     const { ballotId } = await seedProposedBallot(elec)
     await elec.electionEngine.submitBallotForConfirmation(ballotId)
-    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: true })
   })
 
   it('S2: a second submit is refused with row counts unchanged', async () => {
@@ -137,7 +138,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 1)', function () {
     await elec.electionEngine.submitBallotForConfirmation(ballotId)
     await elec.electionEngine.withdrawBallotConfirmation(ballotId)
     await elec.electionEngine.submitBallotForConfirmation(ballotId)
-    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: true })
   })
 
   it('S5: reached-but-unfinalized reads locked, refuses propose and submit, and unlocks once finalized', async () => {
@@ -163,7 +165,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 1)', function () {
       expect(await count(db, 'select count(*) as n from Task where SigningNonce = :nonce and IsCompleted = 0', { nonce })).to.equal(1)
       expect(await count(db, 'select count(*) as n from Ballot where Id = :ballotId', { ballotId })).to.equal(0)
 
-      expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false })
+      // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+      expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false, canWithdraw: false, ownTaskOpen: true })
 
       const rowBefore = await db.prepare('select * from ProposedBallot where Id = :ballotId').get({ ballotId })
       const row = rowBefore as Record<string, unknown>
@@ -188,7 +191,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 1)', function () {
     }
 
     await accept1(elec, ballotId)
-    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: false, confirmed: true })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
   })
 })
 
@@ -253,7 +257,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 2)', function () {
       expect(msg).to.include('forced finalize fault')
       expect(await count(db, 'select count(*) as n from Ballot where Id = :ballotId', { ballotId })).to.equal(0)
 
-      expect(await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false })
+      // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+      expect(await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: true, confirmed: false, canWithdraw: false, ownTaskOpen: false })
 
       const before = await counts(db)
       const probe = countingSign(fx)
@@ -265,7 +270,8 @@ describe('submitBallotForConfirmation lock (WR-04, threshold 2)', function () {
     }
 
     await engine1.completeSignature(task1, { isAccepted: true, signature: sig1, sign: fx.holders[1]!.sign })
-    expect(await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: false, confirmed: true })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await fx.elec.electionEngine.getBallotConfirmationState(ballotId)).to.deep.equal({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
     expect((await openUsers(db, nonce)).length, 'D-09 siblings stay open').to.be.greaterThan(0)
   })
 })

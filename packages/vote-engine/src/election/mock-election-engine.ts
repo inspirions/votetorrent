@@ -58,6 +58,19 @@ export class MockBallotConfirmationState {
 	set(ballotId: string, value: 'proposed' | 'submitted' | 'confirmed'): void {
 		this.state.set(ballotId, value);
 	}
+
+	// gap8/WR-03: who submitted each ballot (the real engine's AdminSigning.UserId), so the mock
+	// can refuse a withdraw by anyone else exactly as the real engine does.
+	private submitters: Map<string, string> = new Map();
+
+	getSubmitter(ballotId: string): string | undefined {
+		return this.submitters.get(ballotId);
+	}
+
+	setSubmitter(ballotId: string, userId: string | undefined): void {
+		if (userId === undefined) this.submitters.delete(ballotId);
+		else this.submitters.set(ballotId, userId);
+	}
 }
 
 export class MockElectionEngine implements IElectionEngine {
@@ -79,8 +92,18 @@ export class MockElectionEngine implements IElectionEngine {
 	// never-invited invitees carry no `sent`.
 	private sentKeyholderInvites = new Map<string, string[]>();
 
-	constructor(confirmationState?: MockBallotConfirmationState) {
+	// gap8/WR-03: the officer this mock acts as. Default keeps every existing caller behaving as
+	// one officer who submits and may withdraw.
+	private currentUserId: string;
+
+	constructor(confirmationState?: MockBallotConfirmationState, currentUserId: string = 'mock-officer') {
 		this.confirmationState = confirmationState ?? new MockBallotConfirmationState();
+		this.currentUserId = currentUserId;
+	}
+
+	/** Switch the officer this mock acts as (screen/parity tests for the non-submitter case). */
+	setCurrentUser(userId: string): void {
+		this.currentUserId = userId;
 	}
 
 	async getBallotDetails(id: string): Promise<BallotDetails> {
@@ -261,6 +284,7 @@ export class MockElectionEngine implements IElectionEngine {
 		}
 		// D-04 parity: ProposedBallot (this.ballots entry) is retained — only the state flag changes.
 		this.confirmationState.set(ballotId, 'submitted');
+		this.confirmationState.setSubmitter(ballotId, this.currentUserId);
 	}
 
 	async withdrawBallotConfirmation(ballotId: string): Promise<void> {
@@ -268,14 +292,28 @@ export class MockElectionEngine implements IElectionEngine {
 		if (current !== 'submitted') {
 			throw new Error(`Ballot ${ballotId} is not currently submitted (state: ${current})`);
 		}
+		// Real-engine parity (T-62-11-03): only the officer who submitted may withdraw.
+		// A state seeded straight through MockBallotConfirmationState.set has no recorded submitter;
+		// that is not "someone else", so it stays withdrawable.
+		const submitter = this.confirmationState.getSubmitter(ballotId);
+		if (submitter !== undefined && submitter !== this.currentUserId) {
+			throw new Error('withdrawBallotConfirmation: Only the officer who submitted this ballot can withdraw it.');
+		}
 		this.confirmationState.set(ballotId, 'proposed');
+		this.confirmationState.setSubmitter(ballotId, undefined);
 	}
 
-	async getBallotConfirmationState(ballotId: string): Promise<{ locked: boolean; confirmed: boolean }> {
+	async getBallotConfirmationState(
+		ballotId: string,
+	): Promise<{ locked: boolean; confirmed: boolean; canWithdraw: boolean; ownTaskOpen: boolean }> {
 		const state = this.confirmationState.get(ballotId);
+		const mine = state === 'submitted' && this.confirmationState.getSubmitter(ballotId) === this.currentUserId;
 		return {
 			locked: state === 'submitted',
 			confirmed: state === 'confirmed',
+			// Threshold-1 model: the submitter may withdraw and owns the one open confirmation task.
+			canWithdraw: mine,
+			ownTaskOpen: mine,
 		};
 	}
 

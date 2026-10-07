@@ -441,7 +441,8 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		const ballots = await electionEngine.getBallots()
 		expect(ballots).toHaveLength(1)
 		for (const b of ballots) {
-			expect(await electionEngine.getBallotConfirmationState(b.id)).toEqual({ locked: false, confirmed: true })
+			// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+			expect(await electionEngine.getBallotConfirmationState(b.id)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 		}
 		const details = await electionEngine.getBallotDetails(ballots[0]!.id)
 		const required = Object.fromEntries(details.ballot.questions.map((q) => [q.code, q.required]))
@@ -468,7 +469,8 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 
 		const electionEngine = await new ElectionsEngine(ctx).openElection(second.electionId)
 		const [only] = await electionEngine.getBallots()
-		expect(await electionEngine.getBallotConfirmationState(only!.id)).toEqual({ locked: false, confirmed: true })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(only!.id)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 		expect(await count('select count(*) as n from Ballot where ElectionId = :e', e)).toBe(1)
 		expect(await count('select count(*) as n from ProposedBallot where ElectionId = :e', e)).toBe(1)
 		expect(await count("select count(*) as n from Task where SignatureType = 'ballot'")).toBe(1)
@@ -512,7 +514,8 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		expect((await electionEngine.getBallotConfirmationState(extra.id)).confirmed).toBe(false)
 
 		await seedDevNetwork(networksEngine)
-		expect(await electionEngine.getBallotConfirmationState(extra.id)).toEqual({ locked: false, confirmed: true })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(extra.id)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 	})
 
 	it('D-03: confirmDevBallot confirms a proposed ballot, is idempotent, and resumes a submitted-but-unconfirmed one', async () => {
@@ -522,7 +525,8 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		const proposedOnly = extraBallot(seeded, authorityId)
 		await electionEngine.proposeBallot(proposedOnly)
 		await confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, proposedOnly.id, seeded.sign)
-		expect(await electionEngine.getBallotConfirmationState(proposedOnly.id)).toEqual({ locked: false, confirmed: true })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(proposedOnly.id)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 		await expect(
 			confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, proposedOnly.id, seeded.sign),
 		).resolves.toBeUndefined()
@@ -533,9 +537,11 @@ describe('dev-seed — D-05/D-07/D-08 founding-officer seed + real signed regist
 		const resumed = extraBallot(seeded, authorityId)
 		await electionEngine.proposeBallot(resumed)
 		await electionEngine.submitBallotForConfirmation(resumed.id)
-		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: true, confirmed: false })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: true })
 		await confirmDevBallot(ctx, seeded.networkReference, seeded.electionId, resumed.id, seeded.sign)
-		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: false, confirmed: true })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(resumed.id)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 		expect(await taskCount()).toBe(3)
 	})
 
@@ -664,7 +670,8 @@ describe('A7 — a mel-only founding officer confirms a threshold-1 ballot', () 
 		const digest = await tasks.getSignatureDigest(task!)
 		await tasks.completeSignature(task!, { isAccepted: true, signature: await seeded.sign(digest), sign: seeded.sign })
 
-		expect(await electionEngine.getBallotConfirmationState(probeId)).toEqual({ locked: false, confirmed: true })
+		// gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+		expect(await electionEngine.getBallotConfirmationState(probeId)).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
 		expect(await ctx.db.prepare('select Id from Ballot where Id = :id').get({ id: probeId })).toBeTruthy()
 		expect((await electionEngine.getBallotDetails(probeId)).ballot.questions).toHaveLength(1)
 

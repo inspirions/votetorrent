@@ -47,8 +47,13 @@ export interface IElectionEngine {
   submitBallotForConfirmation(ballotId: string, sign?: (digest: Uint8Array) => Promise<Signature>): Promise<void>
   /** D-05: Deletes the pending Task + BallotSignatureTaskExtension, unlocking the proposed ballot for editing. */
   withdrawBallotConfirmation(ballotId: string): Promise<void>
-  /** D-05 / D-09: Returns the edit-lock state (locked = pending Task exists) and confirmation state (confirmed = finalized Ballot exists). */
-  getBallotConfirmationState(ballotId: string): Promise<{ locked: boolean; confirmed: boolean }>
+  /**
+   * D-05 / D-09: Returns the edit-lock state (locked = pending Task exists) and confirmation state
+   * (confirmed = finalized Ballot exists). `canWithdraw` = an unreached open session whose
+   * AdminSigning.UserId is the caller (the same rule withdrawBallotConfirmation enforces).
+   * `ownTaskOpen` = an open ballot Task for this ballot whose UserId is the caller.
+   */
+  getBallotConfirmationState(ballotId: string): Promise<{ locked: boolean; confirmed: boolean; canWithdraw: boolean; ownTaskOpen: boolean }>
   buildProposeBallot(): IElectionProposeBallotBuilder
   buildProposeRevision(): IElectionProposeRevisionBuilder
   buildInviteKeyholder(): IElectionInviteKeyholderBuilder

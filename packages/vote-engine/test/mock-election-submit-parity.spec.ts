@@ -30,14 +30,16 @@ describe('MockElectionEngine submit parity (62-55)', () => {
     expect(thrown, 'submit of a never-proposed id must reject').to.be.instanceOf(Error)
     expect((thrown as Error).message).to.equal('ProposedBallot not found: never-proposed')
     const state = await engine.getBallotConfirmationState('never-proposed')
-    expect(state).to.deep.equal({ locked: false, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(state).to.deep.equal({ locked: false, confirmed: false, canWithdraw: false, ownTaskOpen: false })
   })
 
   it('accepts a proposed ballot and locks it; refuses a second submit', async () => {
     const engine = new MockElectionEngine(new MockBallotConfirmationState())
     await engine.proposeBallot(ballot('b1'))
     await engine.submitBallotForConfirmation('b1')
-    expect(await engine.getBallotConfirmationState('b1')).to.deep.equal({ locked: true, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await engine.getBallotConfirmationState('b1')).to.deep.equal({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: true })
     let msg = ''
     try {
       await engine.submitBallotForConfirmation('b1')
@@ -52,7 +54,8 @@ describe('MockElectionEngine submit parity (62-55)', () => {
     await engine.proposeBallot(ballot('b2'))
     await engine.submitBallotForConfirmation('b2')
     await engine.withdrawBallotConfirmation('b2')
-    expect(await engine.getBallotConfirmationState('b2')).to.deep.equal({ locked: false, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(await engine.getBallotConfirmationState('b2')).to.deep.equal({ locked: false, confirmed: false, canWithdraw: false, ownTaskOpen: false })
     engine.markBallotConfirmed('b2')
     let msg = ''
     try {
@@ -113,5 +116,29 @@ describe('MockElectionEngine submit parity (62-55)', () => {
     let confirmed = ''
     try { await engine.submitBallotForConfirmation('b6') } catch (e) { confirmed = (e as Error).message }
     expect(confirmed).to.equal('This ballot is already confirmed.')
+  })
+
+  it('M-1: a withdraw by anyone but the submitter is refused with the real engine message (gap8/WR-03)', async () => {
+    const engine = new MockElectionEngine(new MockBallotConfirmationState(), 'u1')
+    await engine.proposeBallot(ballot('b7'))
+    await engine.submitBallotForConfirmation('b7')
+    engine.setCurrentUser('u2')
+    expect(await engine.getBallotConfirmationState('b7')).to.deep.equal({
+      locked: true, confirmed: false, canWithdraw: false, ownTaskOpen: false,
+    })
+    let msg = ''
+    try { await engine.withdrawBallotConfirmation('b7') } catch (e) { msg = (e as Error).message }
+    expect(msg).to.equal('withdrawBallotConfirmation: Only the officer who submitted this ballot can withdraw it.')
+    engine.setCurrentUser('u1')
+    await engine.withdrawBallotConfirmation('b7')
+    expect((await engine.getBallotConfirmationState('b7')).locked).to.equal(false)
+  })
+
+  it('M-2: a mock built with no user submits and withdraws as the default officer', async () => {
+    const engine = new MockElectionEngine()
+    await engine.proposeBallot(ballot('b8'))
+    await engine.submitBallotForConfirmation('b8')
+    expect((await engine.getBallotConfirmationState('b8')).canWithdraw).to.equal(true)
+    await engine.withdrawBallotConfirmation('b8')
   })
 })

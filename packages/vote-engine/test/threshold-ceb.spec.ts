@@ -186,7 +186,8 @@ describe('ceb threshold-2 end to end (D-08..D-12)', function () {
     }
 
     const state = await fx.elec.electionEngine.getBallotConfirmationState(ballotId)
-    expect(state).to.deep.equal({ locked: true, confirmed: false })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(state).to.deep.equal({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: false })
   })
 
   it('C2 (D-10 crossing + D-09 + derived sessions): the second accept finalizes exactly once', async () => {
@@ -216,7 +217,8 @@ describe('ceb threshold-2 end to end (D-08..D-12)', function () {
     expect(await openTaskUsers(db, nonce)).to.deep.equal([fx.holders[2]!.user.id, fx.holders[3]!.user.id].sort())
 
     const state = await fx.elec.electionEngine.getBallotConfirmationState(ballotId)
-    expect(state).to.deep.equal({ locked: false, confirmed: true })
+    // gap8/WR-03: the state now says who may withdraw and whether the officer has a task (canWithdraw/ownTaskOpen).
+    expect(state).to.deep.equal({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false })
   })
 
   it('C3 (D-10 late signature): a third accept after crossing is recorded, re-finalizes nothing', async () => {
