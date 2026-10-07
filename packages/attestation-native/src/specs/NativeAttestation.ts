@@ -96,9 +96,13 @@ export interface Spec extends TurboModule {
 	 * Phase 49 (D-06/D-04): produces a biometric-gated, hardware-backed P-256 signature
 	 * over `digestBase64` using the key under `keyAlias`. Resolves
 	 * `{ signatureHex: string }` — a 64-byte compact, low-S, hex-encoded signature
-	 * (`r||s`, `s` normalized into the lower half of the P-256 order, matching
-	 * `@noble/curves` v2's `verify()` defaults: `prehash: true`, `lowS: true`,
+	 * (`r||s`, `s` normalized into the lower half of the P-256 order; `lowS: true`,
 	 * `format: 'compact'`). Callers must NOT re-normalize the returned signature.
+	 *
+	 * Signing DOMAIN differs by platform: Android output verifies with `prehash: true` over the
+	 * digest; iOS output verifies with `prehash: false` over the bytes given. Callers whose
+	 * signature is checked by `verifySigP256` must pass `nativeSignInputBase64(digest, Platform.OS)`.
+	 * Applies to `signWithDeviceKey` and `signWithRecoveryKey`.
 	 *
 	 * Byte-format contract for `digestBase64` — a silent-failure trap if violated:
 	 * this is **plain base64 (`Base64.NO_WRAP`) of the RAW digest bytes**, never

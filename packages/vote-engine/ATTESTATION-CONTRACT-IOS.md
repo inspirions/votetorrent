@@ -251,6 +251,18 @@ asymmetry is why the two must be stated separately.)
 
 > **This has no Android counterpart, and that is a finding, not an oversight — see §6.**
 
+### 4.1 Officer and general digest signing
+
+Every other native signature checked by `verifySigP256` / `SignatureValidP256` (noble default
+`prehash: true`, i.e. ECDSA(sha256(digest))) goes through one helper,
+`nativeSignInputBytes` / `nativeSignInputBase64` in `@votetorrent/attestation-native`
+(`src/native-sign-input.ts`): iOS native signs its input as the final hash, so the helper passes
+`sha256(digest)`; Android's `SHA256withECDSA` hashes once, so it passes the digest as-is; any other
+platform throws `UNSUPPORTED_SIGNING_PLATFORM`. The hardware fact behind this is pinned by the
+iPhone 13 vector in `ios-native-sign-domain.hardware.test.ts` (Authority app): the raw iOS output
+verifies with `prehash: false` over the digest and fails `verifySigP256`. §4's PoP stays
+`prehash: false` over `sha256(utf8(POP_DIGEST))` and is unchanged.
+
 ---
 
 ## 5. What the iOS chain proves, precisely

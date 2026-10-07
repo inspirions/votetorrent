@@ -401,7 +401,9 @@ class AttestationNativeModule: NSObject {
 
   /// Biometric-gated P-256 signature over `digestBase64`.
   /// `digestBase64` is PLAIN base64 of the RAW digest bytes — never base64url, never UTF-8-of-a-
-  /// string. Identical contract to Android's `signWithDeviceKey`.
+  /// string. The base64 ENCODING is identical to Android's `signWithDeviceKey`; the signing DOMAIN
+  /// is not: iOS signs the input as the FINAL hash, so callers pre-hash via `nativeSignInputBytes`
+  /// (packages/attestation-native/src/native-sign-input.ts).
   @objc(signWithDeviceKey:digestBase64:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
   func signWithDeviceKey(_ keyAlias: String,
                          digestBase64: String,
@@ -466,9 +468,11 @@ class AttestationNativeModule: NSObject {
     }
 
     var error: Unmanaged<CFError>?
-    // `.ecdsaSignatureDigestX962SHA256` signs an ALREADY-HASHED 32-byte digest — the `prehash: true`
-    // half of the contract. Using the `...MessageX962...` variant would hash the digest a second
-    // time and silently produce a signature over the wrong bytes.
+    // `.ecdsaSignatureDigestX962SHA256` treats the input as the FINAL ECDSA hash (no internal
+    // hash) = noble `prehash: false`. Android's SHA256withECDSA hashes once, so the shared JS helper
+    // (nativeSignInputBytes) pre-hashes on iOS to compensate. The PoP relies on this raw behaviour:
+    // do NOT switch to the `...MessageX962...` variant without changing the PoP verifier, the
+    // contract doc and the pinned hardware vector together.
     guard let sig = SecKeyCreateSignature(key, .ecdsaSignatureDigestX962SHA256,
                                           digest as CFData, &error) as Data? else {
       let err = error!.takeRetainedValue() as Error as NSError
