@@ -389,6 +389,7 @@ export function KeyholderInvitationScreen() {
 					) : (
 						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
 					)}
+					<ThemedText testID="keyholder-reaccept-accept-note">{t("keyholderReacceptAcceptNote")}</ThemedText>
 
 					{/* D-06: paste field for the share text the sender copied. CustomTextInput's `title` is
 					    the field's only label (a separate heading here rendered it twice). */}

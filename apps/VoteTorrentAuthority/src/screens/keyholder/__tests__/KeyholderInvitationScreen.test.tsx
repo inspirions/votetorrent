@@ -205,6 +205,15 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
     expect(buttonByTitle(tr, 'decline').props.disabled).toBe(true);
   });
 
+  it('I1 accept mode explains re-accepting below the paste hint (keyholder-reaccept-accept-note)', async () => {
+    const tr = await render();
+    const note = tr.root.findAll((n) => n.props?.testID === 'keyholder-reaccept-accept-note');
+    expect(note.length).toBeGreaterThan(0);
+    expect(JSON.stringify(tr.toJSON())).toContain('keyholderReacceptAcceptNote');
+    const json = JSON.stringify(tr.toJSON());
+    expect(json.indexOf('invitationAcceptPasteHint')).toBeLessThan(json.indexOf('keyholderReacceptAcceptNote'));
+  });
+
   it('pasting a share shows the slot\'s stored name and enables Accept/Decline', async () => {
     const tr = await render();
     await paste(tr, makeShareText().text);
@@ -415,6 +424,11 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('I1 send mode does not render the accept note', async () => {
+    const tr = await render();
+    expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-reaccept-accept-note')).toHaveLength(0);
   });
 
   const radio = (tr: renderer.ReactTestRenderer, testID: string) =>
