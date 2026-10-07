@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useFocusEffect, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import type { IElectionEngine, InviteStatus, SentKeyholderInvite } from "@votetorrent/vote-core";
+import { DKG_ROUND_DEADLINE_MS } from "@votetorrent/vote-core";
+import type { IElectionEngine, InviteStatus, KeyholderDkgStatus, SentKeyholderInvite } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
@@ -12,6 +13,8 @@ import { useApp } from "../../providers/AppProvider";
 import { resolveKeyholderKeyVault } from "../../engines/keyholder-vault";
 import { driveKeyholderDkg, keyholderDkgRowState, type KeyholderDkgRowState } from "./keyholder-dkg-driver";
 import { KeyholderDkgStatusRow } from "./components/KeyholderDkgStatusRow";
+import { KeyholderDkgOverdueNotice } from "./components/KeyholderDkgOverdueNotice";
+import { overdueKeyholderLabels } from "./keyholder-dkg-overdue";
 import { KEYHOLDER_INVITE_STATE_META, keyholderInviteState } from "./keyholder-invite-status";
 
 type KeyholderParams = {
@@ -50,6 +53,10 @@ export function KeyholderScreen() {
 	// covers "open" too, since useFocusEffect fires on first focus. No timer, no interval.
 	const [dkgRowState, setDkgRowState] = useState<KeyholderDkgRowState | null>("loading");
 	const [dkgErrorMessage, setDkgErrorMessage] = useState<string>("");
+	// The latest outcome's status and the fresh keyholder list feed the advisory overdue notice (D-19
+	// round-deadline ruling). Both are replaced on every focus; the notice never acts, it only names.
+	const [dkgStatus, setDkgStatus] = useState<KeyholderDkgStatus | null>(null);
+	const [dkgKeyholders, setDkgKeyholders] = useState<ReadonlyArray<InviteStatus<SentKeyholderInvite>>>([]);
 	const inFlight = useRef(false);
 	// Results apply while the screen is mounted, not only while the focus that started the drive is
 	// still current: a blur and re-focus mid-drive must not strand the row on "loading".
@@ -85,6 +92,8 @@ export function KeyholderScreen() {
 						// error occurred, render no row at all — the InlineError alone carries the
 						// message. Any other outcome (including a null status with NO error, which
 						// never happens, and every successful read) renders the row.
+						setDkgStatus(outcome.status);
+						setDkgKeyholders(details.current?.keyholders ?? []);
 						setDkgRowState(outcome.status === null && outcome.error ? null : keyholderDkgRowState(outcome.status));
 						if (outcome.error) {
 							const tt = tRef.current;
@@ -104,6 +113,7 @@ export function KeyholderScreen() {
 						console.warn("KeyholderScreen: DKG status read failed", err instanceof Error ? err.name : "unknown");
 						if (mounted.current) {
 							setDkgRowState(null);
+							setDkgStatus(null);
 							setDkgErrorMessage(tRef.current("keyholderDkgLoadError"));
 						}
 					} finally {
@@ -113,6 +123,8 @@ export function KeyholderScreen() {
 			}
 		}, [electionEngine, getEngine, routeKeyholder])
 	);
+
+	const overdueLabels = overdueKeyholderLabels(dkgStatus, dkgKeyholders, t("dkgOverdueUnnamed"));
 
 	return (
 		<ScrollView style={styles.container}>
@@ -126,6 +138,7 @@ export function KeyholderScreen() {
 					<ThemedText testID="keyholder-invite-status">{t(KEYHOLDER_INVITE_STATE_META[keyholderInviteState(keyholder)].labelKey)}</ThemedText>
 				</View>
 				{dkgRowState !== null ? <KeyholderDkgStatusRow state={dkgRowState} /> : null}
+				<KeyholderDkgOverdueNotice labels={overdueLabels} hours={DKG_ROUND_DEADLINE_MS / 3600000} />
 				<InlineError message={dkgErrorMessage} />
 			</View>
 			<View style={styles.section}>
