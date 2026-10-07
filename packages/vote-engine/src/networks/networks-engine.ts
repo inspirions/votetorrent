@@ -13,6 +13,7 @@ import type {
 	FoundingBundleExport,
 	FoundingBundleImportOptions,
 	FoundingBundleImportResult,
+	FoundingBundleInspection,
 	FoundingBundleRows,
 } from '@votetorrent/vote-core';
 import type {
@@ -42,6 +43,7 @@ import {
 	FOUNDING_FAILURE_CATEGORY,
 	FoundingBundleExportError,
 	deriveFoundingDescriptor,
+	foundingBundleFingerprint,
 	foundingBundleSigningDigest,
 	parseFoundingBundle,
 	serializeFoundingBundle,
@@ -427,7 +429,7 @@ export class NetworksEngine implements INetworksEngine {
 
 		const text = serializeFoundingBundle(bundle);
 		const fileName = `votetorrent-network-${descriptor.networkHash.slice(0, 12)}.json`;
-		return { bundle, text, fileName };
+		return { bundle, text, fileName, fingerprint: foundingBundleFingerprint(bundle.digest) };
 	}
 
 	/**
@@ -445,6 +447,22 @@ export class NetworksEngine implements INetworksEngine {
 		user: User | undefined,
 		options?: FoundingBundleImportOptions,
 	): Promise<FoundingBundleImportResult> {
+		// 62-102 (initial/G2 WR-03): an import must carry an out-of-band anchor.
+		// Decided before any parse or DbFactory call; there is no bypass option.
+		const hasAnchor = (v: string | undefined): boolean => typeof v === 'string' && v.length > 0;
+		if (
+			!hasAnchor(options?.expectedFingerprint) &&
+			!hasAnchor(options?.expectedDigest) &&
+			!hasAnchor(options?.expectedNetworkHash)
+		) {
+			return {
+				ok: false,
+				reason: 'anchor-required',
+				category: FOUNDING_FAILURE_CATEGORY['anchor-required'],
+				detail: 'founding bundle: an out-of-band anchor (the exporter\'s fingerprint) is required to import',
+			};
+		}
+
 		const parsed = parseFoundingBundle(bundleText);
 		if (!parsed.ok) {
 			return { ok: false, reason: parsed.reason, category: FOUNDING_FAILURE_CATEGORY[parsed.reason], detail: parsed.detail };
@@ -453,6 +471,7 @@ export class NetworksEngine implements INetworksEngine {
 		const verified = verifyFoundingBundle(parsed.bundle, {
 			expectedNetworkHash: options?.expectedNetworkHash,
 			expectedDigest: options?.expectedDigest,
+			expectedFingerprint: options?.expectedFingerprint,
 		});
 		if (!verified.ok) {
 			return {
@@ -538,16 +557,30 @@ export class NetworksEngine implements INetworksEngine {
 			};
 		}
 
+		// 62-102 (initial/G2 WR-04): every non-success exit after the target
+		// opened closes its database and evicts any cached context, so a retry
+		// is neither refused as already-joined nor blocked by a held handle.
+		const failClosed = async (
+			reason: 'target-open-failed' | 'target-replay-failed' | 'target-conflict',
+			detail: string,
+		): Promise<FoundingBundleImportResult> => {
+			this.contexts.delete(hash);
+			const closable = ctx.db as unknown as { close?: () => Promise<void> };
+			if (typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the handle is discarded either way.
+				}
+			}
+			return { ok: false, reason, category: FOUNDING_FAILURE_CATEGORY[reason], detail };
+		};
+
 		let targetRows: FoundingBundleRows;
 		try {
 			targetRows = await readGenesisRows(ctx.db, genesisKeys);
 		} catch {
-			return {
-				ok: false,
-				reason: 'target-open-failed',
-				category: FOUNDING_FAILURE_CATEGORY['target-open-failed'],
-				detail: 'founding bundle: target database read failed',
-			};
+			return failClosed('target-open-failed', 'founding bundle: target database read failed');
 		}
 
 		const presentCount = FOUNDING_BUNDLE_TABLE_ORDER.reduce(
@@ -559,34 +592,23 @@ export class NetworksEngine implements INetworksEngine {
 		if (presentCount === FOUNDING_BUNDLE_TABLE_ORDER.length) {
 			const targetDigest = computeContentDigest(targetRows as unknown as SnapshotTables);
 			if (targetDigest !== bundle.digest) {
-				return {
-					ok: false,
-					reason: 'target-conflict',
-					category: FOUNDING_FAILURE_CATEGORY['target-conflict'],
-					detail: 'founding bundle: target already holds a different network (different)',
-				};
+				return failClosed('target-conflict', 'founding bundle: target already holds a different network (different)');
 			}
 			outcome = 'already-present';
 		} else if (presentCount === 0) {
 			try {
 				await replayGenesisRows(ctx.db, bundle.rows, nowCanonicalDatetime());
 			} catch {
-				return {
-					ok: false,
-					reason: 'target-replay-failed',
-					category: FOUNDING_FAILURE_CATEGORY['target-replay-failed'],
-					detail: 'founding bundle: target replay refused',
-				};
+				return failClosed('target-replay-failed', 'founding bundle: target replay refused');
 			}
-			const readBack = await readGenesisRows(ctx.db, genesisKeys);
-			const readBackDigest = computeContentDigest(readBack as unknown as SnapshotTables);
-			if (readBackDigest !== bundle.digest) {
-				return {
-					ok: false,
-					reason: 'target-replay-failed',
-					category: FOUNDING_FAILURE_CATEGORY['target-replay-failed'],
-					detail: 'founding bundle: replayed rows do not match the bundle digest',
-				};
+			try {
+				const readBack = await readGenesisRows(ctx.db, genesisKeys);
+				const readBackDigest = computeContentDigest(readBack as unknown as SnapshotTables);
+				if (readBackDigest !== bundle.digest) {
+					return failClosed('target-replay-failed', 'founding bundle: replayed rows do not match the bundle digest');
+				}
+			} catch {
+				return failClosed('target-replay-failed', 'founding bundle: replayed rows could not be read back');
 			}
 			outcome = 'replayed';
 		} else {
@@ -594,15 +616,12 @@ export class NetworksEngine implements INetworksEngine {
 			// batch-1 rows — the dry run above makes that environmental only
 			// (proven safe before this attempt), but a partial target from a
 			// concurrent sync is a real, retryable state.
-			return {
-				ok: false,
-				reason: 'target-conflict',
-				category: FOUNDING_FAILURE_CATEGORY['target-conflict'],
-				detail: 'founding bundle: target holds a partial founding generation (partial — sync in progress, retry later)',
-			};
+			return failClosed(
+				'target-conflict',
+				'founding bundle: target holds a partial founding generation (partial — sync in progress, retry later)',
+			);
 		}
 
-		this.contexts.set(hash, ctx);
 		const networkRef: NetworkReference = {
 			hash,
 			imageUrl: bundle.descriptor.imageUrl,
@@ -610,11 +629,51 @@ export class NetworksEngine implements INetworksEngine {
 			name: bundle.descriptor.name,
 			primaryAuthorityDomainName: bundle.descriptor.primaryAuthorityDomainName,
 		};
-		const recentAfter: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
-		await this.localStorage.setItem('recentNetworks', [...recentAfter, networkRef]);
 
-		const network = await this.open(networkRef, user, true, options?.getPeerCount);
-		return { ok: true, outcome, networkRef, network };
+		// open() finds the context cached (D-06) and, with storeAsRecent, is the
+		// single writer of recentNetworks — nothing durable is written before it
+		// resolves. A rejection evicts and closes so the retry starts clean.
+		this.contexts.set(hash, ctx);
+		let network: INetworkEngine;
+		try {
+			network = await this.open(networkRef, user, true, options?.getPeerCount);
+		} catch {
+			return failClosed('target-open-failed', 'founding bundle: target network could not be opened');
+		}
+		return {
+			ok: true,
+			outcome,
+			networkRef,
+			network,
+			fingerprint: foundingBundleFingerprint(bundle.digest),
+		};
+	}
+
+	/**
+	 * 62-102: validity check without anchors and without any database. Returns
+	 * ONLY the network name on success, deliberately never the digest or the
+	 * fingerprint (the importing officer must type the exporter's value).
+	 * Never throws.
+	 */
+	async inspectFoundingBundle(bundleText: string): Promise<FoundingBundleInspection> {
+		try {
+			const parsed = parseFoundingBundle(bundleText);
+			if (!parsed.ok) {
+				return { ok: false, reason: parsed.reason, category: FOUNDING_FAILURE_CATEGORY[parsed.reason], detail: parsed.detail };
+			}
+			const verified = verifyFoundingBundle(parsed.bundle);
+			if (!verified.ok) {
+				return { ok: false, reason: verified.reason, category: FOUNDING_FAILURE_CATEGORY[verified.reason], detail: verified.detail };
+			}
+			return { ok: true, networkName: parsed.bundle.descriptor.name };
+		} catch {
+			return {
+				ok: false,
+				reason: 'malformed',
+				category: FOUNDING_FAILURE_CATEGORY.malformed,
+				detail: 'founding bundle: could not be inspected',
+			};
+		}
 	}
 
 	async getRecentNetworks(): Promise<NetworkReference[]> {

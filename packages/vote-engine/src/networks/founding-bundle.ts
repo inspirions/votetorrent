@@ -64,6 +64,7 @@ export const FOUNDING_FAILURE_CATEGORY: Readonly<Record<FoundingBundleFailureRea
     'descriptor-mismatch': 'invalid-bundle',
     'exporter-not-founding-officer': 'invalid-bundle',
     'signature-invalid': 'invalid-bundle',
+    'anchor-required': 'invalid-bundle',
     'anchor-mismatch': 'invalid-bundle',
     'replay-rejected': 'invalid-bundle',
     'format-version-mismatch': 'error',
@@ -375,6 +376,75 @@ export function parseFoundingBundle (text: string): FoundingBundleParseResult {
 export interface FoundingBundleAnchors {
   readonly expectedNetworkHash?: string
   readonly expectedDigest?: string
+  /** The fingerprint an officer typed from the exporter's screen; compared in constant time. */
+  readonly expectedFingerprint?: string
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint (62-102 C1, D-36 out-of-band confirmation)
+// ---------------------------------------------------------------------------
+
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+function decodeBase64url (text: string): Uint8Array {
+  const out: number[] = []
+  let acc = 0
+  let bits = 0
+  for (const ch of text) {
+    const v = BASE64URL_ALPHABET.indexOf(ch)
+    if (v < 0) throw new Error('founding bundle: digest is not base64url')
+    acc = (acc << 6) | v
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out.push((acc >> bits) & 0xff)
+      acc &= (1 << bits) - 1
+    }
+  }
+  return Uint8Array.from(out)
+}
+
+/**
+ * The human-comparable fingerprint of a bundle digest: the first 8 bytes of
+ * the base64url-decoded digest as 16 lowercase hex characters in four groups
+ * of four separated by single spaces. Throws if the digest decodes to fewer
+ * than 8 bytes.
+ */
+export function foundingBundleFingerprint (digest: string): string {
+  const bytes = decodeBase64url(digest)
+  if (bytes.length < 8) throw new Error('founding bundle: digest too short to fingerprint')
+  let hex = ''
+  for (let i = 0; i < 8; i++) hex += bytes[i]!.toString(16).padStart(2, '0')
+  return `${hex.slice(0, 4)} ${hex.slice(4, 8)} ${hex.slice(8, 12)} ${hex.slice(12, 16)}`
+}
+
+/** Lowercase and strip spaces and dashes from a typed fingerprint. */
+export function normalizeFingerprintInput (text: string): string {
+  return text.toLowerCase().replace(/[\s-]/g, '')
+}
+
+/**
+ * Constant-time comparison of a typed fingerprint against the one derived
+ * from `digest`: both sides are padded to 16 characters and every character
+ * code is XOR-accumulated with no early exit; length and charset problems
+ * fold into the accumulator and are tested once at the end.
+ */
+export function fingerprintsMatch (typed: string, digest: string): boolean {
+  let expected: string
+  try {
+    expected = foundingBundleFingerprint(digest).replace(/ /g, '')
+  } catch {
+    return false
+  }
+  const given = normalizeFingerprintInput(typed)
+  const width = Math.max(16, given.length)
+  let acc = given.length ^ expected.length
+  for (let i = 0; i < width; i++) {
+    const a = i < given.length ? given.charCodeAt(i) : 0
+    const b = i < expected.length ? expected.charCodeAt(i) : 0
+    acc |= a ^ b
+  }
+  return acc === 0
 }
 
 export type FoundingBundleVerifyResult =
@@ -531,6 +601,10 @@ export function verifyFoundingBundle (bundle: FoundingBundle, anchors: FoundingB
   }
   if (anchors.expectedDigest !== undefined && bundle.digest !== anchors.expectedDigest) {
     return { ok: false, reason: 'anchor-mismatch', detail: 'founding bundle: digest does not match the expected anchor' }
+  }
+
+  if (anchors.expectedFingerprint !== undefined && !fingerprintsMatch(anchors.expectedFingerprint, bundle.digest)) {
+    return { ok: false, reason: 'anchor-mismatch', detail: 'founding bundle: fingerprint does not match the expected anchor' }
   }
 
   return { ok: true }

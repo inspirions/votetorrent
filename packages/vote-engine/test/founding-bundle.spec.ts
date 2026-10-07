@@ -23,6 +23,8 @@ import {
   FoundingBundleExportError,
   deriveFoundingDescriptor,
   foundingBundleSigningDigest,
+  foundingBundleFingerprint,
+  fingerprintsMatch,
   serializeFoundingBundle,
   parseFoundingBundle,
   verifyFoundingBundle
@@ -58,6 +60,13 @@ function makeDeviceLocalStorage (): LocalStorage {
       store.clear()
     }
   }
+}
+
+/** The 62-102 anchor: the digest of the bundle text itself (a test stand-in for the typed fingerprint). */
+function anchored (text: string): { expectedDigest: string } {
+  const parsed = parseFoundingBundle(text)
+  if (!parsed.ok) return { expectedDigest: 'unparseable' }
+  return { expectedDigest: parsed.bundle.digest }
 }
 
 function makeRecordedInMemoryFactory (): { factory: DbFactory; calls: string[] } {
@@ -728,7 +737,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
 
       const { factory, calls } = makeRecordedInMemoryFactory()
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
 
       expect(result.ok, 'import must succeed').to.equal(true)
       if (!result.ok) throw new Error('unreachable')
@@ -800,7 +809,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       expect(expired, 'I-3 setup: the founding key must have genuinely expired before import').to.equal(true)
 
       const engineB = new NetworksEngine(makeDeviceLocalStorage())
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
       expect(result.ok, `I-3 import must succeed even though the founding key has since expired: ${result.ok ? '' : (result as { detail: string }).detail}`).to.equal(true)
       if (!result.ok) throw new Error('unreachable')
       expect(result.outcome).to.equal('replayed')
@@ -816,7 +825,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       const { factory, calls } = makeRecordedInMemoryFactory()
       const storage = makeDeviceLocalStorage()
       const engineB = new NetworksEngine(storage, factory)
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
 
       expect(result.ok).to.equal(false)
       if (result.ok) throw new Error('unreachable')
@@ -850,7 +859,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
 
       const { factory, calls } = makeRecordedInMemoryFactory()
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
 
       expect(result.ok).to.equal(false)
       if (result.ok) throw new Error('unreachable')
@@ -867,11 +876,11 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
 
       const { factory, calls } = makeRecordedInMemoryFactory()
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
-      const first = await engineB.importFoundingBundle(text, undefined)
+      const first = await engineB.importFoundingBundle(text, undefined, anchored(text))
       expect(first.ok).to.equal(true)
       const callsAfterFirst = calls.length
 
-      const second = await engineB.importFoundingBundle(text, undefined)
+      const second = await engineB.importFoundingBundle(text, undefined, anchored(text))
       expect(second.ok).to.equal(false)
       if (second.ok) throw new Error('unreachable')
       expect(second.reason).to.equal('already-joined')
@@ -886,7 +895,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
 
       const sameDbFactory: DbFactory = async () => net.ctx.db
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), sameDbFactory)
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
 
       expect(result.ok, `I-7 import must succeed: ${result.ok ? '' : (result as { reason: string }).reason}`).to.equal(true)
       if (!result.ok) throw new Error('unreachable')
@@ -904,7 +913,7 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       const otherNet = await createTestNetwork()
       const differentDbFactory: DbFactory = async () => otherNet.ctx.db
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), differentDbFactory)
-      const result = await engineB.importFoundingBundle(text, undefined)
+      const result = await engineB.importFoundingBundle(text, undefined, anchored(text))
 
       expect(result.ok).to.equal(false)
       if (result.ok) throw new Error('unreachable')
@@ -912,16 +921,14 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       expect(result.category).to.equal('error')
     })
 
-    it('I-9: a self-consistent bundle from a genuinely different network imports without anchors, and anchor-mismatch with the genuine digest pinned', async () => {
+    it('I-9: a self-consistent bundle from a genuinely different network is refused without an anchor, and anchor-mismatch with the genuine digest pinned', async () => {
       const genuineNet = await createTestNetwork()
       const genuineExporter = await exporterFor(genuineNet)
       const { bundle: genuineBundle } = await genuineNet.networksEngine.exportFoundingBundle(genuineNet.ref.hash, genuineExporter)
 
       // A self-consistent, independently-signed bundle from a SEPARATE network —
       // structurally indistinguishable from an attacker minting their own fully
-      // valid genesis and presenting it as "the" network (T-62-16-03, documented
-      // residual: the real anchor is the founding officer key plus the human
-      // handoff channel, not anything verifyFoundingBundle alone can prove).
+      // valid genesis (T-62-16-03). 62-102: the out-of-band anchor is now required.
       const attackerNet = await createTestNetwork()
       const attackerExporter = await exporterFor(attackerNet)
       const { text: attackerText, bundle: attackerBundle } = await attackerNet.networksEngine.exportFoundingBundle(
@@ -931,13 +938,268 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
 
       const engineB1 = new NetworksEngine(makeDeviceLocalStorage())
       const withoutAnchors = await engineB1.importFoundingBundle(attackerText, undefined)
-      expect(withoutAnchors.ok, 'I-9: imports without anchors (documented residual)').to.equal(true)
+      expect(withoutAnchors.ok, 'I-9: refused without anchors').to.equal(false)
+      if (withoutAnchors.ok) throw new Error('unreachable')
+      expect(withoutAnchors.reason).to.equal('anchor-required')
 
       const engineB2 = new NetworksEngine(makeDeviceLocalStorage())
       const withGenuineAnchor = await engineB2.importFoundingBundle(attackerText, undefined, { expectedDigest: genuineBundle.digest })
       expect(withGenuineAnchor.ok).to.equal(false)
       if (withGenuineAnchor.ok) throw new Error('unreachable')
       expect(withGenuineAnchor.reason).to.equal('anchor-mismatch')
+    })
+  })
+
+  describe('A: anchor required, typed fingerprint, inspect, export fingerprint (62-102 C1)', () => {
+    function jumble (fp: string): string {
+      // "a1b2 c3d4 e5f6 0718" -> "A1B2-C3D4 E5F6 0718" (case, dash, spaces)
+      const groups = fp.split(' ')
+      return `${groups[0]!.toUpperCase()}-${groups[1]!.toUpperCase()}  ${groups[2]!.toUpperCase()} ${groups[3]!.toUpperCase()}`
+    }
+
+    it('A-1: no options and getPeerCount-only imports return anchor-required with ZERO DbFactory calls', async () => {
+      const net = await createTestNetwork()
+      const { text } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
+      const a = await engineB.importFoundingBundle(text, undefined)
+      const b = await engineB.importFoundingBundle(text, undefined, { getPeerCount: () => 0 })
+      const c = await engineB.importFoundingBundle(text, undefined, { expectedFingerprint: '' })
+      for (const r of [a, b, c]) {
+        expect(r.ok).to.equal(false)
+        if (r.ok) throw new Error('unreachable')
+        expect(r.reason).to.equal('anchor-required')
+        expect((r as { category: string }).category).to.equal('invalid-bundle')
+      }
+      expect(calls).to.deep.equal([])
+      // anchor-required is decided before parse: even garbage text gets it
+      const garbage = await engineB.importFoundingBundle('not json', undefined)
+      expect((garbage as { reason: string }).reason).to.equal('anchor-required')
+    })
+
+    it('A-2: expectedDigest of the bundle is accepted; expectedDigest of ANOTHER bundle is anchor-mismatch with zero DbFactory calls', async () => {
+      const net = await createTestNetwork()
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      const other = await createTestNetwork()
+      const { bundle: otherBundle } = await other.networksEngine.exportFoundingBundle(other.ref.hash, await exporterFor(other))
+      const bad = makeRecordedInMemoryFactory()
+      const wrong = await new NetworksEngine(makeDeviceLocalStorage(), bad.factory).importFoundingBundle(text, undefined, { expectedDigest: otherBundle.digest })
+      expect(wrong.ok).to.equal(false)
+      expect((wrong as { reason: string }).reason).to.equal('anchor-mismatch')
+      expect(bad.calls).to.deep.equal([])
+      const good = await new NetworksEngine(makeDeviceLocalStorage()).importFoundingBundle(text, undefined, { expectedDigest: bundle.digest })
+      expect(good.ok).to.equal(true)
+    })
+
+    it('A-3: a typed fingerprint in another case with dashes and spaces is accepted; the ok result carries the lowercase fingerprint', async () => {
+      const net = await createTestNetwork()
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      const fp = foundingBundleFingerprint(bundle.digest)
+      expect(fp).to.match(/^[0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4}$/)
+      const result = await new NetworksEngine(makeDeviceLocalStorage()).importFoundingBundle(text, undefined, { expectedFingerprint: jumble(fp) })
+      expect(result.ok, 'typed fingerprint must be accepted').to.equal(true)
+      if (!result.ok) throw new Error('unreachable')
+      expect((result as { fingerprint: string }).fingerprint).to.equal(fp)
+    })
+
+    it('A-4: a wrong or malformed typed fingerprint is anchor-mismatch, zero DbFactory calls, and the result never contains the file fingerprint or digest', async () => {
+      const net = await createTestNetwork()
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      const fp = foundingBundleFingerprint(bundle.digest)
+      const compact = fp.replace(/ /g, '')
+      const flipped = compact.slice(0, 15) + (compact[15] === '0' ? '1' : '0')
+      const typedValues = ['0000 0000 0000 0000', flipped, compact.slice(0, 15), compact + '0', compact.slice(0, 15) + 'g']
+      for (const typed of typedValues) {
+        const { factory, calls } = makeRecordedInMemoryFactory()
+        const result = await new NetworksEngine(makeDeviceLocalStorage(), factory).importFoundingBundle(text, undefined, { expectedFingerprint: typed })
+        expect(result.ok, `typed "${typed}"`).to.equal(false)
+        if (result.ok) throw new Error('unreachable')
+        expect(result.reason, `typed "${typed}"`).to.equal('anchor-mismatch')
+        expect(calls, `typed "${typed}"`).to.deep.equal([])
+        const dump = JSON.stringify(result)
+        expect(dump).to.not.include(compact)
+        expect(dump).to.not.include(fp)
+        expect(dump).to.not.include(bundle.digest)
+      }
+    })
+
+    it('A-5: foundingBundleFingerprint maps a known digest to the hand-computed value and rejects a short digest', () => {
+      // bytes 00 01 02 03 04 05 06 07 08 -> base64url "AAECAwQFBgcI"
+      expect(foundingBundleFingerprint('AAECAwQFBgcI')).to.equal('0001 0203 0405 0607')
+      // 0xff bytes exercise the url alphabet: "_____w" is ff ff ff ff ff, too short
+      expect(() => foundingBundleFingerprint('_____w')).to.throw()
+      expect(() => foundingBundleFingerprint('')).to.throw()
+    })
+
+    it('A-6: fingerprintsMatch is true for the normalized equal value and false otherwise, including a last-character-only difference', () => {
+      const digest = 'AAECAwQFBgcI'
+      expect(fingerprintsMatch('0001 0203 0405 0607', digest)).to.equal(true)
+      expect(fingerprintsMatch('0001-0203-0405-0607', digest)).to.equal(true)
+      expect(fingerprintsMatch('0001020304050607', digest)).to.equal(true)
+      expect(fingerprintsMatch('0001 0203 0405 0606', digest)).to.equal(false)
+      expect(fingerprintsMatch('1001 0203 0405 0607', digest)).to.equal(false)
+      expect(fingerprintsMatch('0001 0203 0405 060', digest)).to.equal(false)
+      expect(fingerprintsMatch('0001 0203 0405 06070', digest)).to.equal(false)
+      expect(fingerprintsMatch('', digest)).to.equal(false)
+      expect(fingerprintsMatch('zzzz zzzz zzzz zzzz', digest)).to.equal(false)
+    })
+
+    it('A-7: inspectFoundingBundle of a valid text returns exactly { ok, networkName }; a tampered text returns the verify reason; no DbFactory call', async () => {
+      const net = await createTestNetwork()
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      const { factory, calls } = makeRecordedInMemoryFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
+      const ok = await engineB.inspectFoundingBundle(text)
+      expect(Object.keys(ok).sort()).to.deep.equal(['networkName', 'ok'])
+      expect(ok.ok).to.equal(true)
+      expect((ok as { networkName: string }).networkName).to.equal(bundle.descriptor.name)
+
+      const tampered = serializeFoundingBundle({ ...bundle, digest: 'not-the-real-digest' })
+      const bad = await engineB.inspectFoundingBundle(tampered)
+      expect(bad.ok).to.equal(false)
+      if (bad.ok) throw new Error('unreachable')
+      expect(bad.reason).to.equal(verifyFoundingBundle({ ...bundle, digest: 'not-the-real-digest' }).ok ? 'x' : (verifyFoundingBundle({ ...bundle, digest: 'not-the-real-digest' }) as { reason: string }).reason)
+      const garbage = await engineB.inspectFoundingBundle('{{{')
+      expect(garbage.ok).to.equal(false)
+      expect((garbage as { reason: string }).reason).to.equal('malformed')
+      expect(calls).to.deep.equal([])
+    })
+
+    it('A-8: exportFoundingBundle result carries fingerprint === foundingBundleFingerprint(bundle.digest)', async () => {
+      const net = await createTestNetwork()
+      const result = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      expect((result as { fingerprint: string }).fingerprint).to.equal(foundingBundleFingerprint(result.bundle.digest))
+    })
+  })
+
+  describe('W: import cleanup on failure (62-102 WR-04)', () => {
+    interface Tracked { factory: DbFactory; closed: number; calls: number }
+
+    /** A factory whose Database records close() and can be made to throw on the n-th genesis read. */
+    function makeTrackedFactory (failOnSelectFrom?: string): Tracked {
+      const tracked: Tracked = { factory: undefined as unknown as DbFactory, closed: 0, calls: 0 }
+      tracked.factory = async () => {
+        tracked.calls++
+        const db = new Database()
+        const origClose = db.close.bind(db)
+        db.close = (async () => { tracked.closed++; return origClose() }) as typeof db.close
+        if (failOnSelectFrom !== undefined) {
+          const origPrepare = db.prepare.bind(db)
+          db.prepare = ((sql: string) => {
+            if (sql.includes(failOnSelectFrom) && sql.trimStart().toLowerCase().startsWith('select')) {
+              throw new Error('stub: read failed')
+            }
+            return origPrepare(sql)
+          }) as typeof db.prepare
+        }
+        return db
+      }
+      return tracked
+    }
+
+    async function exported (): Promise<{ text: string; digest: string; hash: string }> {
+      const net = await createTestNetwork()
+      const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, await exporterFor(net))
+      return { text, digest: bundle.digest, hash: bundle.descriptor.networkHash }
+    }
+
+    it('W-1: a throwing target genesis read-back resolves target-open-failed, closes the db, leaves no context or recent entry', async () => {
+      const { text, digest, hash } = await exported()
+      const tracked = makeTrackedFactory('from Network')
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), tracked.factory)
+      const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('target-open-failed')
+      expect(tracked.closed, 'db closed').to.be.greaterThan(0)
+      expect(engineB.getEstablishedContext(hash)).to.equal(undefined)
+      expect(await engineB.getRecentNetworks()).to.deep.equal([])
+    })
+
+    it('W-2: a throwing post-replay read-back resolves target-replay-failed and closes the db', async () => {
+      const { text, digest, hash } = await exported()
+      // first genesis read (presence check) passes, the second (read-back) throws
+      let reads = 0
+      const tracked = makeTrackedFactory()
+      const baseFactory = tracked.factory
+      tracked.factory = async (h: string) => {
+        const db = await baseFactory(h)
+        const origPrepare = db.prepare.bind(db)
+        db.prepare = ((sql: string) => {
+          if (sql.includes('from Network') && sql.trimStart().toLowerCase().startsWith('select') && ++reads >= 2) {
+            throw new Error('stub: read-back failed')
+          }
+          return origPrepare(sql)
+        }) as typeof db.prepare
+        return db
+      }
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), tracked.factory)
+      const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('target-replay-failed')
+      expect(tracked.closed).to.be.greaterThan(0)
+      expect(engineB.getEstablishedContext(hash)).to.equal(undefined)
+      expect(await engineB.getRecentNetworks()).to.deep.equal([])
+    })
+
+    it('W-3: a partial target branch closes the db', async () => {
+      const { text, digest } = await exported()
+      // a target that already holds ONLY the Network table's rows is partial
+      const tracked = makeTrackedFactory()
+      const baseFactory = tracked.factory
+      tracked.factory = async (h: string) => {
+        const db = await baseFactory(h)
+        const origPrepare = db.prepare.bind(db)
+        let n = 0
+        db.prepare = ((sql: string) => {
+          const stmt = origPrepare(sql)
+          if (sql.trimStart().toLowerCase().startsWith('select') && sql.includes('from User ') && n++ === 0) {
+            // fake a present User row on the very first read of the User table
+            return { ...stmt, get: async () => ({ Id: 'x' }), all: async () => [{ Id: 'x' }] } as unknown as typeof stmt
+          }
+          return stmt
+        }) as typeof db.prepare
+        return db
+      }
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), tracked.factory)
+      const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      // Whatever the exact partial classification, an ok:false must have closed the handle.
+      if (!result.ok) expect(tracked.closed, 'handle closed on a refused import').to.be.greaterThan(0)
+      expect(result.ok).to.equal(false)
+    })
+
+    it('W-4: open() rejecting after a successful replay resolves target-open-failed, leaves nothing behind, and a retry is not already-joined', async () => {
+      const { text, digest, hash } = await exported()
+      const tracked = makeTrackedFactory()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), tracked.factory)
+      const realOpen = engineB.open.bind(engineB)
+      let failOpen = true
+      engineB.open = (async (...args: Parameters<typeof realOpen>) => {
+        if (failOpen) throw new Error('stub: open failed')
+        return realOpen(...args)
+      }) as typeof engineB.open
+      const first = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(first.ok).to.equal(false)
+      if (first.ok) throw new Error('unreachable')
+      expect(first.reason).to.equal('target-open-failed')
+      expect(engineB.getEstablishedContext(hash)).to.equal(undefined)
+      expect(await engineB.getRecentNetworks()).to.deep.equal([])
+      expect(tracked.closed).to.be.greaterThan(0)
+
+      failOpen = false
+      const second = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(second.ok, 'a retry must not be refused as already-joined').to.equal(true)
+    })
+
+    it('W-5: the happy path leaves exactly one recentNetworks entry for the hash', async () => {
+      const { text, digest, hash } = await exported()
+      const engineB = new NetworksEngine(makeDeviceLocalStorage())
+      const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(result.ok).to.equal(true)
+      const recents = await engineB.getRecentNetworks()
+      expect(recents.filter((r) => r.hash === hash)).to.have.lengthOf(1)
+      expect(recents).to.have.lengthOf(1)
     })
   })
 })

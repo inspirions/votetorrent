@@ -381,7 +381,8 @@ function makeStubNetworksEngine (): INetworksEngine {
     buildCreate () { return new NetworksCreateBuilder(stub) },
     // 62-16: INetworksEngine gained exportFoundingBundle/importFoundingBundle
     // (D-35) — this stub is a NetworksCreateBuilder-only fixture and never
-    // exercises either, so both are unreachable no-ops.
+    // exercises either, so both are unreachable no-ops. 62-102 added
+    // inspectFoundingBundle, a third unreachable no-op.
     async exportFoundingBundle () {
       throw new Error('makeStubNetworksEngine: exportFoundingBundle not implemented')
     },
@@ -391,6 +392,14 @@ function makeStubNetworksEngine (): INetworksEngine {
         reason: 'target-open-failed',
         category: 'error',
         detail: 'makeStubNetworksEngine: importFoundingBundle not implemented'
+      }
+    },
+    async inspectFoundingBundle () {
+      return {
+        ok: false,
+        reason: 'malformed',
+        category: 'invalid-bundle',
+        detail: 'makeStubNetworksEngine: inspectFoundingBundle not implemented'
       }
     }
   }

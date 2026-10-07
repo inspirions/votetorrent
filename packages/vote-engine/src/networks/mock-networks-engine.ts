@@ -10,7 +10,8 @@ import type {
   FoundingBundleExporter,
   FoundingBundleExport,
   FoundingBundleImportOptions,
-  FoundingBundleImportResult
+  FoundingBundleImportResult,
+  FoundingBundleInspection
 } from '@votetorrent/vote-core'
 import { NetworksCreateBuilder } from './builders/index.js'
 
@@ -97,6 +98,15 @@ export class MockNetworksEngine implements INetworksEngine {
       reason: 'target-open-failed',
       category: 'error',
       detail: 'MockNetworksEngine does not import founding bundles'
+    }
+  }
+
+  async inspectFoundingBundle (_bundleText: string): Promise<FoundingBundleInspection> {
+    return {
+      ok: false,
+      reason: 'malformed',
+      category: 'invalid-bundle',
+      detail: 'MockNetworksEngine does not inspect founding bundles'
     }
   }
 }

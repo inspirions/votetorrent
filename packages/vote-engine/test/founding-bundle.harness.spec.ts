@@ -139,7 +139,7 @@ describeP2PHarness('founding bundle across two nodes (D-23, D-35, D-39)', functi
 
     const { factory, calls } = makeRecordedFactory(harness.nodeB.dbFactory)
     engineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
-    const result = await engineB.importFoundingBundle(bundleText, undefined)
+    const result = await engineB.importFoundingBundle(bundleText, undefined, { expectedDigest: bundle.digest })
     joinedNetwork = result
 
     expect(result.ok, `F-1 import must succeed: ${result.ok ? '' : (result as { detail?: string; reason: string }).detail ?? (result as { reason: string }).reason}`).to.equal(true)
@@ -187,7 +187,7 @@ describeP2PHarness('founding bundle across two nodes (D-23, D-35, D-39)', functi
 
     const { factory, calls } = makeRecordedFactory(harness.nodeB.dbFactory)
     const freshEngineB = new NetworksEngine(makeDeviceLocalStorage(), factory)
-    const result = await freshEngineB.importFoundingBundle(text, undefined)
+    const result = await freshEngineB.importFoundingBundle(text, undefined, { expectedDigest: bundle.digest })
 
     expect(result.ok).to.equal(false)
     if (result.ok) throw new Error('unreachable')
@@ -197,7 +197,7 @@ describeP2PHarness('founding bundle across two nodes (D-23, D-35, D-39)', functi
 
   it('F-4, idempotent: importing again on the F-1 engine returns already-joined', async function () {
     this.timeout(HARNESS_TIMEOUTS.startMs)
-    const result = await engineB.importFoundingBundle(bundleText, undefined)
+    const result = await engineB.importFoundingBundle(bundleText, undefined, { expectedDigest: bundle.digest })
     expect(result.ok).to.equal(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.reason).to.equal('already-joined')

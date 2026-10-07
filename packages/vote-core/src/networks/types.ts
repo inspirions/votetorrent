@@ -36,6 +36,14 @@ export interface INetworksEngine {
     user: User | undefined,
     options?: FoundingBundleImportOptions
   ): Promise<FoundingBundleImportResult>
+  /**
+   * 62-102: validity check for the import screen. Parses and verifies a
+   * bundle WITHOUT anchors and WITHOUT opening any database; never throws.
+   * Deliberately returns neither the digest nor the fingerprint, so a screen
+   * cannot show the value the importing officer must type in from the
+   * exporter (the anchor must be an independent, out-of-band input).
+   */
+  inspectFoundingBundle(bundleText: string): Promise<FoundingBundleInspection>
 }
 
 export interface INetworksCreateBuilder extends IBuilder<{ networkInit: NetworkInit; user: User }, INetworkEngine> {
@@ -111,7 +119,19 @@ export interface FoundingBundleExport {
   /** serializeFoundingBundle(bundle): what 62-23 shares via the OS share sheet. */
   readonly text: string
   readonly fileName: string
+  /** 62-102: foundingBundleFingerprint(bundle.digest), for the exporter to read out to the importing officer. */
+  readonly fingerprint: string
 }
+
+/** 62-102: result of `inspectFoundingBundle`. The ok branch deliberately carries no digest or fingerprint. */
+export type FoundingBundleInspection =
+  | { readonly ok: true; readonly networkName: string }
+  | {
+      readonly ok: false
+      readonly reason: FoundingBundleFailureReason
+      readonly category: FoundingBundleFailureCategory
+      readonly detail: string
+    }
 
 /** Every way `exportFoundingBundle` can refuse. */
 export type FoundingBundleExportErrorCode =
@@ -133,6 +153,7 @@ export type FoundingBundleFailureReason =
   | 'descriptor-mismatch'
   | 'exporter-not-founding-officer'
   | 'signature-invalid'
+  | 'anchor-required'
   | 'anchor-mismatch'
   | 'replay-rejected'
   | 'target-conflict'
@@ -144,8 +165,16 @@ export type FoundingBundleFailureCategory = 'invalid-bundle' | 'error'
 
 /** Out-of-band anchors a caller may supply to `verifyFoundingBundle`/`importFoundingBundle` (Phase 50 VerifySnapshotOptions pattern). */
 export interface FoundingBundleImportOptions {
+  /**
+   * At least one anchor (this, `expectedDigest` or `expectedFingerprint`) is
+   * REQUIRED by `importFoundingBundle`: without one it returns
+   * `anchor-required` (D-36 out-of-band confirmation; initial/G2 WR-03).
+   * There is no bypass flag; the app passes `expectedFingerprint`.
+   */
   readonly expectedNetworkHash?: string
   readonly expectedDigest?: string
+  /** The fingerprint the importing officer typed from the exporter's screen (case, spaces and dashes are ignored). */
+  readonly expectedFingerprint?: string
   /** Forwarded to open(). */
   readonly getPeerCount?: () => number
 }
@@ -155,6 +184,8 @@ export type FoundingBundleImportResult =
   | {
       readonly ok: true
       readonly outcome: 'replayed' | 'already-present'
+      /** 62-102: the bundle's fingerprint, for the record. */
+      readonly fingerprint: string
       readonly networkRef: NetworkReference
       readonly network: INetworkEngine
     }
