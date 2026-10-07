@@ -231,7 +231,7 @@ describe('EditBallotScreen — submit / withdraw on the persisted ballot (62-55)
     expect(submitSpy).toHaveBeenCalledWith(BALLOT_ID, expect.any(Function));
     // Threshold-1 property: the lazy signer is never invoked when the engine does not call it.
     expect(mockCreateDeviceSigner).not.toHaveBeenCalled();
-    expect(await engine.getBallotConfirmationState(BALLOT_ID)).toEqual({ locked: true, confirmed: false });
+    expect(await engine.getBallotConfirmationState(BALLOT_ID)).toEqual({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: true }); // gap8/WR-03: the state carries canWithdraw/ownTaskOpen (default mock user submitted)
     expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
@@ -472,7 +472,8 @@ describe('EditBallotScreen — fails closed on an unknown confirmation state (CR
   it('while the first read is pending the form is disabled and no footer renders', async () => {
     const { engine } = newEngine();
     await propose(engine);
-    let release!: (v: { locked: boolean; confirmed: boolean }) => void;
+    // gap8/WR-03: the state carries canWithdraw/ownTaskOpen
+    let release!: (v: Awaited<ReturnType<typeof engine.getBallotConfirmationState>>) => void;
     jest
       .spyOn(engine, 'getBallotConfirmationState')
       .mockImplementationOnce(() => new Promise((res) => { release = res; }));
@@ -484,7 +485,7 @@ describe('EditBallotScreen — fails closed on an unknown confirmation state (CR
     expect(treeContainsText(tr, 'addQuestion')).toBe(false);
 
     await renderer.act(async () => {
-      release({ locked: false, confirmed: false });
+      release({ locked: false, confirmed: false, canWithdraw: false, ownTaskOpen: false });
       for (let i = 0; i < 6; i++) await Promise.resolve();
     });
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
@@ -518,51 +519,60 @@ describe('EditBallotScreen — re-reads the lock after a refused Propose or Subm
   const SUBMIT_REFUSAL = 'ElectionEngine.submitBallotForConfirmation: This ballot is already submitted for confirmation.';
   const PROPOSE_REFUSAL = 'ElectionEngine.proposeBallot: This ballot is out for confirmation and cannot be edited. Withdraw it first.';
 
-  it('E1 stale Submit: refused as already submitted -> footer swaps to Withdraw, no failure copy', async () => {
+  it('E1 stale Submit: refused as already submitted -> footer swaps to Withdraw, says why (gap8/WR-01)', async () => {
     const { engine } = newEngine();
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen('Edit');
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(true);
 
-    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: false });
     engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error(SUBMIT_REFUSAL); });
     await press(tr, 'edit-ballot-submit');
 
     expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
+    expect(treeContainsText(tr, 'ballotSubmitRefusedLocked')).toBe(true);
     expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
   });
 
-  it('E2 stale Propose: refused as out for confirmation -> Withdraw renders, no failure copy', async () => {
+  it('E2 stale Propose: refused as out for confirmation -> Withdraw renders, the refusal is explained and the stored ballot replaces the unsaved edit (gap8/WR-01)', async () => {
     const { engine } = newEngine();
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen('Edit');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { BallotTemplateForm } = require('../components/BallotTemplateForm');
+    await renderer.act(async () => {
+      tr.root.findByType(BallotTemplateForm).props.onDescriptionChange('unsaved edit');
+    });
 
-    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: false });
     engine.proposeBallot = jest.fn(async () => { throw new Error(PROPOSE_REFUSAL); });
     await press(tr, 'edit-ballot-propose');
 
     expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(true);
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
+    expect(treeContainsText(tr, 'ballotProposeRefusedLocked')).toBe(true);
     expect(treeContainsText(tr, 'ballotProposeFailed')).toBe(false);
+    expect(tr.root.findByType(BallotTemplateForm).props.description).toBe('Test ballot');
   });
 
-  it('E3 refusal into confirmed: no footer buttons and no failure copy', async () => {
+  it('E3 refusal into confirmed: no footer buttons, the refusal is explained (gap8/WR-01)', async () => {
     const { engine } = newEngine();
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen('Edit');
 
-    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: false, confirmed: true });
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false });
     engine.submitBallotForConfirmation = jest.fn(async () => { throw new Error('ElectionEngine.submitBallotForConfirmation: This ballot is already confirmed.'); });
     await press(tr, 'edit-ballot-submit');
 
     expect(hasTestID(tr, 'edit-ballot-propose')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-submit')).toBe(false);
     expect(hasTestID(tr, 'edit-ballot-withdraw')).toBe(false);
+    expect(treeContainsText(tr, 'ballotSubmitRefusedConfirmed')).toBe(true);
     expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
   });
 
@@ -615,7 +625,8 @@ describe('EditBallotScreen — re-reads the lock after a refused Propose or Subm
   it('E7 reached-but-unfinalized pin (T-62-62-08): locked footer; a refused Withdraw shows ballotWithdrawFailed and never offers Propose/Submit', async () => {
     const { engine } = newEngine();
     await propose(engine);
-    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false });
+    // The fake models the read-before-reach race: the real engine reports canWithdraw:false once it reads a reached session.
+    jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue({ locked: true, confirmed: false, canWithdraw: true, ownTaskOpen: false });
     engine.withdrawBallotConfirmation = jest.fn(async () => {
       throw new Error('ElectionEngine.withdrawBallotConfirmation: This ballot is already confirmed and can no longer be withdrawn.');
     });
@@ -669,7 +680,7 @@ describe('BallotConfirmation — engine contract confirm path (D-09/D-10)', () =
     await engine.submitBallotForConfirmation(BALLOT_ID);
     engine.markBallotConfirmed(BALLOT_ID);
     const cs = await engine.getBallotConfirmationState(BALLOT_ID);
-    expect(cs).toEqual({ locked: false, confirmed: true });
+    expect(cs).toEqual({ locked: false, confirmed: true, canWithdraw: false, ownTaskOpen: false }); // gap8/WR-03
     expect(confirmState.get(BALLOT_ID)).toBe('confirmed');
   });
 

@@ -38,6 +38,16 @@ import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
  * Withdraw, confirmed -> no footer, readOnly preview -> no footer, unknown lock state
  * (pending or failed read) -> disabled form with Retry only (CR-03, 62-REVIEW.md).
  */
+/**
+ * gap7/IN-05: a cohort-unreachable lock read can take long to fail. After this long without an
+ * answer the screen fails closed (Retry); a later success of the LATEST read still restores it.
+ */
+const BALLOT_STATE_READ_TIMEOUT_MS = 30_000;
+
+type BallotConfirmationView = { locked: boolean; confirmed: boolean; canWithdraw: boolean; ownTaskOpen: boolean };
+
+const errorClass = (error: unknown): string => (error instanceof Error ? error.name : typeof error);
+
 const EditBallotScreen = () => {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
@@ -54,7 +64,11 @@ const EditBallotScreen = () => {
 	const [proposing, setProposing] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
 	const [withdrawing, setWithdrawing] = useState(false);
-	const [confirmationState, setConfirmationState] = useState<{ locked: boolean; confirmed: boolean } | null>(null);
+	const [confirmationState, setConfirmationState] = useState<BallotConfirmationView | null>(null);
+	// gap7/IN-05: only the latest lock read may write state; Retry shows it is busy.
+	const readSeqRef = useRef(0);
+	const retryingRef = useRef(false);
+	const [retrying, setRetrying] = useState(false);
 	// CR-03 (62-REVIEW.md): a failed confirmation-state read must FAIL CLOSED. The edit lock
 	// is unknown, so the form is disabled and the footer shows Retry only.
 	const [stateReadFailed, setStateReadFailed] = useState(false);
@@ -92,7 +106,7 @@ const EditBallotScreen = () => {
 					setPrimaryAuthorityId(details.network.primaryAuthorityId);
 				}
 			} catch (error) {
-				console.warn("Error loading authorities for ballot:", error);
+				console.warn("Error loading authorities for ballot:", errorClass(error));
 			}
 		}
 		loadAuthorities();
@@ -110,50 +124,94 @@ const EditBallotScreen = () => {
 	}, [primaryAuthorityId, (ballotDraft as any).authority]);
 
 	// G12 edit/upsert: load existing ballot from engine on mount so the form
-	// pre-populates AND the draft retains the SAME id for upsert on PROPOSE.
-	useEffect(() => {
+	// pre-populates AND the draft retains the SAME id for upsert on PROPOSE. Also used to
+	// restore the stored ballot after the engine refused an edit (gap8/WR-01), so the form
+	// never shows edits that were not saved.
+	const reloadStoredBallot = async () => {
 		if (!ballotId || !electionEngine) return;
-		const loadBallot = async () => {
-			try {
-				const details = await electionEngine.getBallotDetails(ballotId);
-				if (details?.ballot) {
-					// WR-06: the async load replaces the whole draft, so it must not drop
-					// the electionId that the synchronous seed effect set. setBallotDraft
-					// is a plain setter (no functional updater), so fall back explicitly to
-					// the loaded ballot's electionId, else the route's electionId param.
-					// Map authorityId → authority (the loose key BallotTemplateForm's
-					// dropdown reads) so the Authority field re-populates on reopen.
-					setBallotDraft({
-						...details.ballot,
-						electionId: (details.ballot as any).electionId || electionId || "",
-						authority: (details.ballot as any).authorityId ?? "",
-					} as any);
-				}
-			} catch (error) {
-				console.warn("getBallotDetails error", error);
-				setLoadError(peerUnavailableMessage(error, t, "read") ?? (error instanceof Error ? error.message : String(error)));
+		try {
+			const details = await electionEngine.getBallotDetails(ballotId);
+			if (details?.ballot) {
+				// WR-06: the async load replaces the whole draft, so it must not drop
+				// the electionId that the synchronous seed effect set. setBallotDraft
+				// is a plain setter (no functional updater), so fall back explicitly to
+				// the loaded ballot's electionId, else the route's electionId param.
+				// Map authorityId → authority (the loose key BallotTemplateForm's
+				// dropdown reads) so the Authority field re-populates on reopen.
+				setBallotDraft({
+					...details.ballot,
+					electionId: (details.ballot as any).electionId || electionId || "",
+					authority: (details.ballot as any).authorityId ?? "",
+				} as any);
 			}
-		};
-		loadBallot();
+		} catch (error) {
+			console.warn("getBallotDetails error", errorClass(error));
+			// Peer-unavailable first (translated); everything else is fixed copy, never engine text.
+			setLoadError(peerUnavailableMessage(error, t, "read") ?? t("ballotLoadFailed"));
+		}
+	};
+	useEffect(() => {
+		reloadStoredBallot();
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [ballotId]);
 
 	// One read path for the focus effect, the post-Submit/Withdraw refresh and Retry. Success
 	// clears the failure flag; failure sets it (fail closed, CR-03) and logs the error CLASS only.
-	// Returns the state it read ({ locked, confirmed }), or null when the read failed.
-	const readConfirmationState = useCallback(async (): Promise<{ locked: boolean; confirmed: boolean } | null> => {
-		try {
-			const state = await electionEngine.getBallotConfirmationState(ballotId);
-			const fresh = { locked: !!state.locked, confirmed: !!state.confirmed };
-			setConfirmationState(fresh);
-			setStateReadFailed(false);
+	// Returns the state it read, or null when the read failed or timed out. Reads are sequenced
+	// (gap7/IN-05): a slower, older read never overwrites a newer one.
+	const readConfirmationState = useCallback(async (): Promise<BallotConfirmationView | null> => {
+		const seq = ++readSeqRef.current;
+		const apply = (state: any): BallotConfirmationView => {
+			const fresh = {
+				locked: !!state.locked,
+				confirmed: !!state.confirmed,
+				canWithdraw: state.canWithdraw === true,
+				ownTaskOpen: state.ownTaskOpen === true,
+			};
+			if (seq === readSeqRef.current) {
+				setConfirmationState(fresh);
+				setStateReadFailed(false);
+			}
 			return fresh;
+		};
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const read = Promise.resolve(electionEngine.getBallotConfirmationState(ballotId));
+			read.catch(() => {});
+			const timeout = new Promise<"timeout">((resolve) => {
+				timer = setTimeout(() => resolve("timeout"), BALLOT_STATE_READ_TIMEOUT_MS);
+			});
+			const outcome = await Promise.race([read, timeout]);
+			if (outcome === "timeout") {
+				console.warn("getBallotConfirmationState failed", "timeout");
+				if (seq === readSeqRef.current) setStateReadFailed(true);
+				// A late answer to the LATEST read still restores the screen.
+				read.then((late) => {
+					apply(late);
+				}, () => {});
+				return null;
+			}
+			return apply(outcome);
 		} catch (error) {
-			console.warn("getBallotConfirmationState failed", error instanceof Error ? error.name : "unknown");
-			setStateReadFailed(true);
+			console.warn("getBallotConfirmationState failed", errorClass(error));
+			if (seq === readSeqRef.current) setStateReadFailed(true);
 			return null;
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 	}, [electionEngine, ballotId]);
+
+	const handleRetry = async () => {
+		if (retryingRef.current) return;
+		retryingRef.current = true;
+		setRetrying(true);
+		try {
+			await readConfirmationState();
+		} finally {
+			retryingRef.current = false;
+			setRetrying(false);
+		}
+	};
 
 	// D-05: poll confirmation lock state on every focus so an edit screen opened
 	// while a confirmation is pending shows the correct locked UI immediately.
@@ -192,7 +250,7 @@ const EditBallotScreen = () => {
 			// Re-read rather than guess: threshold 1 returns confirmed, higher thresholds locked.
 			await refreshConfirmationState();
 		} catch (error) {
-			console.warn("submitBallotForConfirmation error", error);
+			console.warn("submitBallotForConfirmation error", errorClass(error));
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
 			// The engine refuses a ballot that is out for confirmation or confirmed (proposeBallot,
@@ -200,7 +258,9 @@ const EditBallotScreen = () => {
 			// follows the engine instead of inviting a retry that cannot succeed (WR-04, 62-REVIEW.md).
 			const fresh = await readConfirmationState();
 			if (fresh && (fresh.locked || fresh.confirmed)) {
-				setErrorMessage("");
+				// gap8/WR-01: say what happened, and show the stored ballot again.
+				setErrorMessage(t(fresh.confirmed ? "ballotSubmitRefusedConfirmed" : "ballotSubmitRefusedLocked"));
+				await reloadStoredBallot();
 			} else {
 				setErrorMessage(outcome.message ?? t("ballotSubmitFailed"));
 			}
@@ -219,7 +279,7 @@ const EditBallotScreen = () => {
 			await electionEngine.withdrawBallotConfirmation(ballotId);
 			await refreshConfirmationState();
 		} catch (error) {
-			console.warn("withdrawBallotConfirmation error", error);
+			console.warn("withdrawBallotConfirmation error", errorClass(error));
 			setErrorMessage(t("ballotWithdrawFailed"));
 		} finally {
 			setWithdrawing(false);
@@ -281,12 +341,14 @@ const EditBallotScreen = () => {
 			await electionEngine.proposeBallot(ballot);
 			navigation.goBack();
 		} catch (error) {
-			console.warn("proposeBallot error", error);
+			console.warn("proposeBallot error", errorClass(error));
 			// Same re-read as the submit catch: a refusal because the ballot is now out for
 			// confirmation or confirmed must leave the footer matching the engine (WR-04).
 			const fresh = await readConfirmationState();
 			if (fresh && (fresh.locked || fresh.confirmed)) {
-				setErrorMessage("");
+				// gap8/WR-01: say what happened and drop the unsaved edits for the stored ballot.
+				setErrorMessage(t(fresh.confirmed ? "ballotProposeRefusedConfirmed" : "ballotProposeRefusedLocked"));
+				await reloadStoredBallot();
 			} else {
 				setErrorMessage(t("ballotProposeFailed"));
 			}
@@ -350,9 +412,10 @@ const EditBallotScreen = () => {
 							testID="edit-ballot-state-retry"
 							title={t("ballotStateRetry")}
 							icon="rotate-right"
-							onPress={readConfirmationState}
+							onPress={handleRetry}
 							backgroundColor={colors.accent}
-						/>
+						disabled={retrying}
+							/>
 					</View>
 				</>
 			)}
