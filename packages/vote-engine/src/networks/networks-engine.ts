@@ -558,15 +558,28 @@ export class NetworksEngine implements INetworksEngine {
 		}
 
 		// 62-102 (initial/G2 WR-04): every non-success exit after the target
-		// opened closes its database and evicts any cached context, so a retry
-		// is neither refused as already-joined nor blocked by a held handle.
+		// opened evicts any cached context, so a retry is never refused as
+		// already-joined, and closes the database ONLY when this engine owns it.
+		// WR-R1-07: a strand-backed handle (the App schema applied by cadre-core's
+		// StrandDatabase before the factory returned it) belongs to the strand
+		// host, which keeps the strand registered and may still be syncing into
+		// it; closing it would leave a registered strand with a dead Database and
+		// fail every retry with target-open-failed until the app restarts. Such a
+		// handle is left open for the host to reuse on the retry.
+		const borrowedFromStrandHost = ((): boolean => {
+			try {
+				return ctx.db.declaredSchemaManager.hasDeclaredSchema('App');
+			} catch {
+				return false;
+			}
+		})();
 		const failClosed = async (
 			reason: 'target-open-failed' | 'target-replay-failed' | 'target-conflict',
 			detail: string,
 		): Promise<FoundingBundleImportResult> => {
 			this.contexts.delete(hash);
 			const closable = ctx.db as unknown as { close?: () => Promise<void> };
-			if (typeof closable.close === 'function') {
+			if (!borrowedFromStrandHost && typeof closable.close === 'function') {
 				try {
 					await closable.close();
 				} catch {

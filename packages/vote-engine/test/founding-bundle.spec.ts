@@ -13,7 +13,8 @@ import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { UserKeyType } from '@votetorrent/vote-core'
 import type { FoundingBundle, FoundingBundleRows, Signature, LocalStorage, AdminInit, Proposal, Scope } from '@votetorrent/vote-core'
-import { prepareDb } from '../src/database/initialize.js'
+import { prepareDb, registerDbPlugins } from '../src/database/initialize.js'
+import { VOTETORRENT_SCHEMA_SQL } from '../src/database/schema-sql.js'
 import { nowCanonicalDatetime, bytesToBase64url } from '../src/utils.js'
 import { buildManifest, computeContentDigest, computeSchemaHash } from '../src/bootstrap/snapshot-manifest.js'
 import {
@@ -1167,6 +1168,45 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       // Whatever the exact partial classification, an ok:false must have closed the handle.
       if (!result.ok) expect(tracked.closed, 'handle closed on a refused import').to.be.greaterThan(0)
       expect(result.ok).to.equal(false)
+    })
+
+    it('W-6 (WR-R1-07): a refused import never closes a strand-held (App-schema) handle, and the retry reuses it and succeeds', async () => {
+      const { text, digest, hash } = await exported()
+      // A strand-host double: ONE held Database per strand, App schema applied before it is handed
+      // out (as cadre-core StrandDatabase does), returned again on every factory call.
+      const innerDdl = VOTETORRENT_SCHEMA_SQL
+        .replace(/^\s*declare\s+schema\s+\w+\s*\{/, '')
+        .replace(/\}\s*apply\s+schema\s+\w+\s*;\s*$/, '')
+        .trim()
+      const held = new Database()
+      await registerDbPlugins(held)
+      await held.exec(`declare schema App { ${innerDdl} } apply schema App;`)
+      held.setSchemaPath(['App', 'main'])
+      let closed = 0
+      const origClose = held.close.bind(held)
+      held.close = (async () => { closed++; return origClose() }) as typeof held.close
+      let failRead = true
+      const origPrepare = held.prepare.bind(held)
+      held.prepare = ((sql: string) => {
+        if (failRead && sql.includes('from Network') && sql.trimStart().toLowerCase().startsWith('select')) {
+          throw new Error('stub: read failed')
+        }
+        return origPrepare(sql)
+      }) as typeof held.prepare
+      const strandFactory: DbFactory = async () => held
+      const engineB = new NetworksEngine(makeDeviceLocalStorage(), strandFactory)
+
+      const first = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(first.ok).to.equal(false)
+      if (first.ok) throw new Error('unreachable')
+      expect(first.reason).to.equal('target-open-failed')
+      expect(closed, 'the strand host owns this handle; the engine must not close it').to.equal(0)
+      expect(engineB.getEstablishedContext(hash)).to.equal(undefined)
+
+      failRead = false
+      const retry = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
+      expect(retry.ok, `retry on the same held handle (${retry.ok ? '' : `${retry.reason}: ${'detail' in retry ? retry.detail : ''}`})`).to.equal(true)
+      expect(closed).to.equal(0)
     })
 
     it('W-4: open() rejecting after a successful replay resolves target-open-failed, leaves nothing behind, and a retry is not already-joined', async () => {
