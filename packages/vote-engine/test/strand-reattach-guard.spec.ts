@@ -130,7 +130,13 @@ describe('strand re-attach guard', () => {
 		return e;
 	}
 
-	/** Wrap a db so any statement whose SQL matches `blocked` throws the cohort-unreachable error. */
+	/**
+	 * Wrap a db so any statement whose SQL matches `blocked` throws the cohort-unreachable error.
+	 *
+	 * WR-R2-05: every method runs with `this` = the PROXY (never the raw target), so the internal
+	 * `this.prepare(...)` that Quereus `Database.get()` / `eval()` / `exec()` issue also passes the
+	 * check. Binding to the target let `db.get(sql)` and `db.eval(sql)` reads bypass the stub.
+	 */
 	function stubBlocked(db: Database, blocked: (sql: string) => string | undefined): { db: Database; seen: string[] } {
 		const seen: string[] = [];
 		const check = (sql: unknown): void => {
@@ -140,16 +146,16 @@ describe('strand re-attach guard', () => {
 				throw unavailableError(table);
 			}
 		};
-		const proxy = new Proxy(db, {
-			get(target, prop) {
-				const value = Reflect.get(target, prop, target) as unknown;
+		const proxy: Database = new Proxy(db, {
+			get(target, prop, receiver) {
+				const value = Reflect.get(target, prop, receiver) as unknown;
 				if (prop === 'prepare' || prop === 'exec') {
 					return (sql: unknown, ...rest: unknown[]) => {
 						check(sql);
-						return (value as (...a: unknown[]) => unknown).call(target, sql, ...rest);
+						return (value as (...a: unknown[]) => unknown).call(receiver, sql, ...rest);
 					};
 				}
-				return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+				return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(receiver) : value;
 			},
 		});
 		return { db: proxy, seen };
@@ -174,6 +180,19 @@ describe('strand re-attach guard', () => {
 		let caught: unknown;
 		try { await peekTid(db, 'networks'); } catch (e) { caught = e; }
 		expect((caught as Error)?.message).to.include('cohort-unreachable');
+	});
+
+	it('R-TID-0b: the stub also trips on db.get(sql) and db.eval(sql), whose prepare is internal (WR-R2-05 negative control)', async () => {
+		const { db, seen } = stubBlocked(await makeStrandDb(), onlyTid);
+		let viaGet: unknown;
+		try { await db.get('select HighWater from TidHighWater where Namespace = :ns', { ns: 'networks' }); } catch (e) { viaGet = e; }
+		expect(findReason(viaGet), 'db.get must reach the stub').to.equal('cohort-unreachable');
+		let viaEval: unknown;
+		try {
+			for await (const _row of db.eval('select HighWater from TidHighWater', {})) { void _row; }
+		} catch (e) { viaEval = e; }
+		expect(findReason(viaEval), 'db.eval must reach the stub').to.equal('cohort-unreachable');
+		expect(seen.length).to.equal(2);
 	});
 
 	it('R-TID-1: open() on a strand never reads TidHighWater (cohort-unreachable stub)', async () => {

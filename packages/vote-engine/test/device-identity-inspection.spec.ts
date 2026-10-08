@@ -91,18 +91,24 @@ describe('O-06 - UserEngine.inspectDeviceIdentity', () => {
     const x = fx.holders[0]!.user
     const seen: string[] = []
     const realDb = ctx.db
+    // WR-R2-05: methods run with `this` = the proxy, so the prepare that Database.get()/eval()/exec()
+    // issue internally is recorded too (binding to the raw target let those reads bypass the spy).
     const spyDb = new Proxy(realDb, {
       get (target, prop, receiver) {
-        const value = Reflect.get(target, prop, target)
+        const value = Reflect.get(target, prop, receiver)
         if ((prop === 'prepare' || prop === 'eval' || prop === 'exec') && typeof value === 'function') {
           return (sql: string, ...rest: unknown[]) => {
             seen.push(sql)
-            return (value as (...a: unknown[]) => unknown).call(target, sql, ...rest)
+            return (value as (...a: unknown[]) => unknown).call(receiver, sql, ...rest)
           }
         }
-        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(receiver) : value
       }
     })
+    // Negative control: a read through db.get (whose prepare is internal) is seen.
+    await spyDb.get("select count(*) as c from UserKey where UserId = :uid", { uid: x.id })
+    expect(seen.some((sql) => /from UserKey where UserId = :uid/.test(sql)), 'db.get reaches the spy').to.equal(true)
+    seen.length = 0
     const spied = inspector({ ...ctx, db: spyDb } as EngineContext, x)
     await spied.inspectDeviceIdentity('R-random', x.activeKeys[0]!.key)
     const userKeySql = seen.filter((sql) => /UserKey/.test(sql))
