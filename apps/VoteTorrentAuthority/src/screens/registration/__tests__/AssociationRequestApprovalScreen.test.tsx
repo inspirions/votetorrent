@@ -622,6 +622,36 @@ describe("AssociationRequestApprovalScreen — failed-open retry and stale reads
 		expect(mockApproveReassociation.mock.calls[0][1]).toEqual({ registrantId: "reg-2-abcdefghij" });
 	});
 
+	it("A-4 (WR-R3-04). a failed read after the session opened closes that session before Retry opens a fresh one", async () => {
+		const first = {
+			strandId: "strand-1",
+			registration: { publishDecision: jest.fn(async () => "cid"), close: jest.fn(async () => undefined) },
+			association: { close: jest.fn(async () => undefined) },
+		};
+		mockCreateTransports.mockImplementationOnce(() => first);
+		mockReviewReject = new Error("read-boom");
+		const tr = await renderScreen();
+		expect(textOf(tr, "association-approval-error")).toBe(EN.associationApprovalLoadError);
+		// The discarded session's transports are closed now, not leaked for the life of the app.
+		expect(first.registration.close).toHaveBeenCalledTimes(1);
+		expect(first.association.close).toHaveBeenCalledTimes(1);
+
+		mockReviewReject = undefined;
+		await pressAsync(tr, "association-approval-retry");
+		expect(mockCreateTransports).toHaveBeenCalledTimes(2);
+		expect(exists(tr, "association-approval-error")).toBe(false);
+		expect(mockTransports.registration.close).not.toHaveBeenCalled();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await flushTicks(4);
+		expect(first.registration.close).toHaveBeenCalledTimes(1);
+		expect(first.association.close).toHaveBeenCalledTimes(1);
+		expect(mockTransports.registration.close).toHaveBeenCalledTimes(1);
+		expect(mockTransports.association.close).toHaveBeenCalledTimes(1);
+	});
+
 	it("A-3. unmounting while a read is in flight raises no warnings and closes the session exactly once", async () => {
 		const slow = deferred<any>();
 		mockGetReassociationReview.mockImplementationOnce(async () => slow.promise);
