@@ -1440,6 +1440,64 @@ describe('NetworkEngine', () => {
 			expect(await AsyncStorage.getItem('pinnedAuthorities')).to.deep.equal(legacy);
 			expect(await AsyncStorage.getItem(scopedKey(ref))).to.equal(undefined);
 		});
+
+		it('P-5 (WR-R1-06): a lookup error on ONE legacy entry keeps only that entry legacy; the others still migrate', async () => {
+			const { engine, ref, authority } = await makeNet();
+			const ghost: Authority = { ...authority, id: 'aid-lookup-throws', name: 'Ghost' };
+			await AsyncStorage.setItem('pinnedAuthorities', [ghost, authority]);
+			const realCtx = (engine as unknown as { ctx: EngineContext }).ctx;
+			const failingDb = new Proxy(realCtx.db, {
+				get(target, prop) {
+					const v = Reflect.get(target, prop, target) as unknown;
+					if (prop === 'prepare') {
+						return (sql: string, ...rest: unknown[]) => {
+							const stmt = (v as (...a: unknown[]) => { get: (p: Record<string, unknown>) => Promise<unknown> }).call(target, sql, ...rest);
+							if (!/from Authority where Id = :id/.test(sql)) return stmt;
+							return {
+								get: async (params: Record<string, unknown>) => {
+									if (params.id === ghost.id) throw new Error('lookup boom');
+									return await stmt.get(params);
+								},
+							};
+						};
+					}
+					return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+				},
+			});
+			const flaky = new NetworkEngine(ref, AsyncStorage, { db: failingDb, user: realCtx.user });
+			expect((await flaky.getPinnedAuthorities()).map((p) => p.id)).to.deep.equal([authority.id]);
+			expect((await AsyncStorage.getItem<Authority[]>(scopedKey(ref)))?.map((p) => p.id)).to.deep.equal([authority.id]);
+			expect((await AsyncStorage.getItem<Authority[]>('pinnedAuthorities'))?.map((p) => p.id)).to.deep.equal([ghost.id]);
+		});
+
+		it('P-5 (WR-R1-06): a legacy pin whose Authority row has a null DomainName still migrates and is listed', async () => {
+			const { engine, ref, authority } = await makeNet();
+			await AsyncStorage.setItem('pinnedAuthorities', [authority]);
+			const realCtx = (engine as unknown as { ctx: EngineContext }).ctx;
+			// DomainName is `text null` in the schema; the row mapper (asText) cannot map null.
+			const nullDomainDb = new Proxy(realCtx.db, {
+				get(target, prop) {
+					const v = Reflect.get(target, prop, target) as unknown;
+					if (prop === 'prepare') {
+						return (sql: string, ...rest: unknown[]) => {
+							const stmt = (v as (...a: unknown[]) => { get: (p: Record<string, unknown>) => Promise<Record<string, unknown> | undefined> }).call(target, sql, ...rest);
+							if (!/DomainName/.test(sql) || !/from Authority where Id = :id/.test(sql)) return stmt;
+							return {
+								get: async (params: Record<string, unknown>) => {
+									const row = await stmt.get(params);
+									return row ? { ...row, DomainName: null } : row;
+								},
+							};
+						};
+					}
+					return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+				},
+			});
+			const nullDomain = new NetworkEngine(ref, AsyncStorage, { db: nullDomainDb, user: realCtx.user });
+			expect((await nullDomain.getPinnedAuthorities()).map((p) => p.id)).to.deep.equal([authority.id]);
+			expect((await AsyncStorage.getItem<Authority[]>(scopedKey(ref)))?.map((p) => p.id)).to.deep.equal([authority.id]);
+			expect(await AsyncStorage.getItem('pinnedAuthorities')).to.equal(undefined);
+		});
 	});
 
 	// -----------------------------------------------------------------------

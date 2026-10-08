@@ -602,10 +602,23 @@ export class NetworkEngine implements INetworkEngine {
   }
 
   /**
+   * Existence-only point lookup for the legacy pin migration (WR-R1-06). It reads no column, so a
+   * row that `mapAuthorityRow` cannot map (a null `DomainName`, which the schema allows) is still
+   * claimed by the network that holds it instead of failing the migration on every read.
+   */
+  private async authorityExists (id: string): Promise<boolean> {
+    const row = await this.ctx.db
+      .prepare('select 1 as x from Authority where Id = :id')
+      .get({ id })
+    return row !== undefined && row !== null
+  }
+
+  /**
    * The raw stored pin list for this network, after claiming any legacy device-wide
-   * entries whose authority exists in this network. Any lookup error aborts the
-   * migration without writing. Scoped key is written first, then the shrunken legacy
-   * list, so a crash between the two can only duplicate a pin, never lose one.
+   * entries whose authority exists in this network. A lookup error is per entry
+   * (WR-R1-06): that entry stays on the legacy key for a later read, and the rest still
+   * migrate. Scoped key is written first, then the shrunken legacy list, so a crash
+   * between the two can only duplicate a pin, never lose one.
    */
   private async readScopedPins (): Promise<Authority[]> {
     const scoped = (await this.localStorage.getItem<Authority[]>(this.pinsKey)) ?? []
@@ -613,13 +626,16 @@ export class NetworkEngine implements INetworkEngine {
     if (legacy.length === 0) return scoped
     const claimed: Authority[] = []
     const remaining: Authority[] = []
-    try {
-      for (const entry of legacy) {
-        if ((await this.lookupAuthority(entry.id)) !== undefined) claimed.push(entry)
-        else remaining.push(entry)
+    for (const entry of legacy) {
+      let exists: boolean
+      try {
+        exists = await this.authorityExists(entry.id)
+      } catch {
+        remaining.push(entry) // unknown: keep it legacy, retried on a later read
+        continue
       }
-    } catch {
-      return scoped
+      if (exists) claimed.push(entry)
+      else remaining.push(entry)
     }
     if (claimed.length === 0) return scoped
     const byId = new Map(scoped.map((a) => [a.id, a]))
