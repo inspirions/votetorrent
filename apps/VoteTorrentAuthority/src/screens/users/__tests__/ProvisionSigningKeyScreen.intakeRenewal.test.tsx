@@ -268,6 +268,65 @@ describe("ProvisionSigningKeyScreen intake renewal after key replacement (A4)", 
 		expect(JSON.stringify(tr.toJSON())).not.toContain("officerIntakeRenewalFailedBody");
 	});
 
+	it("WR-R3-06: a renewal that never settles does not hold the success screen; after 30 s the notice appears", async () => {
+		jest.useFakeTimers();
+		try {
+			seedRecovery();
+			mockRenew.mockImplementation(() => new Promise<string>(() => undefined));
+			const tr = await renderScreen();
+			await runRecovery(tr);
+			expect(mockRenew).toHaveBeenCalledTimes(1);
+			expect(JSON.stringify(tr.toJSON())).toContain("signingKeyProvisioningSuccessHeading");
+			expect(tr.root.findAllByProps({ testID: "signing-key-intake-renewal-failed" })).toHaveLength(0);
+
+			await renderer.act(async () => {
+				jest.advanceTimersByTime(29_999);
+			});
+			expect(tr.root.findAllByProps({ testID: "signing-key-intake-renewal-failed" })).toHaveLength(0);
+			await renderer.act(async () => {
+				jest.advanceTimersByTime(1);
+			});
+			expect(tr.root.findAllByProps({ testID: "signing-key-intake-renewal-failed" }).length).toBeGreaterThan(0);
+			expect(JSON.stringify(tr.toJSON())).toContain("signingKeyProvisioningSuccessHeading");
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it("WR-R3-06: a slow renewal that later succeeds replaces the timed-out notice, and the outcome is logged at info", async () => {
+		jest.useFakeTimers();
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			seedRecovery();
+			let settle!: (outcome: string) => void;
+			mockRenew.mockImplementation(
+				() =>
+					new Promise<string>((resolve) => {
+						settle = resolve;
+					})
+			);
+			const tr = await renderScreen();
+			await runRecovery(tr);
+			await renderer.act(async () => {
+				jest.advanceTimersByTime(30_000);
+			});
+			expect(tr.root.findAllByProps({ testID: "signing-key-intake-renewal-failed" }).length).toBeGreaterThan(0);
+
+			await renderer.act(async () => {
+				settle("renewed");
+			});
+			await flush();
+			expect(tr.root.findAllByProps({ testID: "signing-key-intake-renewal-failed" })).toHaveLength(0);
+			expect(infoSpy).toHaveBeenCalledWith("[intake-renewal] outcome=renewed");
+			expect(warnSpy.mock.calls.filter((c) => String(c[0]).includes("[intake-renewal]"))).toHaveLength(0);
+		} finally {
+			infoSpy.mockRestore();
+			warnSpy.mockRestore();
+			jest.useRealTimers();
+		}
+	});
+
 	it("first-run provisioning never calls renewal", async () => {
 		mockRouteParams = { reason: "first-run" };
 		nativeFake.provisionDeviceKey.mockResolvedValue({ publicKeyBase64: "N", publicKeyCompressedHex: NEW_KEY });
