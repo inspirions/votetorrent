@@ -109,14 +109,46 @@ function nameAlt(extra: string[]): string {
 
 function patternsFor(extra: string[]): RegExp[] {
 	const n = nameAlt(extra);
+	const BANG = '(?:!|\\?)?';
 	return [
 		R1,
-		new RegExp('String\\(' + n + '\\)'),
-		new RegExp('\\b' + n + '\\??\\.' + MSG),
-		new RegExp('\\)\\??\\.' + MSG),
+		// String(x), String(x as Error), String(x ?? "y")
+		new RegExp('String\\(\\s*' + n + '\\b'),
+		// x.message, x?.message, x!.message
+		new RegExp('\\b' + n + BANG + '\\.' + MSG),
+		// (x as Error).message, (x as Error)!.message
+		new RegExp('\\)' + BANG + '\\.' + MSG),
 		new RegExp('\\$\\{' + n + '\\}'),
+		// x["message"], x['message']
+		new RegExp('\\b' + n + BANG + '\\[\\s*["\']' + MSG + '["\']\\s*\\]'),
+		// x.toString()
+		new RegExp('\\b' + n + BANG + '\\.to' + 'String\\('),
+		// JSON.stringify(x)
+		new RegExp('JSON\\.str' + 'ingify\\(\\s*' + n + '\\b'),
+		// "Failed: " + x
+		new RegExp('\\+\\s*' + n + '\\b(?!\\s*[.([])'),
+		// const { message } = x
+		new RegExp('\\{\\s*' + MSG + '\\s*\\}\\s*='),
 	];
 }
+
+/** The top-level comma of a bracket span's contents, or -1 (strings and nesting skipped). */
+function topLevelComma(inner: string): number {
+	let depth = 0;
+	for (let i = 0; i < inner.length; i++) {
+		const c = inner[i];
+		if (c === "'" || c === '"' || c === '`') {
+			let j = i + 1;
+			while (j < inner.length && inner[j] !== c) j += inner[j] === '\\' ? 2 : 1;
+			i = j;
+		} else if (c === '(' || c === '[' || c === '{') depth++;
+		else if (c === ')' || c === ']' || c === '}') depth--;
+		else if (c === ',' && depth === 0) return i;
+	}
+	return -1;
+}
+
+const PARAM_HEAD = /^(?:async\s+)?(?:function\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)/;
 
 function catchBoundNames(text: string): string[] {
 	const out = new Set<string>();
@@ -124,6 +156,23 @@ function catchBoundNames(text: string): string[] {
 	for (let m = re.exec(text); m; m = re.exec(text)) out.add(m[1]);
 	const re2 = /\.catch\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*(?:=>|\)|:|,)/g;
 	for (let m = re2.exec(text); m; m = re2.exec(text)) out.add(m[1]);
+	// .then(ok, (problem) => ...): the rejection callback's parameter
+	const re3 = /\.then\(/g;
+	for (let m = re3.exec(text); m; m = re3.exec(text)) {
+		const open = m.index + m[0].length - 1;
+		const close = findClose(text, open);
+		if (close < 0) continue;
+		const inner = text.slice(open + 1, close);
+		const comma = topLevelComma(inner);
+		if (comma < 0) continue;
+		const p = PARAM_HEAD.exec(inner.slice(comma + 1).trimStart());
+		if (p) out.add(p[1]);
+	}
+	// onError: (problem) => ..., onError={(problem) => ...}, onFailure = (problem) => ..., onError(problem) { ... }
+	const re4 = /\bon(?:Error|Fail|Failure|Reject|Rejected)\s*[:=]\s*\{?\s*(?:async\s+)?(?:function\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)/g;
+	for (let m = re4.exec(text); m; m = re4.exec(text)) out.add(m[1]);
+	const re5 = /\bon(?:Error|Fail|Failure|Reject|Rejected)\s*\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)\s*\{/g;
+	for (let m = re5.exec(text); m; m = re5.exec(text)) out.add(m[1]);
 	return [...out];
 }
 
@@ -193,7 +242,9 @@ export function scanTextFull(relPath: string, text: string): { hits: Hit[]; uncl
 	for (const [i, line] of blanked.split('\n').entries()) {
 		const t = line.trim();
 		if (t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) continue;
-		const hit = pats.some((p) => p.test(line)) || (line.includes(R5_A) && line.includes('.' + MSG));
+		// Same-line block comments (including JSX `{/* ... */}`) are prose, never a render.
+		const code = line.replace(/\/\*.*?\*\//g, ' ');
+		const hit = pats.some((p) => p.test(code)) || (code.includes(R5_A) && code.includes('.' + MSG));
 		if (hit) hits.push({ file: relPath, line: i + 1, key: lineKey(orig[i]), text: orig[i].trim() });
 	}
 	return { hits, unclosed };
@@ -306,6 +357,16 @@ const FIXTURE_NAMES = [
 	'n10-builder-join',
 	'n12-duplicated-exempt-line',
 	'n13-unbalanced-paren-in-console-string',
+	'n14-non-null-message',
+	'n15-bracket-message',
+	'n16-destructured-message',
+	'n17-to-string',
+	'n18-string-cast',
+	'n19-string-coalesce',
+	'n20-concat',
+	'n21-json-stringify',
+	'n22-then-reject-param',
+	'n23-on-error-callback',
 ].map((n) => n + '.fixture.txt');
 // fixture name -> the line (1-based) that must be hit; undefined = the last line
 const RENDER_LINE: Record<string, number> = {
@@ -314,7 +375,7 @@ const RENDER_LINE: Record<string, number> = {
 };
 
 describe('strict guard self-test', () => {
-	it('keeps exactly the ten committed negative-control fixtures', () => {
+	it('keeps exactly the committed negative-control fixtures', () => {
 		expect(fs.readdirSync(FIXTURE_DIR).sort()).toEqual([...FIXTURE_NAMES].sort());
 	});
 
@@ -350,6 +411,11 @@ describe('strict guard self-test', () => {
 		expect(asFile).toContain(`C12 file must not be exempt: ${file}`);
 		const asLine = classify([], { EXEMPT_LINES: [{ file, key: '0000000000000000', count: 1, reason: 'self-test' }] }, 1);
 		expect(asLine).toContain(`C12 file must not be exempt: ${file}`);
+	});
+
+	it('ignores a same-line block comment but still sees the code beside it', () => {
+		expect(scanText('c.tsx', '{/* field + InlineError */}')).toEqual([]);
+		expect(scanText('c.tsx', 'setX(err.' + MSG + '); /* note */')).toHaveLength(1);
 	});
 
 	it('scans its own strict section to zero hits', () => {
