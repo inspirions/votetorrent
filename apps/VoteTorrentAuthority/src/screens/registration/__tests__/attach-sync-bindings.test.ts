@@ -396,6 +396,53 @@ describe("createRestRegistrationSyncBinding — R1-R10", () => {
 		}
 	});
 
+	it("S-2b (WR-R3-05): headers that arrive but a body that stalls still time out, abort, and fail the sync", async () => {
+		jest.useFakeTimers();
+		const priorFetch = (global as any).fetch;
+		let seenSignal: AbortSignal | undefined;
+		(global as any).fetch = jest.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+			seenSignal = init?.signal;
+			return { ok: true, status: 200, json: () => new Promise(() => undefined) };
+		});
+		try {
+			const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example" });
+			delete (deps as any).fetchJson;
+			const binding = createRestRegistrationSyncBinding(deps);
+			let settled = false;
+			const outcome = binding.syncNow({ authorityId: AUTHORITY_ID }).then(
+				() => undefined,
+				(e: Error) => e,
+			);
+			void outcome.then(() => {
+				settled = true;
+			});
+			await jest.advanceTimersByTimeAsync(REST_BRIDGE_FETCH_TIMEOUT_MS - 1);
+			expect(settled).toBe(false);
+			await jest.advanceTimersByTimeAsync(2);
+			const err = await outcome;
+			expect(err).toBeInstanceOf(Error);
+			expect(err!.message).toBe("registration bridge listing failed");
+			expect(seenSignal!.aborted).toBe(true);
+		} finally {
+			(global as any).fetch = priorFetch;
+			jest.useRealTimers();
+		}
+	});
+
+	it("S-2c: the default fetch hands back the body it read, and a 200 listing still imports nothing when empty", async () => {
+		const priorFetch = (global as any).fetch;
+		(global as any).fetch = jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ staged: [] }) }));
+		try {
+			const { deps } = makeDeps({ restBridgeUrl: "https://bridge.example" });
+			delete (deps as any).fetchJson;
+			const report = await createRestRegistrationSyncBinding(deps).syncNow({ authorityId: AUTHORITY_ID });
+			expect(report.imported).toBe(0);
+			expect((global as any).fetch).toHaveBeenCalledTimes(1);
+		} finally {
+			(global as any).fetch = priorFetch;
+		}
+	});
+
 	it("R10: attachSyncBindings registers a handle with id 'rest' outside __DEV__", async () => {
 		const priorDev = (global as any).__DEV__;
 		(global as any).__DEV__ = false;
