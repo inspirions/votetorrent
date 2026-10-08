@@ -1,6 +1,6 @@
 /**
  * continuity.round2.test.ts — gap6/WR-07 (unavailable reasons) and initial/G5 WR-04 reader half
- * (an approval beats a contradictory rejection). U-1, U-2, P-1..P-3.
+ * (an approval beats a contradictory rejection). U-1, U-2, P-1..P-4 (P-4: REVIEW CR-R4-02).
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {Signature} from '@votetorrent/vote-core';
@@ -125,6 +125,31 @@ describe('advanceReassociation prefers approval (initial/G5 WR-04 reader)', () =
 			.mockResolvedValueOnce([{requestId: 'Q', status: 'r', cursor: '1'}])
 			.mockResolvedValueOnce([{requestId: 'other', status: 'c', challengeNonce: 'x', cursor: '1'}]);
 		expect(await advanceReassociation(ceremony(poll), 'Q', false)).toEqual({kind: 'rejected'});
+	});
+
+	test('P-4: [c, r] in one page, not yet answered -> rejected, and the challenge is never answered', async () => {
+		const poll = jest.fn().mockResolvedValueOnce([
+			{requestId: 'Q', status: 'c', challengeNonce: 'N', cursor: '1'},
+			{requestId: 'Q', status: 'r', cursor: '2'},
+		]).mockResolvedValueOnce([]);
+		const produce = jest.fn(async () => ({publicKey: P256_PUB, deviceId: 'd', attestationTime: 1, certificateChain: ['c']}));
+		const submit = jest.fn(async () => undefined);
+		expect(await advanceReassociation(ceremony(poll, produce, submit), 'Q', false)).toEqual({kind: 'rejected'});
+		expect(produce).not.toHaveBeenCalled();
+		expect(submit).not.toHaveBeenCalled();
+	});
+
+	test('P-4: rejection on page 1, challenge on page 2, not yet answered -> rejected, never answered', async () => {
+		const poll = jest
+			.fn()
+			.mockResolvedValueOnce([{requestId: 'Q', status: 'r', cursor: '1'}])
+			.mockResolvedValueOnce([{requestId: 'Q', status: 'c', challengeNonce: 'N', cursor: '2'}])
+			.mockResolvedValueOnce([]);
+		const produce = jest.fn(async () => ({publicKey: P256_PUB, deviceId: 'd', attestationTime: 1, certificateChain: ['c']}));
+		const submit = jest.fn(async () => undefined);
+		expect(await advanceReassociation(ceremony(poll, produce, submit), 'Q', false)).toEqual({kind: 'rejected'});
+		expect(produce).not.toHaveBeenCalled();
+		expect(submit).not.toHaveBeenCalled();
 	});
 
 	test('P-3: a c answer still drives produce + submitAttestation once', async () => {

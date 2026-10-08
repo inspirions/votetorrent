@@ -343,7 +343,10 @@ export async function advanceReassociation(
 			continue;
 		}
 
-		if (latest.status === 'c' && latest.challengeNonce && !isAnswered) {
+		// Once this request has been rejected, never answer its challenge: answering would prompt for a
+		// biometric and publish a signed attestation for a request that is already decided. An approval
+		// still wins because it returns above, before this point.
+		if (latest.status === 'c' && latest.challengeNonce && !isAnswered && !sawRejection) {
 			const challenge: AttestationChallenge = {
 				nonce: latest.challengeNonce,
 				authorityId: deps.authorityId,
