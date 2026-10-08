@@ -45,7 +45,9 @@ beforeEach(() => {
 	mockDims = { width: 360, height: 760 };
 });
 afterEach(() => {
-	tr.unmount();
+	renderer.act(() => {
+		tr.unmount();
+	});
 	jest.useRealTimers();
 	jest.restoreAllMocks();
 });
@@ -118,14 +120,39 @@ describe("usePreserveScrollOnResize", () => {
 		expect(handlers.scrollEventThrottle).toBe(16);
 	});
 
-	it("leaves no timer running on unmount", async () => {
+	// WR-R6-02: a mid-list state makes the restore branch deterministic (scrollTo), and BOTH scroll
+	// methods are asserted, so a fired cap cannot slip through on the method the test did not check.
+	async function armMidListRestore() {
 		await mount();
+		layout(600);
+		handlers.onContentSizeChange(360, 1400);
+		scroll(300); // 300 + 600 < 1400 -> mid-list
 		const baseline = jest.getTimerCount();
 		await setDims({ width: 760, height: 360 });
 		expect(jest.getTimerCount()).toBeGreaterThan(baseline); // the settle cap is armed
-		tr.unmount();
+	}
+
+	it("control: without unmount the armed cap fires the restore (the unmount check below is live)", async () => {
+		await armMidListRestore();
+		await renderer.act(async () => {
+			jest.runOnlyPendingTimers();
+		});
+		expect(ref.current.scrollTo).toHaveBeenCalledTimes(1);
+		expect(ref.current.scrollTo).toHaveBeenCalledWith({ y: 300, animated: false });
+		expect(ref.current.scrollToEnd).not.toHaveBeenCalled();
+	});
+
+	it("leaves no timer running on unmount", async () => {
+		await armMidListRestore();
+		await renderer.act(async () => {
+			tr.unmount();
+		});
 		jest.runOnlyPendingTimers();
-		expect(ref.current.scrollTo).not.toHaveBeenCalled(); // cancelled, never fired
-		tr = renderer.create(<Probe />); // for afterEach
+		// Cancelled, never fired: neither restore method is called.
+		expect(ref.current.scrollTo).not.toHaveBeenCalled();
+		expect(ref.current.scrollToEnd).not.toHaveBeenCalled();
+		await renderer.act(async () => {
+			tr = renderer.create(<Probe />); // for afterEach
+		});
 	});
 });
