@@ -484,13 +484,40 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
   });
 
   it('never calls resendInvite', async () => {
-    mockRouteParams.keyholder = invitee('Kay Holder');
-    const resend = jest.fn();
-    (mockInvitationEngine as Record<string, unknown>).resendInvite = resend;
-    const tr = await render();
-    await send(tr);
-    expect(resend).not.toHaveBeenCalled();
-    delete (mockInvitationEngine as Record<string, unknown>).resendInvite;
+    // REVIEW WR-R5-08: resendInvite lives on the AUTHORITY engine (vote-core IAuthorityEngine), not on
+    // the invitations engine, so a spy planted there could never fire. Instead every engine the
+    // screen can reach (anything getEngine returns, under any name, and the route's electionEngine)
+    // is wrapped so that reading any resend-like member is recorded, and the send must touch none.
+    const touched: string[] = [];
+    const RESEND = /resend/i;
+    const watch = (label: string, target: object): object =>
+      new Proxy(target, {
+        get(t, prop, receiver) {
+          if (typeof prop === 'string' && RESEND.test(prop)) {
+            touched.push(`${label}.${prop}`);
+            return jest.fn();
+          }
+          return Reflect.get(t, prop, receiver);
+        },
+      });
+    const realGetEngine = mockGetEngine.getMockImplementation()!;
+    mockGetEngine.mockImplementation(async (name: string): Promise<any> => {
+      const engine = await realGetEngine(name);
+      // An engine this harness does not provide is still a place a resend could be sought.
+      return watch(name, (engine as object | undefined) ?? {});
+    });
+    mockRouteParams.electionEngine = watch('electionEngine', electionEngine);
+    try {
+      mockRouteParams.keyholder = invitee('Kay Holder');
+      const tr = await render();
+      await send(tr);
+      expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
+      expect(mockGetEngine).toHaveBeenCalled();
+      expect(touched).toEqual([]);
+    } finally {
+      mockGetEngine.mockImplementation(realGetEngine);
+      mockRouteParams.electionEngine = electionEngine;
+    }
   });
 
   it('without a keyholder param lists only pending invitees; Send waits for a choice', async () => {
