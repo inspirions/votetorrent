@@ -31,6 +31,7 @@ import { isCompleteFingerprintInput, mapFoundingImportResult, type FoundingImpor
 import type { NavigationProp } from '../../navigation/types'
 import { globalStyles } from '../../theme/styles'
 import { useDeviceSigningErrorHandler } from '../../hooks/useDeviceSigningErrorHandler'
+import { useKeyboardInset } from '../../hooks/useKeyboardInset'
 import type { NetworkReference } from '@votetorrent/vote-core'
 
 interface ScreenState {
@@ -55,6 +56,7 @@ export default function ImportFoundingBundleScreen() {
 	const navigation = useNavigation<NavigationProp>()
 	const { networksEngine, selectNetwork } = useApp()
 	const insets = useSafeAreaInsets()
+	const keyboardInset = useKeyboardInset()
 
 	const [screenState, setScreenState] = useState<ScreenState>({ kind: 'idle' })
 	// The post-import selectNetwork failed (routed or not): the success body then offers View
@@ -376,7 +378,15 @@ export default function ImportFoundingBundleScreen() {
 	return (
 		// The screen's standard 16dp gutter (globalStyles.container, as every sibling network screen
 		// uses). Without it the error copy ran from x = 0 to the right edge on a 360dp Redmi 8.
-		<ScrollView style={globalStyles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}>
+		// WR-R3-07: the fingerprint input sits above Join and Choose Another File. Under forced
+		// edge-to-edge the window is not resized for the IME, so the keyboard inset is added here, and
+		// a tap on Join while the keyboard is open presses Join instead of only dismissing the keyboard.
+		<ScrollView
+			testID="founding-import-scroll"
+			style={globalStyles.container}
+			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
+			keyboardShouldPersistTaps="handled"
+		>
 			{renderBody()}
 		</ScrollView>
 	)
