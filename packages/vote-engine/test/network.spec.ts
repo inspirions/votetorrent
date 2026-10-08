@@ -3712,13 +3712,22 @@ describe('NetworkRespondToInviteBuilder', () => {
 		} as InviteAction<unknown>;
 		const b = new NetworkRespondToInviteBuilder(engine).setInvite(invite);
 		expect(b.isValid()).to.equal(true);
-		// 62-102: the builder's toEngineInput does not carry invitePrivate (follow-up: the builder file is
-		// outside this plan), so commit reaches the engine (no BuilderValidationError) and the keyless
-		// engine refuses with invite-key-required.
+		// WR-R2-06: toEngineInput now carries invitePrivate, so the builder commits like the direct path.
 		let caught: unknown;
-		try { await b.commit(); } catch (err) { caught = err; }
-		expect(caught).to.not.be.instanceOf(BuilderValidationError);
-		expect((caught as { code?: string }).code).to.equal('invite-key-required');
+		let result: string | undefined;
+		try { result = await b.commit(); } catch (err) { caught = err; }
+		expect(caught, String(caught)).to.equal(undefined);
+		expect(result).to.be.a('string').with.length.greaterThan(0);
+	});
+
+	it('WR-R2-06: toEngineInput and fromPayload carry invitePrivate; toJSON never serializes it', () => {
+		const stub = makeStubNetworkEngine();
+		const secret = 'ab'.repeat(32);
+		const b = new NetworkRespondToInviteBuilder(stub).setInvite({ ...makeInviteAction(), invitePrivate: secret });
+		expect(b.toEngineInput().invitePrivate).to.equal(secret);
+		expect(new NetworkRespondToInviteBuilder(stub).fromPayload({ ...makeInviteAction(), invitePrivate: secret }).toEngineInput().invitePrivate).to.equal(secret);
+		expect(JSON.stringify(b.toJSON())).to.not.include(secret);
+		expect(b.toJSON().draft).to.not.have.property('invitePrivate');
 	});
 
 	it('round-trip serialization and fromJSON kind/version rejection', () => {
@@ -3756,8 +3765,9 @@ describe('NetworkRespondToInviteBuilder', () => {
 			userId: undefined,
 		} as InviteAction<unknown>;
 		const b = new NetworkRespondToInviteBuilder(engine).setInvite(invite);
-		// 62-102: the builder drops invitePrivate, so the first commit is refused by the engine; the guard still latches.
-		await b.commit().catch(() => undefined);
+		// WR-R2-06: the first commit must itself succeed (its outcome is asserted, not discarded).
+		const first = await b.commit();
+		expect(first).to.be.a('string').with.length.greaterThan(0);
 		let caught: unknown;
 		try { b.commit(); } catch (err) { caught = err; }
 		expect(caught).to.be.instanceOf(BuilderAlreadyCommittedError);
@@ -3835,11 +3845,18 @@ describe('NetworkRespondToInviteBuilder', () => {
 			userInit: undefined,
 			userId: undefined,
 		} as InviteAction<unknown>;
-		// 62-102: the builder drops invitePrivate (its file is outside this plan), so the builder path is
-		// refused by the keyless engine with invite-key-required while the direct, keyed path succeeded.
-		let builderCaught: unknown;
-		try { await eng2.buildRespondToInvite().fromPayload(invite2).commit(); } catch (err) { builderCaught = err; }
-		expect((builderCaught as { code?: string } | undefined)?.code).to.equal('invite-key-required');
+		// WR-R2-06: parity restored -- the builder path carries invitePrivate and writes the same
+		// shape of InviteResult as the direct path (each on its own network and slot).
+		const builderResult = await eng2.buildRespondToInvite().fromPayload(invite2).commit();
+		expect(typeof builderResult).to.equal(typeof directResult);
+		const shape = async (ctx: EngineContext): Promise<unknown> => {
+			const rows: unknown[] = [];
+			for await (const r of ctx.db.eval('select IsAccepted, InvokedId is not null as HasInvokedId, Digest is not null as HasDigest from InviteResult', {})) rows.push({ ...r });
+			return rows;
+		};
+		const directShape = await shape(ctx1);
+		expect(directShape).to.have.length(1);
+		expect(await shape(ctx2)).to.deep.equal(directShape);
 	});
 
 	it('FACT-04 parity: MockNetworkEngine.buildRespondToInvite() returns instanceof NetworkRespondToInviteBuilder', () => {
