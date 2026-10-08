@@ -42,6 +42,32 @@ function makeShare(type: string) {
 const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'slot-cid-1' }));
 
 const mockGoBack = jest.fn();
+// Every navigation call the screen can make is recorded, so "no param holds the private key" is
+// checked against what the SCREEN writes (setParams, onward navigation), not against the route
+// params only this test writes (REVIEW WR-R5-09).
+const mockNavigate = jest.fn();
+const mockSetParams = jest.fn();
+const mockReplace = jest.fn();
+const mockPush = jest.fn();
+const mockDispatch = jest.fn();
+/** Navigation calls whose arguments carry a 64-hex secret or the given private key. */
+function navigationLeaks(invitePrivate: string): string[] {
+  const out: string[] = [];
+  const all: Array<[string, jest.Mock]> = [
+    ['navigate', mockNavigate],
+    ['setParams', mockSetParams],
+    ['replace', mockReplace],
+    ['push', mockPush],
+    ['dispatch', mockDispatch],
+  ];
+  for (const [name, fn] of all) {
+    for (const call of fn.mock.calls) {
+      const text = JSON.stringify(call) ?? '';
+      if (/[0-9a-f]{64}/i.test(text) || text.includes(invitePrivate)) out.push(`${name}: ${text.slice(0, 120)}`);
+    }
+  }
+  return out;
+}
 const mockSetOptions = jest.fn();
 
 let mockRouteParams: { mode: 'send' | 'accept'; shareToken?: string } = { mode: 'send' };
@@ -142,7 +168,15 @@ jest.mock('@react-navigation/native', () => ({
     require('react').useEffect(cb, [cb]);
   },
   useRoute: () => ({ params: mockRouteParams }),
-  useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), setOptions: mockSetOptions }),
+  useNavigation: () => ({
+    goBack: mockGoBack,
+    navigate: mockNavigate,
+    setOptions: mockSetOptions,
+    setParams: mockSetParams,
+    replace: mockReplace,
+    push: mockPush,
+    dispatch: mockDispatch,
+  }),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -424,7 +458,7 @@ describe('AuthorityInvitationScreen - hardened accept (masked share, press-time 
     expect(JSON.stringify(tr.toJSON())).toContain('invitationPastedSummary');
     expect(textInputs(tr).filter((n) => String(n.props.value ?? '').includes(share.invitePrivate))).toHaveLength(0);
     expect(JSON.stringify(tr.toJSON())).not.toContain(share.invitePrivate);
-    expect(JSON.stringify(mockRouteParams)).not.toMatch(/[0-9a-f]{64}/i);
+    expect(navigationLeaks(share.invitePrivate)).toEqual([]);
     expect(mockGetAuthorityInvite).toHaveBeenCalledTimes(1);
   });
 
