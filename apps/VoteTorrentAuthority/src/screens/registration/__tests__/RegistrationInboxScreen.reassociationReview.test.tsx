@@ -125,6 +125,14 @@ describe("RegistrationInboxScreen — device-change review setting (D-46 ruling)
 		await act(async () => {
 			radio.props.onPress?.();
 		});
+		// WR-R6-07: the write path awaits getEngine("intake") and createDeviceSigner before
+		// setIntakePolicy; give a regression the same flush the positive case needs before asserting.
+		await act(async () => {
+			for (let i = 0; i < 8; i++) await Promise.resolve();
+		});
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const { createDeviceSigner } = require("../../../engines/device-signer");
 		expect(mockSetIntakePolicy).not.toHaveBeenCalled();
+		expect(createDeviceSigner).not.toHaveBeenCalled();
 	});
 });

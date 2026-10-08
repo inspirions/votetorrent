@@ -139,7 +139,9 @@ export interface RestRegistrationSyncDeps {
 	) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 }
 
-/** A bridge that never answers must not leave the card "syncing" forever (initial/G3 WR-03). */
+/** A bridge that never answers must not leave the card "syncing" forever (initial/G3 WR-03). The
+ * deadline covers the whole exchange: the response headers AND the body (WR-R3-05), so a bridge that
+ * sends headers and then stalls the body still fails the sync. */
 export const REST_BRIDGE_FETCH_TIMEOUT_MS = 15_000;
 
 const DEFAULT_FETCH_JSON: NonNullable<RestRegistrationSyncDeps["fetchJson"]> = async (url, init) => {
@@ -161,9 +163,29 @@ const DEFAULT_FETCH_JSON: NonNullable<RestRegistrationSyncDeps["fetchJson"]> = a
 						signal: controller.signal,
 					})
 				: fetch(url, { signal: controller.signal });
+		// The body is read under the same deadline, before the timer is cleared: the caller's `json()`
+		// then returns the already-read body and can never hang on a stalled stream.
+		const exchange = (async () => {
+			const res = await request;
+			let body: { value: unknown } | { error: unknown };
+			try {
+				body = { value: await res.json() };
+			} catch (error) {
+				// A non-JSON body (an error page, an empty 204) only matters if the caller reads it.
+				body = { error };
+			}
+			return {
+				ok: res.ok,
+				status: res.status,
+				json: async () => {
+					if ("error" in body) throw body.error;
+					return body.value;
+				},
+			};
+		})();
 		// Swallow a late rejection of the losing branch (the abort rejects the request itself).
-		request.catch(() => undefined);
-		return await Promise.race([request, timeout]);
+		exchange.catch(() => undefined);
+		return await Promise.race([exchange, timeout]);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
 	}

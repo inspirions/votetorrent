@@ -28,6 +28,12 @@ jest.mock("react-native-safe-area-context", () => ({
 
 let mockCurrentLocale: "en" | "es" = "en";
 
+// WR-R3-07: the IME inset the screen must add under forced edge-to-edge (0 = keyboard dismissed).
+let mockKeyboardInset = 0;
+jest.mock("../../../hooks/useKeyboardInset", () => ({
+	useKeyboardInset: () => mockKeyboardInset,
+}));
+
 jest.mock("react-i18next", () => ({
 	useTranslation: () => ({
 		t: (key: string) => {
@@ -196,6 +202,7 @@ beforeEach(() => {
 	mockSelectNetwork.mockReset();
 	mockSelectNetwork.mockImplementation(async () => undefined);
 	mockCurrentLocale = "en";
+	mockKeyboardInset = 0;
 	mockNetworksEngine = { importFoundingBundle: jest.fn(async () => okResult("replayed")) };
 	mockGetDeviceUser.mockImplementation(async () => ({ id: "user-1" } as any));
 });
@@ -422,6 +429,20 @@ describe("S-4b: typed fingerprint step — nothing from the file is shown before
 		expect((join().props as any).disabled).toBe(true);
 		await typeFingerprint(tr, "0000 1111 2222 3333");
 		expect((join().props as any).disabled).toBe(false);
+	});
+
+	it("WR-R3-07: with the keyboard open the confirm body is padded by the IME inset and taps reach Join", async () => {
+		mockKeyboardInset = 320;
+		const { tr } = await reachConfirm();
+		expect(findJsonByTestID(tr.toJSON(), "founding-import-body-confirm")).toBeTruthy();
+		const scroll = tr.root.findAll((n) => n.props?.testID === "founding-import-scroll" && n.props?.contentContainerStyle !== undefined)[0]!;
+		expect(scroll.props.keyboardShouldPersistTaps).toBe("handled");
+		expect(scroll.props.contentContainerStyle.paddingBottom).toBe(0 + 16 + 320);
+
+		mockKeyboardInset = 0;
+		await typeFingerprint(tr, "0000");
+		const after = tr.root.findAll((n) => n.props?.testID === "founding-import-scroll" && n.props?.contentContainerStyle !== undefined)[0]!;
+		expect(after.props.contentContainerStyle.paddingBottom).toBe(16);
 	});
 
 	it("never renders the file's fingerprint (full or by group): empty, partial, and after a wrong attempt", async () => {

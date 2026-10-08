@@ -184,6 +184,21 @@ beforeEach(() => {
 });
 
 describe('AuthorityInvitationScreen — INV-02 (send mode real invitePrivate sharing)', () => {
+  it('WR-R3-08: a double tap on Send in one frame saves one invitation', async () => {
+    const tr = await render();
+    await renderer.act(async () => {
+      const nameInput = tr.root.findAll(
+        (n) => n.props?.title === 'name' && typeof n.props?.onChangeText === 'function',
+      )[0];
+      nameInput.props.onChangeText('New Name');
+    });
+    const onPress = buttonByTitle(tr, 'send').props.onPress;
+    await renderer.act(async () => {
+      await Promise.all([onPress(), onPress()]);
+    });
+    expect(mockSaveInviteWithSigning).toHaveBeenCalledTimes(1);
+  });
+
   it('onSend calls createAuthorityInvite then saveInviteWithSigning("iad") and the share text contains invitePrivate', async () => {
     const tr = await render();
 

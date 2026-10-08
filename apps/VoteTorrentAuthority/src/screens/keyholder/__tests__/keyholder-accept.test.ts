@@ -64,6 +64,11 @@ async function inviteKeyholder(seeded: Awaited<ReturnType<typeof seedElection>>,
 	return { shareText: share.text, slotCid: slotRow!.Cid as string };
 }
 
+/** The status a committed accept reads back: the slot's result is an acceptance invoking `userId`. */
+function committedStatus(userId: string) {
+	return { invite: { name: 'held' }, result: { isAccepted: true, invitationSignature: '', invokedId: userId } };
+}
+
 function makeVaultHarness() {
 	const wrapper = createFakeSecretWrapper();
 	const vault = createAuthorityKeyVault({
@@ -131,14 +136,17 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 	});
 
 	describe('one seat per device per election, never the inviter (seat pre-checks)', () => {
-		const stubEngine = (seats: Record<string, { electionId: string; selfInvite: boolean } | undefined>) => {
+		const stubEngine = (
+			seats: Record<string, { electionId: string; selfInvite: boolean } | undefined>,
+			statuses: Record<string, unknown> = {}
+		) => {
 			const respondToInvite = jest.fn(async () => undefined);
 			return {
 				respondToInvite,
 				engine: {
 					resolveInviteSlot: jest.fn(async () => ({ status: 'live', cid: 'new-slot' })),
 					respondToInvite,
-					getKeyholderInvite: jest.fn(async () => undefined),
+					getKeyholderInvite: jest.fn(async (cid: string) => statuses[cid] as never),
 					getKeyholderSlotSeat: jest.fn(async (cid: string) => seats[cid]),
 				},
 			};
@@ -161,15 +169,74 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 				'vt.keyholder-identities.v1',
 				JSON.stringify({ v: 1, identities: [{ userId: 'u-held', inviteSlotCid: 'held-slot' }] })
 			);
-			const { engine, respondToInvite } = stubEngine({
-				'new-slot': { electionId: 'e1', selfInvite: false },
-				'held-slot': { electionId: 'e1', selfInvite: false },
-			});
+			const { engine, respondToInvite } = stubEngine(
+				{
+					'new-slot': { electionId: 'e1', selfInvite: false },
+					'held-slot': { electionId: 'e1', selfInvite: false },
+				},
+				{ 'held-slot': committedStatus('u-held') }
+			);
 			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toMatchObject({
 				code: 'seat-already-held',
 			});
 			expect(wrapper.authWraps).toBe(0);
 			expect(respondToInvite).not.toHaveBeenCalled();
+		});
+
+		it('an orphan whose slot is still unanswered is never a seat: the accept proceeds and the orphan is kept', async () => {
+			const { vault, storage } = makeVaultHarness();
+			await storage.setItem('vt.keyholder-identities.v1', JSON.stringify({ v: 1, identities: [{ userId: 'u-orphan', inviteSlotCid: 'held-slot' }] }));
+			const { engine, respondToInvite } = stubEngine(
+				{
+					'new-slot': { electionId: 'e1', selfInvite: false },
+					'held-slot': { electionId: 'e1', selfInvite: false },
+				},
+				{ 'held-slot': { invite: { name: 'held' } } }
+			);
+			await acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text);
+			expect(respondToInvite).toHaveBeenCalledTimes(1);
+			const ids = (await listKeyholderIdentities(storage)).map((r) => r.userId);
+			expect(ids).toContain('u-orphan');
+			expect(ids).toHaveLength(2);
+		});
+
+		it.each([
+			['answered by another identity', { invite: { name: 'held' }, result: { isAccepted: true, invitationSignature: '', invokedId: 'u-other' } }],
+			['declined', { invite: { name: 'held' }, result: { isAccepted: false, invitationSignature: '' } }],
+		])('an orphan whose slot was %s is discarded and the accept proceeds', async (_name, status) => {
+			const { vault, storage } = makeVaultHarness();
+			await storage.setItem('vt.keyholder-identities.v1', JSON.stringify({ v: 1, identities: [{ userId: 'u-orphan', inviteSlotCid: 'held-slot' }] }));
+			const { engine, respondToInvite } = stubEngine(
+				{
+					'new-slot': { electionId: 'e1', selfInvite: false },
+					'held-slot': { electionId: 'e1', selfInvite: false },
+				},
+				{ 'held-slot': status }
+			);
+			await acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text);
+			expect(respondToInvite).toHaveBeenCalledTimes(1);
+			const ids = (await listKeyholderIdentities(storage)).map((r) => r.userId);
+			expect(ids).not.toContain('u-orphan');
+			expect(ids).toHaveLength(1);
+		});
+
+		it('a failing status read of a held same-election slot propagates with 0 wraps and discards nothing', async () => {
+			const { vault, storage, wrapper } = makeVaultHarness();
+			await storage.setItem('vt.keyholder-identities.v1', JSON.stringify({ v: 1, identities: [{ userId: 'u-held', inviteSlotCid: 'held-slot' }] }));
+			const { engine, respondToInvite } = stubEngine({
+				'new-slot': { electionId: 'e1', selfInvite: false },
+				'held-slot': { electionId: 'e1', selfInvite: false },
+			});
+			engine.getKeyholderInvite = jest.fn(async (cid: string) => {
+				if (cid === 'held-slot') throw new Error('status read down');
+				return undefined as never;
+			});
+			await expect(acceptKeyholderInvitation({ invitationEngine: engine as never, vault, storage }, makeShare('Zed').text)).rejects.toThrow(
+				'status read down'
+			);
+			expect(wrapper.authWraps).toBe(0);
+			expect(respondToInvite).not.toHaveBeenCalled();
+			expect((await listKeyholderIdentities(storage)).map((r) => r.userId)).toEqual(['u-held']);
 		});
 
 		it('a held seat of another election, or of an unknown slot, does not block', async () => {
@@ -229,7 +296,7 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 			const engine = {
 				resolveInviteSlot: jest.fn(async () => ({ status: 'live', cid: 'new-slot' })),
 				respondToInvite,
-				getKeyholderInvite: jest.fn(async () => undefined),
+				getKeyholderInvite: jest.fn(async (cid: string) => (cid === 'held-slot' ? committedStatus(U) : undefined)),
 				getKeyholderSlotSeat: jest.fn(async (cid: string) => ({ electionId: 'e1', selfInvite: false, cid })),
 			};
 			const deps = { invitationEngine: engine as never, vault, storage, ...(reader ? { readKeyholderSeatFacts: reader } : {}) };
@@ -347,6 +414,46 @@ describe('acceptKeyholderInvitation (D-21/D-26, real schema)', () => {
 
 		// Unknown outcome — nothing is discarded.
 		expect(await listKeyholderIdentities(storage)).toHaveLength(1);
+	});
+
+	it('A5b: re-accepting after a respond + re-read double failure succeeds; the orphan never counts as a seat and is discarded once its slot is answered', async () => {
+		const seeded = await seedElection();
+		const Frank = await inviteKeyholder(seeded, 'Frank');
+		const Gail = await inviteKeyholder(seeded, 'Gail');
+		const { vault, storage } = makeVaultHarness();
+		const realEngine = new InvitationEngine(inviteeCtx(seeded.auth.ctx));
+		let statusCalls = 0;
+		const outageEngine = {
+			resolveInviteSlot: jest.fn(async (k: string, t: 'k') => realEngine.resolveInviteSlot(k, t)),
+			respondToInvite: jest.fn(async () => {
+				throw new Error('peers unreachable (write)');
+			}),
+			getKeyholderInvite: jest.fn(async (id: string) => {
+				if (++statusCalls === 1) return realEngine.getKeyholderInvite(id);
+				throw new Error('peers unreachable (read)');
+			}),
+			getKeyholderSlotSeat: jest.fn(async (id: string) => realEngine.getKeyholderSlotSeat(id)),
+		};
+
+		// 1. Unknown outcome: the identity is kept.
+		await expect(acceptKeyholderInvitation({ invitationEngine: outageEngine as never, vault, storage }, Frank.shareText)).rejects.toThrow(
+			'peers unreachable (write)'
+		);
+		const [orphan] = await listKeyholderIdentities(storage);
+		expect(orphan).toBeDefined();
+
+		// 2. Connectivity returns: the same invitation is accepted, not refused seat-already-held.
+		const accepted = await acceptKeyholderInvitation({ invitationEngine: realEngine, vault, storage }, Frank.shareText);
+		expect(accepted.userId).not.toBe(orphan!.userId);
+		expect(accepted.slotCid).toBe(Frank.slotCid);
+
+		// 3. A second seat of the same election is still refused, and the now-answered orphan is discarded on the way.
+		await expect(acceptKeyholderInvitation({ invitationEngine: realEngine, vault, storage }, Gail.shareText)).rejects.toMatchObject({
+			code: 'seat-already-held',
+		});
+		expect((await listKeyholderIdentities(storage)).map((r) => r.userId)).toEqual([accepted.userId]);
+		expect(await vault.hasSecret(`vt.keyholder-signing.${orphan!.userId}`)).toBe(false);
+		expect(await vault.hasSecret(`vt.keyholder-signing.${accepted.userId}`)).toBe(true);
 	});
 
 	it('A6: the engine receives exactly (slotCid, true, invitePrivate, undefined, userId, provisioning), and release() has run by the time the promise settles', async () => {

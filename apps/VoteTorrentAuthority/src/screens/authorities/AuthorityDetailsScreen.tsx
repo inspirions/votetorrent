@@ -100,17 +100,23 @@ export default function AuthorityDetailsScreen() {
 	};
 
 	useEffect(() => {
+		// WR-R3-01: an open that lands after the route moved to another authority (or after Try Again
+		// started a newer open) must not write: its engine belongs to the previous subject.
+		let cancelled = false;
 		async function loadEngines() {
 			setErrorMessage("");
 			setNotFound(false);
 			try {
 				const engine = await getEngine("network");
+				if (cancelled) return;
 				setNetworkEngine(engine as INetworkEngine);
 				if (engine) {
 					const authorityEngine = await (engine as INetworkEngine).openAuthority(authority.id);
+					if (cancelled) return;
 					setAuthorityEngine(authorityEngine);
 				}
 			} catch (error) {
+				if (cancelled) return;
 				const code = (error as { code?: unknown } | null)?.code;
 				const message = (error as { message?: unknown } | null)?.message;
 				if (code === "authority-not-found" || message === "Authority not found") {
@@ -128,6 +134,9 @@ export default function AuthorityDetailsScreen() {
 			}
 		}
 		loadEngines();
+		return () => {
+			cancelled = true;
+		};
 	}, [getEngine, authority.id, engineNonce]);
 
 	useEffect(() => {
@@ -175,6 +184,7 @@ export default function AuthorityDetailsScreen() {
 	}, [networkEngine, authorityEngine, authority.id, reloadNonce, notFound]);
 
 	useEffect(() => {
+		let cancelled = false;
 		async function getUsers() {
 			if (!networkEngine || !adminDetails) {
 				setOfficers([]);
@@ -227,12 +237,14 @@ export default function AuthorityDetailsScreen() {
 					}
 				});
 				await Promise.all(userEnginePromises);
+				if (cancelled) return;
 				setOfficerUsers(userMap);
 				if (peerFailureReason) {
 					console.warn("[authority-details] peer read unavailable:", peerFailureReason);
 					setPeerUnavailable(true);
 				}
 			} catch (error) {
+				if (cancelled) return;
 				console.warn("Error fetching users:", error);
 				setOfficers([]);
 				setOfficerUsers(new Map());
@@ -240,23 +252,33 @@ export default function AuthorityDetailsScreen() {
 			}
 		}
 		getUsers();
+		return () => {
+			cancelled = true;
+		};
 	}, [networkEngine, adminDetails]);
 
 	useEffect(() => {
 		// Invited authorities are supplied by the real authority engine (to be
 		// implemented). Bind defensively so this UI is ready without adding mock
 		// data — the section renders empty until the engine provides the list.
+		let cancelled = false;
 		async function loadInvited() {
 			const fn = (authorityEngine as any)?.getInvitedAuthorities;
 			if (typeof fn !== "function") return;
 			try {
-				setInvitedAuthorities((await fn.call(authorityEngine)) ?? []);
+				const invited = (await fn.call(authorityEngine)) ?? [];
+				if (cancelled) return;
+				setInvitedAuthorities(invited);
 			} catch (error) {
+				if (cancelled) return;
 				console.warn("Error loading invited authorities:", error);
 				setErrorMessage(tRef.current("invitedAuthoritiesLoadFailed"));
 			}
 		}
 		loadInvited();
+		return () => {
+			cancelled = true;
+		};
 	}, [authorityEngine]);
 
 	useEffect(() => {
@@ -273,6 +295,35 @@ export default function AuthorityDetailsScreen() {
 					),
 		});
 	}, [pinned, notFound, navigation, t, handlePinToggle]);
+
+	// WR-R3-03: the network engine itself failed to open. Without this block the screen returned
+	// null and neither the error copy nor the Try Again (which re-runs loadEngines) was reachable.
+	if (authority && !networkEngine && (errorMessage || peerUnavailable)) {
+		const retryEngines = () => {
+			setReloadNonce((n) => n + 1);
+			setEngineNonce((n) => n + 1);
+		};
+		return (
+			<ScrollView
+				testID="authority-details-engine-failed"
+				style={styles.container}
+				contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}
+			>
+				<InlineError message={errorMessage} />
+				{peerUnavailable ? (
+					<PeerReadUnavailableNotice variant="unavailable" onRetry={retryEngines} />
+				) : (
+					<CustomButton
+						title={t("peerReadUnavailableRetry")}
+						icon="rotate-right"
+						size="tall"
+						testID="authority-details-engine-retry"
+						onPress={retryEngines}
+					/>
+				)}
+			</ScrollView>
+		);
+	}
 
 	if (!authority || !networkEngine) {
 		return null;

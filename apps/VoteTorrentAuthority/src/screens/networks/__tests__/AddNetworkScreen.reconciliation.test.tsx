@@ -944,6 +944,20 @@ describe("AddNetworkScreen — late first network (62-116)", () => {
 		return spies.flatMap((s) => s.mock.calls).filter((c) => typeof c[0] === "string" && tags.includes(c[0]));
 	}
 
+	/** Every text a logged value can carry, including an Error's message and stack (JSON.stringify of
+	 * an Error is "{}", so a bare `console.error(err)` would otherwise scan clean). */
+	function loggedText(arg: unknown, seen = new Set<unknown>()): string {
+		if (arg instanceof Error) return [arg.name, arg.message, arg.stack ?? "", loggedText((arg as { cause?: unknown }).cause, seen)].join(" ");
+		if (arg !== null && typeof arg === "object") {
+			if (seen.has(arg)) return "";
+			seen.add(arg);
+			return Object.entries(arg as Record<string, unknown>)
+				.map(([k, v]) => `${k} ${loggedText(v, seen)}`)
+				.join(" ");
+		}
+		return String(arg);
+	}
+
 	it("(N-5) snapshot failure and create failure log only tags and class names", async () => {
 		const info = jest.spyOn(console, "info").mockImplementation(() => {});
 		const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
@@ -965,11 +979,16 @@ describe("AddNetworkScreen — late first network (62-116)", () => {
 		const createCalls = matchedCalls([info, warn, error]).filter((c) => c[0] === "handleCreate error:");
 		expect(createCalls.length).toBeGreaterThan(0);
 
+		// The tag-anchored calls carry strings only.
 		for (const call of matchedCalls([info, warn, error])) {
-			for (const arg of call) {
-				expect(typeof arg).toBe("string");
-				expect(String(arg)).not.toContain("secret");
-			}
+			for (const arg of call) expect(typeof arg).toBe("string");
+		}
+		// WR-R6-04: the leak scan covers EVERY captured call on all three channels — any tag, a
+		// template-literal first argument, or a bare error object — not only the tag-matched subset.
+		const allCalls = [info, warn, error].flatMap((s) => s.mock.calls);
+		expect(allCalls.length).toBeGreaterThan(0);
+		for (const call of allCalls) {
+			for (const arg of call) expect(loggedText(arg)).not.toContain("secret");
 		}
 		info.mockRestore();
 		warn.mockRestore();

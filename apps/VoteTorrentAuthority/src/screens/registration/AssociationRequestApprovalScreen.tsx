@@ -141,8 +141,17 @@ export default function AssociationRequestApprovalScreen() {
 				setNotice((n) => (n === "load-error" ? "none" : n));
 			} catch {
 				// Never the engine message: an unavailable session and a failed read share one key.
-				// A rejected session must never be reused: Retry opens a fresh one.
-				if (seq === loadSeqRef.current) sessionPromiseRef.current = undefined;
+				// A rejected session must never be reused: Retry opens a fresh one. WR-R3-04: the session being
+				// discarded may have opened (the later engine read failed), so close its two transports now;
+				// nothing else references it, and the unmount cleanup only closes the current one.
+				if (seq === loadSeqRef.current) {
+					const stale = sessionPromiseRef.current;
+					sessionPromiseRef.current = undefined;
+					void stale?.then(
+						(s) => s.close(),
+						() => undefined
+					);
+				}
 				if (unmountedRef.current || seq !== loadSeqRef.current) return;
 				setLoadFailed(true);
 				setNotice("load-error");

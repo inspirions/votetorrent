@@ -144,4 +144,47 @@ describe('PendingInvitationsSection', () => {
 		expect(mockGetEngine).not.toHaveBeenCalled();
 		expect(hasId(tr, 'pending-invitations-loading')).toBe(true);
 	});
+
+	it("WR-R3-02: an authority switch drops the previous authority's rows in the same render", async () => {
+		const engineA = { getPendingInviteCids: jest.fn(async () => ['c1']) };
+		const tr = await render(engineA);
+		expect(hasId(tr, 'pending-invitation-c1')).toBe(true);
+
+		await renderer.act(async () => {
+			tr.update(<PendingInvitationsSection authorityId="a2" authorityEngine={null} />);
+		});
+		await flush();
+
+		expect(hasId(tr, 'pending-invitation-c1')).toBe(false);
+		expect(text(tr)).not.toContain('Bea Two');
+		expect(hasId(tr, 'pending-invitations-loading')).toBe(true);
+	});
+
+	it("WR-R3-02: a load of the previous authority that lands after the switch never shows its rows", async () => {
+		let resolveCids!: (cids: string[]) => void;
+		const engineA = {
+			getPendingInviteCids: jest.fn(
+				() =>
+					new Promise<string[]>((resolve) => {
+						resolveCids = resolve;
+					})
+			),
+		};
+		const tr = await render(engineA);
+		expect(engineA.getPendingInviteCids).toHaveBeenCalledTimes(1);
+
+		await renderer.act(async () => {
+			tr.update(<PendingInvitationsSection authorityId="a2" authorityEngine={null} />);
+		});
+		await flush();
+		await renderer.act(async () => {
+			resolveCids(['c1']);
+		});
+		await flush();
+
+		expect(hasId(tr, 'pending-invitation-c1')).toBe(false);
+		expect(text(tr)).not.toContain('Bea Two');
+		expect(hasId(tr, 'pending-invitations-loading')).toBe(true);
+		expect(mockNavigate).not.toHaveBeenCalled();
+	});
 });

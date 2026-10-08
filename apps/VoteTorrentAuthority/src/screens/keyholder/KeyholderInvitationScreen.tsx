@@ -113,7 +113,10 @@ export function KeyholderInvitationScreen() {
 	}, [mode, fixedName, electionEngine]);
 
 	// INV-03: real keyholder invite send via un-gated inviteKeyholder (21-05)
-	const onSend = async () => {
+	// WR-R3-08: `isSending` disables Send only after a re-render, so two taps in one frame would each
+	// mint an invitation slot. This ref latches synchronously, before any await.
+	const sendingRef = useRef(false);
+	const sendInvitation = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
 		setIsSending(true);
@@ -194,6 +197,15 @@ export function KeyholderInvitationScreen() {
 			);
 		} finally {
 			setIsSending(false);
+		}
+	};
+	const onSend = async () => {
+		if (sendingRef.current) return;
+		sendingRef.current = true;
+		try {
+			await sendInvitation();
+		} finally {
+			sendingRef.current = false;
 		}
 	};
 

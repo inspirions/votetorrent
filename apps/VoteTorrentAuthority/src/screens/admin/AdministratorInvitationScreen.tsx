@@ -137,7 +137,10 @@ export default function AdministratorInvitationScreen() {
 	}, [mode, pastedInvite, getEngine, expired]);
 
 	// INV-01: real officer invite send with device signature (D-01/D-03/D-04)
-	const onSend = async () => {
+	// WR-R3-08: `isSending` disables Send only after a re-render, so two taps in one frame would each
+	// mint an invitation slot. This ref latches synchronously, before any await.
+	const sendingRef = useRef(false);
+	const sendInvitation = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
 		setIsSending(true);
@@ -191,6 +194,15 @@ export default function AdministratorInvitationScreen() {
 			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
 		} finally {
 			setIsSending(false);
+		}
+	};
+	const onSend = async () => {
+		if (sendingRef.current) return;
+		sendingRef.current = true;
+		try {
+			await sendInvitation();
+		} finally {
+			sendingRef.current = false;
 		}
 	};
 

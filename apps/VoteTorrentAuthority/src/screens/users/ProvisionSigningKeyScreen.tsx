@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Platform, ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
 import type { NavigationProp } from "../../navigation/types";
@@ -71,6 +71,8 @@ type ProvisionReason = "first-run" | "invalidated";
 
 /** Ten years in milliseconds — expiration epoch for every key this screen registers. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+/** WR-R3-06: how long the background intake-key renewal may run before the success screen says it failed. */
+const INTAKE_RENEWAL_NOTICE_TIMEOUT_MS = 30_000;
 
 /**
  * Base64 of the UTF-8 bytes of a string — mirrors `real-attestation-producer.ts`'s identical
@@ -133,6 +135,15 @@ export default function ProvisionSigningKeyScreen() {
 	const [phase, setPhase] = useState<ScreenPhase>("idle");
 	const [errorClass, setErrorClass] = useState<DeviceSigningErrorClass | undefined>(undefined);
 	const [intakeRenewalFailed, setIntakeRenewalFailed] = useState(false);
+	// WR-R3-06: the intake-key renewal runs after the success screen is shown and may settle after
+	// the officer has left it; only a mounted screen records its outcome.
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
 	const pending = phase === "pending";
 	const isFirstRun = reason === "first-run";
 
@@ -582,17 +593,27 @@ export default function ProvisionSigningKeyScreen() {
 			// follow-up); leaving it set on any earlier failure path is the entire point.
 			await clearRecoveryInProgress();
 
-			// O-01: the replacement can strand the officer's intake encryption key. Renew it now (one
-			// extra prompt, only when stranded). Never fails the recovery: a failure is surfaced as a
-			// notice on the success screen.
-			const renewal = await renewOfficerIntakeKeyAfterKeyReplacement({
+			// The recovery itself is complete: show success now, never behind the renewal below.
+			setPhase("success");
+
+			// O-01: the replacement can strand the officer's intake encryption key. Renew it in the
+			// background (one extra prompt, only when stranded). It never fails or blocks the recovery
+			// (WR-R3-06): a renewal still unsettled after INTAKE_RENEWAL_NOTICE_TIMEOUT_MS (a stalled
+			// network write) shows the renewal-failed notice, and the real outcome replaces it if the
+			// renewal settles later while the screen is still mounted.
+			const noticeTimer = setTimeout(() => {
+				if (mountedRef.current) setIntakeRenewalFailed(true);
+			}, INTAKE_RENEWAL_NOTICE_TIMEOUT_MS);
+			void renewOfficerIntakeKeyAfterKeyReplacement({
 				getEngine,
 				createSigner: resolveDeviceSigner,
-			});
-			console.warn(`[intake-renewal] outcome=${renewal}`);
-			setIntakeRenewalFailed(renewal === "failed");
-
-			setPhase("success");
+			})
+				.catch(() => "failed" as const)
+				.then((renewal) => {
+					clearTimeout(noticeTimer);
+					console.info(`[intake-renewal] outcome=${renewal}`);
+					if (mountedRef.current) setIntakeRenewalFailed(renewal === "failed");
+				});
 		} catch (err) {
 			// T-49-USER-7 (deviceSigningError.ts:117-118) — mapDeviceSigningError/handleCeremonyError
 			// below classify this into a UI-safe copy string, which necessarily discards the raw

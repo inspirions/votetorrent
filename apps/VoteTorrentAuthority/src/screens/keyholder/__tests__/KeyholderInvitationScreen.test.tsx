@@ -473,6 +473,28 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
     expect(JSON.stringify(tr.toJSON())).toContain('keyholderInviteExpiresAt');
   });
 
+  it('WR-R3-08: a double tap on Send in one frame mints one invitation slot', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    const tr = await render();
+    const onPress = buttonByTitle(tr, 'send').props.onPress;
+    await renderer.act(async () => {
+      await Promise.all([onPress(), onPress()]);
+    });
+    expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
+    expect(sharedPayload(tr).name).toBe('Kay Holder');
+  });
+
+  it('WR-R3-08: the Send latch is released after a failed send, so Send works again', async () => {
+    mockRouteParams.keyholder = invitee('Kay Holder');
+    mockInviteKeyholder.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await send(tr);
+    expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
+    await send(tr);
+    expect(mockInviteKeyholder).toHaveBeenCalledTimes(2);
+    expect(sharedPayload(tr).name).toBe('Kay Holder');
+  });
+
   it('choosing 7 days sends now + 168 h', async () => {
     mockRouteParams.keyholder = invitee('Kay Holder');
     const tr = await render();

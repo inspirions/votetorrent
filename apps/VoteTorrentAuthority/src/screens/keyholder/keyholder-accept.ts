@@ -29,6 +29,10 @@
  *     (`getKeyholderSlotSeat`). A self-invite is refused ('self-invite'); so is a device that already holds a
  *     keyholder identity whose slot belongs to the same election ('seat-already-held'). Both cost zero auth
  *     wraps. The engine refuses a self-invite too (62-103); this check spares the biometric prompts.
+ *     A held identity counts as a seat only when its slot's result is an acceptance invoking that identity.
+ *     An orphan (unknown-outcome accept, or a kill between provisioning and responding) is skipped, and it
+ *     is discarded once its slot's answer is known to be some other outcome. A failing read of the held
+ *     slot's status propagates (fail closed, zero wraps) rather than guessing.
  */
 
 import type { IInvitationEngine } from '@votetorrent/vote-core';
@@ -83,6 +87,20 @@ export async function acceptKeyholderInvitation(
 	for (const held of await listKeyholderIdentities(deps.storage)) {
 		const heldSeat = await deps.invitationEngine.getKeyholderSlotSeat(held.inviteSlotCid);
 		if (heldSeat && heldSeat.electionId === seat.electionId) {
+			// A held identity is a seat only on positive evidence that its accept committed: the slot's
+			// result is an acceptance invoking THIS identity. An identity left behind by an accept whose
+			// outcome was unknown (respond and re-read both failed) or by a kill between provisioning and
+			// responding never became a seat, so it must not lock the keyholder out of the election.
+			const heldStatus = await deps.invitationEngine.getKeyholderInvite(held.inviteSlotCid);
+			const committed = heldStatus?.result?.isAccepted === true && heldStatus.result.invokedId === held.userId;
+			if (!committed) {
+				// Discard only when the slot's answer is known and is not this identity; an unanswered slot
+				// leaves the identity in place (skipped, never counted).
+				if (heldStatus?.result !== undefined) {
+					await discardKeyholderIdentity({ vault: deps.vault, storage: deps.storage }, held.userId).catch(() => undefined);
+				}
+				continue;
+			}
 			if (!factsRead) {
 				factsRead = true;
 				try {

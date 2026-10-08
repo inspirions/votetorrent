@@ -229,6 +229,49 @@ describe("AuthorityDetailsScreen — a read the network could not answer is not 
 		expect(text).not.toContain("N/A");
 	});
 
+	it("WR-R3-03: the network engine open fails cohort-unreachable: the unavailable notice renders, and Try Again re-opens", async () => {
+		mockGetAdminDetails.mockResolvedValue(makeAdminDetails());
+		mockGetEngine.mockRejectedValueOnce(peerUnavailableError());
+		const tr = await renderScreen();
+
+		expect(tr.toJSON()).not.toBeNull();
+		expect(noticeShown(tr)).toBe(true);
+		const text = allText(tr);
+		expect(text).toContain("peerReadUnavailableTitle");
+		expect(text).not.toContain("is unavailable");
+		expect(text).not.toContain("default/app/Admin");
+		const openCallsBefore = mockGetEngine.mock.calls.filter((c) => c[0] === "network").length;
+
+		await pressRetry(tr);
+
+		expect(mockGetEngine.mock.calls.filter((c) => c[0] === "network").length).toBe(openCallsBefore + 1);
+		expect(noticeShown(tr)).toBe(false);
+		expect(allText(tr)).toContain("Una Test");
+	});
+
+	it("WR-R3-03: the network engine open fails with a non-peer error: translated copy plus a Try Again that re-opens", async () => {
+		mockGetAdminDetails.mockResolvedValue(makeAdminDetails());
+		mockGetEngine.mockRejectedValueOnce(new Error("engine boom"));
+		const tr = await renderScreen();
+
+		const text = allText(tr);
+		expect(text).toContain("authorityDetailsLoadFailed");
+		expect(text).not.toContain("engine boom");
+		expect(noticeShown(tr)).toBe(false);
+		const retry = tr.root.findAll(
+			(n) => n.props?.testID === "authority-details-engine-retry" && typeof n.props?.onPress === "function"
+		);
+		expect(retry.length).toBeGreaterThan(0);
+		await renderer.act(async () => {
+			retry[0].props.onPress();
+		});
+		await flush();
+
+		const after = allText(tr);
+		expect(after).toContain("Una Test");
+		expect(after).not.toContain("authorityDetailsLoadFailed");
+	});
+
 	it("a non-peer error shows translated copy, never the engine message, and no notice", async () => {
 		mockGetAdminDetails.mockRejectedValue(new Error("boom"));
 		const tr = await renderScreen();

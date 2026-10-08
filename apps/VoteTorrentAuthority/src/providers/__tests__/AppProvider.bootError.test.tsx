@@ -1,24 +1,23 @@
 /**
- * AppProvider.reattach.test.tsx — R2 unit coverage (58-05, D-08/D-09/D-10).
+ * AppProvider.bootError.test.tsx — boot error classification on the re-attach path (gap 4).
  *
- * Proves the cold-start re-attach race is REMOVED (not survived): the init
- * effect awaits CadreNodeProvider's `nodeSettled` (Task 1) before its first
- * `factory.setNode(...)` / `NetworksEngine.open()` call, bounded by
- * `NODE_SETTLE_TIMEOUT_MS` and resolving (never rejecting) to a solo
- * default. Five behaviours, each run against the UNCHANGED AppProvider.tsx
- * first and recorded RED in the SUMMARY (see the plan's acceptance
- * criteria) before being trusted green.
+ * What this file asserts, against a faked `EngineFactory` whose `NetworksEngine.open()` replays a
+ * queue of errors:
+ *  - B-1: a peer-unavailable open failure is retried twice (5 s, then 15 s) and then shows the
+ *    translated peer-unavailable view with Try Again and Start Fresh; the log carries the reason
+ *    token only.
+ *  - B-2: a generic failure is not retried, shows the generic translated copy, and still logs
+ *    `Re-attach failed:` through console.error.
+ *  - B-3: two peer-unavailable failures followed by a success heal with no error view.
+ *  - B-4: unmounting during a retry delay stops further open() calls.
+ *  - B-4b: Start Fresh from the syncing view during a retry delay cancels the retry.
+ *  - B-5: the outer fatal path (the recent-networks read fails) shows generic copy.
+ * Every view is checked for raw engine text (`expectNoRaw`): no Quereus message, table name, block
+ * id or reason token ever reaches the screen.
  *
- * `EngineFactory` is faked so the whole instrument is "which node did the
- * factory hold at the moment NetworksEngine.open() was actually called" —
- * the ONLY way to observe which DbFactory backend a real dispatch would
- * have chosen (mirrors the lazy-dispatch shape in engine-factory.ts).
- *
- * House mocking style: named `mock*` module-scope jest.fns behind
- * `jest.mock` factories (AddNetworkScreen.provisioning.test.tsx), with the
- * module under test `require()`'d after all mock setup (rn-db-factory.test.ts
- * / CadreNodeProvider.test.tsx) so mock-prefixed config variables are
- * guaranteed initialized before the mocked modules are first required.
+ * Mocking style: named `mock*` module-scope jest.fns behind `jest.mock` factories, with the module
+ * under test `require()`'d after all mock setup so the mock-prefixed variables are initialised
+ * before the mocked modules are first required.
  */
 
 import React from "react";

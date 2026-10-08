@@ -43,6 +43,19 @@ export function PendingInvitationsSection({ authorityId, authorityEngine }: Pend
 	const [errorMessage, setErrorMessage] = useState("");
 	const mounted = useRef(true);
 	const loadSeq = useRef(0);
+	// WR-R3-02: rows belong to the authority (and engine) they were read for. When either changes, the
+	// previous rows and error are dropped in the same render, so a row can never pair the new
+	// `authorityId` with the previous authority's slot. `subjectRef` lets an in-flight load from the
+	// previous subject see that it is no longer current, even when the new engine is still null (no
+	// new load has started to bump `loadSeq`).
+	const [rowsSubject, setRowsSubject] = useState({ authorityId, authorityEngine });
+	if (rowsSubject.authorityId !== authorityId || rowsSubject.authorityEngine !== authorityEngine) {
+		setRowsSubject({ authorityId, authorityEngine });
+		setRows(null);
+		setErrorMessage("");
+	}
+	const subjectRef = useRef({ authorityId, authorityEngine });
+	subjectRef.current = { authorityId, authorityEngine };
 
 	useEffect(() => {
 		mounted.current = true;
@@ -54,7 +67,12 @@ export function PendingInvitationsSection({ authorityId, authorityEngine }: Pend
 	const load = useCallback(async () => {
 		if (!authorityEngine) return;
 		const seq = ++loadSeq.current;
-		const current = () => mounted.current && seq === loadSeq.current;
+		const loadAuthorityId = subjectRef.current.authorityId;
+		const current = () =>
+			mounted.current &&
+			seq === loadSeq.current &&
+			subjectRef.current.authorityEngine === authorityEngine &&
+			subjectRef.current.authorityId === loadAuthorityId;
 		try {
 			const cids = await authorityEngine.getPendingInviteCids();
 			const list: Row[] = [];
