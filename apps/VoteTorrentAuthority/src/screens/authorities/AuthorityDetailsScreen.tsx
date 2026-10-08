@@ -296,6 +296,35 @@ export default function AuthorityDetailsScreen() {
 		});
 	}, [pinned, notFound, navigation, t, handlePinToggle]);
 
+	// WR-R3-03: the network engine itself failed to open. Without this block the screen returned
+	// null and neither the error copy nor the Try Again (which re-runs loadEngines) was reachable.
+	if (authority && !networkEngine && (errorMessage || peerUnavailable)) {
+		const retryEngines = () => {
+			setReloadNonce((n) => n + 1);
+			setEngineNonce((n) => n + 1);
+		};
+		return (
+			<ScrollView
+				testID="authority-details-engine-failed"
+				style={styles.container}
+				contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}
+			>
+				<InlineError message={errorMessage} />
+				{peerUnavailable ? (
+					<PeerReadUnavailableNotice variant="unavailable" onRetry={retryEngines} />
+				) : (
+					<CustomButton
+						title={t("peerReadUnavailableRetry")}
+						icon="rotate-right"
+						size="tall"
+						testID="authority-details-engine-retry"
+						onPress={retryEngines}
+					/>
+				)}
+			</ScrollView>
+		);
+	}
+
 	if (!authority || !networkEngine) {
 		return null;
 	}
