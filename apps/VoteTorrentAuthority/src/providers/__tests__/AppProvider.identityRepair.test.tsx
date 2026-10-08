@@ -81,21 +81,23 @@ const { Text } = require("react-native");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { AppProvider, useApp } = require("../AppProvider");
 
-let captured: { selectNetwork: (ref: unknown) => Promise<void> } | undefined;
+let captured: { selectNetwork: (ref: unknown) => Promise<void>; hasNetwork: boolean } | undefined;
 function Probe() {
 	captured = useApp();
 	return <Text>probe</Text>;
 }
 
 async function mount() {
+	let tr: any;
 	await renderer.act(async () => {
-		renderer.create(
+		tr = renderer.create(
 			<AppProvider>
 				<Probe />
 			</AppProvider>,
 		);
 		for (let i = 0; i < 20; i++) await Promise.resolve();
 	});
+	return tr;
 }
 
 beforeEach(() => {
@@ -129,10 +131,29 @@ describe("AppProvider forked identity repair (F5)", () => {
 	});
 
 	it("boot: a throwing repair never blocks boot", async () => {
-		mockRecent = [NETWORK];
-		mockRepair.mockRejectedValue(new Error("boom"));
-		await mount();
-		expect(mockSetCurrentUser).toHaveBeenLastCalledWith(mockStoredUser);
+		// WR-R6-03: assert that boot COMPLETED, not only that the stored user was bound (that bind runs
+		// before the repair, so it held even when the repair's rejection failed the re-attach).
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+		const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			mockRecent = [NETWORK];
+			mockRepair.mockRejectedValue(new Error("boom"));
+			const tr = await mount();
+			// Positive anchor: the repair ran and its failure was absorbed.
+			expect(mockRepair).toHaveBeenCalledTimes(1);
+			expect(warnSpy).toHaveBeenCalledWith("[identity-repair] outcome=failed");
+			// Boot completed onto the network.
+			expect(captured!.hasNetwork).toBe(true);
+			expect(tr.root.findAll((n: { props?: { testID?: string } }) => n.props?.testID === "boot-error-view")).toHaveLength(0);
+			expect(mockOpen).toHaveBeenCalledTimes(1);
+			expect(mockOpen).toHaveBeenCalledWith(NETWORK, mockStoredUser);
+			expect(mockSetCurrentUser).toHaveBeenLastCalledWith(mockStoredUser);
+			expect(mockClearEngineCache).not.toHaveBeenCalled();
+			expect(errorSpy).not.toHaveBeenCalled();
+		} finally {
+			errorSpy.mockRestore();
+			warnSpy.mockRestore();
+		}
 	});
 
 	it("selectNetwork: repaired identity is bound and the network re-opened with it", async () => {
