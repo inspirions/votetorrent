@@ -10,15 +10,14 @@
  *  - never when the forked id is a User on another recent network of this device, or when that
  *    cannot be verified (fail safe);
  *  - the pre-repair record is backed up byte-for-byte first and the backup is never overwritten;
- *  - `restoreDeviceIdentityForkBackup()` sets only `user.id` back and writes a pair-specific
- *    declined marker, so the next boot does not repair again.
+ *  - `restoreDeviceIdentityForkBackup()` sets only `user.id` back to the last repair's source id
+ *    and writes a pair-specific declined marker, so the next boot does not repair again.
  *
  * Logs: the closed outcome token only. Never an id, a key or an error message.
  */
 import type { User } from '@votetorrent/vote-core'
 import {
 	getForkRepairApplied,
-	getForkRepairBackup,
 	getForkRepairDeclined,
 	getRawDeviceUserRecord,
 	isRecoveryInProgress,
@@ -122,20 +121,29 @@ export async function repairDeviceIdentityForkIfNeeded(deps: RepairDeps): Promis
 }
 
 /**
- * Undo a repair: sets only `user.id` back to the backed-up id and writes the declined marker.
- * Returns `false` when there is no backup, `'restore-refused-id-changed'` (nothing written) when
- * the stored id is no longer the one the repair wrote, `true` on success. The backup is kept.
+ * Undo the most recent repair: sets only `user.id` back to that repair's `fromUserId` and writes
+ * the declined marker for exactly that pair, so the next boot does not make the same repair again.
+ * Returns `false` when there is no applied repair to undo (or the stored record cannot be read),
+ * `'restore-refused-id-changed'` (nothing written) when the stored id is no longer the one the
+ * repair wrote, `true` on success. Never throws.
+ *
+ * The undo target is the APPLIED pair, never the backup: the backup is written once and never
+ * overwritten, so after a repair R->X and a later X->Y it still holds R, and going back to it
+ * would skip X. The byte-exact backup is kept as a forensic record only.
  */
 export async function restoreDeviceIdentityForkBackup(): Promise<boolean | 'restore-refused-id-changed'> {
-	const backup = await getForkRepairBackup()
-	if (backup === null) return false
-	const backedUpId = (JSON.parse(backup) as { user?: { id?: unknown } }).user?.id
-	if (typeof backedUpId !== 'string') return false
-	const applied = await getForkRepairApplied()
-	const currentRaw = await AsyncStorage.getItem(DEVICE_USER_KEY)
-	const currentId = currentRaw === null ? undefined : (JSON.parse(currentRaw) as { user?: { id?: unknown } }).user?.id
-	if (!applied || currentId !== applied.toUserId) return 'restore-refused-id-changed'
-	await replaceDeviceUserId(backedUpId)
-	await setForkRepairDeclined({ fromUserId: backedUpId, toUserId: applied.toUserId })
-	return true
+	try {
+		const applied = await getForkRepairApplied()
+		if (!applied) return false
+		const currentRaw = await AsyncStorage.getItem(DEVICE_USER_KEY)
+		if (currentRaw === null) return false
+		const currentId = (JSON.parse(currentRaw) as { user?: { id?: unknown } }).user?.id
+		if (currentId !== applied.toUserId) return 'restore-refused-id-changed'
+		await replaceDeviceUserId(applied.fromUserId)
+		await setForkRepairDeclined({ fromUserId: applied.fromUserId, toUserId: applied.toUserId })
+		return true
+	} catch (err) {
+		console.warn(`[identity-repair] restore=failed name=${err instanceof Error ? err.name : 'unknown'}`)
+		return false
+	}
 }

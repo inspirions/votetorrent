@@ -1,6 +1,6 @@
 /**
  * O-06 app half: planDeviceIdentityRepair / repairDeviceIdentityForkIfNeeded /
- * restoreDeviceIdentityForkBackup (F1-F4b). Real AsyncStorage jest mock; fake inspection engines.
+ * restoreDeviceIdentityForkBackup (F1-F4d). Real AsyncStorage jest mock; fake inspection engines.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import {
@@ -137,6 +137,32 @@ describe('restoreDeviceIdentityForkBackup (F4/F4b)', () => {
 		await AsyncStorage.setItem(DEVICE_USER_KEY, raw)
 		expect(await restoreDeviceIdentityForkBackup()).toBe('restore-refused-id-changed')
 		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(raw)
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
+	})
+
+	it('F4c: after R->X then X->Y, restore goes back ONE step to X and declines exactly X->Y (REVIEW WR-R4-02)', async () => {
+		await run(engine(forked))
+		const Y = 'network-id-y'
+		const second = await run(engine({ localIsNetworkUser: false, officerUserIdsHoldingKey: [Y] }), 'no', { ...USER, id: X })
+		expect(second.outcome).toBe('repaired')
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(Y)
+
+		expect(await restoreDeviceIdentityForkBackup()).toBe(true)
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(X)
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY))!)).toEqual({ fromUserId: X, toUserId: Y })
+		// the forensic backup still holds the very first record
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBe(STORED)
+		// and the declined marker suppresses the X->Y repair it was written for
+		const again = await run(engine({ localIsNetworkUser: false, officerUserIdsHoldingKey: [Y] }), 'no', { ...USER, id: X })
+		expect(again.outcome).toBe('declined')
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(X)
+	})
+
+	it('F4d: a corrupt stored record returns false and writes nothing, never throws', async () => {
+		await run(engine(forked))
+		await AsyncStorage.setItem(DEVICE_USER_KEY, '{not json')
+		await expect(restoreDeviceIdentityForkBackup()).resolves.toBe(false)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe('{not json')
 		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
 	})
 
