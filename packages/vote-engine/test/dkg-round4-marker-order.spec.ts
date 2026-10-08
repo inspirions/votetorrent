@@ -24,11 +24,11 @@ async function countRows (db: Database, electionId: string, revision: number, at
   return (row?.c as number | undefined) ?? 0
 }
 
-async function awaitingRound4 (db: Database, electionId: string, revision: number, participants: DkgTestParticipant[]): Promise<DkgTestParticipant> {
+async function awaitingRound4 (db: Database, electionId: string, revision: number, participants: DkgTestParticipant[], attempt = 1): Promise<DkgTestParticipant> {
   for (const p of participants) {
     const row = await db
-      .prepare('select 1 as x from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = 1 and DkgRound = 4 and SenderUserId = :senderUserId')
-      .get({ electionId, revision, senderUserId: p.userId })
+      .prepare('select 1 as x from KeyholderDkgMessage where ElectionId = :electionId and ElectionRevision = :revision and Attempt = :attempt and DkgRound = 4 and SenderUserId = :senderUserId')
+      .get({ electionId, revision, attempt, senderUserId: p.userId })
     if (!row) return p
   }
   throw new Error('every participant already posted round 4')
@@ -74,6 +74,8 @@ describe('dkg-round4-marker-order.spec: stale marker deleted before the fresh sh
       caught = err
     }
     expect(caught, 'the simulated marker-delete failure surfaces').to.not.equal(undefined)
+    // WR-R2-10: the refusal must be the INJECTED crash, not some other failure on the way.
+    expect(String(caught)).to.include('simulated crash at marker delete')
     expect(await p.vault.hasSecret(shareAlias), 'no fresh share exists next to the stale marker').to.equal(false)
 
     flaky.disarm()
@@ -86,6 +88,58 @@ describe('dkg-round4-marker-order.spec: stale marker deleted before the fresh sh
     }
     const status = await p.engine.getDkgStatus(electionId, p.userId)
     expect(status.phase).to.equal('complete')
+  })
+
+  it('M-4 (WR-R2-10): a stale marker naming a genuinely ABORTED attempt: the retried share survives the V-1 sweep, and the old-order crash state would lose it', async () => {
+    const { auth, electionEngine, electionId, revision, participants } = await seedDkgElection({ keyholders: ['Alice', 'Bob', 'Carol', 'Dave'], threshold: 2 })
+    const db = auth.ctx.db
+    const revoked = participants[3]!
+    const roster = participants.slice(0, 3)
+    // Attempt 1 aborts for real (roster-changed, as dkg.spec H): a revoke after every R1 exists.
+    await runDkgToQuiescence(participants, electionId, {
+      stopWhen: async () => (await countRows(db, electionId, revision, 1, 1)) === participants.length
+    })
+    await electionEngine.revokeKeyholder({ name: revoked.name, type: 'k', expiration: '0', inviteKey: '', inviteSignature: '' }, electionId)
+    await runDkgToQuiescence(roster, electionId, {
+      stopWhen: async () => (await countRows(db, electionId, revision, 2, 3)) === roster.length
+    })
+    const status = await roster[0]!.engine.getDkgStatus(electionId)
+    expect(status.attempts.find((a) => a.attempt === 1)?.outcome, 'attempt 1 is aborted (precondition, read back)').to.equal('aborted')
+
+    const p = await awaitingRound4(db, electionId, revision, roster, 2)
+    const shareAlias = keyholderDkgShareAlias(electionId, revision, p.userId)
+    const markerAlias = keyholderDkgShareAttemptAlias(electionId, revision, p.userId)
+    // The stale marker names attempt 1, which IS aborted: exactly what the V-1 sweep deletes on.
+    await p.vault.putSecret(markerAlias, new TextEncoder().encode('1'), KEYHOLDER_SHARE_ATTEMPT_POLICY)
+
+    const flaky = flakyVault(p.vault, markerAlias)
+    let caught: unknown
+    try {
+      await new KeyholderDkgEngine(auth.ctx, { vault: flaky.vault }).advanceDkg(electionId, p.signer)
+    } catch (err) {
+      caught = err
+    }
+    expect(String(caught)).to.include('simulated crash at marker delete')
+    expect(await p.vault.hasSecret(shareAlias), 'no fresh share next to the aborted-attempt marker').to.equal(false)
+
+    flaky.disarm()
+    await p.engine.advanceDkg(electionId, p.signer)
+    expect(await p.vault.hasSecret(shareAlias), 'the retried round 4 stored the share').to.equal(true)
+    expect(new TextDecoder().decode((await p.vault.getSecret(markerAlias))!)).to.equal('2')
+
+    // The sweep can only delete while no ElectionKey exists: read that precondition back.
+    const noKey = async (): Promise<boolean> => (await db.prepare('select 1 as x from ElectionKey where ElectionId = :electionId').get({ electionId })) === undefined
+    expect(await noKey(), 'no ElectionKey yet, so the V-1 sweep is armed').to.equal(true)
+    await p.engine.advanceDkg(electionId, p.signer) // runs cleanupVault
+    expect(await p.vault.hasSecret(shareAlias), 'the share produced by attempt 2 survives the sweep').to.equal(true)
+
+    // Negative control: the OLD order's crash state (fresh share, marker still naming aborted
+    // attempt 1) is swept, so the leg above would fail under a reverted ordering.
+    await p.vault.deleteSecret(markerAlias)
+    await p.vault.putSecret(markerAlias, new TextEncoder().encode('1'), KEYHOLDER_SHARE_ATTEMPT_POLICY)
+    expect(await noKey(), 'still no ElectionKey for the control').to.equal(true)
+    await p.engine.advanceDkg(electionId, p.signer)
+    expect(await p.vault.hasSecret(shareAlias), 'old-order crash state: the sweep deletes the fresh share').to.equal(false)
   })
 
   it('M-3: the happy path (no stale marker) still stores share + marker', async () => {
