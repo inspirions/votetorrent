@@ -390,6 +390,13 @@ describe("createRestRegistrationSyncBinding — R1-R10", () => {
 			expect(err).toBeInstanceOf(Error);
 			expect(seenSignal).toBeDefined();
 			expect(seenSignal!.aborted).toBe(true);
+			// WR-R6-05: "a plain call" means fetch ran with no receiver (or the global object). A
+			// stored or method-call reference would hand it another `this`, which RN/Hermes rejects
+			// with an illegal-invocation error.
+			const fetchMock = (global as any).fetch as jest.Mock;
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			const receiver = fetchMock.mock.contexts[0];
+			expect(receiver === undefined || receiver === globalThis).toBe(true);
 		} finally {
 			(global as any).fetch = priorFetch;
 			jest.useRealTimers();
