@@ -40,11 +40,17 @@ const mockShare = jest.fn();
 const RN = require("react-native");
 RN.Share.share = (...a: unknown[]) => mockShare(...a);
 
-function makeDetails(title: string) {
+function makeDetails(title: string, opts: { withProposedHolder?: boolean } = {}) {
 	return {
 		election: { id: title, title, authorityId: "a", type: 0, date: Date.UTC(2026, 9, 1), revisionDeadline: 0, ballotDeadline: 0 },
 		current: { revision: 1, revisionTimestamp: [], tags: [], timeline: {}, keyholderThreshold: 1, keyholders: [] },
-		proposed: undefined,
+		// The Share control renders only on a proposed-revision holder row, so E-3 needs one.
+		proposed: opts.withProposedHolder
+			? {
+					proposed: { revision: 2, revisionTimestamp: [], tags: [], timeline: {}, keyholderThreshold: 1, keyholders: [{ name: "Holder One" }] },
+					signatures: [],
+				}
+			: undefined,
 	};
 }
 
@@ -142,7 +148,7 @@ describe("ElectionDetailsScreen load failures", () => {
 
 	it("E-3: a non-peer ballots failure shows electionBallotsLoadFailed, a Share failure electionShareFailed; no raw text", async () => {
 		mockElectionEngine = makeEngine(
-			jest.fn().mockResolvedValue(makeDetails("Spring")),
+			jest.fn().mockResolvedValue(makeDetails("Spring", { withProposedHolder: true })),
 			jest.fn().mockRejectedValue(new Error("ballots raw text")),
 		);
 		const tr = await renderScreen();
@@ -151,15 +157,17 @@ describe("ElectionDetailsScreen load failures", () => {
 		expect(json).not.toContain("ballots raw text");
 
 		mockShare.mockRejectedValueOnce(new Error("share raw text"));
-		const shareButtons = tr.root.findAll((n) => n.props?.title === "share" && typeof n.props?.onPress === "function");
-		if (shareButtons.length > 0) {
-			await renderer.act(async () => {
-				await shareButtons[0].props.onPress();
-			});
-			json = JSON.stringify(tr.toJSON());
-			expect(json).toContain("electionShareFailed");
-			expect(json).not.toContain("share raw text");
-		}
+		// Never behind an `if`: the Share control must be found, or this half proves nothing.
+		const shareButtons = tr.root.findAll((n) => n.props?.title === "shareRevision" && typeof n.props?.onPress === "function");
+		expect(shareButtons.length).toBeGreaterThan(0);
+		expect(json).not.toContain("electionShareFailed");
+		await renderer.act(async () => {
+			await shareButtons[0].props.onPress();
+		});
+		expect(mockShare).toHaveBeenCalledTimes(1);
+		json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("electionShareFailed");
+		expect(json).not.toContain("share raw text");
 	});
 
 	it("E-3 regression: a peer failure still shows the peer notice", async () => {
