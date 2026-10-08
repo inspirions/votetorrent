@@ -304,6 +304,35 @@ describe('re-association decision republish drain (62-113 Task 2, WR-02)', funct
     expect(await w.decisionRow(requestId2, 'c')).to.not.equal(undefined)
   })
 
+  it('D-8 (WR-R1-02): an unreadable decision scan costs one counted failure, never the sync; R1 still issues its challenge', async () => {
+    const w = await makeWorld('automatic')
+    // A row past 'p' so the drain reaches its AssociationDecision scan.
+    const { registrantId, code } = await w.approveRegistration()
+    const earlier = await w.submitSentinel(randomTestKeyPair(), code)
+    await w.engine.approveReassociation(earlier, { registrantId }, w.officerSign, w.intake, w.fixture.opener)
+    const pending = await w.submitSentinel(randomTestKeyPair(), (await w.approveRegistration()).code)
+
+    const db = w.ctx.db as unknown as { eval: (...args: unknown[]) => unknown }
+    const realEval = db.eval
+    let tripped = 0
+    db.eval = function (this: unknown, ...args: unknown[]) {
+      if (typeof args[0] === 'string' && /from AssociationDecision where AuthorityId/.test(args[0])) {
+        tripped++
+        throw new Error('Missing block: AssociationDecision header (simulated)')
+      }
+      return (realEval as (...a: unknown[]) => unknown).apply(this, args)
+    }
+    try {
+      const summary = await w.process()
+      expect(tripped, 'the drain reached the stubbed scan').to.equal(1)
+      expect(summary.challengesIssued, 'R1 ran despite the drain failure').to.equal(1)
+      expect(summary.publishFailures, 'the drain failure is counted').to.equal(1)
+      expect((await w.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: pending }))!.Status).to.equal('c')
+    } finally {
+      db.eval = realEval
+    }
+  })
+
   it('D-7: a quiet run keeps exactly the four-field summary', async () => {
     const w = await makeWorld()
     expect(await w.process()).to.deep.equal({ challengesIssued: 0, associated: 0, rejected: 0, awaitingReview: 0 })

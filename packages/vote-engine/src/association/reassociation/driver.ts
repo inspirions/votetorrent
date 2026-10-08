@@ -383,35 +383,43 @@ export async function republishUndecided (
   opener: ReassociationOpener
 ): Promise<{ readonly republished: number; readonly failures: number }> {
   // `Status <> 'p'`, never `in (...)` next to an AuthorityId equality (Quereus AND+IN trap).
-  const rows: Array<{ id: string; deviceKey: string; status: string; challengeNonce?: string; rejectionReason?: string; decidedAt?: string }> = []
+  // WR-R1-02: rows are collected raw and decoded inside the per-row try below, so one malformed
+  // row is counted as a failure and skipped instead of aborting the whole scan.
+  const rawRows: Array<Record<string, unknown>> = []
   for await (const row of host.ctx.db.eval(
     "select Id, DeviceKey, Status, ChallengeNonce, RejectionReason, DecidedAt from AssociationRequest where AuthorityId = :rowAuthorityId and RegistrantId = :sentinel and Status <> 'p'",
     { rowAuthorityId: authorityId, sentinel: REASSOCIATION_UNRESOLVED_REGISTRANT_ID }
   )) {
-    rows.push({
-      id: asText(row.Id, 'AssociationRequest.Id'),
-      deviceKey: asText(row.DeviceKey, 'AssociationRequest.DeviceKey'),
-      status: asText(row.Status, 'AssociationRequest.Status'),
-      challengeNonce: row.ChallengeNonce == null ? undefined : asText(row.ChallengeNonce, 'AssociationRequest.ChallengeNonce'),
-      rejectionReason: row.RejectionReason == null ? undefined : asText(row.RejectionReason, 'AssociationRequest.RejectionReason'),
-      decidedAt: row.DecidedAt == null ? undefined : reZulu(asText(row.DecidedAt, 'AssociationRequest.DecidedAt'))
-    })
+    rawRows.push(row as Record<string, unknown>)
   }
-  if (rows.length === 0) return { republished: 0, failures: 0 }
+  if (rawRows.length === 0) return { republished: 0, failures: 0 }
 
   const decided = new Set<string>()
   for await (const row of host.ctx.db.eval(
     'select RequestId, Status from AssociationDecision where AuthorityId = :rowAuthorityId',
     { rowAuthorityId: authorityId }
   )) {
-    decided.add(`${asText(row.RequestId, 'AssociationDecision.RequestId')}\u0000${asText(row.Status, 'AssociationDecision.Status')}`)
+    try {
+      decided.add(`${asText(row.RequestId, 'AssociationDecision.RequestId')}\u0000${asText(row.Status, 'AssociationDecision.Status')}`)
+    } catch {
+      // An undecodable decision row marks nothing as decided; at worst its request is republished
+      // and the strand answers duplicate-decision, which counts as success.
+    }
   }
 
   let republished = 0
   let failures = 0
-  for (const row of rows) {
-    if (decided.has(`${row.id}\u0000${row.status}`)) continue
+  for (const rawRow of rawRows) {
     try {
+      const row = {
+        id: asText(rawRow.Id, 'AssociationRequest.Id'),
+        deviceKey: asText(rawRow.DeviceKey, 'AssociationRequest.DeviceKey'),
+        status: asText(rawRow.Status, 'AssociationRequest.Status'),
+        challengeNonce: rawRow.ChallengeNonce == null ? undefined : asText(rawRow.ChallengeNonce, 'AssociationRequest.ChallengeNonce'),
+        rejectionReason: rawRow.RejectionReason == null ? undefined : asText(rawRow.RejectionReason, 'AssociationRequest.RejectionReason'),
+        decidedAt: rawRow.DecidedAt == null ? undefined : reZulu(asText(rawRow.DecidedAt, 'AssociationRequest.DecidedAt'))
+      }
+      if (decided.has(`${row.id}\u0000${row.status}`)) continue
       const decidedAt = row.decidedAt ?? new Date().toISOString()
       if (row.status === 'c') {
         if (row.challengeNonce === undefined || row.challengeNonce.startsWith(REASSOCIATION_REJECTION_NONCE_PREFIX)) continue
@@ -453,7 +461,14 @@ export async function processPendingReassociations (
   const interruptedCompleted = await host.completeInterruptedRejections(authorityId, signatureOrCallback, intake)
 
   // WR-02 — republish any local transition whose decision never reached the strand.
-  const drained = await republishUndecided(host, authorityId, intake, opener)
+  // WR-R1-02: best-effort. A scan that cannot be read (for example a `Missing block` on the
+  // AssociationDecision header) is one counted failure, never a rejected sync: R1/R2 still run.
+  let drained: { readonly republished: number; readonly failures: number }
+  try {
+    drained = await republishUndecided(host, authorityId, intake, opener)
+  } catch {
+    drained = { republished: 0, failures: 1 }
+  }
   let publishFailures = drained.failures
 
   let challengesIssued = 0
