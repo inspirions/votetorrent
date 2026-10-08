@@ -1,8 +1,14 @@
 /**
  * RegistrantDetailScreen.lateOfficer.test.tsx — 62-144 (D-51, late-officer ruling).
  *
- * The Selective tier: sealed details this device cannot open render an explicit state, never an
- * empty audience preview, never offer disclosure, and never leak a value or salt.
+ * The Selective and Private tiers of a registrant this device cannot open:
+ *  - L1/L2: `not-a-recipient` keeps its existing line and adds the late-officer explanation.
+ *  - L3: `no-opener`, `unreadable`, `tampered` and `opened` render their own state and no
+ *    explanation.
+ *  - L6: the Spanish and English explanation copy.
+ *  - L7: for every sealed state, even when the engine hands back the sealed content, no value,
+ *    field name or salt reaches the tree or any console channel, no audience preview is rendered
+ *    and no disclosure is requested.
  */
 import React from "react";
 import renderer from "react-test-renderer";
@@ -261,7 +267,7 @@ async function seed(engine: any): Promise<void> {
 function selTier(overrides: Record<string, unknown>): RegistrantSelective {
 	return { cid: "cid-1", registrantId: REGISTRANT_ID, ...overrides } as RegistrantSelective;
 }
-const LEAVES = [{ name: "Party", value: VALUE_SENTINEL, salt: "SALT_SENTINEL_1" }];
+const LEAVES = [{ name: "Party", value: VALUE_SENTINEL, salt: SALT_SENTINEL }];
 
 let consoleSpies: jest.SpyInstance[] = [];
 let getDisclosed: jest.SpyInstance;
@@ -347,6 +353,37 @@ describe("RegistrantDetailScreen — late officer explanation (D-51, NEVER rulin
 		absent(tr, "registrant-detail-selective-late-officer");
 		expect(treeText(tr)).not.toContain("sealedBeforeOfficerExplanation");
 	});
+
+	it.each(["not-a-recipient", "no-opener", "unreadable", "tampered"])(
+		"L7. %s: no value, field name or salt leaks, no audience preview, no disclosure",
+		async (access) => {
+			await seed(mockRegistrationEngine);
+			stubPrivate(
+				privTier({
+					detailsAccess: access,
+					// A buggy or hostile engine that hands back the sealed content anyway.
+					privateDetails: [
+						{ name: "SSN", value: SSN_SENTINEL },
+						{ name: "DOB", value: DOB_SENTINEL },
+						{ name: LEAK_NAME, value: PHONE_SENTINEL },
+					],
+				})
+			);
+			stubSelective(selTier({ detailsAccess: access, selectiveDetails: LEAVES }));
+			const tr = await renderScreen();
+			// Positive anchors: both tiers rendered their sealed state.
+			present(tr, "registrant-detail-private-sealed");
+			present(tr, "registrant-detail-selective-unread");
+			absent(tr, "selective-audience-preview");
+			expect(getDisclosed).not.toHaveBeenCalled();
+			const tree = treeText(tr);
+			const logged = JSON.stringify(consoleSpies.map((spy) => spy.mock.calls));
+			for (const sentinel of [SSN_SENTINEL, DOB_SENTINEL, PHONE_SENTINEL, SALT_SENTINEL, LEAK_NAME, VALUE_SENTINEL]) {
+				expect(tree).not.toContain(sentinel);
+				expect(logged).not.toContain(sentinel);
+			}
+		}
+	);
 
 	it("L6. the Spanish copy names the funcionario and the English copy says never", () => {
 		expect(resources.es.translation.sealedBeforeOfficerExplanation).toContain("funcionario");

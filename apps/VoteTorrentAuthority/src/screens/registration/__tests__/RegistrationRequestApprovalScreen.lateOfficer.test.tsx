@@ -1,15 +1,17 @@
 /**
  * RegistrationRequestApprovalScreen.lateOfficer.test.tsx - 62-144 (D-51, late-officer ruling).
  *
- * The duplicate callout and closed state, decide-time publishing, the vrg threshold
- * Reject-as-vote path with its progress note and unreachable outcome, and the D-49 unreadable
- * content states. Every engine is a call-recording jest.fn: this proves the screen's CALL
- * CONTRACT and what it renders, never an access-control boundary (the schema CHECKs and the
- * real-engine specs own that). `continuity-review` is deliberately NOT mocked.
+ * Covers only the late-officer explanation on this screen:
+ *  - L4: a `not-a-recipient` request keeps its unreadable-content line, adds the explanation after
+ *    it (English and Spanish), and leaves Approve/Reject disabled.
+ *  - L5: `no-opener`, `unreadable`, `tampered` and a readable payload render their own state and no
+ *    explanation.
+ * Every engine is a call-recording jest.fn: this proves what the screen renders, never an
+ * access-control boundary (the schema CHECKs and the real-engine specs own that).
+ * `continuity-review` is deliberately NOT mocked.
  */
 
 import React from "react";
-import { StyleSheet } from "react-native";
 import renderer from "react-test-renderer";
 
 const RECEIVED_AT = "2026-08-05T10:00:00Z";
@@ -34,19 +36,6 @@ const PENDING_READ: any = {
 	receivedAt: RECEIVED_AT,
 };
 
-const LONG_FIRST = "Maximiliana Esperanza";
-const LONG_LAST = "Villalobos-Etxeberria de la Cruz";
-const CANDIDATE: any = {
-	requestId: "req-B",
-	authorityId: "auth-1",
-	issuerType: "registrant",
-	submittedAt: SUBMITTED_AT,
-	receivedAt: RECEIVED_AT,
-	firstName: LONG_FIRST,
-	lastName: LONG_LAST,
-	matchedOn: [],
-};
-
 function taskFor(read: any): any {
 	return {
 		type: "signature",
@@ -57,20 +46,6 @@ function taskFor(read: any): any {
 		payload: read.payload,
 		submittedAt: read.submittedAt,
 		issuerType: read.issuerType,
-	};
-}
-
-function status(overrides: Record<string, unknown> = {}): any {
-	return {
-		nonce: "n1",
-		scope: "vrg",
-		threshold: 2,
-		signatures: 0,
-		openTasks: 3,
-		rejected: 0,
-		reached: false,
-		unreachable: false,
-		...overrides,
 	};
 }
 
@@ -240,23 +215,6 @@ function orderedTestIDs(tr: renderer.ReactTestRenderer): string[] {
 	collectTestIDs(tr.toJSON(), acc);
 	return acc;
 }
-function findPressable(tr: renderer.ReactTestRenderer, testID: string) {
-	const wrapper = tr.root.findByProps({ testID });
-	return [wrapper, ...wrapper.findAll(() => true)].find((n) => typeof n.props.onPress === "function" || typeof n.props.onPressIn === "function");
-}
-function press(tr: renderer.ReactTestRenderer, testID: string) {
-	const p = findPressable(tr, testID)!;
-	renderer.act(() => {
-		(p.props.onPress ?? p.props.onPressIn)();
-	});
-}
-async function pressAsync(tr: renderer.ReactTestRenderer, testID: string) {
-	const p = findPressable(tr, testID)!;
-	await renderer.act(async () => {
-		(p.props.onPress ?? p.props.onPressIn)();
-	});
-	await flushTicks(12);
-}
 function isDisabled(tr: renderer.ReactTestRenderer, testID: string): boolean {
 	const wrapper = tr.root.findByProps({ testID });
 	const node = [wrapper, ...wrapper.findAll(() => true)].find((n) => "disabled" in n.props);
@@ -278,51 +236,6 @@ function textOf(tr: renderer.ReactTestRenderer, testID: string): string {
 }
 function whole(tr: renderer.ReactTestRenderer): string {
 	return JSON.stringify(tr.toJSON());
-}
-function flat(node: renderer.ReactTestInstance): Record<string, any> {
-	return (StyleSheet.flatten(node.props.style) ?? {}) as Record<string, any>;
-}
-function clippingAncestors(node: renderer.ReactTestInstance, stopAt: renderer.ReactTestInstance): string[] {
-	const problems: string[] = [];
-	let cur: renderer.ReactTestInstance | null = node.parent;
-	while (cur) {
-		const st = flat(cur);
-		for (const k of ["height", "maxHeight"]) if (st[k] !== undefined) problems.push(`${k}=${String(st[k])}`);
-		if (st.overflow === "hidden") problems.push("overflow:hidden");
-		if (cur === stopAt) break;
-		cur = cur.parent;
-	}
-	return problems;
-}
-function engineCalls(): number {
-	return (
-		mockRejectRegistrationRequest.mock.calls.length +
-		mockGetSignatureDigest.mock.calls.length +
-		mockCompleteSignature.mock.calls.length +
-		mockPublishRegistrationDecision.mock.calls.length
-	);
-}
-
-/** Makes the engine fakes behave like a real decision: the read flips to the decided status. */
-function decideOnAccept(finalStatus: "a" | "r") {
-	mockCompleteSignature.mockImplementation(async (_t: any, r: any) => {
-		if (r.isAccepted) mockCurrentRead = { ...mockCurrentRead, status: finalStatus };
-	});
-}
-function decideOnReject() {
-	mockRejectRegistrationRequest.mockImplementation(async () => {
-		mockCurrentRead = { ...mockCurrentRead, status: "r" };
-	});
-}
-async function rejectWithReason(tr: renderer.ReactTestRenderer, reason = "no proof of residence") {
-	// D-07: Reject is disabled until the checklist gate is met; tick only when it is not already.
-	if (isDisabled(tr, "registration-request-approval-reject")) press(tr, "verification-checklist-toggle-id");
-	press(tr, "registration-request-approval-reject");
-	const input = tr.root.findByProps({ testID: "reject-reason-reason-input" });
-	renderer.act(() => {
-		input.props.onChangeText(reason);
-	});
-	await pressAsync(tr, "reject-reason-confirm");
 }
 
 let consoleSpies: jest.SpyInstance[] = [];
@@ -349,7 +262,6 @@ beforeEach(() => {
 afterEach(() => {
 	consoleSpies.forEach((s) => expect(s).not.toHaveBeenCalled());
 });
-
 
 describe("RegistrationRequestApprovalScreen - late officer explanation", () => {
 	const UNREAD = (access: string) => ({ ...PENDING_READ, payload: {}, payloadAccess: access });
