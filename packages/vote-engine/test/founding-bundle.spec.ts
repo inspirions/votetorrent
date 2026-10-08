@@ -1165,9 +1165,12 @@ describe('NetworksEngine export/import (D-35, D-37, D-38, D-39)', () => {
       }
       const engineB = new NetworksEngine(makeDeviceLocalStorage(), tracked.factory)
       const result = await engineB.importFoundingBundle(text, undefined, { expectedDigest: digest })
-      // Whatever the exact partial classification, an ok:false must have closed the handle.
-      if (!result.ok) expect(tracked.closed, 'handle closed on a refused import').to.be.greaterThan(0)
+      // WR-R2-09: prove the PARTIAL branch was reached (not the read-failure branch W-1 covers).
       expect(result.ok).to.equal(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.reason).to.equal('target-conflict')
+      expect('detail' in result ? result.detail : '').to.include('partial')
+      expect(tracked.closed, 'handle closed on a refused import').to.be.greaterThan(0)
     })
 
     it('W-6 (WR-R1-07): a refused import never closes a strand-held (App-schema) handle, and the retry reuses it and succeeds', async () => {
