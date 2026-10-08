@@ -38,7 +38,11 @@ export function NetworkDetailsScreen() {
 	const [primaryAuthorityEngine, setPrimaryAuthorityEngine] = useState<IAuthorityEngine>();
 	const [primaryAuthorityDetails, setPrimaryAuthorityDetails] = useState<AuthorityDetails>();
 	const [primaryAuthorityAdmin, setPrimaryAuthorityAdmin] = useState<AdminDetails>();
-	const [loadError, setLoadError] = useState("");
+	// WR-R3-09: each load owns its own error, so one load clearing its error can never erase the
+	// other's, and each effect ignores a run superseded by a newer one (cancelled in cleanup).
+	const [networkLoadError, setNetworkLoadError] = useState("");
+	const [authorityLoadError, setAuthorityLoadError] = useState("");
+	const loadError = networkLoadError || authorityLoadError;
 	// Bumped by Try Again; both load effects depend on it so a retry re-runs the network load and
 	// then (through the new details) the primary-authority load.
 	const [reloadNonce, setReloadNonce] = useState(0);
@@ -55,22 +59,31 @@ export function NetworkDetailsScreen() {
 	const insets = useSafeAreaInsets();
 
 	useEffect(() => {
+		let cancelled = false;
 		const loadNetwork = async () => {
-			setLoadError("");
+			setNetworkLoadError("");
 			try {
 				const engine = await getEngine<INetworkEngine>("network", networkRef as NetworkReference);
+				if (cancelled) return;
 				setNetworkEngine(engine);
 				const details = await engine.getDetails();
+				if (cancelled) return;
 				setNetworkDetails(details);
 				// Which officer is looking — only their own SIGN button is live (AuthorizationSection).
 				const currentUser = await engine.getCurrentUser();
-				setCurrentUserId((await currentUser?.getSummary())?.id);
+				const currentUserSummaryId = (await currentUser?.getSummary())?.id;
+				if (cancelled) return;
+				setCurrentUserId(currentUserSummaryId);
 			} catch (error) {
+				if (cancelled) return;
 				console.warn("Failed to load network details:", error instanceof Error ? error.name : typeof error);
-				setLoadError(t("networkDetailsLoadFailed"));
+				setNetworkLoadError(t("networkDetailsLoadFailed"));
 			}
 		};
 		loadNetwork();
+		return () => {
+			cancelled = true;
+		};
 	}, [reloadNonce]);
 
 	// Phase 8 plan 08-05 (D-14): compute a flat list of changed fields between
@@ -118,28 +131,36 @@ export function NetworkDetailsScreen() {
 	// "Authority not found". Pass networkDetails.network.primaryAuthorityId, and short-circuit
 	// when it is falsy so we never pass undefined into openAuthority.
 	useEffect(() => {
+		let cancelled = false;
 		const loadPrimaryAuthority = async () => {
 			if (!networkDetails) return;
 			const primaryAuthorityId = networkDetails.network.primaryAuthorityId;
 			if (!primaryAuthorityId) return;
-			setLoadError("");
+			setAuthorityLoadError("");
 			try {
 				const authorityEngine = await getEngine<IAuthorityEngine>(
 					"authority",
 					primaryAuthorityId
 				);
+				if (cancelled) return;
 				setPrimaryAuthorityEngine(authorityEngine);
 				const details = await authorityEngine.getDetails();
+				if (cancelled) return;
 				setPrimaryAuthorityDetails(details);
 				const administration = await authorityEngine.getAdminDetails();
+				if (cancelled) return;
 				if (__DEV__) console.info("[network-details] administration", administration);
 				setPrimaryAuthorityAdmin(administration);
 			} catch (error) {
+				if (cancelled) return;
 				console.warn("Failed to load primary authority details:", error instanceof Error ? error.name : typeof error);
-				setLoadError(t("networkDetailsLoadFailed"));
+				setAuthorityLoadError(t("networkDetailsLoadFailed"));
 			}
 		};
 		loadPrimaryAuthority();
+		return () => {
+			cancelled = true;
+		};
 	}, [networkEngine, networkDetails, reloadNonce]);
 
 	// Phase 16 plan 08 (item 2): make the tapped network the active/current network.

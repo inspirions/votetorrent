@@ -122,6 +122,81 @@ describe('NetworkDetailsScreen retry', () => {
     expect(find(tr, (p) => p.testID === 'network-details-retry').length).toBe(0);
   });
 
+  it('WR-R3-09: a slow failure of a superseded primary-authority load never re-raises the error over a later success', async () => {
+    let rejectStale!: (e: Error) => void;
+    let authorityCalls = 0;
+    const authorityEngine = {
+      getDetails: jest.fn(async () => {
+        authorityCalls += 1;
+        if (authorityCalls === 1) throw new Error('first authority read failed');
+        if (authorityCalls === 2) {
+          return new Promise((_resolve, reject) => {
+            rejectStale = reject;
+          });
+        }
+        return { id: 'a-1' };
+      }),
+      getAdminDetails: jest.fn(async () => ({})),
+    };
+    const networkEngine = {
+      getDetails: jest.fn(async () => ({ network: { primaryAuthorityId: 'a-1', name: 'Net Loaded' } })),
+      getCurrentUser: async () => undefined,
+    };
+    mockGetEngine.mockImplementation(async (name: string) => (name === 'network' ? networkEngine : authorityEngine));
+
+    const tr = await renderScreen();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(tr.toJSON())).toContain('networkDetailsLoadFailed');
+    const retry = find(tr, (p) => p.testID === 'network-details-retry' && typeof p.onPress === 'function');
+    await act(async () => {
+      await retry[0].props.onPress();
+    });
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+    // The run against the new details succeeded.
+    expect(authorityCalls).toBe(3);
+    expect(JSON.stringify(tr.toJSON())).not.toContain('networkDetailsLoadFailed');
+
+    // The superseded run (started against the old details) now fails late.
+    await act(async () => {
+      rejectStale(new Error('late stale failure'));
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(tr.toJSON())).not.toContain('networkDetailsLoadFailed');
+    expect(find(tr, (p) => p.testID === 'network-details-retry').length).toBe(0);
+  });
+
+  it('WR-R3-09: a network-load failure is not erased when the primary-authority load starts', async () => {
+    const authorityEngine = {
+      getDetails: jest.fn(async () => ({ id: 'a-1' })),
+      getAdminDetails: jest.fn(async () => ({})),
+    };
+    // The details land, then the current-user read fails: the authority load starts AFTER the
+    // network load has already recorded its error.
+    const networkEngine = {
+      getDetails: jest.fn(async () => ({ network: { primaryAuthorityId: 'a-1', name: 'Net Loaded' } })),
+      getCurrentUser: async () => {
+        throw new Error('current user read failed');
+      },
+    };
+    mockGetEngine.mockImplementation(async (name: string) => (name === 'network' ? networkEngine : authorityEngine));
+
+    const tr = await renderScreen();
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+    expect(authorityEngine.getAdminDetails).toHaveBeenCalled();
+    expect(JSON.stringify(tr.toJSON())).toContain('networkDetailsLoadFailed');
+    expect(find(tr, (p) => p.testID === 'network-details-retry').length).toBeGreaterThan(0);
+  });
+
   it('N-2c: Select on a network whose User has no recovery key navigates to ProvisionSigningKey (the deferred-select gate)', async () => {
     const networkEngine = {
       getDetails: async () => ({ network: { name: 'Net' } }),
