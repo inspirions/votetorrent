@@ -22,7 +22,12 @@
  * MAX_FOUNDING_BUNDLE_FILE_BYTES = 1048576 is 4 bytes per character of 62-16's
  * `MAX_FOUNDING_BUNDLE_CHARS` (262144) import ceiling. That engine constant is not importable
  * here — `packages/vote-engine/src/networks/founding-bundle.ts` is in no barrel — so this is a
- * conservative restatement at the file-size layer, checked BEFORE any copy or read (T-62-23-02).
+ * conservative restatement at the file-size layer (T-62-23-02). It is checked BEFORE any read in
+ * every case: against the picker's reported size before the copy, or, when the provider reports no
+ * size, against the local copy's size (a native-backed blob, never loaded into the JS heap) before
+ * the text is read. The text actually read is checked again as UTF-8 bytes. Residual: when the
+ * provider reports no size the copy into the cache is itself unbounded (the picker's
+ * `keepLocalCopy` has no limit); the copy is deleted when the pick ends.
  *
  * This file never logs a uri, file name or file content — only a closed failure-kind token
  * (T-62-23-04).
@@ -57,6 +62,11 @@ export interface PickerModuleSubset {
 export interface PickFoundingBundleFileDeps {
 	picker?: PickerModuleSubset
 	readText?: (uri: string) => Promise<string>
+	/**
+	 * Byte size of the local copy, read without loading its content into the JS heap. Used only
+	 * when the provider reported no size. Default: `fetch(uri)` as a native-backed blob.
+	 */
+	sizeOfLocalCopy?: (uri: string) => Promise<number>
 	/** Deletes the picker's cache copy. Default: attestation-native `deleteCachedFile`. */
 	deleteLocalCopy?: (uri: string) => Promise<unknown>
 }
@@ -75,6 +85,35 @@ function getPicker(): PickerModuleSubset {
 
 function defaultReadText(uri: string): Promise<string> {
 	return fetch(uri).then((response) => response.text())
+}
+
+async function defaultSizeOfLocalCopy(uri: string): Promise<number> {
+	const blob = (await (await fetch(uri)).blob()) as Blob & { close?: () => void }
+	const size = blob.size
+	// RN blobs hold native memory until closed; the size is all this check needs.
+	blob.close?.()
+	if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) throw new Error('size unavailable')
+	return size
+}
+
+/** UTF-8 byte length of a JS string, without allocating an encoded copy. */
+export function utf8ByteLength(text: string): number {
+	let bytes = 0
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i)
+		if (c < 0x80) bytes += 1
+		else if (c < 0x800) bytes += 2
+		else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+			const next = text.charCodeAt(i + 1)
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				bytes += 4
+				i++
+			} else {
+				bytes += 3
+			}
+		} else bytes += 3
+	}
+	return bytes
 }
 
 function defaultDeleteLocalCopy(uri: string): Promise<unknown> {
@@ -99,6 +138,7 @@ export async function pickFoundingBundleFile(
 ): Promise<PickedFoundingBundleFile> {
 	const picker = deps?.picker ?? getPicker()
 	const readText = deps?.readText ?? defaultReadText
+	const sizeOfLocalCopy = deps?.sizeOfLocalCopy ?? defaultSizeOfLocalCopy
 	const deleteLocalCopy = deps?.deleteLocalCopy ?? defaultDeleteLocalCopy
 
 	let pickedUri: string
@@ -150,9 +190,14 @@ export async function pickFoundingBundleFile(
 	}
 
 	try {
+		// The provider reported no size: measure the local copy before reading a single character.
+		if (pickedSize === null && (await sizeOfLocalCopy(localUri)) > MAX_FOUNDING_BUNDLE_FILE_BYTES) {
+			logFailure('too-large')
+			return { kind: 'too-large' }
+		}
 		const text = await readText(localUri)
-		// The provider may report no size, so the cap is enforced on what was actually read.
-		if (text.length > MAX_FOUNDING_BUNDLE_FILE_BYTES) {
+		// A reported size can be wrong, so the cap is enforced again, in bytes, on what was read.
+		if (utf8ByteLength(text) > MAX_FOUNDING_BUNDLE_FILE_BYTES) {
 			logFailure('too-large')
 			return { kind: 'too-large' }
 		}
