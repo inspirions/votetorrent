@@ -6,8 +6,9 @@
  * sorts the way Quereus does; the production strand is an OPTIMYSTIC-backed table. If an optimystic
  * bump ever pushes ORDER BY / range predicates down into the plugin's own storage order (a different
  * collation from Quereus BINARY), the walk would see pages that do not advance. This spec runs the
- * walk against a real optimystic table (the plugin installed under the Authority app workspace, a
- * `local` in-memory transactor) loaded with the mirror shape (non-BMP cursor text whose UTF-16
+ * walk against a real optimystic table (the plugin installed under EACH app workspace, Authority and
+ * Voter, on the @quereus/quereus copy that plugin itself resolves, with a `local` in-memory
+ * transactor) loaded with the mirror shape (non-BMP cursor text whose UTF-16
  * order differs from code-point order), so such a bump fails a host test.
  *
  * Run this spec on EVERY optimystic bump. If the plugin cannot be loaded the spec FAILS (it never
@@ -15,12 +16,29 @@
  */
 
 import { expect } from 'chai'
-import { Database } from '@quereus/quereus'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import type { Database } from '@quereus/quereus'
 import { insertWithCursorRetry } from '../src/registration/transport/p2p-staging-seam.js'
 import type { StagingSqlPort } from '../src/registration/transport/p2p-staging-seam.js'
 
-const PLUGIN_INDEX = '../../../apps/VoteTorrentAuthority/node_modules/@optimystic/quereus-plugin-optimystic/dist/index.js'
-const PLUGIN_PATH_FOR_MESSAGE = 'apps/VoteTorrentAuthority/node_modules/@optimystic/quereus-plugin-optimystic/dist/index.js'
+const HERE = dirname(fileURLToPath(import.meta.url))
+/** WR-R2-07: BOTH apps ship the plugin; each copy is guarded, not only the Authority's. */
+const APPS = ['VoteTorrentAuthority', 'VoteTorrentVoter'] as const
+
+/** Node's bare-specifier directory lookup: the nearest `node_modules/<name>` at or above `fromDir`. */
+function findPackageDir (fromDir: string, name: string): string {
+  for (let dir = fromDir; ; dir = dirname(dir)) {
+    const candidate = join(dir, 'node_modules', name)
+    if (existsSync(join(candidate, 'package.json'))) return candidate
+    if (dirname(dir) === dir) throw new Error(`${name} is not resolvable from ${fromDir}`)
+  }
+}
+
+function packageJson (dir: string): { version: string; exports?: { '.'?: { import?: string } }; main?: string } {
+  return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version: string; exports?: { '.'?: { import?: string } }; main?: string }
+}
 
 const pad = (n: number): string => String(n).padStart(16, '0')
 const PREFIX = '00000000000000'
@@ -39,8 +57,11 @@ type RegisterFn = (db: Database, config: Record<string, unknown>) => {
   dispose?: () => Promise<void>
 }
 
-describe('staging cursor walk over an optimystic-backed table (gap4/IN-01 guard)', function () {
+for (const app of APPS) describe(`staging cursor walk over an optimystic-backed table (gap4/IN-01 guard) [${app}]`, function () {
   this.timeout(120_000)
+
+  const pluginDir = resolve(HERE, `../../../apps/${app}/node_modules/@optimystic/quereus-plugin-optimystic`)
+  const pluginPathForMessage = `apps/${app}/node_modules/@optimystic/quereus-plugin-optimystic/dist/index.js`
 
   let db: Database
   let dispose: (() => Promise<void>) | undefined
@@ -49,25 +70,35 @@ describe('staging cursor walk over an optimystic-backed table (gap4/IN-01 guard)
   before(async () => {
     let register: RegisterFn
     try {
-      const mod = (await import(PLUGIN_INDEX)) as { register: RegisterFn }
+      const mod = (await import(pathToFileURL(join(pluginDir, 'dist/index.js')).href)) as { register: RegisterFn }
       register = mod.register
     } catch (err) {
-      throw new Error(`optimystic quereus plugin could not be loaded from ${PLUGIN_PATH_FOR_MESSAGE}: ${(err as Error).message}`)
+      throw new Error(`optimystic quereus plugin could not be loaded from ${pluginPathForMessage}: ${(err as Error).message}`)
     }
-    db = new Database()
+    // WR-R2-07: the Database comes from the SAME @quereus/quereus copy the plugin resolves (the
+    // combination an app ships), never from vote-engine's own copy, so the plugin's vtable and
+    // instanceof checks run against the engine that plans the query.
+    const pluginQuereusDir = findPackageDir(join(pluginDir, 'dist'), '@quereus/quereus')
+    const pluginQuereus = packageJson(pluginQuereusDir)
+    const entry = pluginQuereus.exports?.['.']?.import ?? pluginQuereus.main ?? 'dist/src/index.js'
+    const { Database: PluginDatabase } = (await import(pathToFileURL(join(pluginQuereusDir, entry)).href)) as { Database: new () => Database }
+    // ...and that copy must be the version vote-engine itself is tested against.
+    const engineQuereus = packageJson(findPackageDir(HERE, '@quereus/quereus'))
+    expect(pluginQuereus.version, `${app}'s plugin resolves @quereus/quereus ${pluginQuereus.version}, vote-engine uses ${engineQuereus.version}`).to.equal(engineQuereus.version)
+
+    db = new PluginDatabase()
     const plugin = register(db, { default_transactor: 'local', default_key_network: 'test' })
     for (const v of plugin.vtables) db.registerModule(v.name, v.module as never, v.auxData as never)
     for (const f of plugin.functions) db.registerFunction(f.schema as never)
     dispose = plugin.dispose?.bind(plugin)
-    const { createRequire } = await import('node:module')
-    version = (createRequire(import.meta.url)('../../../apps/VoteTorrentAuthority/node_modules/@optimystic/quereus-plugin-optimystic/package.json') as { version: string }).version
+    version = packageJson(pluginDir).version
     await db.exec(`
       create table RegistrationRequestStaging (
         StrandId text,
         Cursor text,
         Payload text null,
         primary key (StrandId, Cursor)
-      ) using optimystic('tree://vote-engine-test/registration-staging', transactor='local', keyNetwork='test')
+      ) using optimystic('tree://vote-engine-test/${app}/registration-staging', transactor='local', keyNetwork='test')
     `)
   })
 
@@ -86,7 +117,7 @@ describe('staging cursor walk over an optimystic-backed table (gap4/IN-01 guard)
         await db.exec(sql, params as never)
       },
       async close (): Promise<void> {},
-      describe: () => `optimystic-local@${version}`
+      describe: () => `optimystic-local@${version} (${app})`
     }
   }
 
@@ -114,7 +145,7 @@ describe('staging cursor walk over an optimystic-backed table (gap4/IN-01 guard)
     )) plan.push(`${(row as { node_type: string }).node_type}: ${(row as { detail: string }).detail}`)
     // Evidence only: the behaviour leg (W-4) is the guard; the plan text explains it.
     // eslint-disable-next-line no-console
-    console.log(`[optimystic ${version}] walk page plan:\n${plan.join('\n')}`)
+    console.log(`[optimystic ${version} ${app}] walk page plan:\n${plan.join('\n')}`)
     expect(plan.length).to.be.greaterThan(0)
   })
 })
