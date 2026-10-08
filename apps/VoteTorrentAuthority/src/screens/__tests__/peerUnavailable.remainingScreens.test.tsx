@@ -12,15 +12,19 @@ const peerErr = () => Object.assign(new Error(PEER_RAW), { name: "QuereusError" 
 let mockRejection: unknown;
 let mockRouteParams: any = {};
 
+// Named so each case can assert its rejecting call ran (REVIEW WR-R5-04): the generic key is what
+// ANY exception maps to, so a harness TypeError would otherwise pass for the planted rejection.
+const mockListRegistrationRequests = jest.fn(async () => { throw mockRejection; });
+const mockResendRevision = jest.fn(async () => { throw mockRejection; });
 const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
 	if (name === "registration") {
-		return { listRegistrationRequests: jest.fn(async () => { throw mockRejection; }) };
+		return { listRegistrationRequests: mockListRegistrationRequests };
 	}
 	if (name === "network") {
 		return {
 			getDetails: jest.fn(async () => { throw mockRejection; }),
 			proposeRevision: jest.fn(async () => { throw mockRejection; }),
-			resendRevision: jest.fn(async () => { throw mockRejection; }),
+			resendRevision: mockResendRevision,
 			openAuthority: jest.fn(async () => { throw mockRejection; }),
 		};
 	}
@@ -108,21 +112,22 @@ const defaultGetEngine = mockGetEngine.getMockImplementation()!;
 beforeEach(() => {
 	mockGetEngine.mockReset();
 	mockGetEngine.mockImplementation(defaultGetEngine);
+	mockListRegistrationRequests.mockClear();
+	mockResendRevision.mockClear();
 });
 const errorSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
 afterAll(() => errorSpy.mockRestore());
 
 describe("remaining screens: peer-unavailable copy", () => {
 	describe("UserDetailsScreen load (READ)", () => {
+		let userEngine: { getSummary: jest.Mock; getHistory: jest.Mock };
 		const renderScreen = () => {
 			const { UserDetailsScreen } = require("../users/UserDetailsScreen");
-			mockRouteParams = {
-				user: { id: "u1", name: "U", activeKeys: [] },
-				userEngine: {
-					getSummary: jest.fn(async () => { throw mockRejection; }),
-					getHistory: jest.fn(async () => { throw mockRejection; }),
-				},
+			userEngine = {
+				getSummary: jest.fn(async () => { throw mockRejection; }),
+				getHistory: jest.fn(async () => { throw mockRejection; }),
 			};
+			mockRouteParams = { user: { id: "u1", name: "U", activeKeys: [] }, userEngine };
 			return mount(<UserDetailsScreen />);
 		};
 
@@ -136,6 +141,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 		it("R-2: a generic error renders translated copy, never its raw message", async () => {
 			mockRejection = new Error("disk corrupt");
 			const tr = await renderScreen();
+			expect(userEngine.getSummary).toHaveBeenCalled();
 			const s = texts(tr);
 			expect(s).toContain("errorLoadFailedGeneric");
 			expect(s).not.toContain("disk corrupt");
@@ -144,6 +150,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 	});
 
 	describe("NetworkRevisionScreen submit (WRITE)", () => {
+		let proposeRevision: jest.Mock;
 		const submit = async () => {
 			const NetworkRevisionScreen = require("../networks/NetworkRevisionScreen").default;
 			mockRouteParams = { networkId: "n1" };
@@ -157,6 +164,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 				})),
 				proposeRevision: jest.fn(async () => { throw mockRejection; }),
 			};
+			proposeRevision = engine.proposeRevision;
 			mockGetEngine.mockImplementation(async () => engine);
 			const tr = await mount(<NetworkRevisionScreen />);
 			const btn = tr.root.findAll((n) => typeof n.props.onPress === "function" && /propose/i.test(String(n.props.title ?? "")))[0];
@@ -175,6 +183,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 		it("R-2: a generic error renders translated copy, never its raw message", async () => {
 			mockRejection = new Error("disk corrupt");
 			const s = texts(await submit());
+			expect(proposeRevision).toHaveBeenCalled();
 			expect(s).toContain("errorActionFailedGeneric");
 			expect(s).not.toContain("disk corrupt");
 			expect(s).not.toContain("peerWriteUnavailable");
@@ -198,6 +207,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 		it("R-4: a generic error renders translated copy, never its raw message", async () => {
 			mockRejection = new Error("disk corrupt");
 			const s = texts(await renderScreen());
+			expect(mockListRegistrationRequests).toHaveBeenCalled();
 			expect(s).toContain("errorLoadFailedGeneric");
 			expect(s).not.toContain("disk corrupt");
 			expect(s).not.toContain("peerReadUnavailableBody");
@@ -224,6 +234,7 @@ describe("remaining screens: peer-unavailable copy", () => {
 		it("R-4: a generic error renders translated copy, never its raw message", async () => {
 			mockRejection = new Error("disk corrupt");
 			const s = texts(await resend());
+			expect(mockResendRevision).toHaveBeenCalled();
 			expect(s).toContain("errorActionFailedGeneric");
 			expect(s).not.toContain("disk corrupt");
 		});

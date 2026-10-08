@@ -148,6 +148,13 @@ async function pressTitle(tr: Tr, title: string): Promise<void> {
 const reject = async (): Promise<never> => {
 	throw mockRejection;
 };
+/**
+ * A rejecting engine method that records its calls. Every case asserts its stub ran before it
+ * checks the copy (REVIEW WR-R5-04): the generic key is what ANY exception maps to, so without
+ * the call assertion a harness TypeError (a renamed or missing method, a failed precondition)
+ * would pass for the rejection the case claims to test.
+ */
+const rejecting = () => jest.fn(reject);
 
 const errSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
 afterAll(() => errSpy.mockRestore());
@@ -163,57 +170,79 @@ beforeEach(() => {
 describe("READ failures show errorLoadFailedGeneric", () => {
 	it("PollingDevicesScreen load", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
-		mockEngines = { authorityConfig: { getPollingDevices: reject } };
+		const getPollingDevices = rejecting();
+		mockEngines = { authorityConfig: { getPollingDevices } };
 		const Screen = require("../authorities/PollingDevicesScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getPollingDevices).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("ProposedAdministrationScreen load", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
-		mockEngines = { network: { openAuthority: reject } };
+		const openAuthority = rejecting();
+		mockEngines = { network: { openAuthority } };
 		const Screen = require("../authorities/ProposedAdministrationScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(openAuthority).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("AuthorityPeersScreen load", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
-		mockEngines = { authorityConfig: { getAuthorityPeers: reject } };
+		const getAuthorityPeers = rejecting();
+		mockEngines = { authorityConfig: { getAuthorityPeers } };
 		const Screen = require("../authorities/AuthorityPeersScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getAuthorityPeers).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("NetworkRevisionScreen load", async () => {
 		mockRouteParams = { networkId: "n1" };
-		mockEngines = { network: { getDetails: reject } };
+		const getDetails = rejecting();
+		mockEngines = { network: { getDetails } };
 		const Screen = require("../networks/NetworkRevisionScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getDetails).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("NetworkStatisticsScreen load", async () => {
 		mockRouteParams = { networkId: "n1" };
-		mockEngines = { network: { getStatistics: reject } };
+		const getStatistics = rejecting();
+		mockEngines = { network: { getStatistics } };
 		const Screen = require("../networks/NetworkStatisticsScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getStatistics).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("RegistrationPolicyScreen load", async () => {
 		mockRouteParams = { electionEngine: {}, electionId: "e1", authorityId: "auth-1" };
-		mockEngines = { registration: { getElectionRegistrationFields: reject } };
+		const getElectionRegistrationFields = rejecting();
+		mockEngines = { registration: { getElectionRegistrationFields } };
 		const Screen = require("../elections/RegistrationPolicyScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getElectionRegistrationFields).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 
 	it("EditElectionScreen load", async () => {
-		mockRouteParams = { electionEngine: { getElectionDetails: reject } };
+		const getElectionDetails = rejecting();
+		mockRouteParams = { electionEngine: { getElectionDetails } };
 		const Screen = require("../elections/EditElectionScreen").default;
-		expectCopy(await mount(<Screen />), "errorLoadFailedGeneric");
+		const tr = await mount(<Screen />);
+		expect(getElectionDetails).toHaveBeenCalled();
+		expectCopy(tr, "errorLoadFailedGeneric");
 	});
 });
 
 describe("WRITE failures show errorActionFailedGeneric", () => {
 	it("PollingDevicesScreen add", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
-		mockEngines = { authorityConfig: { getPollingDevices: async () => [], addPollingDevice: reject } };
+		const addPollingDevice = rejecting();
+		mockEngines = { authorityConfig: { getPollingDevices: async () => [], addPollingDevice } };
 		const Screen = require("../authorities/PollingDevicesScreen").default;
 		const tr = await mount(<Screen />);
 		const headerRight = mockNavigation.setOptions.mock.calls.at(-1)![0].headerRight;
@@ -227,21 +256,24 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 			hashInput.props.onChangeText(HASH_A);
 		});
 		await pressId(tr, "polling-devices-add-submit");
+		expect(addPollingDevice).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("PollingDevicesScreen remove", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
+		const removePollingDevice = rejecting();
 		mockEngines = {
 			authorityConfig: {
 				getPollingDevices: async () => [{ authorityId: "auth-1", deviceHash: HASH_A, label: "Precinct 4" }],
-				removePollingDevice: reject,
+				removePollingDevice,
 			},
 		};
 		const Screen = require("../authorities/PollingDevicesScreen").default;
 		const tr = await mount(<Screen />);
 		await pressId(tr, "polling-devices-remove-" + HASH_A);
 		await pressId(tr, "polling-device-remove-" + HASH_A + "-confirm");
+		expect(removePollingDevice).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
@@ -250,18 +282,20 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 		const authorityEngine = {
 			getAdminDetails: async () => ({ admin: { officers: [] } }),
 			getDetails: async () => ({ authority: { id: "auth-1", name: "A", domainName: "a.example.org" } }),
-			proposeAdmin: reject,
+			proposeAdmin: rejecting(),
 		};
 		mockEngines = { network: { openAuthority: async () => authorityEngine, getUser: async () => undefined } };
 		const Screen = require("../authorities/ProposedAdministrationScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "propose");
+		expect(authorityEngine.proposeAdmin).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("AuthorityPeersScreen add", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
-		mockEngines = { authorityConfig: { getAuthorityPeers: async () => [], addAuthorityPeer: reject } };
+		const addAuthorityPeer = rejecting();
+		mockEngines = { authorityConfig: { getAuthorityPeers: async () => [], addAuthorityPeer } };
 		const Screen = require("../authorities/AuthorityPeersScreen").default;
 		const tr = await mount(<Screen />);
 		await pressId(tr, "authority-peers-add-toggle");
@@ -270,26 +304,30 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 			input.props.onChangeText("peer-alpha");
 		});
 		await pressId(tr, "authority-peers-add-submit");
+		expect(addAuthorityPeer).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("AuthorityPeersScreen remove", async () => {
 		mockRouteParams = { authorityId: "auth-1" };
+		const removeAuthorityPeer = rejecting();
 		mockEngines = {
 			authorityConfig: {
 				getAuthorityPeers: async () => [{ authorityId: "auth-1", peerId: "peer-alpha" }],
-				removeAuthorityPeer: reject,
+				removeAuthorityPeer,
 			},
 		};
 		const Screen = require("../authorities/AuthorityPeersScreen").default;
 		const tr = await mount(<Screen />);
 		await pressId(tr, "authority-peers-remove-peer-alpha");
 		await pressId(tr, "authority-peers-confirm-peer-alpha-confirm");
+		expect(removeAuthorityPeer).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("NetworkRevisionScreen propose", async () => {
 		mockRouteParams = { networkId: "n1" };
+		const proposeRevision = rejecting();
 		mockEngines = {
 			network: {
 				getDetails: async () => ({
@@ -300,12 +338,13 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 						policies: { electionType: "adhoc", numberRequiredTSAs: 1, timestampAuthorities: [] },
 					},
 				}),
-				proposeRevision: reject,
+				proposeRevision,
 			},
 		};
 		const Screen = require("../networks/NetworkRevisionScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "propose");
+		expect(proposeRevision).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
@@ -319,42 +358,52 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 	const signatureEngine = () => ({
 		getTaskSigningStatus: async () => null,
 		getSignatureDigest: async () => new Uint8Array([1, 2, 3]),
-		completeSignature: reject,
+		completeSignature: rejecting(),
 	});
 
 	it("SignatureTaskScreen sign", async () => {
 		mockRouteParams = { task };
-		mockEngines = { signatureTasksEngine: signatureEngine() };
+		const engine = signatureEngine();
+		mockEngines = { signatureTasksEngine: engine };
 		const Screen = require("../tasks/SignatureTaskScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "sign");
+		expect(engine.completeSignature).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("SignatureTaskScreen reject", async () => {
 		mockRouteParams = { task };
-		mockEngines = { signatureTasksEngine: signatureEngine() };
+		const engine = signatureEngine();
+		mockEngines = { signatureTasksEngine: engine };
 		const Screen = require("../tasks/SignatureTaskScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "reject");
+		expect(engine.completeSignature).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("ProposedRevisionScreen resend", async () => {
 		mockRouteParams = { name: "N", revision: {} };
-		mockEngines = { network: { resendRevision: reject, cancelRevision: reject } };
+		const network = { resendRevision: rejecting(), cancelRevision: rejecting() };
+		mockEngines = { network };
 		const Screen = require("../tasks/ProposedRevisionScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "proposedRevisionResendRequest");
+		expect(network.resendRevision).toHaveBeenCalled();
+		expect(network.cancelRevision).not.toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 
 	it("ProposedRevisionScreen cancel", async () => {
 		mockRouteParams = { name: "N", revision: {} };
-		mockEngines = { network: { resendRevision: reject, cancelRevision: reject } };
+		const network = { resendRevision: rejecting(), cancelRevision: rejecting() };
+		mockEngines = { network };
 		const Screen = require("../tasks/ProposedRevisionScreen").default;
 		const tr = await mount(<Screen />);
 		await pressTitle(tr, "proposedRevisionCancelRequest");
+		expect(network.cancelRevision).toHaveBeenCalled();
+		expect(network.resendRevision).not.toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
 	});
 });

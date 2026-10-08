@@ -14,6 +14,7 @@ const LEAK = 'Engine X requestId=abc cid=bafyLEAK';
 let mockRouteParams: any = {};
 let mockNetworksEngine: any;
 const mockSaveInviteWithSigning = jest.fn(async (..._args: any[]): Promise<any> => undefined);
+const mockInviteKeyholder = jest.fn(async (..._args: any[]): Promise<any> => undefined);
 const mockAuthorityEngine = {
   createOfficerInvite: jest.fn(() => ({
     invitePrivate: 'p', inviteKey: 'k', inviteSignature: 's', expiration: 'x', type: 'o', name: 'N', title: 'T',
@@ -142,9 +143,9 @@ function arrange(name: string, failWith: unknown) {
       keyholder: { invite: { name: 'Kay' } },
       electionEngine: {
         getElectionDetails: async () => ({ election: { id: 'e1' } }),
-        inviteKeyholder: async () => {
+        inviteKeyholder: mockInviteKeyholder.mockImplementation(async () => {
           throw failWith;
-        },
+        }),
       },
     };
   }
@@ -156,6 +157,8 @@ describe.each(SCREENS)('$name invitation send mode', (screen) => {
     const tr = await render(screen);
     await fillName(tr);
     await pressSend(tr);
+    // REVIEW WR-R5-04: the rejecting engine call ran, so the copy is that rejection's, not a harness TypeError's.
+    expect(screen.name === 'Keyholder' ? mockInviteKeyholder : mockSaveInviteWithSigning).toHaveBeenCalled();
     expect(text(tr)).toContain(screen.name === 'Keyholder' ? 'keyholderInviteSendFailed' : 'invitationSendFailed');
     expectNoLeak(tr);
   });
