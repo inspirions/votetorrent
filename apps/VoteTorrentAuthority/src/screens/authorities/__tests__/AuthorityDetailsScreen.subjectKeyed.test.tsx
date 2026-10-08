@@ -192,6 +192,43 @@ describe("AuthorityDetailsScreen -- the last read belongs to its authority (REVI
 		expect(text).toContain("Other Authority");
 	});
 
+	it("A-3 (WR-R3-01): a slow open of authority A that lands after the route moved to B never writes A's engine", async () => {
+		let resolveOpenA!: (engine: any) => void;
+		const openA = new Promise<any>((resolve) => {
+			resolveOpenA = resolve;
+		});
+		const engineB = {
+			getAdminDetails: jest.fn(async () => makeAdminDetails([BEA])),
+			getPendingInviteCids: jest.fn(async () => []),
+		};
+		mockGetAdminDetails.mockResolvedValue(makeAdminDetails([UNA]));
+		mockNetworkEngine.openAuthority.mockImplementation(async (id: string) => (id === "authority-2" ? (engineB as any) : openA));
+		const tr = await renderScreen();
+		expect(mockGetAdminDetails).not.toHaveBeenCalled();
+
+		mockRouteParams = { authority: AUTHORITY_B };
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const Screen = require("../AuthorityDetailsScreen").default;
+		await renderer.act(async () => {
+			tr.update(<Screen />);
+		});
+		await flush();
+		expect(allText(tr)).toContain("Bea Two");
+
+		// A's open finally lands.
+		await renderer.act(async () => {
+			resolveOpenA(mockAuthorityEngine);
+		});
+		await flush();
+
+		const text = allText(tr);
+		expect(mockGetAdminDetails).not.toHaveBeenCalled();
+		expect(text).toContain("Bea Two");
+		expect(text).toContain("Other Authority");
+		expect(text).not.toContain("Una Test");
+		expect(text).not.toContain("user-una");
+	});
+
 	it("A-2: the same authority keeps its stale read with the stale notice after a peer failure", async () => {
 		mockGetAdminDetails.mockResolvedValueOnce(makeAdminDetails([UNA, BEA]));
 		mockGetUser.mockImplementation(async (userId: string) => {
