@@ -42,6 +42,32 @@ function makeShare(type: string) {
 const mockResolveInviteSlot = jest.fn(async (_key: string, _type: string): Promise<any> => ({ status: 'live', cid: 'slot-cid-1' }));
 
 const mockGoBack = jest.fn();
+// Every navigation call the screen can make is recorded, so "no param holds the private key" is
+// checked against what the SCREEN writes (setParams, onward navigation), not against the route
+// params only this test writes (REVIEW WR-R5-09).
+const mockNavigate = jest.fn();
+const mockSetParams = jest.fn();
+const mockReplace = jest.fn();
+const mockPush = jest.fn();
+const mockDispatch = jest.fn();
+/** Navigation calls whose arguments carry a 64-hex secret or the given private key. */
+function navigationLeaks(invitePrivate: string): string[] {
+  const out: string[] = [];
+  const all: Array<[string, jest.Mock]> = [
+    ['navigate', mockNavigate],
+    ['setParams', mockSetParams],
+    ['replace', mockReplace],
+    ['push', mockPush],
+    ['dispatch', mockDispatch],
+  ];
+  for (const [name, fn] of all) {
+    for (const call of fn.mock.calls) {
+      const text = JSON.stringify(call) ?? '';
+      if (/[0-9a-f]{64}/i.test(text) || text.includes(invitePrivate)) out.push(`${name}: ${text.slice(0, 120)}`);
+    }
+  }
+  return out;
+}
 const mockSetOptions = jest.fn();
 
 let mockRouteParams: { mode: 'send' | 'accept'; shareToken?: string } = { mode: 'send' };
@@ -142,7 +168,15 @@ jest.mock('@react-navigation/native', () => ({
     require('react').useEffect(cb, [cb]);
   },
   useRoute: () => ({ params: mockRouteParams }),
-  useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), setOptions: mockSetOptions }),
+  useNavigation: () => ({
+    goBack: mockGoBack,
+    navigate: mockNavigate,
+    setOptions: mockSetOptions,
+    setParams: mockSetParams,
+    replace: mockReplace,
+    push: mockPush,
+    dispatch: mockDispatch,
+  }),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -439,7 +473,7 @@ describe('AuthorityInvitationScreen - hardened accept (masked share, press-time 
     expect(JSON.stringify(tr.toJSON())).toContain('invitationPastedSummary');
     expect(textInputs(tr).filter((n) => String(n.props.value ?? '').includes(share.invitePrivate))).toHaveLength(0);
     expect(JSON.stringify(tr.toJSON())).not.toContain(share.invitePrivate);
-    expect(JSON.stringify(mockRouteParams)).not.toMatch(/[0-9a-f]{64}/i);
+    expect(navigationLeaks(share.invitePrivate)).toEqual([]);
     expect(mockGetAuthorityInvite).toHaveBeenCalledTimes(1);
   });
 
@@ -493,12 +527,51 @@ describe('AuthorityInvitationScreen - hardened accept (masked share, press-time 
       byTestId(tr, 'authority-invitation-paste-clear').props.onPress();
     });
     expect(JSON.stringify(tr.toJSON())).not.toContain('invitationAcceptFailed');
-    // a parse-failing paste keeps it clear, then an expired share shows the expired notice only
     const expired = JSON.stringify({ ...JSON.parse(makeShare('au').text), expiration: '2020-01-01T00:00:00.000' });
     await renderer.act(async () => {
       tr.root.findAll((n) => n.props?.testID === 'authority-invitation-paste-input' && typeof n.props?.onChangeText === 'function')[0].props.onChangeText(expired);
     });
     const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).not.toContain('invitationAcceptFailed');
+    expect(rendered).toContain('invitationAcceptExpired');
+  });
+
+  // REVIEW WR-R5-07: the check above is satisfied by Clear alone. These put the stale error in place
+  // AT the moment of the next paste (the field's value replaced while the error shows), so only the
+  // paste effect itself can clear it.
+  const pasteField = (tr: renderer.ReactTestRenderer) =>
+    tr.root.findAll((n) => n.props?.testIDPrefix === 'authority-invitation-paste' && typeof n.props?.onChangeText === 'function')[0];
+
+  it('gap9/IN-08: an expired share pasted while a stale error shows clears it and shows only the expired notice', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await press(tr, 'accept');
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptFailed');
+    const expired = JSON.stringify({ ...JSON.parse(makeShare('au').text), expiration: '2020-01-01T00:00:00.000' });
+    await renderer.act(async () => {
+      pasteField(tr).props.onChangeText(expired);
+    });
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).not.toContain('invitationAcceptFailed');
+    expect(rendered).toContain('invitationAcceptExpired');
+  });
+
+  it('gap9/IN-08: a parse-failing paste while a stale error shows clears it, and a following expired share keeps it clear', async () => {
+    mockRespondToInvite.mockRejectedValueOnce(new Error('boom'));
+    const tr = await render();
+    await press(tr, 'accept');
+    expect(JSON.stringify(tr.toJSON())).toContain('invitationAcceptFailed');
+    await renderer.act(async () => {
+      pasteField(tr).props.onChangeText('not a share');
+    });
+    let rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).not.toContain('invitationAcceptFailed');
+    expect(rendered).not.toContain('invitationAcceptExpired');
+    const expired = JSON.stringify({ ...JSON.parse(makeShare('au').text), expiration: '2020-01-01T00:00:00.000' });
+    await renderer.act(async () => {
+      pasteField(tr).props.onChangeText(expired);
+    });
+    rendered = JSON.stringify(tr.toJSON());
     expect(rendered).not.toContain('invitationAcceptFailed');
     expect(rendered).toContain('invitationAcceptExpired');
   });

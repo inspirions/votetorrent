@@ -7,6 +7,7 @@
 import React from "react";
 import renderer from "react-test-renderer";
 import { ThemedText } from "../../../components/ThemedText";
+import { consoleTags, leakingCalls, nonLiteralConsoleFirstArgs, untaggedCalls } from "../../__fixtures__/log-content-scan";
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
 jest.mock("react-native-safe-area-context", () => ({
@@ -40,11 +41,17 @@ const mockShare = jest.fn();
 const RN = require("react-native");
 RN.Share.share = (...a: unknown[]) => mockShare(...a);
 
-function makeDetails(title: string) {
+function makeDetails(title: string, opts: { withProposedHolder?: boolean } = {}) {
 	return {
 		election: { id: title, title, authorityId: "a", type: 0, date: Date.UTC(2026, 9, 1), revisionDeadline: 0, ballotDeadline: 0 },
 		current: { revision: 1, revisionTimestamp: [], tags: [], timeline: {}, keyholderThreshold: 1, keyholders: [] },
-		proposed: undefined,
+		// The Share control renders only on a proposed-revision holder row, so E-3 needs one.
+		proposed: opts.withProposedHolder
+			? {
+					proposed: { revision: 2, revisionTimestamp: [], tags: [], timeline: {}, keyholderThreshold: 1, keyholders: [{ name: "Holder One" }] },
+					signatures: [],
+				}
+			: undefined,
 	};
 }
 
@@ -93,11 +100,16 @@ const hasTitle = (tr: renderer.ReactTestRenderer, title: string) =>
 	tr.root.findAll((n) => n.props?.electionDetails?.election?.title === title).length > 0;
 
 let warnSpy: jest.SpyInstance;
+let errorSpy: jest.SpyInstance;
 beforeEach(() => {
 	jest.clearAllMocks();
 	warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+	errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
 });
-afterEach(() => warnSpy.mockRestore());
+afterEach(() => {
+	warnSpy.mockRestore();
+	errorSpy.mockRestore();
+});
 
 describe("ElectionDetailsScreen load failures", () => {
 	it("E-1: a first details read that fails shows the translated error and Try Again, not Loading; Try Again recovers", async () => {
@@ -142,7 +154,7 @@ describe("ElectionDetailsScreen load failures", () => {
 
 	it("E-3: a non-peer ballots failure shows electionBallotsLoadFailed, a Share failure electionShareFailed; no raw text", async () => {
 		mockElectionEngine = makeEngine(
-			jest.fn().mockResolvedValue(makeDetails("Spring")),
+			jest.fn().mockResolvedValue(makeDetails("Spring", { withProposedHolder: true })),
 			jest.fn().mockRejectedValue(new Error("ballots raw text")),
 		);
 		const tr = await renderScreen();
@@ -151,15 +163,17 @@ describe("ElectionDetailsScreen load failures", () => {
 		expect(json).not.toContain("ballots raw text");
 
 		mockShare.mockRejectedValueOnce(new Error("share raw text"));
-		const shareButtons = tr.root.findAll((n) => n.props?.title === "share" && typeof n.props?.onPress === "function");
-		if (shareButtons.length > 0) {
-			await renderer.act(async () => {
-				await shareButtons[0].props.onPress();
-			});
-			json = JSON.stringify(tr.toJSON());
-			expect(json).toContain("electionShareFailed");
-			expect(json).not.toContain("share raw text");
-		}
+		// Never behind an `if`: the Share control must be found, or this half proves nothing.
+		const shareButtons = tr.root.findAll((n) => n.props?.title === "shareRevision" && typeof n.props?.onPress === "function");
+		expect(shareButtons.length).toBeGreaterThan(0);
+		expect(json).not.toContain("electionShareFailed");
+		await renderer.act(async () => {
+			await shareButtons[0].props.onPress();
+		});
+		expect(mockShare).toHaveBeenCalledTimes(1);
+		json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("electionShareFailed");
+		expect(json).not.toContain("share raw text");
 	});
 
 	it("E-3 regression: a peer failure still shows the peer notice", async () => {
@@ -196,22 +210,23 @@ describe("ElectionDetailsScreen load failures", () => {
 	it("E-5: the screen's own failure logs carry only tags, class names and reason tokens", async () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const src: string = require("fs").readFileSync(require("path").join(__dirname, "..", "ElectionDetailsScreen.tsx"), "utf8");
-		const tags = new Set<string>();
-		for (const m of src.matchAll(/console\.(?:warn|error)\(\s*"([^"]+)"/g)) tags.add(m[1]);
+		const tags = consoleTags(src);
 		expect(tags.size).toBeGreaterThan(0);
+		// A log whose first argument is built at runtime (template literal, concatenation) fails here.
+		expect(nonLiteralConsoleFirstArgs(src)).toEqual([]);
 
 		mockElectionEngine = makeEngine(jest.fn().mockRejectedValue(new Error("secret details text")), jest.fn().mockRejectedValue(new Error("secret ballots text")));
 		await renderScreen();
 		mockElectionEngine = makeEngine(jest.fn().mockRejectedValue(peerError()), jest.fn().mockRejectedValue(peerError()));
 		await renderScreen();
 
-		const matched = warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && tags.has(c[0]));
-		expect(matched.length).toBeGreaterThanOrEqual(4);
-		for (const call of matched) {
-			for (const arg of call) {
-				expect(typeof arg).toBe("string");
-				expect(arg).not.toContain("secret");
-			}
+		// EVERY spied call, not only the tagged ones (REVIEW WR-R5-01).
+		const calls = [...warnSpy.mock.calls, ...errorSpy.mock.calls];
+		expect(calls.filter((c) => typeof c[0] === "string" && tags.has(c[0])).length).toBeGreaterThanOrEqual(4);
+		expect(untaggedCalls(calls, tags)).toEqual([]);
+		expect(leakingCalls(calls, ["secret"])).toEqual([]);
+		for (const call of calls) {
+			for (const arg of call) expect(typeof arg).toBe("string");
 		}
 	});
 });

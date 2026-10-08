@@ -8,6 +8,9 @@
  *  - the loader's create branch (SecRandomCopyBytes + SecItemAdd) is guarded by `createIfMissing`.
  *  - a nil policy marker must NOT throw NO_WRAP_KEY early: the data read decides, so an existing item
  *    whose marker read spuriously returned nil is decrypted, never reported replaceable.
+ *  - with a nil marker on unwrap, the loader still learns whether the item exists, through a no-UI
+ *    attributes-only probe, so an invalidated item reads as KEY_INVALIDATED, never as the
+ *    replaceable NO_WRAP_KEY (REVIEW WR-R4-06).
  *  - the Keychain prompt reason is the caller's promptSubtitle, never a blank literal.
  *  - the KEY_INVALIDATED and WRAP_KEY_POLICY_MISMATCH branches are still present.
  *
@@ -82,11 +85,22 @@ function checkIosWrapKeyRead(rawSwift: string): string[] {
 		} else if (dataRead < 0) {
 			out.push('loader data read (SecItemCopyMatching(readQuery) not found')
 		}
+		const probeCall = /itemExisted\s*=\s*wrapKeyItemExists\(/.exec(loader)
+		if (!probeCall) out.push('loader must set itemExisted from wrapKeyItemExists on a nil marker')
+		else if (dataRead >= 0 && probeCall.index > dataRead) out.push('the existence probe must run before the data read')
 		if (!loader.includes('KEY_INVALIDATED')) out.push('loader lost the KEY_INVALIDATED branch')
 		if (!loader.includes('WRAP_KEY_POLICY_MISMATCH')) out.push('loader lost the WRAP_KEY_POLICY_MISMATCH refusal')
 		if (!loader.includes('NO_WRAP_KEY')) out.push('loader lost the NO_WRAP_KEY branch')
 		if (/localizedReason\s*=\s*""/.test(loader)) out.push('localizedReason is a blank literal')
 		if (!/localizedReason\s*=\s*reason\b/.test(loader)) out.push('localizedReason must be assigned from the reason parameter')
+	}
+	const probe = funcBody(swift, 'wrapKeyItemExists')
+	if (!probe) out.push('wrapKeyItemExists body not found')
+	else {
+		if (probe.includes('kSecReturnData')) out.push('the existence probe must not read the item data')
+		if (!probe.includes('kSecReturnAttributes')) out.push('the existence probe must ask for attributes only')
+		if (!/interactionNotAllowed\s*=\s*true/.test(probe)) out.push('the existence probe must never show UI (interactionNotAllowed = true)')
+		if (!probe.includes('errSecInteractionNotAllowed')) out.push('the existence probe must count errSecInteractionNotAllowed as present')
 	}
 	return out
 }
@@ -124,6 +138,29 @@ describe('iOS secret-wrap read contract (unwrap never creates; reason forwarded)
 			)
 			expect(planted).not.toBe(src)
 			expect(checkIosWrapKeyRead(planted).some((p) => p.includes('between the marker read'))).toBe(true)
+		})
+
+		it('a loader that drops the nil-marker existence probe is reported', () => {
+			const src = loadSwift()
+			const planted = src.replace(/itemExisted = wrapKeyItemExists\(alias: alias\)/, 'itemExisted = false')
+			expect(planted).not.toBe(src)
+			expect(checkIosWrapKeyRead(planted).some((p) => p.includes('wrapKeyItemExists on a nil marker'))).toBe(true)
+		})
+
+		it('an existence probe that reads the item data is reported', () => {
+			const src = loadSwift()
+			const probeAt = src.indexOf('func wrapKeyItemExists(')
+			const planted = src.slice(0, probeAt) + src.slice(probeAt).replace('kSecReturnAttributes as String: true', 'kSecReturnData as String: true')
+			expect(planted).not.toBe(src)
+			expect(checkIosWrapKeyRead(planted).some((p) => p.includes('must not read the item data'))).toBe(true)
+		})
+
+		it('an existence probe that treats a withheld item as absent is reported', () => {
+			const src = loadSwift()
+			const probeAt = src.indexOf('func wrapKeyItemExists(')
+			const planted = src.slice(0, probeAt) + src.slice(probeAt).replace(' || status == errSecInteractionNotAllowed', '')
+			expect(planted).not.toBe(src)
+			expect(checkIosWrapKeyRead(planted).some((p) => p.includes('errSecInteractionNotAllowed as present'))).toBe(true)
 		})
 
 		it('an unguarded create branch in the loader is reported', () => {

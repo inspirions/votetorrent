@@ -8,6 +8,7 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { consoleTags, leakingCalls, nonLiteralConsoleFirstArgs, untaggedCalls } from '../../__fixtures__/log-content-scan';
 
 let mockCurrentElectionEngine: unknown = null;
 let mockReadOnly = false;
@@ -216,9 +217,20 @@ describe('R2-1/R2-2 refused Propose and Submit explain themselves and reload the
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen();
-    // Edit via the carry-back-free path: change the form, then reload must discard it. Submit is
-    // disabled while dirty (R2-8), so drive the handler through a clean draft and mutate the stored
-    // row behind the screen instead: the reload must show the NEW stored description.
+    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
+    // Submit is disabled while dirty (R2-8), so drive the handler through a clean draft and change
+    // the stored row behind the screen instead: the reload must show the NEW stored description,
+    // which only an applied reload can put in the form (REVIEW WR-R5-06).
+    const CHANGED = 'Changed behind the screen';
+    await engine.proposeBallot({
+      id: BALLOT_ID,
+      electionId: 'test-election',
+      authorityId: 'auth-1',
+      description: CHANGED,
+      districts: [],
+      questions: [],
+    });
+    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
     const detailsSpy = jest.spyOn(engine, 'getBallotDetails');
     jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue(after);
     engine.submitBallotForConfirmation = jest.fn(async () => {
@@ -226,10 +238,11 @@ describe('R2-1/R2-2 refused Propose and Submit explain themselves and reload the
     });
     await press(tr, 'edit-ballot-submit');
 
+    expect(engine.submitBallotForConfirmation).toHaveBeenCalled();
     expect(treeContainsText(tr, copy)).toBe(true);
     expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
     expect(detailsSpy).toHaveBeenCalled();
-    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
+    expect(formDescription(tr)).toBe(CHANGED);
   });
 });
 
@@ -356,9 +369,10 @@ describe('R2-7 the screen logs only fixed tags and error class names (O-09)', ()
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const path = require('path');
     const src: string = fs.readFileSync(path.join(__dirname, '..', 'EditBallotScreen.tsx'), 'utf8');
-    const tags = new Set<string>();
-    for (const m of src.matchAll(/console\.(?:warn|error)\(\s*(["'])(.*?)\1/g)) tags.add(m[2]);
+    const tags = consoleTags(src);
     expect(tags.size).toBeGreaterThan(0);
+    // A log whose first argument is built at runtime (template literal, concatenation) fails here.
+    expect(nonLiteralConsoleFirstArgs(src)).toEqual([]);
 
     const SECRET = 'SECRET-engine-text-requestId=zzz';
     const failures: Array<(engine: any) => void> = [
@@ -386,16 +400,13 @@ describe('R2-7 the screen logs only fixed tags and error class names (O-09)', ()
       await press(tr, id);
     }
 
-    const calls = [...(console.warn as jest.Mock).mock.calls, ...(console.error as jest.Mock).mock.calls].filter(
-      (c) => typeof c[0] === 'string' && tags.has(c[0])
-    );
-    expect(calls.length).toBeGreaterThan(0);
+    // EVERY spied call, not only the tagged ones (REVIEW WR-R5-01).
+    const calls = [...(console.warn as jest.Mock).mock.calls, ...(console.error as jest.Mock).mock.calls];
+    expect(calls.some((c) => typeof c[0] === 'string' && tags.has(c[0]))).toBe(true);
+    expect(untaggedCalls(calls, tags)).toEqual([]);
+    expect(leakingCalls(calls, ['SECRET', 'requestId'])).toEqual([]);
     for (const call of calls) {
-      for (const arg of call) {
-        expect(typeof arg).toBe('string');
-        expect(arg).not.toContain('SECRET');
-        expect(arg).not.toContain('requestId');
-      }
+      for (const arg of call) expect(typeof arg).toBe('string');
     }
   });
 });

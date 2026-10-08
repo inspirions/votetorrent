@@ -6,27 +6,23 @@
  * Every pattern is assembled from pieces so this file cannot match itself (checked by G-3).
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import { STRICT_RAW_ERROR_FILES } from '../__fixtures__/strict-raw-error-files';
 
 const SRC = path.resolve(__dirname, '..', '..');
 
-/** Files held to the strict rule, relative to src. */
-export const STRICT_FILES: readonly string[] = [
-	'screens/registration/RegistrationRequestApprovalScreen.tsx',
-	'screens/admin/AdministratorInvitationScreen.tsx',
-	'screens/authorities/AuthorityInvitationScreen.tsx',
-	'screens/keyholder/KeyholderInvitationScreen.tsx',
-	'screens/ballots/EditBallotScreen.tsx',
-	'screens/elections/ElectionDetailsScreen.tsx',
-	'screens/networks/AddNetworkScreen.tsx',
-];
+/** Files held to the strict rule, relative to src (shared with the whole-app guard's C12 check). */
+export const STRICT_FILES: readonly string[] = STRICT_RAW_ERROR_FILES;
 
 const CAUGHT = '(?:err|error|e|cause)';
+// Patterns 2 and 3 are deliberately NOT anchored to a setter call on the same line (REVIEW
+// WR-R5-03): `const m = err.message;` followed by `setError(m)`, or a setter whose argument sits on
+// the next line, must fail too. These files never read a caught error's message or stringify a
+// caught error anywhere, not even to classify it (the wider guard's helpers do that elsewhere).
 const PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
 	{ name: 'error-or-string ternary', re: new RegExp(['instanceof Error', ' \\? ', '[A-Za-z_.]+', '\\.mess', 'age'].join('')) },
-	{ name: 'String() of a caught error in a setter', re: new RegExp(['\\bset[A-Za-z]*\\(.*', 'Str', 'ing\\(', CAUGHT, '\\)'].join('')) },
-	{ name: 'message of a caught error in a setter', re: new RegExp(['\\bset[A-Za-z]*\\(.*\\b', CAUGHT, '\\.mess', 'age'].join('')) },
+	{ name: 'String() of a caught error', re: new RegExp(['\\bStr', 'ing\\(\\s*', CAUGHT, '\\b'].join('')) },
+	{ name: 'message of a caught error', re: new RegExp(['\\b', CAUGHT, '(?:!|\\?)?\\.mess', 'age'].join('')) },
 	{ name: 'request id in a template literal', re: new RegExp(['`.*request', 'Id', '='].join('')) },
 ];
 
@@ -61,19 +57,41 @@ describe('strict raw error message guard', () => {
 		expect(violations).toEqual([]);
 	});
 
-	it('G-2 the scan fails on a re-added raw render (negative control, scratch copy)', () => {
-		const original = fs.readFileSync(path.join(SRC, STRICT_FILES[1]), 'utf8');
-		const bad = ['setErrorMessage(err instanceof Error ? err.mess', 'age : Str', 'ing(err));'].join('');
-		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'strict-guard-'));
-		const scratch = path.join(scratchDir, 'Scratch.tsx');
-		try {
-			fs.writeFileSync(scratch, original + '\n' + bad + '\n');
-			expect(scanSource(fs.readFileSync(scratch, 'utf8')).length).toBeGreaterThan(0);
-			fs.writeFileSync(scratch, original + '\nsetErrorMessage(' + ['out', 'come.mess', 'age'].join('') + ' ?? t("x"));\n');
-			expect(scanSource(fs.readFileSync(scratch, 'utf8'))).toEqual([]);
-		} finally {
-			fs.rmSync(scratchDir, { recursive: true, force: true });
-		}
+	// G-2: one control line per pattern, each matching ONLY its own pattern, so deleting or breaking
+	// any single pattern turns its own case red (REVIEW WR-R5-03). Lines are assembled from pieces
+	// so this file cannot match itself (G-3).
+	const M = ['mess', 'age'].join('');
+	const S = ['Str', 'ing'].join('');
+	const RID = ['request', 'Id='].join('');
+	const ONLY_ONE: ReadonlyArray<[string, string]> = [
+		['error-or-string ternary', `setErrorMessage(failure instanceof Error ? failure.${M} : t("x"));`],
+		['String() of a caught error', `setErrorMessage(${S}(err));`],
+		['message of a caught error', `const m = err.${M};`],
+		['request id in a template literal', 'const s = `sent ' + RID + '${id}`;'],
+	];
+
+	it.each(ONLY_ONE)('G-2 the "%s" pattern alone flags its control line', (name, line) => {
+		expect(PATTERNS.map((p) => p.name)).toContain(name);
+		const hits = scanSource(line);
+		expect(hits).toHaveLength(1);
+		expect(hits[0]).toContain(`[${name}]`);
+	});
+
+	it('G-2 a caught message read on one line and rendered on the next is flagged', () => {
+		const hits = scanSource(`const m = error.${M};\nsetError(m);`);
+		expect(hits).toHaveLength(1);
+		expect(hits[0]).toMatch(/^1: \[message of a caught error\]/);
+	});
+
+	it('G-2 a setter whose argument is on the next line is flagged', () => {
+		const hits = scanSource(`setError(\n  ${S}(cause)\n);`);
+		expect(hits).toHaveLength(1);
+		expect(hits[0]).toMatch(/^2: \[String\(\) of a caught error\]/);
+	});
+
+	it('G-2 the allowed already-translated outcome and a comment are not flagged', () => {
+		expect(scanSource('setErrorMessage(' + ['out', 'come.mess', 'age'].join('') + ' ?? t("x"));')).toEqual([]);
+		expect(scanSource(`// setErrorMessage(err.${M})`)).toEqual([]);
 	});
 
 	it('G-3 the guard source itself matches nothing', () => {

@@ -7,12 +7,14 @@ import React from 'react';
 import fs from 'fs';
 import path from 'path';
 import renderer from 'react-test-renderer';
+import { consoleTags, leakingCalls, nonLiteralConsoleFirstArgs, untaggedCalls } from '../__fixtures__/log-content-scan';
 
 const LEAK = 'Engine X requestId=abc cid=bafyLEAK';
 
 let mockRouteParams: any = {};
 let mockNetworksEngine: any;
 const mockSaveInviteWithSigning = jest.fn(async (..._args: any[]): Promise<any> => undefined);
+const mockInviteKeyholder = jest.fn(async (..._args: any[]): Promise<any> => undefined);
 const mockAuthorityEngine = {
   createOfficerInvite: jest.fn(() => ({
     invitePrivate: 'p', inviteKey: 'k', inviteSignature: 's', expiration: 'x', type: 'o', name: 'N', title: 'T',
@@ -70,14 +72,8 @@ const SCREENS: Screen[] = [
   { name: 'Keyholder', file: 'keyholder/KeyholderInvitationScreen.tsx', load: () => require('../keyholder/KeyholderInvitationScreen') },
 ];
 
-/** Every string-literal first argument of a console.warn/console.error call in the screen's source. */
-function logTags(file: string): string[] {
-  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-  const tags: string[] = [];
-  const re = new RegExp('console\\.(?:warn|error)\\(\\s*"([^"]+)"', 'g');
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src))) tags.push(m[1]);
-  return tags;
+function screenSource(file: string): string {
+  return fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 }
 
 async function render(screen: Screen) {
@@ -147,9 +143,9 @@ function arrange(name: string, failWith: unknown) {
       keyholder: { invite: { name: 'Kay' } },
       electionEngine: {
         getElectionDetails: async () => ({ election: { id: 'e1' } }),
-        inviteKeyholder: async () => {
+        inviteKeyholder: mockInviteKeyholder.mockImplementation(async () => {
           throw failWith;
-        },
+        }),
       },
     };
   }
@@ -161,23 +157,28 @@ describe.each(SCREENS)('$name invitation send mode', (screen) => {
     const tr = await render(screen);
     await fillName(tr);
     await pressSend(tr);
+    // REVIEW WR-R5-04: the rejecting engine call ran, so the copy is that rejection's, not a harness TypeError's.
+    expect(screen.name === 'Keyholder' ? mockInviteKeyholder : mockSaveInviteWithSigning).toHaveBeenCalled();
     expect(text(tr)).toContain(screen.name === 'Keyholder' ? 'keyholderInviteSendFailed' : 'invitationSendFailed');
     expectNoLeak(tr);
   });
 
   it('I-3 the screen logs only fixed tags and class names', async () => {
     arrange(screen.name, new Error(LEAK));
-    const tags = logTags(screen.file);
-    expect(tags.length).toBeGreaterThan(0);
+    const src = screenSource(screen.file);
+    const tags = consoleTags(src);
+    expect(tags.size).toBeGreaterThan(0);
+    // A log whose first argument is built at runtime (template literal, concatenation) fails here.
+    expect(nonLiteralConsoleFirstArgs(src)).toEqual([]);
     const tr = await render(screen);
     await fillName(tr);
     await pressSend(tr);
-    const matched = [...warn.mock.calls, ...err.mock.calls].filter((c) => typeof c[0] === 'string' && tags.includes(c[0]));
-    expect(matched.length).toBeGreaterThan(0);
-    for (const call of matched) {
-      for (const a of call) expect(typeof a).toBe('string');
-      expect(JSON.stringify(call)).not.toContain('Engine X');
-    }
+    // EVERY spied call, not only the tagged ones (REVIEW WR-R5-01).
+    const calls = [...warn.mock.calls, ...err.mock.calls];
+    expect(calls.some((c) => typeof c[0] === 'string' && tags.has(c[0]))).toBe(true);
+    expect(untaggedCalls(calls, tags)).toEqual([]);
+    expect(leakingCalls(calls, ['Engine X', 'requestId=abc', 'bafyLEAK'])).toEqual([]);
+    for (const call of calls) for (const a of call) expect(typeof a).toBe('string');
   });
 });
 
@@ -234,5 +235,26 @@ describe('I-4 regressions', () => {
     const t = text(tr);
     expect(t).toContain('peerWriteUnavailable');
     expect(t).not.toContain('invitationSendFailed');
+  });
+});
+
+describe('log-content-scan self-test (the shared checks can fail)', () => {
+  it('harvests both quote styles and flags runtime-built first arguments', () => {
+    const src = [
+      'console.warn("double tag:", e.name);',
+      "console.error('single tag', e.name);",
+      'console.warn(`plain backtick`);',
+      'console.warn(`built ${e.message}`);',
+      'console.error("x: " + e.message);',
+      'console.warn(tagVar, e.name);',
+    ].join('\n');
+    expect([...consoleTags(src)].sort()).toEqual(['double tag:', 'plain backtick', 'single tag']);
+    expect(nonLiteralConsoleFirstArgs(src)).toHaveLength(3);
+  });
+
+  it('finds a secret in any argument, including inside an Error object, and reports unknown first arguments', () => {
+    const calls: unknown[][] = [['tag', 'TypeError'], ['tag', new Error('has SECRET')], ['other first arg']];
+    expect(leakingCalls(calls, ['SECRET'])).toHaveLength(1);
+    expect(untaggedCalls(calls, new Set(['tag']))).toEqual(['other first arg']);
   });
 });

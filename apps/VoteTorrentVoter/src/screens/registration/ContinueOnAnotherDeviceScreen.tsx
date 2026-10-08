@@ -115,6 +115,9 @@ export default function ContinueOnAnotherDeviceScreen() {
 	const evidenceKeyRef = useRef<string | null>(null);
 	const answeredRef = useRef(false);
 	const advanceInFlightRef = useRef(false);
+	// Set just before an intentional exit (Check Back Later / Back to Registration) so the pending
+	// `beforeRemove` guard lets that one navigation through instead of swallowing it.
+	const allowLeaveRef = useRef(false);
 
 	const scrollRef = useRef<ScrollViewInstance>(null);
 	const viewportHeightRef = useRef(0);
@@ -212,6 +215,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 	useEffect(() => {
 		if (branch !== 'pending' || failureClass !== null) return;
 		const unsubscribe = navigation.addListener('beforeRemove', e => {
+			if (allowLeaveRef.current) return;
 			e.preventDefault();
 		});
 		return unsubscribe;
@@ -395,7 +399,10 @@ export default function ContinueOnAnotherDeviceScreen() {
 	const backToRegistrationButton = (testID: string, label: string) => (
 		<Pressable
 			testID={testID}
-			onPress={() => navigation.popToTop()}
+			onPress={() => {
+				allowLeaveRef.current = true;
+				navigation.popToTop();
+			}}
 			style={[styles.retryCta, {borderColor: colors.primary, borderRadius: radii.pill}]}>
 			<Text style={[styles.ctaLabel, {color: colors.primary}]}>{label}</Text>
 		</Pressable>

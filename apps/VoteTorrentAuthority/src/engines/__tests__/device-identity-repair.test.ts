@@ -1,6 +1,6 @@
 /**
  * O-06 app half: planDeviceIdentityRepair / repairDeviceIdentityForkIfNeeded /
- * restoreDeviceIdentityForkBackup (F1-F4b). Real AsyncStorage jest mock; fake inspection engines.
+ * restoreDeviceIdentityForkBackup / rollbackDeviceIdentityRepair (F1-F6). Real AsyncStorage jest mock; fake inspection engines.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import {
@@ -13,6 +13,7 @@ import {
 	planDeviceIdentityRepair,
 	repairDeviceIdentityForkIfNeeded,
 	restoreDeviceIdentityForkBackup,
+	rollbackDeviceIdentityRepair,
 } from '../device-identity-repair'
 
 const R = 'forked-id-r'
@@ -98,6 +99,31 @@ describe('repairDeviceIdentityForkIfNeeded (F2/F3)', () => {
 		expect(logs).not.toContain('secret-id')
 	})
 
+	it('F3c: shouldPersist false after the reads abandons the repair with nothing written (REVIEW WR-R4-04)', async () => {
+		const shouldPersist = jest.fn(() => false)
+		const e = engine(forked)
+		const res = await repairDeviceIdentityForkIfNeeded({
+			deviceUser: USER as never,
+			getUserEngineForCurrentUser: async () => e as never,
+			otherNetworkHasUser: async () => 'no',
+			shouldPersist,
+		})
+		expect(res).toEqual({ outcome: 'abandoned' })
+		expect(e.inspectDeviceIdentity).toHaveBeenCalledTimes(1)
+		expect(shouldPersist).toHaveBeenCalledTimes(1)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(STORED)
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBeNull()
+		// asked only when a write is next: a not-forked device never asks
+		const notForked = jest.fn(() => true)
+		await repairDeviceIdentityForkIfNeeded({
+			deviceUser: USER as never,
+			getUserEngineForCurrentUser: async () => engine({ localIsNetworkUser: true, officerUserIdsHoldingKey: [] }) as never,
+			otherNetworkHasUser: async () => 'no',
+			shouldPersist: notForked,
+		})
+		expect(notForked).not.toHaveBeenCalled()
+	})
+
 	it('F3b: other networks', async () => {
 		expect((await run(engine(forked), 'yes')).outcome).toBe('skipped-legit-elsewhere')
 		expect((await run(engine(forked), 'unknown')).outcome).toBe('skipped-unverified-other-network')
@@ -140,6 +166,32 @@ describe('restoreDeviceIdentityForkBackup (F4/F4b)', () => {
 		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
 	})
 
+	it('F4c: after R->X then X->Y, restore goes back ONE step to X and declines exactly X->Y (REVIEW WR-R4-02)', async () => {
+		await run(engine(forked))
+		const Y = 'network-id-y'
+		const second = await run(engine({ localIsNetworkUser: false, officerUserIdsHoldingKey: [Y] }), 'no', { ...USER, id: X })
+		expect(second.outcome).toBe('repaired')
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(Y)
+
+		expect(await restoreDeviceIdentityForkBackup()).toBe(true)
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(X)
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY))!)).toEqual({ fromUserId: X, toUserId: Y })
+		// the forensic backup still holds the very first record
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBe(STORED)
+		// and the declined marker suppresses the X->Y repair it was written for
+		const again = await run(engine({ localIsNetworkUser: false, officerUserIdsHoldingKey: [Y] }), 'no', { ...USER, id: X })
+		expect(again.outcome).toBe('declined')
+		expect(JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!).user.id).toBe(X)
+	})
+
+	it('F4d: a corrupt stored record returns false and writes nothing, never throws', async () => {
+		await run(engine(forked))
+		await AsyncStorage.setItem(DEVICE_USER_KEY, '{not json')
+		await expect(restoreDeviceIdentityForkBackup()).resolves.toBe(false)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe('{not json')
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
+	})
+
 	it('F4b: the next repair with the same candidate is declined and writes nothing; a different candidate is still considered', async () => {
 		await run(engine(forked))
 		await restoreDeviceIdentityForkBackup()
@@ -151,5 +203,30 @@ describe('restoreDeviceIdentityForkBackup (F4/F4b)', () => {
 		expect(res2.outcome).toBe('repaired')
 		expect(res2.user?.id).toBe('x-prime')
 		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBe(STORED)
+	})
+})
+
+describe('rollbackDeviceIdentityRepair (F6, REVIEW WR-R4-03)', () => {
+	const forked = { localIsNetworkUser: false, officerUserIdsHoldingKey: [X] }
+
+	it('sets only the id back while the stored id is still the repaired one, writes no declined marker', async () => {
+		await run(engine(forked))
+		expect(await rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).toBe(true)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(STORED)
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
+		// the next boot may repair again
+		expect((await run(engine(forked))).outcome).toBe('repaired')
+	})
+
+	it('refuses (writes nothing) when the stored id is no longer the repaired one, and never throws', async () => {
+		await run(engine(forked))
+		const cur = JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!)
+		cur.user.id = 'someone-else'
+		const raw = JSON.stringify(cur)
+		await AsyncStorage.setItem(DEVICE_USER_KEY, raw)
+		expect(await rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).toBe(false)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(raw)
+		await AsyncStorage.setItem(DEVICE_USER_KEY, '{not json')
+		await expect(rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).resolves.toBe(false)
 	})
 })

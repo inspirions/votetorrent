@@ -117,34 +117,41 @@ describe("EditOfficerScreen", () => {
 
 	it("U-1 load failure shows errorLoadFailedGeneric", async () => {
 		mockRouteParams = { authority, officerId: "o1" };
-		mockEngines = { network: { openAuthority: jest.fn(async () => { throw rawErr(); }) } };
+		const openAuthority = jest.fn(async () => { throw rawErr(); });
+		mockEngines = { network: { openAuthority } };
 		const S = Screen();
-		expectGeneric(allText(await mount(<S />)), "errorLoadFailedGeneric");
+		const tr = await mount(<S />);
+		// REVIEW WR-R5-04: the rejecting stub ran, so the copy is the rejection's, not a harness TypeError's.
+		expect(openAuthority).toHaveBeenCalled();
+		expectGeneric(allText(tr), "errorLoadFailedGeneric");
 	});
 
 	it("U-1 save failure shows errorActionFailedGeneric", async () => {
 		mockRouteParams = { authority };
+		const proposeAdmin = jest.fn(async () => { throw rawErr(); });
 		mockEngines = {
 			network: {
 				openAuthority: jest.fn(async () => ({
 					getAdminDetails: async () => adminDetails,
-					proposeAdmin: jest.fn(async () => { throw rawErr(); }),
+					proposeAdmin,
 				})),
 			},
 		};
 		const S = Screen();
 		const tr = await mount(<S />);
 		await press(byTitle(tr, "save"));
+		expect(proposeAdmin).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorActionFailedGeneric");
 	});
 
 	it("U-1 remove failure shows errorActionFailedGeneric", async () => {
 		mockRouteParams = { authority, officerId: "o1" };
+		const proposeAdmin = jest.fn(async () => { throw rawErr(); });
 		mockEngines = {
 			network: {
 				openAuthority: jest.fn(async () => ({
 					getAdminDetails: async () => adminDetails,
-					proposeAdmin: jest.fn(async () => { throw rawErr(); }),
+					proposeAdmin,
 					}),
 				),
 				getUser: jest.fn(async () => undefined),
@@ -155,6 +162,7 @@ describe("EditOfficerScreen", () => {
 		expect(typeof mockHeaderRight).toBe("function");
 		const chip = mockHeaderRight();
 		await press({ props: { onPress: chip.props.onPress } });
+		expect(proposeAdmin).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorActionFailedGeneric");
 	});
 });
@@ -162,26 +170,29 @@ describe("EditOfficerScreen", () => {
 describe("OfficerDetailsScreen", () => {
 	it("U-1 open-user failure shows errorLoadFailedGeneric", async () => {
 		mockRouteParams = { officer: { userId: "o1", title: "T", scopes: [] }, authority };
-		mockEngines = { network: { getUser: jest.fn(async () => { throw rawErr(); }) } };
+		const getUser = jest.fn(async () => { throw rawErr(); });
+		mockEngines = { network: { getUser } };
 		const S = require("../admin/OfficerDetailsScreen").default;
 		const tr = await mount(<S />);
 		const card = tr.root.findAll((x) => Array.isArray(x.props?.additionalInfo) && typeof x.props?.onPress === "function")[0];
 		await press(card);
+		expect(getUser).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorLoadFailedGeneric");
 	});
 });
 
 describe("UserDetailsScreen", () => {
 	it("U-1 summary and history load failures show errorLoadFailedGeneric", async () => {
-		mockRouteParams = {
-			user: { id: "u1", name: "U", activeKeys: [] },
-			userEngine: {
-				getSummary: jest.fn(async () => { throw rawErr(); }),
-				getHistory: jest.fn(async () => { throw rawErr(); }),
-			},
+		const userEngine = {
+			getSummary: jest.fn(async () => { throw rawErr(); }),
+			getHistory: jest.fn(async () => { throw rawErr(); }),
 		};
+		mockRouteParams = { user: { id: "u1", name: "U", activeKeys: [] }, userEngine };
 		const { UserDetailsScreen } = require("../users/UserDetailsScreen");
-		expectGeneric(allText(await mount(<UserDetailsScreen />)), "errorLoadFailedGeneric");
+		const tr = await mount(<UserDetailsScreen />);
+		expect(userEngine.getSummary).toHaveBeenCalled();
+		expect(userEngine.getHistory).toHaveBeenCalled();
+		expectGeneric(allText(tr), "errorLoadFailedGeneric");
 	});
 });
 
@@ -208,8 +219,10 @@ describe("ReviseUserScreen", () => {
 
 	it("U-1 sign failure shows errorActionFailedGeneric", async () => {
 		const tr = await prepare(jest.fn());
-		mockSignerImpl = async () => { throw rawErr(); };
+		const signer = jest.fn(async () => { throw rawErr(); });
+		mockSignerImpl = signer;
 		await press(byTitle(tr, "sign"));
+		expect(signer).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorActionFailedGeneric");
 	});
 });
@@ -222,8 +235,10 @@ describe("AddKeyScreen", () => {
 	};
 
 	it("U-1 save failure shows errorActionFailedGeneric", async () => {
-		const tr = await mountAdd(jest.fn(async () => { throw rawErr(); }));
+		const addKey = jest.fn(async () => { throw rawErr(); });
+		const tr = await mountAdd(addKey);
 		await press(byTitle(tr, "addKey"));
+		expect(addKey).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorActionFailedGeneric");
 	});
 
@@ -239,13 +254,15 @@ describe("AddKeyScreen", () => {
 
 describe("DefaultUserScreen", () => {
 	it("U-1 save failure shows errorActionFailedGeneric, not the storage error", async () => {
+		const set = jest.fn(async () => { throw rawErr(); });
 		mockRouteParams = {
 			defaultUser: { name: "D", image: { url: "" } },
-			defaultUserEngine: { set: jest.fn(async () => { throw rawErr(); }) },
+			defaultUserEngine: { set },
 		};
 		const { DefaultUserScreen } = require("../users/DefaultUserScreen");
 		const tr = await mount(<DefaultUserScreen />);
 		await press(byTitle(tr, "save"));
+		expect(set).toHaveBeenCalled();
 		expectGeneric(allText(tr), "errorActionFailedGeneric");
 	});
 });

@@ -263,7 +263,7 @@ describe('ContinueOnAnotherDevice ways out', () => {
 		expect(mockPopToTop).toHaveBeenCalledTimes(1);
 	});
 
-	it('S-3: pending without failure: beforeRemove prevented; Check Back Later pops to root', async () => {
+	it('S-3: pending without failure: a back gesture is prevented; Check Back Later pops to root through the guard', async () => {
 		mockListAssociationRequests.mockImplementation(async () => [PENDING_ROW]);
 		const tr = await mountAndFlush();
 		expect(JSON.stringify(tr.toJSON())).toContain('Waiting for approval');
@@ -271,10 +271,17 @@ describe('ContinueOnAnotherDevice ways out', () => {
 		const text = JSON.stringify(tr.toJSON());
 		expect(text).toContain('Check Back Later');
 		expect(text).toContain('Your request stays with the authority');
+		// React Navigation's popToTop emits `beforeRemove` on this screen; model that here so a guard
+		// that swallows the intentional exit fails this test (REVIEW CR-R4-01).
+		let popPrevented: boolean | null = null;
+		mockPopToTop.mockImplementationOnce(() => {
+			popPrevented = fireBeforeRemove().defaultPrevented;
+		});
 		renderer.act(() => {
 			tr.root.findByProps({testID: 'continue-device-check-back-later'}).props.onPress();
 		});
 		expect(mockPopToTop).toHaveBeenCalledTimes(1);
+		expect(popPrevented).toBe(false);
 	});
 
 	it('S-4: pending + identity-lost: recovery view AND Back to Registration; beforeRemove not prevented', async () => {

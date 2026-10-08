@@ -43,6 +43,32 @@ function makeShareText(type = 'k', name = 'Ada Keyholder') {
 }
 
 const mockGoBack = jest.fn();
+// Every navigation call the screen can make is recorded, so "no param holds the private key" is
+// checked against what the SCREEN writes (setParams, onward navigation), not against the route
+// params only this test writes (REVIEW WR-R5-09).
+const mockNavigate = jest.fn();
+const mockSetParams = jest.fn();
+const mockReplace = jest.fn();
+const mockPush = jest.fn();
+const mockDispatch = jest.fn();
+/** Navigation calls whose arguments carry a 64-hex secret or the given private key. */
+function navigationLeaks(invitePrivate: string): string[] {
+  const out: string[] = [];
+  const all: Array<[string, jest.Mock]> = [
+    ['navigate', mockNavigate],
+    ['setParams', mockSetParams],
+    ['replace', mockReplace],
+    ['push', mockPush],
+    ['dispatch', mockDispatch],
+  ];
+  for (const [name, fn] of all) {
+    for (const call of fn.mock.calls) {
+      const text = JSON.stringify(call) ?? '';
+      if (/[0-9a-f]{64}/i.test(text) || text.includes(invitePrivate)) out.push(`${name}: ${text.slice(0, 120)}`);
+    }
+  }
+  return out;
+}
 const mockSetOptions = jest.fn();
 
 const mockRouteParams: { mode: 'send' | 'accept'; shareToken?: string; electionEngine?: unknown; keyholder?: unknown } = {
@@ -130,7 +156,15 @@ jest.mock('@react-navigation/native', () => ({
     require('react').useEffect(cb, [cb]);
   },
   useRoute: () => ({ params: mockRouteParams }),
-  useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), setOptions: mockSetOptions }),
+  useNavigation: () => ({
+    goBack: mockGoBack,
+    navigate: mockNavigate,
+    setOptions: mockSetOptions,
+    setParams: mockSetParams,
+    replace: mockReplace,
+    push: mockPush,
+    dispatch: mockDispatch,
+  }),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -506,13 +540,40 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
   });
 
   it('never calls resendInvite', async () => {
-    mockRouteParams.keyholder = invitee('Kay Holder');
-    const resend = jest.fn();
-    (mockInvitationEngine as Record<string, unknown>).resendInvite = resend;
-    const tr = await render();
-    await send(tr);
-    expect(resend).not.toHaveBeenCalled();
-    delete (mockInvitationEngine as Record<string, unknown>).resendInvite;
+    // REVIEW WR-R5-08: resendInvite lives on the AUTHORITY engine (vote-core IAuthorityEngine), not on
+    // the invitations engine, so a spy planted there could never fire. Instead every engine the
+    // screen can reach (anything getEngine returns, under any name, and the route's electionEngine)
+    // is wrapped so that reading any resend-like member is recorded, and the send must touch none.
+    const touched: string[] = [];
+    const RESEND = /resend/i;
+    const watch = (label: string, target: object): object =>
+      new Proxy(target, {
+        get(t, prop, receiver) {
+          if (typeof prop === 'string' && RESEND.test(prop)) {
+            touched.push(`${label}.${prop}`);
+            return jest.fn();
+          }
+          return Reflect.get(t, prop, receiver);
+        },
+      });
+    const realGetEngine = mockGetEngine.getMockImplementation()!;
+    mockGetEngine.mockImplementation(async (name: string): Promise<any> => {
+      const engine = await realGetEngine(name);
+      // An engine this harness does not provide is still a place a resend could be sought.
+      return watch(name, (engine as object | undefined) ?? {});
+    });
+    mockRouteParams.electionEngine = watch('electionEngine', electionEngine);
+    try {
+      mockRouteParams.keyholder = invitee('Kay Holder');
+      const tr = await render();
+      await send(tr);
+      expect(mockInviteKeyholder).toHaveBeenCalledTimes(1);
+      expect(mockGetEngine).toHaveBeenCalled();
+      expect(touched).toEqual([]);
+    } finally {
+      mockGetEngine.mockImplementation(realGetEngine);
+      mockRouteParams.electionEngine = electionEngine;
+    }
   });
 
   it('without a keyholder param lists only pending invitees; Send waits for a choice', async () => {
@@ -599,7 +660,7 @@ describe('KeyholderInvitationScreen - hardened accept (stored name, masked share
     expect(JSON.stringify(tr.toJSON())).toContain('invitationPastedSummary');
     expect(JSON.stringify(tr.toJSON())).not.toContain(share.invitePrivate);
     expect(textInputs(tr).filter((n) => String(n.props.value ?? '').includes(share.invitePrivate))).toHaveLength(0);
-    expect(JSON.stringify(mockRouteParams)).not.toMatch(/[0-9a-f]{64}/i);
+    expect(navigationLeaks(share.invitePrivate)).toEqual([]);
   });
 
   it('Decline: a double tap sends one respondToInvite', async () => {

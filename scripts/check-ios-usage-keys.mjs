@@ -13,7 +13,8 @@
  *   --selftest        run the fixture cases under scripts/fixtures/ios-usage-keys
  *
  * Rules, per app that depends on @votetorrent/attestation-native:
- *   - Info.plist exists and carries a non-blank NSFaceIDUsageDescription
+ *   - Info.plist exists and carries a non-blank NSFaceIDUsageDescription as a TOP-LEVEL key
+ *     (a direct child of the root dict, not inside an XML comment or a nested dict)
  *   - every key ending in UsageDescription is non-blank
  *   - when the app has any <lang>.lproj/InfoPlist.strings, en and es both exist
  *     and define every usage key non-blank
@@ -38,14 +39,43 @@ function decode(s) {
 		.replace(/&amp;/g, '&');
 }
 
-/** Map of key -> string value (undefined when the value is not a string). */
+/**
+ * Map of key -> string value (undefined when the value is not a string), for the TOP-LEVEL keys
+ * only: the direct children of the root <dict>, which are the only keys iOS reads for purpose
+ * strings. XML comments are removed first, so a commented-out key does not count, and a key inside
+ * a nested <dict> (or an <array>) is not a top-level key.
+ */
 export function parsePlistKeys(xml) {
+	const text = xml.replace(/<!--[\s\S]*?-->/g, '');
 	const out = new Map();
-	const re = /<key>([^<]*)<\/key>\s*(?:<string>([\s\S]*?)<\/string>|<string\s*\/>)?/g;
+	// One token per element that matters for depth or for a top-level key/value pair.
+	const re =
+		/<key>([^<]*)<\/key>|<string>([\s\S]*?)<\/string>|<string\s*\/>|<(?:dict|array)\s*\/>|<(dict|array)>|<\/(?:dict|array)>|<(true|false)\s*\/>|<(integer|real|date|data)>[\s\S]*?<\/(?:integer|real|date|data)>/g;
+	let depth = 0;
+	let pendingKey = null;
+	const settle = (value) => {
+		if (pendingKey !== null && depth === 1) out.set(pendingKey, value);
+		pendingKey = null;
+	};
 	let m;
-	while ((m = re.exec(xml)) !== null) {
-		const isString = /<string/.test(m[0].slice(m[0].indexOf('</key>')));
-		out.set(m[1], isString ? decode(m[2] ?? '') : undefined);
+	while ((m = re.exec(text)) !== null) {
+		const tok = m[0];
+		if (tok.startsWith('<key>')) {
+			pendingKey = depth === 1 ? m[1] : null;
+		} else if (tok.startsWith('<string>')) {
+			settle(decode(m[2] ?? ''));
+		} else if (/^<string\s*\/>$/.test(tok)) {
+			settle('');
+		} else if (m[3] !== undefined) {
+			settle(undefined);
+			depth++;
+		} else if (tok.startsWith('</')) {
+			pendingKey = null;
+			depth--;
+		} else {
+			// <dict/>, <array/>, <true/>, <false/>, <integer>, <real>, <date>, <data>: not a string
+			settle(undefined);
+		}
 	}
 	return out;
 }
@@ -132,6 +162,8 @@ const CASES = [
 	['d-es-missing-key', false, 'es.lproj'],
 	['e-es-empty-value', false, 'es.lproj'],
 	['f-valid', true, null],
+	['g-commented-faceid', false, FACE],
+	['h-nested-faceid', false, FACE],
 ];
 
 function selftest() {
@@ -145,7 +177,7 @@ function selftest() {
 	}
 	const empty = scanRoot(join(FIXTURES, 'no-such-dir'));
 	const emptyGood = !empty.ok;
-	console.log(`${emptyGood ? 'PASS' : 'MISMATCH'} g-zero-apps: rejected`);
+	console.log(`${emptyGood ? 'PASS' : 'MISMATCH'} z-zero-apps: rejected`);
 	if (!emptyGood) bad++;
 	console.log(bad === 0 ? 'selftest passed' : `selftest FAILED (${bad})`);
 	return bad === 0;

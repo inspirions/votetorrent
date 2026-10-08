@@ -593,6 +593,29 @@ class AttestationNativeModule: NSObject {
     return label
   }
 
+  /// Does an item exist under [alias]? A no-UI attributes-only probe (no data, no prompt). Used on
+  /// the unwrap path when the policy marker read returned nil, so an invalidated
+  /// `.biometryCurrentSet` item is still known to exist and its data read's errSecItemNotFound can
+  /// be reported KEY_INVALIDATED instead of the replaceable NO_WRAP_KEY. errSecSuccess and
+  /// errSecInteractionNotAllowed (present but withheld without UI) count as present; only
+  /// errSecItemNotFound counts as absent. Any other status is treated as absent, which leaves the
+  /// data read to decide exactly as before.
+  private func wrapKeyItemExists(alias: String) -> Bool {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnAttributes as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecUseAuthenticationContext as String: context
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    return status == errSecSuccess || status == errSecInteractionNotAllowed
+  }
+
   /// Loads the wrap key under [alias], keyed by `service` + `kSecAttrAccount == alias`, creating it
   /// only when [createIfMissing] is true (wrap). NEVER updates or overwrites an existing item — a
   /// policy mismatch is rejected, never reconciled (T-62-08-11). Returns the raw 32-byte AES key.
@@ -653,12 +676,17 @@ class AttestationNativeModule: NSObject {
       } else if addStatus != errSecSuccess {
         throw SecretWrapNativeError.code("WRAP_FAILED", "SecItemAdd failed with OSStatus \(addStatus)")
       }
+    } else {
+      // Unwrap with a nil marker: learn whether the item exists without reading its data, so an
+      // invalidated item is reported KEY_INVALIDATED below rather than replaceable NO_WRAP_KEY.
+      itemExisted = wrapKeyItemExists(alias: alias)
     }
     // A nil marker with createIfMissing == false (unwrap) deliberately falls through to the data read
     // below. It must NOT throw NO_WRAP_KEY early: the marker read is no-UI and can spuriously return
     // nil for an item that exists, and the JS callers treat NO_WRAP_KEY as replaceable, so an early
-    // throw could overwrite a saved vote or identity. The data read decides: an absent item gives
-    // errSecItemNotFound -> NO_WRAP_KEY (itemExisted false); a present one is decrypted.
+    // throw could overwrite a saved vote or identity. The data read decides: a present one is
+    // decrypted; errSecItemNotFound is KEY_INVALIDATED when the existence probe above saw the item
+    // (an invalidated auth-required item), and NO_WRAP_KEY only when it did not.
 
     var readQuery: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,

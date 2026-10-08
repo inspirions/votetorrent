@@ -1,5 +1,5 @@
 /**
- * pick-founding-bundle-file.test.ts — P-1..P-5 (D-36).
+ * pick-founding-bundle-file.test.ts — P-1..P-5 (D-36); P-3c..P-3e and C-1b cover REVIEW WR-R4-05.
  *
  * Every case injects a fake `PickerModuleSubset` via `deps.picker` (never a real
  * `@react-native-documents/picker` require) EXCEPT P-5, which proves the seam's lazy-require
@@ -88,15 +88,62 @@ describe('pickFoundingBundleFile — D-36 never-throwing picker seam', () => {
 		expect(readText).not.toHaveBeenCalled();
 	});
 
-	it('P-3b: a null size is read (bypasses the too-large check, proceeds to copy+read)', async () => {
+	it('P-3b: a null size is measured on the local copy, then read', async () => {
 		const picker = makeFakePicker({
 			pick: jest.fn(async () => [{ uri: 'content://x', name: 'unknown-size.json', size: null, error: null }]),
 		});
 		const readText = jest.fn(async () => 'text');
+		const sizeOfLocalCopy = jest.fn(async () => 4);
 
-		const result = await pickFoundingBundleFile({ picker, readText });
+		const result = await pickFoundingBundleFile({ picker, readText, sizeOfLocalCopy });
 
 		expect(result).toEqual({ kind: 'picked', text: 'text' });
+		expect(sizeOfLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
+	});
+
+	it('P-3c: a null size whose local copy is over the cap resolves too-large WITHOUT reading it, and the copy is deleted (REVIEW WR-R4-05)', async () => {
+		const picker = makeFakePicker({
+			pick: jest.fn(async () => [{ uri: 'content://x', name: 'unknown-size.json', size: null, error: null }]),
+		});
+		const readText = jest.fn(async () => 'should-not-be-called');
+		const deleteLocalCopy = jest.fn(async () => true);
+
+		const result = await pickFoundingBundleFile({
+			picker,
+			readText,
+			sizeOfLocalCopy: async () => MAX_FOUNDING_BUNDLE_FILE_BYTES + 1,
+			deleteLocalCopy,
+		});
+
+		expect(result).toEqual({ kind: 'too-large' });
+		expect(readText).not.toHaveBeenCalled();
+		expect(deleteLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
+	});
+
+	it('P-3d: a null size whose local copy cannot be measured fails closed as read-failed, never read', async () => {
+		const picker = makeFakePicker({
+			pick: jest.fn(async () => [{ uri: 'content://x', name: 'unknown-size.json', size: null, error: null }]),
+		});
+		const readText = jest.fn(async () => 'should-not-be-called');
+
+		const result = await pickFoundingBundleFile({
+			picker,
+			readText,
+			sizeOfLocalCopy: async () => {
+				throw new Error('no blob');
+			},
+			deleteLocalCopy: jest.fn(async () => true),
+		});
+
+		expect(result).toEqual({ kind: 'unreadable', reason: 'read-failed' });
+		expect(readText).not.toHaveBeenCalled();
+	});
+
+	it('P-3e: a reported size is trusted for the pre-check, so the local copy is not measured', async () => {
+		const sizeOfLocalCopy = jest.fn(async () => 0);
+		const result = await pickFoundingBundleFile({ picker: makeFakePicker(), readText: async () => 'ok', sizeOfLocalCopy });
+		expect(result).toEqual({ kind: 'picked', text: 'ok' });
+		expect(sizeOfLocalCopy).not.toHaveBeenCalled();
 	});
 
 	it('P-4: a keepLocalCopy result with status "error" resolves unreadable/copy-failed', async () => {
@@ -139,16 +186,36 @@ describe('pickFoundingBundleFile — cap on text length and cache-copy cleanup (
 		const readText = jest.fn(async () => 'x'.repeat(MAX_FOUNDING_BUNDLE_FILE_BYTES + 1));
 		const deleteLocalCopy = jest.fn(async () => true);
 
-		const result = await pickFoundingBundleFile({ picker, readText, deleteLocalCopy });
+		// the size probe under-reports, so only the post-read check can catch it
+		const result = await pickFoundingBundleFile({ picker, readText, deleteLocalCopy, sizeOfLocalCopy: async () => 10 });
 
 		expect(result).toEqual({ kind: 'too-large' });
 		expect(deleteLocalCopy).toHaveBeenCalledWith('file://local/bundle.json');
 	});
 
+	it('C-1b: the post-read cap counts UTF-8 bytes, not UTF-16 code units (REVIEW WR-R4-05)', async () => {
+		const picker = makeFakePicker({ pick: jest.fn(async () => NO_SIZE_PICK) });
+		// 3 bytes per character in UTF-8: well under the cap in characters, over it in bytes
+		const text = '\u20ac'.repeat(Math.floor(MAX_FOUNDING_BUNDLE_FILE_BYTES / 3) + 1);
+		expect(text.length).toBeLessThan(MAX_FOUNDING_BUNDLE_FILE_BYTES);
+		const result = await pickFoundingBundleFile({
+			picker,
+			readText: async () => text,
+			sizeOfLocalCopy: async () => 10,
+			deleteLocalCopy: jest.fn(async () => true),
+		});
+		expect(result).toEqual({ kind: 'too-large' });
+	});
+
 	it('C-2: text exactly at the cap is accepted', async () => {
 		const picker = makeFakePicker({ pick: jest.fn(async () => NO_SIZE_PICK) });
 		const text = 'x'.repeat(MAX_FOUNDING_BUNDLE_FILE_BYTES);
-		const result = await pickFoundingBundleFile({ picker, readText: async () => text, deleteLocalCopy: jest.fn(async () => true) });
+		const result = await pickFoundingBundleFile({
+			picker,
+			readText: async () => text,
+			sizeOfLocalCopy: async () => MAX_FOUNDING_BUNDLE_FILE_BYTES,
+			deleteLocalCopy: jest.fn(async () => true),
+		});
 		expect(result).toEqual({ kind: 'picked', text });
 	});
 
@@ -182,6 +249,16 @@ describe('pickFoundingBundleFile — cap on text length and cache-copy cleanup (
 		const deleteLocalCopy = jest.fn(async () => { throw new Error('boom'); });
 		const result = await pickFoundingBundleFile({ picker: makeFakePicker(), readText: async () => 'ok', deleteLocalCopy });
 		expect(result).toEqual({ kind: 'picked', text: 'ok' });
+	});
+});
+
+describe('utf8ByteLength', () => {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { utf8ByteLength } = require('../pick-founding-bundle-file');
+	it('matches Buffer.byteLength for ASCII, 2-, 3- and 4-byte characters and a lone surrogate', () => {
+		for (const s of ['', 'abc', '\u00e9', '\u20ac', '\u{1F600}', 'a\u00e9\u20ac\u{1F600}z', '\ud800x']) {
+			expect(utf8ByteLength(s)).toBe(Buffer.byteLength(s, 'utf8'));
+		}
 	});
 });
 
