@@ -1,6 +1,6 @@
 /**
  * O-06 app half: planDeviceIdentityRepair / repairDeviceIdentityForkIfNeeded /
- * restoreDeviceIdentityForkBackup (F1-F4d). Real AsyncStorage jest mock; fake inspection engines.
+ * restoreDeviceIdentityForkBackup / rollbackDeviceIdentityRepair (F1-F6). Real AsyncStorage jest mock; fake inspection engines.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import {
@@ -13,6 +13,7 @@ import {
 	planDeviceIdentityRepair,
 	repairDeviceIdentityForkIfNeeded,
 	restoreDeviceIdentityForkBackup,
+	rollbackDeviceIdentityRepair,
 } from '../device-identity-repair'
 
 const R = 'forked-id-r'
@@ -177,5 +178,30 @@ describe('restoreDeviceIdentityForkBackup (F4/F4b)', () => {
 		expect(res2.outcome).toBe('repaired')
 		expect(res2.user?.id).toBe('x-prime')
 		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBe(STORED)
+	})
+})
+
+describe('rollbackDeviceIdentityRepair (F6, REVIEW WR-R4-03)', () => {
+	const forked = { localIsNetworkUser: false, officerUserIdsHoldingKey: [X] }
+
+	it('sets only the id back while the stored id is still the repaired one, writes no declined marker', async () => {
+		await run(engine(forked))
+		expect(await rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).toBe(true)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(STORED)
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_DECLINED_KEY)).toBeNull()
+		// the next boot may repair again
+		expect((await run(engine(forked))).outcome).toBe('repaired')
+	})
+
+	it('refuses (writes nothing) when the stored id is no longer the repaired one, and never throws', async () => {
+		await run(engine(forked))
+		const cur = JSON.parse((await AsyncStorage.getItem(DEVICE_USER_KEY))!)
+		cur.user.id = 'someone-else'
+		const raw = JSON.stringify(cur)
+		await AsyncStorage.setItem(DEVICE_USER_KEY, raw)
+		expect(await rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).toBe(false)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(raw)
+		await AsyncStorage.setItem(DEVICE_USER_KEY, '{not json')
+		await expect(rollbackDeviceIdentityRepair({ fromUserId: R, toUserId: X })).resolves.toBe(false)
 	})
 })

@@ -12,7 +12,11 @@ import type { StagingOpener, StagingDecisionSigner } from "@votetorrent/vote-eng
 import { rnDbFactory } from "../engines/rn-db-factory";
 import { getOrCreateDeviceUser } from "../engines/device-user";
 import { createDeviceSigner, type SignCallback } from "../engines/device-signer";
-import { repairDeviceIdentityForkIfNeeded, type OtherNetworkAnswer } from "../engines/device-identity-repair";
+import {
+	repairDeviceIdentityForkIfNeeded,
+	rollbackDeviceIdentityRepair,
+	type OtherNetworkAnswer,
+} from "../engines/device-identity-repair";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { classifyPeerReadFailure } from "../engines/peer-read-unavailable";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
@@ -226,11 +230,29 @@ async function repairForkedIdentityAfterOpen(
 			otherNetworkHasUser,
 		});
 		if (result.outcome !== "repaired" || !result.user) return undefined;
-		factory.setCurrentUser(result.user);
-		await networksEng.open(network, result.user);
-		factory.clearEngineCache();
-		await factory.getEngine("network", network);
-		return result.user;
+		const repaired = result.user;
+		try {
+			factory.setCurrentUser(repaired);
+			await networksEng.open(network, repaired);
+			factory.clearEngineCache();
+			await factory.getEngine("network", network);
+			return repaired;
+		} catch {
+			// WR-R4-03: the new id is already stored, but the session could not be re-bound to it.
+			// Put storage, the factory, the network ctx and the engine cache back on the old id so
+			// the session never signs as one user while its engines act as another.
+			console.warn("[identity-repair] outcome=rebind-failed");
+			await rollbackDeviceIdentityRepair({ fromUserId: user.id, toUserId: repaired.id });
+			factory.setCurrentUser(user);
+			factory.clearEngineCache();
+			try {
+				await networksEng.open(network, user);
+				await factory.getEngine("network", network);
+			} catch {
+				console.warn("[identity-repair] outcome=rebind-restore-failed");
+			}
+			return undefined;
+		}
 	} catch {
 		console.warn("[identity-repair] outcome=failed");
 		return undefined;

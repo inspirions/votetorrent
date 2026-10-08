@@ -121,6 +121,28 @@ export async function repairDeviceIdentityForkIfNeeded(deps: RepairDeps): Promis
 }
 
 /**
+ * Roll back a repair that was persisted but could not be bound into the running session (the
+ * network re-open or engine rebuild after it failed). Sets only `user.id` back to `fromUserId`,
+ * and only while the stored id is still `toUserId`. Writes no declined marker: the failure was in
+ * this session's rebind, not a decision against the pair, so the next boot may repair again.
+ * Returns `true` when the stored id was set back. Never throws.
+ */
+export async function rollbackDeviceIdentityRepair(pair: { fromUserId: string; toUserId: string }): Promise<boolean> {
+	try {
+		const currentRaw = await AsyncStorage.getItem(DEVICE_USER_KEY)
+		if (currentRaw === null) return false
+		const currentId = (JSON.parse(currentRaw) as { user?: { id?: unknown } }).user?.id
+		if (currentId !== pair.toUserId) return false
+		await replaceDeviceUserId(pair.fromUserId)
+		console.info('[identity-repair] outcome=rolled-back')
+		return true
+	} catch (err) {
+		console.warn(`[identity-repair] rollback=failed name=${err instanceof Error ? err.name : 'unknown'}`)
+		return false
+	}
+}
+
+/**
  * Undo the most recent repair: sets only `user.id` back to that repair's `fromUserId` and writes
  * the declined marker for exactly that pair, so the next boot does not make the same repair again.
  * Returns `false` when there is no applied repair to undo (or the stored record cannot be read),
