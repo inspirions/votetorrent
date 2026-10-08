@@ -487,13 +487,16 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
       return { ...real, signerKey: randomTestKeyPair().publicHex }
     } }
     const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    // WR-R2-03: the fixture lookup runs OUTSIDE the try, so its own failure is never counted as the refusal.
+    const invitePrivate = await invitePrivateForSlot(seeded.auth.ctx, slot.cid)
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, tampered)
+      await invitationEngine.respondToInvite(slot.cid, true, invitePrivate, undefined, undefined, tampered)
     } catch (err) {
       caught = err
     }
     expect(caught, 'a signerKey mismatch must reject').to.not.equal(undefined)
+    expect(String((caught as Error)?.message), 'refused by the signerKey check, not by an earlier refusal').to.match(/does not match keyholder\.signingKey\.key/)
     const irCount = (await seeded.auth.ctx.db.prepare('select count(*) as c from InviteResult where SlotCid = :cid').get({ cid: slot.cid }))!.c as number
     expect(irCount, 'no InviteResult row written').to.equal(0)
   })
@@ -504,13 +507,15 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Tina Keyholder')
     const provisioning = { ...makeKeyholderProvisioning(), dkgPublicKey: '02'.repeat(32) }
     const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    const invitePrivate = await invitePrivateForSlot(seeded.auth.ctx, slot.cid)
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, provisioning)
+      await invitationEngine.respondToInvite(slot.cid, true, invitePrivate, undefined, undefined, provisioning)
     } catch (err) {
       caught = err
     }
     expect(caught, 'a malformed dkgPublicKey must reject').to.not.equal(undefined)
+    expect(String((caught as Error)?.message), 'refused by the dkgPublicKey format check').to.match(/dkgPublicKey must be a 66-char/)
     const irCount = (await seeded.auth.ctx.db.prepare('select count(*) as c from InviteResult where SlotCid = :cid').get({ cid: slot.cid }))!.c as number
     expect(irCount, 'no InviteResult row written').to.equal(0)
   })
@@ -521,13 +526,17 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Uma Keyholder')
     const provisioning = makeKeyholderProvisioning()
     const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
+    const invitePrivate = await invitePrivateForSlot(seeded.auth.ctx, slot.cid)
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, seeded.auth.user.id, provisioning)
+      await invitationEngine.respondToInvite(slot.cid, true, invitePrivate, undefined, seeded.auth.user.id, provisioning)
     } catch (err) {
       caught = err
     }
     expect(caught, 'reusing the officer id as invokedId must reject').to.not.equal(undefined)
+    // The refusal must come from the User insert INSIDE the transaction (after the InviteResult
+    // insert), or this test does not exercise atomicity at all.
+    expect(String((caught as Error)?.message), 'refused by the User primary key inside the transaction').to.match(/UNIQUE constraint failed: User PK/)
     const irCount = (await seeded.auth.ctx.db.prepare('select count(*) as c from InviteResult where SlotCid = :cid').get({ cid: slot.cid }))!.c as number
     expect(irCount, 'the old non-atomic orphan is gone -- zero InviteResult rows for this slot').to.equal(0)
     const khCount = (await seeded.auth.ctx.db.prepare('select count(*) as c from Keyholder where UserId = :id').get({ id: seeded.auth.user.id }))!.c as number
@@ -544,20 +553,23 @@ describe('D-26 lockstep: respondToInvite (Task 3)', () => {
     expect(irRow, 'a decline still writes InviteResult').to.not.be.undefined
   })
 
-  it('a second accept of the same slot rejects (InviteResult PK) and writes nothing new', async () => {
+  it('a second accept of the same slot is refused invite-already-answered (live-head check, before any write) and writes nothing new', async () => {
     const seeded = await seedElectionWithThreshold()
     await seeded.electionEngine.inviteKeyholder(makeKeyholderInvite('Wendy Keyholder'), seeded.electionId, makeTestSignCallback(seeded.auth.user))
     const slot = await keyholderSlotCid(seeded.auth.ctx, 'Wendy Keyholder')
     const invitationEngine = new InvitationEngine(inviteeContext(seeded.auth.ctx))
     await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, makeKeyholderProvisioning())
     const countBefore = (await seeded.auth.ctx.db.prepare('select count(*) as c from User').get())!.c as number
+    const invitePrivate = await invitePrivateForSlot(seeded.auth.ctx, slot.cid)
     let caught: unknown
     try {
-      await invitationEngine.respondToInvite(slot.cid, true, await invitePrivateForSlot(seeded.auth.ctx, slot.cid), undefined, undefined, makeKeyholderProvisioning())
+      await invitationEngine.respondToInvite(slot.cid, true, invitePrivate, undefined, undefined, makeKeyholderProvisioning())
     } catch (err) {
       caught = err
     }
     expect(caught, 'a second accept of the same slot must reject').to.not.equal(undefined)
+    // Since 62-102 the live-head check refuses before any write; the InviteResult PK is never reached.
+    expect((caught as { code?: unknown })?.code, 'refused as already answered').to.equal('invite-already-answered')
     const countAfter = (await seeded.auth.ctx.db.prepare('select count(*) as c from User').get())!.c as number
     expect(countAfter, 'no new User row from the rejected second accept').to.equal(countBefore)
   })

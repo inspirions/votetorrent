@@ -215,14 +215,17 @@ describe('D-21: fresh User per keyholder accept', () => {
     const eveCid = await keyholderSlotCid(elec.ctx, 'Eve Keyholder')
 
     const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+    // WR-R2-03: the fixture lookup runs OUTSIDE the try, so its own failure is never counted as the refusal.
+    const invitePrivate = await invitePrivateForSlot(elec.ctx, eveCid)
     let caught: unknown
     try {
       // Reuse-attempt: pass the officer's own id as the accept-time invokedId.
-      await invitationEngine.respondToInvite(eveCid, true, await invitePrivateForSlot(elec.ctx, eveCid), undefined, auth.user.id, makeKeyholderProvisioning())
+      await invitationEngine.respondToInvite(eveCid, true, invitePrivate, undefined, auth.user.id, makeKeyholderProvisioning())
     } catch (err) {
       caught = err
     }
     expect(caught, 'reusing the officer id as invokedId must reject').to.not.be.undefined
+    expect(String((caught as Error)?.message), 'refused by the User primary key, not an earlier refusal').to.match(/UNIQUE constraint failed: User PK/)
 
     const row = await elec.ctx.db
       .prepare('select count(*) as c from Keyholder where UserId = :officerId')
