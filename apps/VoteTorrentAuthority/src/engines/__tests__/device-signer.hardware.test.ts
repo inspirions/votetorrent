@@ -82,10 +82,19 @@ const mockIsRecoveryInProgress = isRecoveryInProgress as jest.MockedFunction<typ
 // real P-256 key pair and a real signature (a fake hex string is correctly refused as a desync).
 const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
 const SIGNING_PRIV = p256.utils.randomSecretKey()
-// Installs the platform-faithful native model and returns the signature it will produce for `d`.
-const installNative = (platform: NativeSignPlatform) => {
+// Installs the platform-faithful native model and returns the list of signature hex strings native
+// actually handed back, in call order (WR-R6-01: the signer's output is compared with what native
+// produced, never with itself).
+const installNative = (platform: NativeSignPlatform): string[] => {
 	setPlatformOS(platform)
-	nativeFake.signWithDeviceKey.mockImplementation(makeFakeNativeP256Signer(SIGNING_PRIV, platform).signWithDeviceKey)
+	const model = makeFakeNativeP256Signer(SIGNING_PRIV, platform)
+	const produced: string[] = []
+	nativeFake.signWithDeviceKey.mockImplementation(async (alias: string, digestBase64: string, ...prompts: string[]) => {
+		const result = await model.signWithDeviceKey(alias, digestBase64, ...prompts)
+		produced.push(result.signatureHex)
+		return result
+	})
+	return produced
 }
 
 const PROVISIONED_USER: User = {
@@ -106,11 +115,12 @@ describe.each<NativeSignPlatform>(['ios', 'android'])('device-signer.ts — hard
 	it('(a) base64-encodes the digest and passes the alias + three prompt strings through unchanged', async () => {
 		mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
 		const digest = new Uint8Array([1, 2, 3, 4])
-		installNative(platform)
+		const produced = installNative(platform)
 
 		const sign = await createDeviceSigner('Officer One')
 		const signature = await sign(digest)
-		const goodSig = signature.signature
+		expect(produced).toHaveLength(1)
+		expect(produced[0]).not.toBe('')
 
 		expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
 		const [alias, digestBase64, title, subtitle, negativeButton] = nativeFake.signWithDeviceKey.mock.calls[0] as [
@@ -133,7 +143,7 @@ describe.each<NativeSignPlatform>(['ios', 'android'])('device-signer.ts — hard
 			signerUserId: PROVISIONED_USER.id,
 			signerKey: PROVISIONED_USER.activeKeys[0]!.key,
 			// Returned hex is passed through verbatim — never re-normalized.
-			signature: goodSig,
+			signature: produced[0],
 		})
 	})
 
@@ -171,11 +181,17 @@ describe.each<NativeSignPlatform>(['ios', 'android'])('device-signer.ts — hard
 			mockGetDeviceUser.mockResolvedValue(PROVISIONED_USER)
 			mockIsRecoveryInProgress.mockResolvedValue(false)
 			const digest = new Uint8Array([1, 2, 3])
-			installNative(platform)
+			const produced = installNative(platform)
 
 			const sign = await createDeviceSigner('Officer One')
-			await expect(sign(digest)).resolves.toMatchObject({ signerKey: PROVISIONED_USER.activeKeys[0]!.key })
+			const signature = await sign(digest)
 			expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1)
+			expect(produced).toHaveLength(1)
+			expect(signature).toEqual({
+				signerUserId: PROVISIONED_USER.id,
+				signerKey: PROVISIONED_USER.activeKeys[0]!.key,
+				signature: produced[0],
+			})
 		})
 
 		it('checks the marker AFTER the NO_KEY_PROVISIONED gate (an unprovisioned device is never routed to recovery)', async () => {
