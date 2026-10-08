@@ -78,13 +78,25 @@ describe('O-06 - UserEngine.inspectDeviceIdentity', () => {
     })
   })
 
-  it('I5 expired key: not listed', async () => {
+  it('I5 expired key: not listed', async function () {
+    // WR-R2-08: a 10 s window, then poll until it lapses. The old 1.5 s window had to cover a
+    // signed insert (schema check Expiration > now) AND the first inspection, which a loaded host
+    // can miss; datetimes here are second-precision, so the window must be several seconds.
+    this.timeout(40_000)
     const x = fx.holders[0]!.user
     const pair = randomTestKeyPair()
-    await giveKey(ctx, x, pair.publicHex, Date.now() + 1500)
+    const expiresAt = Date.now() + 10_000
+    await giveKey(ctx, x, pair.publicHex, expiresAt)
     expect((await inspector(ctx, x).inspectDeviceIdentity('R-random', pair.publicHex)).officerUserIdsHoldingKey).to.deep.equal([x.id])
-    await new Promise((resolve) => setTimeout(resolve, 1800))
-    expect((await inspector(ctx, x).inspectDeviceIdentity('R-random', pair.publicHex)).officerUserIdsHoldingKey).to.deep.equal([])
+    const deadline = expiresAt + 20_000
+    let listed: string[] = [x.id]
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      listed = (await inspector(ctx, x).inspectDeviceIdentity('R-random', pair.publicHex)).officerUserIdsHoldingKey
+      if (listed.length === 0) break
+    }
+    expect(Date.now(), 'the key was never listed as expired before its expiration').to.be.at.least(expiresAt - 1000)
+    expect(listed, 'the expired key is no longer listed').to.deep.equal([])
   })
 
   it('I6 shape: no UserKey query without a UserId = predicate, and bad arguments are refused', async () => {
