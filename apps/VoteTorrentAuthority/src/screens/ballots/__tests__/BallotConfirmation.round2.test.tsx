@@ -8,6 +8,7 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { consoleTags, leakingCalls, nonLiteralConsoleFirstArgs, untaggedCalls } from '../../__fixtures__/log-content-scan';
 
 let mockCurrentElectionEngine: unknown = null;
 let mockReadOnly = false;
@@ -356,9 +357,10 @@ describe('R2-7 the screen logs only fixed tags and error class names (O-09)', ()
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const path = require('path');
     const src: string = fs.readFileSync(path.join(__dirname, '..', 'EditBallotScreen.tsx'), 'utf8');
-    const tags = new Set<string>();
-    for (const m of src.matchAll(/console\.(?:warn|error)\(\s*(["'])(.*?)\1/g)) tags.add(m[2]);
+    const tags = consoleTags(src);
     expect(tags.size).toBeGreaterThan(0);
+    // A log whose first argument is built at runtime (template literal, concatenation) fails here.
+    expect(nonLiteralConsoleFirstArgs(src)).toEqual([]);
 
     const SECRET = 'SECRET-engine-text-requestId=zzz';
     const failures: Array<(engine: any) => void> = [
@@ -386,16 +388,13 @@ describe('R2-7 the screen logs only fixed tags and error class names (O-09)', ()
       await press(tr, id);
     }
 
-    const calls = [...(console.warn as jest.Mock).mock.calls, ...(console.error as jest.Mock).mock.calls].filter(
-      (c) => typeof c[0] === 'string' && tags.has(c[0])
-    );
-    expect(calls.length).toBeGreaterThan(0);
+    // EVERY spied call, not only the tagged ones (REVIEW WR-R5-01).
+    const calls = [...(console.warn as jest.Mock).mock.calls, ...(console.error as jest.Mock).mock.calls];
+    expect(calls.some((c) => typeof c[0] === 'string' && tags.has(c[0]))).toBe(true);
+    expect(untaggedCalls(calls, tags)).toEqual([]);
+    expect(leakingCalls(calls, ['SECRET', 'requestId'])).toEqual([]);
     for (const call of calls) {
-      for (const arg of call) {
-        expect(typeof arg).toBe('string');
-        expect(arg).not.toContain('SECRET');
-        expect(arg).not.toContain('requestId');
-      }
+      for (const arg of call) expect(typeof arg).toBe('string');
     }
   });
 });
