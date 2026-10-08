@@ -205,15 +205,17 @@ describe('re-association decision republish drain (62-113 Task 2, WR-02)', funct
     expect(second.publishFailures).to.equal(undefined)
   })
 
-  it("D-2: approveReassociation's failed 'c' publish is republished by the next processPendingReassociations", async () => {
+  it("D-2: approveReassociation's failed 'c' publish does not fail the approval and is republished by the next processPendingReassociations", async () => {
     const w = await makeWorld()
     const { registrantId, code } = await w.approveRegistration()
     const requestId = await w.submitSentinel(randomTestKeyPair(), code)
 
     w.failWhen((d) => (d.status === 'c' ? new Error('transient publish failure') : undefined))
-    let threw = false
-    try { await w.engine.approveReassociation(requestId, { registrantId }, w.officerSign, w.intake, w.fixture.opener) } catch { threw = true }
-    expect(threw).to.equal(true)
+    // WR-R1-01: the 'c' transition committed, so the approval reports its outcome instead of
+    // throwing (a throw here made the officer's retry fail with 'not-pending').
+    const result = await w.engine.approveReassociation(requestId, { registrantId }, w.officerSign, w.intake, w.fixture.opener)
+    expect(result.outcome).to.equal('awaiting-device-attestation')
+    expect(w.calls.filter((c) => c.requestId === requestId && c.status === 'c'), 'the publish was attempted').to.have.lengthOf(1)
     expect((await w.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: requestId }))!.Status).to.equal('c')
     expect(await w.decisionRow(requestId, 'c')).to.equal(undefined)
 

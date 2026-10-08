@@ -674,7 +674,13 @@ export async function approveReassociation (
 
   const challenge = await host.issueAttestationChallenge(input.registrantId, row.deviceKey, signatureOrCallback, row.electionId)
   await host.writeChallengeTransition(requestId, row.authorityId, challenge.nonce, signatureOrCallback)
-  await intake.publishDecision({ requestId, status: 'c', challengeNonce: challenge.nonce, decidedAt: new Date().toISOString() })
+  try {
+    await intake.publishDecision({ requestId, status: 'c', challengeNonce: challenge.nonce, decidedAt: new Date().toISOString() })
+  } catch {
+    // WR-R1-01: the 'c' transition is already committed, so the approval took effect. Throwing
+    // here would report a failed approval whose retry then fails with 'not-pending'. The
+    // republish drain (WR-02) publishes this decision on the next sync, as the doc above says.
+  }
 
   return {
     requestId,
