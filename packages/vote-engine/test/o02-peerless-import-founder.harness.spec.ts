@@ -12,10 +12,14 @@
  * bundle only makes sense against the node-A that founded it, so a single shared bundle
  * across two independent node-A instances is not possible.
  *
- * Only unconditional facts are asserted (the arm ran, the measurements were taken, and
- * Arm J converges, as founding-bundle.harness F-1 already shows). Arm F's outcome is
- * LOGGED as `[o02] arm=F run=<n> sha=<head> headerEqual=<bool> aToB=<bool> bToA=<bool>
- * errors=<tokens>`, never asserted. Prediction: 62-gap-repros/o02-peerless-import-founder/RESULTS.md.
+ * Only unconditional facts are asserted (the import succeeded, the arm ran, the
+ * measurements were taken, and Arm J converges, as founding-bundle.harness F-1 already
+ * shows). Arm F's outcome is LOGGED as `[o02] arm=F run=<n> sha=<head> imported=<bool>
+ * headerEqual=<bool> aToB=<bool> bToA=<bool> errors=<tokens>`, never asserted.
+ *
+ * CR-R2-01: the import carries the exporter's fingerprint as its out-of-band anchor. Before
+ * that, 62-102's anchor-required refusal made both arms import nothing (vacuous at HEAD); the
+ * runs recorded in RESULTS.md were made at 7e90c388, before 62-102, and stand for that SHA. Prediction: 62-gap-repros/o02-peerless-import-founder/RESULTS.md.
  * NO product source is touched; measured runs belong to 62-98.
  */
 
@@ -62,6 +66,8 @@ const ERROR_TOKENS = ['Missing block', 'cohort-unreachable', 'BlockUnavailable']
 interface ArmResult {
   arm: 'J' | 'F'
   ran: boolean
+  /** CR-R2-01: the founding import actually succeeded; an arm whose import was refused measured nothing. */
+  imported: boolean
   headerEqual: boolean
   aToB: boolean
   bToA: boolean
@@ -87,7 +93,7 @@ async function readBootstrapRows (db: Database): Promise<string> {
 
 async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
   const errors = new Set<string>()
-  const result: ArmResult = { arm, ran: false, headerEqual: false, aToB: false, bToA: false, errors: [] }
+  const result: ArmResult = { arm, ran: false, imported: false, headerEqual: false, aToB: false, bToA: false, errors: [] }
   const peerless = arm === 'F'
   const harness: TwoNodeHarness = await startTwoNodeHarness({
     peerlessNodeB: peerless,
@@ -119,7 +125,11 @@ async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
     }
 
     const engineB = new NetworksEngine(makeDeviceLocalStorage(), harness.nodeB.dbFactory)
-    const imported = await engineB.importFoundingBundle(exported.text, undefined)
+    // CR-R2-01: since 62-102 an import with no out-of-band anchor is refused ('anchor-required')
+    // before any DbFactory call, so the arm would import nothing and arm F would never open B's
+    // strand while peerless. Pass the exporter's fingerprint, as the importing officer types it.
+    const imported = await engineB.importFoundingBundle(exported.text, undefined, { expectedFingerprint: exported.fingerprint })
+    result.imported = imported.ok
     if (!imported.ok) errors.add(`import:${(imported as { reason: string }).reason}`)
 
     if (peerless) await harness.connectAndEnrolNodeB()
@@ -170,7 +180,7 @@ async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
   result.errors = [...errors]
   // (4) one log line per arm (shape is what 62-98 parses).
   console.log(
-    `[o02] arm=${arm} run=${RUN} sha=${SHA} headerEqual=${result.headerEqual} aToB=${result.aToB} bToA=${result.bToA} errors=${result.errors.join(',') || 'none'}`
+    `[o02] arm=${arm} run=${RUN} sha=${SHA} imported=${result.imported} headerEqual=${result.headerEqual} aToB=${result.aToB} bToA=${result.bToA} errors=${result.errors.join(',') || 'none'}`
   )
   return result
 }
@@ -181,12 +191,14 @@ describeP2PHarness('O-02: peerless founder:true import vs connected joiner (62-9
   const results = new Map<'J' | 'F', ArmResult>()
 
   for (const arm of ARM_ORDER as ('J' | 'F')[]) {
-    it(`arm ${arm}: ran and measured (${arm === 'J' ? 'control, asserts convergence' : 'O-02, logged only'})`, async function () {
+    it(`arm ${arm}: imported, ran and measured (${arm === 'J' ? 'control, asserts convergence' : 'O-02, outcome logged only'})`, async function () {
       this.timeout(HARNESS_TIMEOUTS.suiteMs)
       const r = await runArm(arm)
       results.set(arm, r)
       // Unconditional: the arm reached its measurements. Arm F's OUTCOME is never asserted.
       expect(r.ran, `arm ${arm} must reach its measurements (errors=${r.errors.join(',')})`).to.equal(true)
+      // CR-R2-01: both arms must actually have imported, or the arm measured nothing.
+      expect(r.imported, `arm ${arm} import must succeed (errors=${r.errors.join(',')})`).to.equal(true)
       if (arm === 'J') {
         expect(r.headerEqual, 'control: bootstrap rows equal').to.equal(true)
         expect(r.aToB, 'control: A->B').to.equal(true)
