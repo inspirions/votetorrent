@@ -1,10 +1,12 @@
 import { QuereusError, MisuseError } from '@quereus/quereus'
+import type { SqlValue } from '@quereus/quereus'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { FeatureNotAvailableError, toImageRef } from '@votetorrent/vote-core'
 import { AuthorityEngine } from '../authority/authority-engine.js'
 import { readInviteChain } from '../invite/read-invite-chain.js'
+import { withInviteWriteSerial } from '../invite/invite-write-serial.js'
 import { UserEngine } from '../user/user-engine.js'
 import {
   asText,
@@ -1203,6 +1205,34 @@ export class NetworkEngine implements INetworkEngine {
     const authorityImageRefJson = invokesAuthority?.imageUrl != null
       ? JSON.stringify(invokesAuthority.imageUrl)
       : null
+    // WR-R1-09 (mirrors InvitationEngine gap7/IN-04): the chain read above happens before the
+    // signing work, so a cancellation (or another answer) can land in between. The InviteResult is
+    // therefore written inside ONE transaction, serialized per database with every other invite
+    // write (cancelInvite included), whose first statement re-reads the chain and requires this
+    // slot to still be its live head.
+    const writeResultIfLive = async (sql: string, params: Record<string, SqlValue>): Promise<void> => {
+      await withInviteWriteSerial(this.ctx.db, async () => {
+        await this.ctx.db.exec('BEGIN')
+        try {
+          const live = await readInviteChain(this.ctx.db, invite.invite.inviteKey, invite.invite.type, nowCanonicalDatetime())
+          if (live.status !== 'live' || live.cid !== slotCid) {
+            if (live.status === 'answered') throw invitationError('invite-already-answered', 'respondToInvite: invite already answered')
+            if (live.status === 'no-longer-valid') throw invitationError('invite-no-longer-valid', 'respondToInvite: invite is no longer valid')
+            if (live.status === 'live') throw invitationError('invite-superseded', 'respondToInvite: invite was replaced by a newer copy')
+            throw invitationError('invite-unverifiable', 'respondToInvite: invite chain cannot be verified')
+          }
+          await this.ctx.db.exec(sql, params)
+          await this.ctx.db.exec('COMMIT')
+        } catch (innerErr) {
+          try {
+            await this.ctx.db.exec('ROLLBACK')
+          } catch {
+            // already rolled back by the failed statement; the original error is what matters.
+          }
+          throw innerErr
+        }
+      })
+    }
     try {
       if (isAuthorityInvite && invite.isAccepted) {
         // D-06 / D-09 (Phase 12.4): the engine commits a 7-arg Digest to
@@ -1277,7 +1307,7 @@ export class NetworkEngine implements INetworkEngine {
         if (!signed.valid) {
           throw invitationError('invite-signature-invalid', 'respondToInvite: invite signature does not verify')
         }
-        await this.ctx.db.exec(
+        await writeResultIfLive(
 					`insert into InviteResult (
 						SlotCid,
 						IsAccepted,
@@ -1320,7 +1350,7 @@ export class NetworkEngine implements INetworkEngine {
           throw invitationError('invite-signature-invalid', 'respondToInvite: invite signature does not verify')
         }
         const isSignatureValid = signedResult.valid
-        await this.ctx.db.exec(
+        await writeResultIfLive(
 					`insert into InviteResult (
 						SlotCid,
 						IsAccepted,

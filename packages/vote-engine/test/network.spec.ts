@@ -2020,6 +2020,39 @@ describe('NetworkEngine', () => {
 				expect(await resultCount(net)).to.equal(0);
 			});
 
+			it('WR-R1-09: a cancellation landing between the chain read and the insert is refused inside the transaction and writes no InviteResult', async () => {
+				const { net, auth, share } = await seedRealInvite();
+				const slot = await net.ctx.db.prepare('select Cid from InviteSlot where InviteKey = :k').get({ k: share.inviteKey });
+				const engineCtx = (net.networkEngine as unknown as { ctx: EngineContext }).ctx;
+				const db = engineCtx.db as unknown as { prepare: (sql: string, ...rest: unknown[]) => { get: (p?: unknown) => Promise<unknown> } };
+				const realPrepare = db.prepare.bind(db);
+				let cancelled = false;
+				// The au-accept branch computes its Digest AFTER the chain read and BEFORE the insert:
+				// withdraw the invitation exactly there, as an officer on another screen would.
+				db.prepare = (sql: string, ...rest: unknown[]) => {
+					const stmt = realPrepare(sql, ...rest);
+					if (cancelled || !/select Digest\(:tid/.test(sql)) return stmt;
+					return new Proxy(stmt, {
+						get(target, prop, receiver) {
+							if (prop !== 'get') return Reflect.get(target, prop, receiver);
+							return async (params?: unknown) => {
+								cancelled = true;
+								await auth.cancelInvite(slot!.Cid as string);
+								return await target.get(params);
+							};
+						},
+					});
+				};
+				try {
+					const c = await code(net.networkEngine.respondToInvite({ invite: share, invitePrivate: share.invitePrivate, isAccepted: true, invokes: officerInvokes, inviteSignature: 'x' } as never));
+					expect(cancelled, `the cancellation was injected mid-call (code=${c})`).to.equal(true);
+					expect(c).to.equal('invite-no-longer-valid');
+					expect(await resultCount(net)).to.equal(0);
+				} finally {
+					db.prepare = realPrepare;
+				}
+			});
+
 			it('on a resend chain the InviteResult is written for the HEAD Cid, never the original', async () => {
 				const { net, auth, share } = await seedRealInvite();
 				const original = await net.ctx.db.prepare('select Cid from InviteSlot where InviteKey = :k').get({ k: share.inviteKey });
