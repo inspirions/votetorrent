@@ -142,7 +142,10 @@ export default function AuthorityInvitationScreen() {
 
 	// INV-02: onSend invites onto the network's EXISTING primary authority.
 	// D-05: a Copy-to-clipboard share is added after a successful send.
-	const onSend = async () => {
+	// WR-R3-08: `isSending` disables Send only after a re-render, so two taps in one frame would each
+	// mint an invitation slot. This ref latches synchronously, before any await.
+	const sendingRef = useRef(false);
+	const sendInvitation = async () => {
 		// 16-08 item 4: clear any prior error so a retry starts clean.
 		setErrorMessage("");
 		// Required-field guard: an empty authority name would otherwise generate an
@@ -225,6 +228,15 @@ export default function AuthorityInvitationScreen() {
 			return;
 		} finally {
 			setIsSending(false);
+		}
+	};
+	const onSend = async () => {
+		if (sendingRef.current) return;
+		sendingRef.current = true;
+		try {
+			await sendInvitation();
+		} finally {
+			sendingRef.current = false;
 		}
 	};
 
