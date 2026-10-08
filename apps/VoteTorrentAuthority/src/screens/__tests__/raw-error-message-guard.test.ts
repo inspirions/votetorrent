@@ -9,6 +9,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { STRICT_RAW_ERROR_FILES } from '../__fixtures__/strict-raw-error-files';
 
 const SRC = path.resolve(__dirname, '..', '..');
 const ROOTS = ['screens', 'components'];
@@ -202,15 +203,9 @@ export function scanText(relPath: string, text: string): Hit[] {
 	return scanTextFull(relPath, text).hits;
 }
 
-const C12_FILES = [
-	'screens/registration/RegistrationRequestApprovalScreen.tsx',
-	'screens/invitations/AdministratorInvitationScreen.tsx',
-	'screens/invitations/AuthorityInvitationScreen.tsx',
-	'screens/invitations/KeyholderInvitationScreen.tsx',
-	'screens/elections/EditBallotScreen.tsx',
-	'screens/elections/ElectionDetailsScreen.tsx',
-	'screens/networks/AddNetworkScreen.tsx',
-];
+// The strict (C12) screens: one shared list, never a local copy (a drifted copy named four paths
+// that did not exist, so those screens could be exempted unnoticed).
+const C12_FILES: readonly string[] = STRICT_RAW_ERROR_FILES;
 
 export function classify(hits: Hit[], lists: Lists, scannedFileCount: number): string[] {
 	const failures: string[] = [];
@@ -342,6 +337,19 @@ describe('strict guard self-test', () => {
 			1,
 		);
 		expect(failures.some((f) => f.includes('count mismatch'))).toBe(true);
+	});
+
+	it('every C12 file exists, so the never-exempt rule can match it', () => {
+		expect(C12_FILES.length).toBeGreaterThan(0);
+		const missing = C12_FILES.filter((f) => !fs.existsSync(path.join(SRC, f)));
+		expect(missing).toEqual([]);
+	});
+
+	it.each([...C12_FILES])('refuses an exemption naming the C12 file %s', (file) => {
+		const asFile = classify([], { EXEMPT_FILES: [{ file, reason: 'self-test' }] }, 1);
+		expect(asFile).toContain(`C12 file must not be exempt: ${file}`);
+		const asLine = classify([], { EXEMPT_LINES: [{ file, key: '0000000000000000', count: 1, reason: 'self-test' }] }, 1);
+		expect(asLine).toContain(`C12 file must not be exempt: ${file}`);
 	});
 
 	it('scans its own strict section to zero hits', () => {

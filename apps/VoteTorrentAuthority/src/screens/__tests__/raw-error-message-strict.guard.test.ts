@@ -8,19 +8,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { STRICT_RAW_ERROR_FILES } from '../__fixtures__/strict-raw-error-files';
 
 const SRC = path.resolve(__dirname, '..', '..');
 
-/** Files held to the strict rule, relative to src. */
-export const STRICT_FILES: readonly string[] = [
-	'screens/registration/RegistrationRequestApprovalScreen.tsx',
-	'screens/admin/AdministratorInvitationScreen.tsx',
-	'screens/authorities/AuthorityInvitationScreen.tsx',
-	'screens/keyholder/KeyholderInvitationScreen.tsx',
-	'screens/ballots/EditBallotScreen.tsx',
-	'screens/elections/ElectionDetailsScreen.tsx',
-	'screens/networks/AddNetworkScreen.tsx',
-];
+/** Files held to the strict rule, relative to src (shared with the whole-app guard's C12 check). */
+export const STRICT_FILES: readonly string[] = STRICT_RAW_ERROR_FILES;
 
 const CAUGHT = '(?:err|error|e|cause)';
 const PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
