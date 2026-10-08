@@ -110,6 +110,35 @@ function expectCopy(tr: Tr, key: string): void {
 	expect(s).not.toContain("default/app");
 }
 
+/**
+ * Presses never swallow a throw (REVIEW WR-R5-05): a handler that rethrows after rendering its copy
+ * would be an unhandled rejection on a device, so it must fail the test. The two remove paths whose
+ * screen handler DOES rethrow by contract hand that rejection to LifecycleConfirmCard's onConfirm,
+ * which re-enables the card; `expectConfirmRejects` asserts that contract directly.
+ */
+async function invoke(handler: () => unknown): Promise<void> {
+	await renderer.act(async () => {
+		await handler();
+	});
+	await flush();
+}
+
+/** The remove confirmation's onConfirm rejects with the planted error (the card's retry contract). */
+async function expectConfirmRejects(tr: Tr, testIDPrefix: string): Promise<void> {
+	const card = tr.root.findAll((n) => n.props?.testIDPrefix === testIDPrefix && typeof n.props?.onConfirm === "function")[0];
+	expect(card).toBeDefined();
+	let rejected: unknown;
+	await renderer.act(async () => {
+		try {
+			await card!.props.onConfirm();
+		} catch (e) {
+			rejected = e;
+		}
+	});
+	await flush();
+	expect(rejected).toBe(mockRejection);
+}
+
 /** Press a control by testID wrapper (ChipButton binds onPressIn, CustomButton onPress). */
 async function pressId(tr: Tr, testID: string): Promise<void> {
 	const wrapper = tr.root.findByProps({ testID });
@@ -118,15 +147,7 @@ async function pressId(tr: Tr, testID: string): Promise<void> {
 	);
 	expect(candidates.length).toBeGreaterThan(0);
 	const target = candidates[0]!;
-	await renderer.act(async () => {
-		try {
-			if (typeof target.props.onPressIn === "function") target.props.onPressIn();
-			else await target.props.onPress();
-		} catch {
-			// a re-thrown write failure is expected on the remove paths
-		}
-	});
-	await flush();
+	await invoke(() => (typeof target.props.onPressIn === "function" ? target.props.onPressIn() : target.props.onPress()));
 }
 
 /** Press a control by its title. */
@@ -135,14 +156,7 @@ async function pressTitle(tr: Tr, title: string): Promise<void> {
 		(n) => typeof n.props.title === "string" && n.props.title === title && typeof n.props.onPress === "function",
 	)[0];
 	if (!node) throw new Error(`no control titled ${title}`);
-	await renderer.act(async () => {
-		try {
-			await node.props.onPress();
-		} catch {
-			// swallowed: the screen renders the failure
-		}
-	});
-	await flush();
+	await invoke(() => node.props.onPress());
 }
 
 const reject = async (): Promise<never> => {
@@ -275,6 +289,7 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 		await pressId(tr, "polling-device-remove-" + HASH_A + "-confirm");
 		expect(removePollingDevice).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
+		await expectConfirmRejects(tr, "polling-device-remove-" + HASH_A);
 	});
 
 	it("ProposedAdministrationScreen propose", async () => {
@@ -323,6 +338,7 @@ describe("WRITE failures show errorActionFailedGeneric", () => {
 		await pressId(tr, "authority-peers-confirm-peer-alpha-confirm");
 		expect(removeAuthorityPeer).toHaveBeenCalled();
 		expectCopy(tr, "errorActionFailedGeneric");
+		await expectConfirmRejects(tr, "authority-peers-confirm-peer-alpha");
 	});
 
 	it("NetworkRevisionScreen propose", async () => {
