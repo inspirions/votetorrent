@@ -7,6 +7,7 @@ import {
 	markSchemaInitialized,
 } from '../src/database/initialize.js';
 import { NetworksEngine } from '../src/networks/networks-engine.js';
+import { NetworkEngine } from '../src/network/network-engine.js';
 import { peekTid, allocateTid } from '../src/database/tid-allocator.js';
 import { createTestNetwork, makeTestSignCallback } from './fixtures/test-context.js';
 import { AsyncStorage } from './shims/react-native.js';
@@ -231,34 +232,71 @@ describe('strand re-attach guard', () => {
 		expect(seen).to.deep.equal([]);
 	});
 
+	/** Every TidHighWater row on the RAW db (the only table allocateTid writes), as comparable text. */
+	async function tidSnapshot(raw: Database): Promise<string> {
+		const rows: unknown[] = [];
+		for await (const row of raw.eval('select Namespace, HighWater from TidHighWater order by Namespace', {})) rows.push(row);
+		return JSON.stringify(rows);
+	}
+
 	it('W-1: after open(), the first allocateTid rejects with the classifiable token and writes nothing', async () => {
 		const base = await makeStrandDb();
 		await markSchemaInitialized(base);
 		const { db } = stubBlocked(base, onlyTid);
 		const engine = new NetworksEngine(AsyncStorage, async () => db);
 		await engine.open(ref, undefined, false);
+		// WR-R2-04: a real before/after snapshot of what allocateTid writes (read on the raw db,
+		// which the stub does not intercept). `count(*)` always returns a row, so it proved nothing.
+		const before = await tidSnapshot(base);
 		let caught: unknown;
 		try { await allocateTid(db, 'networks'); } catch (e) { caught = e; }
 		expect(caught, 'allocateTid must reject').to.not.equal(undefined);
 		expect(findReason(caught)).to.equal('cohort-unreachable');
 		// No engine wrapper sits between the officer write and allocateTid in the engines that
 		// call it (grep: key-release/registration/elections call allocateTid unwrapped).
-		const rows = await base.prepare('select count(*) as c from SchemaInit').get();
-		expect(rows).to.not.equal(undefined);
+		expect(await tidSnapshot(base), 'the rejected allocateTid wrote nothing').to.equal(before);
+		// Control: the snapshot does see a TidHighWater write when one happens.
+		await allocateTid(base, 'networks');
+		expect(await tidSnapshot(base), 'the snapshot detects a real write').to.not.equal(before);
 	});
 
-	it('W-2: non-genesis table reads fail classifiably while genesis-table reads succeed locally', async () => {
+	it('W-2: through real engine reads, a non-genesis read fails classifiably while a genesis read succeeds locally', async () => {
+		// WR-R2-04: drive NetworkEngine itself (the old leg only exercised the stub's own regex).
+		const net = await createTestNetwork();
+		const exporter = {
+			userId: net.user.id,
+			signerKey: net.user.activeKeys[0]!.key,
+			sign: makeTestSignCallback(net.user),
+		};
+		const { text, bundle } = await net.networksEngine.exportFoundingBundle(net.ref.hash, exporter);
 		const base = await makeStrandDb();
-		await markSchemaInitialized(base);
+		const store = new Map<string, unknown>();
+		const deviceStorage = {
+			async getItem<T>(k: string): Promise<T | undefined> { return store.has(k) ? (store.get(k) as T) : undefined; },
+			async setItem<T>(k: string, v: T): Promise<void> { store.set(k, v); },
+			async removeItem(k: string): Promise<void> { store.delete(k); },
+			async clear(): Promise<void> { store.clear(); },
+		};
+		const imported = await new NetworksEngine(deviceStorage, async () => base).importFoundingBundle(text, undefined, { expectedDigest: bundle.digest });
+		if (!imported.ok) throw new Error(`fixture import failed: ${imported.reason}`);
+
+		// A joiner holds only the genesis tables locally; every other table is cohort-only.
 		const GENESIS = new Set(['user', 'userkey', 'authority', 'admin', 'officer', 'network', 'schemainit']);
-		const { db } = stubBlocked(base, (sql) => {
+		const { db, seen } = stubBlocked(base, (sql) => {
 			const m = /\bfrom\s+(\w+)/i.exec(sql);
 			if (!m) return undefined;
 			return GENESIS.has(m[1]!.toLowerCase()) ? undefined : m[1];
 		});
-		await db.prepare('select count(*) as c from Authority').get();
+		const joiner = new NetworkEngine(imported.networkRef, deviceStorage, { db, user: net.user });
+
+		const summary = await joiner.getNetworkSummary();
+		expect(summary.hash, 'the genesis read succeeds locally').to.equal(imported.networkRef.hash);
+		expect(seen, 'the genesis read touched no cohort-only table').to.deep.equal([]);
+
 		let caught: unknown;
-		try { await db.prepare('select count(*) as c from Election').get(); } catch (e) { caught = e; }
-		expect(findReason(caught)).to.equal('cohort-unreachable');
+		try { await joiner.getElections(); } catch (e) { caught = e; }
+		expect(caught, 'the non-genesis read must reject').to.not.equal(undefined);
+		expect(findReason(caught), 'and stay classifiable through the engine wrapper').to.equal('cohort-unreachable');
+		expect(seen.some((sql) => /from\s+Election\b/i.test(sql)), 'the rejection came from the Election read').to.equal(true);
 	});
 });
