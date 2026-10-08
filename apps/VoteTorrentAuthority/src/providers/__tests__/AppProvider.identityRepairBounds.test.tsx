@@ -3,6 +3,9 @@
  * AppProvider.identityRepair.test.tsx):
  *  - B-1 (REVIEW WR-R4-03): a repair that persisted but whose re-bind fails is rolled back, so
  *    storage, factory, network ctx and engine cache all end on the old id together.
+ *  - B-2 (REVIEW WR-R4-04): the repair's reads are bounded by IDENTITY_REPAIR_BUDGET_MS; past it
+ *    boot / select go on and the late repair is told not to write. A repair already writing is
+ *    waited for.
  */
 import React from "react";
 
@@ -82,9 +85,9 @@ const renderer = require("react-test-renderer");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Text } = require("react-native");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { AppProvider, useApp } = require("../AppProvider");
+const { AppProvider, useApp, IDENTITY_REPAIR_BUDGET_MS } = require("../AppProvider");
 
-let captured: { selectNetwork: (ref: unknown) => Promise<void> } | undefined;
+let captured: { selectNetwork: (ref: unknown) => Promise<void>; hasNetwork: boolean } | undefined;
 function Probe() {
 	captured = useApp();
 	return <Text>probe</Text>;
@@ -155,5 +158,92 @@ describe("AppProvider identity repair failure paths", () => {
 		await mount();
 		expect(mockRollback).not.toHaveBeenCalled();
 		expect(mockSetCurrentUser).toHaveBeenLastCalledWith(REPAIRED_USER);
+	});
+});
+
+describe("AppProvider identity repair time budget (WR-R4-04)", () => {
+	type Deps = { shouldPersist?: () => boolean };
+	let gate: { release: (v: { outcome: string; user?: unknown }) => void } | undefined;
+	let seenDeps: Deps | undefined;
+
+	beforeEach(() => {
+		jest.useFakeTimers();
+		mockOpen.mockImplementation(async () => undefined);
+		gate = undefined;
+		seenDeps = undefined;
+	});
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	function hangingRepair(persistFirst: boolean) {
+		mockRepair.mockImplementation((deps: unknown) => {
+			seenDeps = deps as Deps;
+			if (persistFirst) expect(seenDeps.shouldPersist?.()).toBe(true);
+			return new Promise((resolve) => {
+				gate = { release: resolve };
+			});
+		});
+	}
+
+	// The provider renders its children only once boot settles, so no probe yet means not selected.
+	const networkSelected = () => captured?.hasNetwork === true;
+
+	async function advance(ms: number) {
+		await renderer.act(async () => {
+			jest.advanceTimersByTime(ms);
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		});
+	}
+
+	it("B-2 boot: a repair still reading when the budget is spent no longer holds boot, and may not write", async () => {
+		mockRecent = [NETWORK];
+		hangingRepair(false);
+		await mount();
+		expect(mockRepair).toHaveBeenCalledTimes(1);
+		expect(networkSelected()).toBe(false);
+
+		await advance(IDENTITY_REPAIR_BUDGET_MS - 1);
+		expect(networkSelected()).toBe(false);
+		await advance(1);
+		expect(networkSelected()).toBe(true);
+
+		// the late repair finishes its reads: it is told not to write
+		expect(seenDeps!.shouldPersist!()).toBe(false);
+		await renderer.act(async () => {
+			gate!.release({ outcome: "abandoned" });
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		});
+		expect(mockSetCurrentUser).toHaveBeenLastCalledWith(mockStoredUser);
+		expect(mockClearEngineCache).not.toHaveBeenCalled();
+	});
+
+	it("B-2 boot: a repair that already began writing is waited for past the budget", async () => {
+		mockRecent = [NETWORK];
+		hangingRepair(true);
+		await mount();
+		await advance(IDENTITY_REPAIR_BUDGET_MS * 2);
+		expect(networkSelected()).toBe(false);
+		await renderer.act(async () => {
+			gate!.release({ outcome: "repaired", user: REPAIRED_USER });
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		});
+		expect(networkSelected()).toBe(true);
+		expect(mockSetCurrentUser).toHaveBeenLastCalledWith(REPAIRED_USER);
+	});
+
+	it("B-2 selectNetwork: resolves once the budget is spent, with the repair still reading", async () => {
+		hangingRepair(false);
+		await mount();
+		let settled = false;
+		await renderer.act(async () => {
+			captured!.selectNetwork(NETWORK).then(() => (settled = true));
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		});
+		expect(settled).toBe(false);
+		await advance(IDENTITY_REPAIR_BUDGET_MS);
+		expect(settled).toBe(true);
+		expect(networkSelected()).toBe(true);
+		expect(seenDeps!.shouldPersist!()).toBe(false);
 	});
 });

@@ -188,9 +188,19 @@ type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic
 const PEER_RETRY_DELAYS_MS = [5000, 15000];
 
 /**
+ * WR-R4-04: how long boot / select waits for the identity repair's READS (the inspection and the
+ * other-network checks, which on a joiner can go through an unreachable cohort for minutes). Past
+ * it the caller goes on without the repair and the repair is abandoned before it writes anything;
+ * it is attempted again on the next boot. A repair that has already started writing is waited for,
+ * because its re-bind or rollback must finish before the session goes on.
+ */
+export const IDENTITY_REPAIR_BUDGET_MS = 5000;
+
+/**
  * O-06: after the network is open, repair a device identity forked by the old Replace Signing Key.
  * Returns the repaired user (already bound into the factory, the network re-opened with it and the
- * cached engines rebuilt), or `undefined` when nothing changed. Never throws, never blocks boot.
+ * cached engines rebuilt), or `undefined` when nothing changed. Never throws. Bounded by
+ * `IDENTITY_REPAIR_BUDGET_MS`, and abandoned before any write once `isCancelled()` is true.
  *
  * Cache handling (read from engine-factory.ts / networks-engine.ts): `NetworksEngine.open` is
  * cache-first but rewrites the cached ctx with the supplied user, so re-opening with the repaired
@@ -202,6 +212,36 @@ async function repairForkedIdentityAfterOpen(
 	factory: EngineFactory,
 	network: NetworkReference,
 	user: User,
+	isCancelled: () => boolean = () => false,
+): Promise<User | undefined> {
+	let expired = false;
+	let committed = false;
+	const shouldPersist = (): boolean => {
+		if (expired || isCancelled()) return false;
+		committed = true;
+		return true;
+	};
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const budget = new Promise<undefined>((resolve) => {
+		timer = setTimeout(() => {
+			if (committed) return;
+			expired = true;
+			console.info("[identity-repair] outcome=budget-elapsed");
+			resolve(undefined);
+		}, IDENTITY_REPAIR_BUDGET_MS);
+	});
+	try {
+		return await Promise.race([runForkedIdentityRepair(factory, network, user, shouldPersist), budget]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+async function runForkedIdentityRepair(
+	factory: EngineFactory,
+	network: NetworkReference,
+	user: User,
+	shouldPersist: () => boolean,
 ): Promise<User | undefined> {
 	try {
 		const networksEng = factory.getNetworksEngine();
@@ -228,6 +268,7 @@ async function repairForkedIdentityAfterOpen(
 				return ctx ? new UserEngine(user, ctx) : undefined;
 			},
 			otherNetworkHasUser,
+			shouldPersist,
 		});
 		if (result.outcome !== "repaired" || !result.user) return undefined;
 		const repaired = result.user;
@@ -598,8 +639,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await openWithRetry(networksEng, network, user);
 						await factory.getEngine("network", network);
-						// O-06: repair a forked device identity (reversible; never blocks boot).
-						user = (await repairForkedIdentityAfterOpen(factory, network, user)) ?? user;
+						// O-06: repair a forked device identity. Bounded (IDENTITY_REPAIR_BUDGET_MS) and
+						// abandoned before any write once this run is cancelled.
+						user = (await repairForkedIdentityAfterOpen(factory, network, user, () => cancelled)) ?? user;
+						if (cancelled) return;
 						// 47-23: __DEV__-guarded, flag-gated registrant fixture. No-op in
 						// release and whenever REGISTRANT_SEED_ENABLED is false (committed
 						// default). Awaited HERE — rather than fired from index.js — so

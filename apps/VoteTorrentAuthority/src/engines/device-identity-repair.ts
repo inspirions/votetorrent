@@ -50,6 +50,7 @@ export type IdentityRepairOutcome =
 	| 'skipped-unverified-other-network'
 	| 'skipped-recovery'
 	| 'unsupported'
+	| 'abandoned'
 	| 'failed'
 
 export type OtherNetworkAnswer = 'yes' | 'no' | 'unknown'
@@ -71,6 +72,13 @@ export interface RepairDeps {
 	getUserEngineForCurrentUser: () => Promise<InspectableUserEngine | undefined>
 	/** Is `userId` a User on another recent network of this device? `unknown` fails safe. */
 	otherNetworkHasUser: (userId: string) => Promise<OtherNetworkAnswer>
+	/**
+	 * Asked once, after every read and just before the first write. `false` abandons the repair
+	 * with nothing written (outcome `abandoned`): the caller stopped waiting (time budget spent,
+	 * boot run superseded), so a late answer must not change the stored identity under a session
+	 * that already went on without it. Absent means always persist.
+	 */
+	shouldPersist?: () => boolean
 }
 
 export interface RepairResult {
@@ -110,6 +118,7 @@ export async function repairDeviceIdentityForkIfNeeded(deps: RepairDeps): Promis
 
 		const raw = await getRawDeviceUserRecord()
 		if (raw === null) return done('failed')
+		if (deps.shouldPersist && !deps.shouldPersist()) return done('abandoned')
 		await writeForkRepairBackupIfAbsent(raw)
 		await setForkRepairApplied({ fromUserId: localId, toUserId })
 		const user = await replaceDeviceUserId(toUserId)

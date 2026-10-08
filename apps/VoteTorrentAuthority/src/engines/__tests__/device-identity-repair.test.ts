@@ -99,6 +99,31 @@ describe('repairDeviceIdentityForkIfNeeded (F2/F3)', () => {
 		expect(logs).not.toContain('secret-id')
 	})
 
+	it('F3c: shouldPersist false after the reads abandons the repair with nothing written (REVIEW WR-R4-04)', async () => {
+		const shouldPersist = jest.fn(() => false)
+		const e = engine(forked)
+		const res = await repairDeviceIdentityForkIfNeeded({
+			deviceUser: USER as never,
+			getUserEngineForCurrentUser: async () => e as never,
+			otherNetworkHasUser: async () => 'no',
+			shouldPersist,
+		})
+		expect(res).toEqual({ outcome: 'abandoned' })
+		expect(e.inspectDeviceIdentity).toHaveBeenCalledTimes(1)
+		expect(shouldPersist).toHaveBeenCalledTimes(1)
+		expect(await AsyncStorage.getItem(DEVICE_USER_KEY)).toBe(STORED)
+		expect(await AsyncStorage.getItem(DEVICE_USER_FORK_BACKUP_KEY)).toBeNull()
+		// asked only when a write is next: a not-forked device never asks
+		const notForked = jest.fn(() => true)
+		await repairDeviceIdentityForkIfNeeded({
+			deviceUser: USER as never,
+			getUserEngineForCurrentUser: async () => engine({ localIsNetworkUser: true, officerUserIdsHoldingKey: [] }) as never,
+			otherNetworkHasUser: async () => 'no',
+			shouldPersist: notForked,
+		})
+		expect(notForked).not.toHaveBeenCalled()
+	})
+
 	it('F3b: other networks', async () => {
 		expect((await run(engine(forked), 'yes')).outcome).toBe('skipped-legit-elsewhere')
 		expect((await run(engine(forked), 'unknown')).outcome).toBe('skipped-unverified-other-network')
