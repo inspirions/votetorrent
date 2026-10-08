@@ -79,6 +79,18 @@ function tokensIn (error: unknown, into: Set<string>): void {
   for (const t of ERROR_TOKENS) if (text.includes(t)) into.add(t)
 }
 
+/**
+ * WR-R2-01: every failed leg also records its own truncated message, so a failure that carries
+ * none of ERROR_TOKENS (a pollUntil timeout, a write refusal, a constraint error) is never logged
+ * as `errors=none`. The tokens stay as a classification on top. Commas are replaced because the
+ * log line joins errors with ','.
+ */
+function recordLeg (leg: string, error: unknown, into: Set<string>): void {
+  tokensIn(error, into)
+  const message = String((error as Error)?.message ?? error).slice(0, 160).replace(/\s+/g, ' ').replace(/,/g, ';')
+  into.add(`${leg}:${message}`)
+}
+
 async function readAll (db: Database, sql: string): Promise<Record<string, unknown>[]> {
   const rows: Record<string, unknown>[] = []
   for await (const row of db.eval(sql)) rows.push(row as Record<string, unknown>)
@@ -146,7 +158,7 @@ async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
         { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: bootstrap rows equal` }
       )
       result.headerEqual = true
-    } catch (e) { tokensIn(e, errors) }
+    } catch (e) { recordLeg('headerEqual', e, errors) }
 
     // (2) A writes after the import; does B read it?
     try {
@@ -157,7 +169,7 @@ async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
         { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: A->B` }
       )
       result.aToB = true
-    } catch (e) { tokensIn(e, errors) }
+    } catch (e) { recordLeg('aToB', e, errors) }
 
     // (3) B writes; does A read it?
     try {
@@ -168,12 +180,11 @@ async function runArm (arm: 'J' | 'F'): Promise<ArmResult> {
         { timeoutMs: HARNESS_TIMEOUTS.replicationMs, label: `o02 ${arm}: B->A` }
       )
       result.bToA = true
-    } catch (e) { tokensIn(e, errors) }
+    } catch (e) { recordLeg('bToA', e, errors) }
 
     result.ran = true
   } catch (e) {
-    tokensIn(e, errors)
-    errors.add(`arm-error:${((e as Error)?.message ?? String(e)).slice(0, 120).replace(/\s+/g, ' ')}`)
+    recordLeg('arm-error', e, errors)
   } finally {
     await harness.stop()
   }
