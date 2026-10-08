@@ -217,9 +217,20 @@ describe('R2-1/R2-2 refused Propose and Submit explain themselves and reload the
     await propose(engine);
     mockCurrentElectionEngine = engine;
     const tr = await renderScreen();
-    // Edit via the carry-back-free path: change the form, then reload must discard it. Submit is
-    // disabled while dirty (R2-8), so drive the handler through a clean draft and mutate the stored
-    // row behind the screen instead: the reload must show the NEW stored description.
+    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
+    // Submit is disabled while dirty (R2-8), so drive the handler through a clean draft and change
+    // the stored row behind the screen instead: the reload must show the NEW stored description,
+    // which only an applied reload can put in the form (REVIEW WR-R5-06).
+    const CHANGED = 'Changed behind the screen';
+    await engine.proposeBallot({
+      id: BALLOT_ID,
+      electionId: 'test-election',
+      authorityId: 'auth-1',
+      description: CHANGED,
+      districts: [],
+      questions: [],
+    });
+    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
     const detailsSpy = jest.spyOn(engine, 'getBallotDetails');
     jest.spyOn(engine, 'getBallotConfirmationState').mockResolvedValue(after);
     engine.submitBallotForConfirmation = jest.fn(async () => {
@@ -227,10 +238,11 @@ describe('R2-1/R2-2 refused Propose and Submit explain themselves and reload the
     });
     await press(tr, 'edit-ballot-submit');
 
+    expect(engine.submitBallotForConfirmation).toHaveBeenCalled();
     expect(treeContainsText(tr, copy)).toBe(true);
     expect(treeContainsText(tr, 'ballotSubmitFailed')).toBe(false);
     expect(detailsSpy).toHaveBeenCalled();
-    expect(formDescription(tr)).toBe(STORED_DESCRIPTION);
+    expect(formDescription(tr)).toBe(CHANGED);
   });
 });
 
