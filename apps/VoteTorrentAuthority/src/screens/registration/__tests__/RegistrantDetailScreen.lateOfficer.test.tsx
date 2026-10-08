@@ -319,11 +319,30 @@ describe("RegistrantDetailScreen — late officer explanation (D-51, NEVER rulin
 		expect(textOf(hostNode(tr, "registrant-detail-selective-late-officer"))).toBe("sealedBeforeOfficerExplanation");
 	});
 
+	// WR-R6-06: each absence check is anchored on the state it claims to test having rendered, so a
+	// stub drift that leaves a tier unrendered (or in an error state) cannot pass vacuously.
+	const L3_PRIVATE_ANCHOR: Record<string, string> = {
+		"no-opener": "registrant-detail-private-sealed-no-key",
+		unreadable: "registrant-detail-private-sealed-unreadable",
+		tampered: "registrant-detail-private-sealed-unreadable",
+		opened: "registrant-detail-private-empty",
+	};
 	it.each(["no-opener", "unreadable", "tampered", "opened"])("L3. %s renders no explanation", async (access) => {
 		await seed(mockRegistrationEngine);
 		stubPrivate(privTier({ detailsAccess: access }));
 		stubSelective(selTier({ detailsAccess: access, selectiveDetails: access === "opened" ? LEAVES : undefined }));
 		const tr = await renderScreen();
+		// Positive anchors: the tier states under test actually rendered.
+		present(tr, L3_PRIVATE_ANCHOR[access]!);
+		if (access === "opened") {
+			absent(tr, "registrant-detail-private-sealed");
+			absent(tr, "registrant-detail-selective-unread");
+			present(tr, "registrant-detail-selective-tier");
+		} else {
+			present(tr, "registrant-detail-private-sealed");
+			present(tr, "registrant-detail-selective-unread");
+		}
+		expect(consoleSpies[2]).not.toHaveBeenCalled();
 		absent(tr, "registrant-detail-private-late-officer");
 		absent(tr, "registrant-detail-selective-late-officer");
 		expect(treeText(tr)).not.toContain("sealedBeforeOfficerExplanation");

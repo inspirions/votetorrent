@@ -371,10 +371,24 @@ describe("RegistrationRequestApprovalScreen - late officer explanation", () => {
 	});
 
 	it("L5. no-opener, unreadable, tampered and readable render no explanation", async () => {
+		// WR-R6-06: each case first proves the state under test rendered (its own unreadable line, or
+		// the readable payload), so the absence check cannot pass on a screen that never rendered.
+		const UNREAD_LINE: Record<string, string> = {
+			"no-opener": dict("en").registrationContentNoKey,
+			unreadable: dict("en").registrationContentUnreadable,
+			tampered: dict("en").registrationContentTampered,
+		};
 		for (const access of ["no-opener", "unreadable", "tampered", "opened"]) {
 			jest.clearAllMocks();
 			mockCurrentRead = access === "opened" ? { ...PENDING_READ, payloadAccess: access } : UNREAD(access);
 			const tr = await renderScreen();
+			if (access === "opened") {
+				expect(exists(tr, "registration-request-approval-content-unreadable")).toBe(false);
+				expect(whole(tr)).toContain("Doe");
+			} else {
+				expect(UNREAD_LINE[access]).toEqual(expect.any(String));
+				expect(textOf(tr, "registration-request-approval-content-unreadable")).toBe(UNREAD_LINE[access]);
+			}
 			expect(exists(tr, "registration-request-approval-late-officer")).toBe(false);
 		}
 	});

@@ -265,6 +265,9 @@ describe("ProvisionSigningKeyScreen intake renewal after key replacement (A4)", 
 		seedRecovery();
 		const tr = await renderScreen();
 		await runRecovery(tr);
+		// WR-R6-06 positive anchors: the recovery reached success and the renewal actually ran.
+		expect(JSON.stringify(tr.toJSON())).toContain("signingKeyProvisioningSuccessHeading");
+		expect(mockRenew).toHaveBeenCalledTimes(1);
 		expect(JSON.stringify(tr.toJSON())).not.toContain("officerIntakeRenewalFailedBody");
 	});
 
@@ -334,6 +337,9 @@ describe("ProvisionSigningKeyScreen intake renewal after key replacement (A4)", 
 		nativeFake.produceAttestation.mockResolvedValue({ certificateChainBase64: ["l"], publicKeyCompressedHex: NEW_KEY });
 		const tr = await renderScreen();
 		await runRecovery(tr);
+		// WR-R6-06 positive anchor: first-run provisioning completed (the success screen rendered).
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalled();
+		expect(JSON.stringify(tr.toJSON())).toContain("signingKeyProvisioningSuccessHeading");
 		expect(mockRenew).not.toHaveBeenCalled();
 	});
 });

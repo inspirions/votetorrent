@@ -121,6 +121,11 @@ describe("SettingsScreen peer-unavailable reads (62-96)", () => {
 		const { NoNetworkEstablishedError } = require("../../../engines/engine-factory");
 		mockGetEngine = jest.fn().mockRejectedValue(new NoNetworkEstablishedError("none"));
 		const tr = await renderScreen();
+		// WR-R6-06 positive anchors: the no-network rejection was actually taken, and the screen
+		// rendered its network-independent controls.
+		expect(mockGetEngine).toHaveBeenCalled();
+		expect(tr.root.findAll((n) => n.props?.testID === "settings-language-toggle").length).toBeGreaterThan(0);
+		expect(console.error).not.toHaveBeenCalled();
 		expect(noticeCount(tr)).toBe(0);
 		expect(allText(tr)).not.toContain("settingsLoadFailed");
 	});

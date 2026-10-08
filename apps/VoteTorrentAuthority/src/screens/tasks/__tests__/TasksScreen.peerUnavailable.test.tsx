@@ -122,6 +122,12 @@ describe("TasksScreen peer-unavailable reads (62-96)", () => {
 		mockGetKeys.mockRejectedValue(new NoNetworkEstablishedError("none"));
 		mockGetSigs.mockResolvedValue([]);
 		const tr = await renderScreen();
+		// WR-R6-06 positive anchors: the load ran into the no-network rejection and the no-network
+		// empty state rendered.
+		expect(mockGetKeys).toHaveBeenCalled();
+		expect(allText(tr)).toContain("noNetworkTitle");
+		expect(allText(tr)).toContain("noNetwork");
+		expect(console.error).not.toHaveBeenCalled();
 		expect(noticeCount(tr)).toBe(0);
 		expect(allText(tr)).not.toContain("tasksLoadFailed");
 	});
