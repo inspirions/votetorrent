@@ -429,15 +429,17 @@ echo "[run-replication-proof] STRAND_ID captured: ${STRAND_ID}"
 # ── STEP 3: LAUNCH THE DRONE with STRAND_ID (D-07 automated injection) ───────
 # Source nvm, run drone under Node 22. Capture READY line and inject ws multiaddr
 # into the runner's generated config so it connects automatically.
-# STRAND_ID is the hash of the network the device created, so the drone must JOIN that strand, not
-# found a second history under the same id (round-3 UAT test 15: while peered, the device's own
-# committed rows read as missing). Both drones default to join. Only drone-A's role is overridable
-# from DRONE_STRAND_ROLE: pass DRONE_STRAND_ROLE=found to reproduce a historical run (drone-A then
-# founds the strand, as every run before this default did). Drone-B reads its OWN variable,
-# DRONE_B_STRAND_ROLE (default join), and never inherits DRONE_STRAND_ROLE: historical drone-B was
-# never a founder, and inheriting `found` would make it found a third history under the device's
-# STRAND_ID (WR-05).
-echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-join} under Node 22 ..."
+# Drone-A FOUNDS the proof strand by default (DRONE_STRAND_ROLE=found). STRAND_ID here is the fixed
+# proof-strand id, and the only device-side history under it is Peer A's Step-1 solo boot, which
+# wipe_proof_strand_store deletes before the Step-4 networked relaunch. With drone-A joining instead
+# (the 62-85 default), no node in the networked run holds the strand's founding Header: every node
+# logs `founder: false`, cadre-core's first-sync gate withholds the strand DB from all of them, and
+# acquireProofDb neither resolves nor throws, so REPL-01 times out at 420 s (2026-10-08 runs 2 and 4).
+# The round-3 UAT fork (test 15) needs a device-founded strand that SURVIVES into the drone's run;
+# this proof never has one. Pass DRONE_STRAND_ROLE=join to reproduce that variant. Drone-B reads its
+# OWN variable, DRONE_B_STRAND_ROLE (default join), and never inherits DRONE_STRAND_ROLE: drone-B
+# was never a founder, and inheriting `found` would make it found a second history (WR-05).
+echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-found} under Node 22 ..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "${NVM_DIR}/nvm.sh" ]; then
   # shellcheck source=/dev/null
@@ -471,7 +473,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-join}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-found}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -630,28 +632,76 @@ echo "[run-replication-proof] Drone-B strand addr: ${STRAND_B_ADDR}"
 
 # Inject the drone's ws multiaddr into the runner (D-07). The runner reads CONTROL_ADDR
 # at the top of replication-proof-runner.ts; we rewrite just that constant line.
-# The EXIT trap calls restore_flags which git-checkouts the FLAG_FILE; for CONFIG_FILE
-# we rely on git checkout too (it is tracked). Add CONFIG_FILE to the EXIT restore.
-# Capture the original runner for git-restore (it is tracked, git checkout -- restores it).
+# The EXIT trap restores CONFIG_FILE from a byte copy taken HERE, before injection. It used to
+# `git checkout --` it, which also silently discarded any UNCOMMITTED edit to the runner at the
+# end of the first run (2026-10-08: the fixes under test would have vanished after one run).
+CONFIG_BACKUP=$(mktemp "/tmp/replication-proof-runner-backup-XXXXXX")
+cp "${CONFIG_FILE}" "${CONFIG_BACKUP}"
+
+# Invite-share channel (62-102). NetworkEngine.respondToInvite needs the invite's one-time
+# PRIVATE key, which only the founder phone holds. The founder logs PROOF_INVITE_SHARE=
+# <inviteKey>.<invitePrivate>; a watcher copies every one it sees on either phone into
+# SHARE_DIR/invite-share.txt, and a loopback HTTP server serves it to the joiner, which the
+# emulator reaches at 10.0.2.2. Throwaway keys of a throwaway proof network, dev harness only.
+SHARE_PORT="${PROOF_SHARE_PORT:-8790}"
+SHARE_DIR=$(mktemp -d "/tmp/replication-proof-share-XXXXXX")
+: > "${SHARE_DIR}/invite-share.txt"
+python3 -m http.server "${SHARE_PORT}" --bind 127.0.0.1 --directory "${SHARE_DIR}" > /dev/null 2>&1 &
+SHARE_SERVER_PID=$!
+sleep 1
+if ! kill -0 "${SHARE_SERVER_PID}" 2>/dev/null; then
+  echo "[run-replication-proof] ERROR: invite-share server could not bind 127.0.0.1:${SHARE_PORT} (set PROOF_SHARE_PORT)" >&2
+  exit 1
+fi
+(
+  # The script runs under `set -euo pipefail`, which this subshell inherits: a pass with no share
+  # yet (grep matches nothing, exit 1) would fail the pipeline and kill the watcher on its first
+  # iteration, before the founder has logged anything (2026-10-08 run 7: 0 shares relayed).
+  set +e +o pipefail
+  while true; do
+    for serial in "${PEER_A_SERIAL}" "${PEER_B_SERIAL}"; do
+      adb -s "${serial}" logcat -d -s ReactNativeJS:I 2>/dev/null \
+        | grep -oE 'PROOF_INVITE_SHARE=[0-9a-fA-F]+\.[0-9a-fA-F]{64}' | cut -d= -f2
+    done | cat "${SHARE_DIR}/invite-share.txt" - | sort -u > "${SHARE_DIR}/invite-share.next"
+    mv "${SHARE_DIR}/invite-share.next" "${SHARE_DIR}/invite-share.txt"
+    sleep 3
+  done
+) &
+SHARE_WATCH_PID=$!
+SHARE_URL_FOR_DEVICE="http://10.0.2.2:${SHARE_PORT}/invite-share.txt"
+cleanup_share() {
+  kill "${SHARE_WATCH_PID}" "${SHARE_SERVER_PID}" 2>/dev/null || true
+  local n
+  n=$(grep -c . "${SHARE_DIR}/invite-share.txt" 2>/dev/null || echo 0)
+  echo "[run-replication-proof] invite-share channel: ${n} share(s) relayed" >&2
+  rm -rf "${SHARE_DIR}" 2>/dev/null || true
+}
 # shellcheck disable=SC2064
-trap 'restore_flags; git checkout -- '"${CONFIG_FILE}"' 2>/dev/null || true' EXIT
+trap 'restore_flags; cleanup_share; cp "'"${CONFIG_BACKUP}"'" "'"${CONFIG_FILE}"'" && rm -f "'"${CONFIG_BACKUP}"'"' EXIT
 
 # Replace the CONTROL_ADDR placeholder line in the runner with the real drone control address.
 # The device emulator reaches the host at 10.0.2.2; replace the host IP in the addr.
 # The drone emits its loopback (127.0.0.1) ws multiaddr; the Android emulator reaches the
 # host loopback at 10.0.2.2. Rewrite either loopback/wildcard host to the emulator alias.
-# Only drone-A's control addr is injected (CONTROL_ADDR) — the control network is
-# unaffected by the n=4 strand-cohort growth (D-04); only the strand cohort (below)
-# needs both drones' addresses.
+# Both drones' control addrs are injected: CONTROL_ADDR (drone-A) and CONTROL_ADDR_B (drone-B).
+# With drone-A alone, drone-B held no connection to either phone and every dial-back to a phone
+# ended in NO_RESERVATION (2026-10-08). The runner uses both as control bootstraps and relays.
 DRONE_ADDR_FOR_DEVICE=$(echo "${DRONE_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
+DRONE_B_ADDR_FOR_DEVICE=$(echo "${DRONE_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Apply the same host-IP rewrite for the strand addresses (Pitfall 2: separate addresses, separate nodes).
 STRAND_ADDR_FOR_DEVICE=$(echo "${STRAND_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 STRAND_B_ADDR_FOR_DEVICE=$(echo "${STRAND_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Use a temp marker that is not a regex special char.
-python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_INVITE}" << 'PYEOF'
+# Device-sized poll budgets (ticks of the runner's 1 s POLL_INTERVAL_MS; each tick is a real
+# distributed read, so wall time is longer). The source keeps its short defaults for jest.
+INVITE_SLOT_POLL_FOR_DEVICE="${PROOF_INVITE_SLOT_POLL_MAX:-420}"
+READ_POLL_FOR_DEVICE="${PROOF_READ_POLL_MAX:-480}"
+python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_INVITE}" "${DRONE_B_ADDR_FOR_DEVICE}" "${SHARE_URL_FOR_DEVICE}" "${INVITE_SLOT_POLL_FOR_DEVICE}" "${READ_POLL_FOR_DEVICE}" << 'PYEOF'
 import sys
 path, control_addr, strand_addr, strand_addr_b = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 invite = sys.argv[5]
+control_addr_b, share_url = sys.argv[6], sys.argv[7]
+invite_slot_poll, read_poll = sys.argv[8], sys.argv[9]
 content = open(path).read()
 import re
 # Inject CONTROL_ADDR (control-network bootstrap — drone-A's control node).
@@ -702,6 +752,29 @@ new_content, n_invite = re.subn(
     new_content,
     count=1,
 )
+for const_name, value in (('CONTROL_ADDR_B', control_addr_b), ('PROOF_INVITE_SHARE_URL', share_url)):
+    new_content, n_const = re.subn(
+        r"(const " + const_name + r" = ')[^']*(')",
+        r"\g<1>" + value + r"\g<2>",
+        new_content,
+        count=1,
+    )
+    if n_const != 1:
+        print(f'[run-replication-proof] ERROR: {const_name} constant not found in the runner', file=sys.stderr)
+        sys.exit(1)
+
+for const_name, value in (('INVITE_SLOT_POLL_MAX', invite_slot_poll), ('REPL_POLL_MAX', read_poll)):
+    new_content, n_const = re.subn(
+        r"(const " + const_name + r" = )\d+(;)",
+        r"\g<1>" + str(int(value)) + r"\g<2>",
+        new_content,
+        count=1,
+    )
+    if n_const != 1:
+        print(f'[run-replication-proof] ERROR: {const_name} constant not found in the runner', file=sys.stderr)
+        sys.exit(1)
+    print(f"[run-replication-proof] {const_name} in runner injected: {value}")
+
 if n_invite != 1:
     # Fail loudly: a silently-unwritten invite boots every device unenrolled, which fails
     # later as an unexplained empty strand cohort — the exact misdiagnosis this closes.
@@ -714,6 +787,8 @@ print(f"[run-replication-proof] PROOF_INVITE in runner injected ({len(invite_for
 print(f"[run-replication-proof] CONTROL_ADDR in runner injected: {control_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR in runner injected: {strand_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {strand_addr_b}")
+print(f"[run-replication-proof] CONTROL_ADDR_B in runner injected: {control_addr_b}")
+print(f"[run-replication-proof] PROOF_INVITE_SHARE_URL in runner injected: {share_url}")
 PYEOF
 
 # ── STEP 4: RELAUNCH BOTH PEERS NETWORKED for the symmetric proof run ─────────
@@ -940,7 +1015,11 @@ fi
 # distributed-DB round trip, not a local read. At that measured rate a full 120-tick read phase
 # needs ~480 s; budget for the bad case (same margin pattern as STRAND_PEERS_TIMEOUT/
 # STRAND_TIMEOUT above, both raised past their own measured worst case for the same reason).
-VERDICT_TIMEOUT=600
+# 2026-10-08 run 8: the founder's genesis + invite ceremony took ~4 min after its acquire, and
+# the joiner then needs minutes more to accept and create its authority, so both read phases run
+# far longer than the 120-tick default. The runner's device budgets are injected below
+# (PROOF_INVITE_SLOT_POLL_MAX / PROOF_READ_POLL_MAX); this poll must outlast them.
+VERDICT_TIMEOUT=1200
 echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_A_SERIAL} (${VERDICT_TIMEOUT}s) ..."
 VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "${PEER_A_SERIAL}" $((VERDICT_TIMEOUT / 5)))
 echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_B_SERIAL} (${VERDICT_TIMEOUT}s) ..."

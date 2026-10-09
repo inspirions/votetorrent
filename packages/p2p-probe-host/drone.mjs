@@ -265,12 +265,19 @@ if (IS_FOUNDER) {
 } else if (DRONE_INVITE) {
   // A NON-founder drone (drone-B) is a joiner like any device: the founder will accept it
   // once it connects, but acceptance is only the owner's half. Redeeming the invite is the
-  // joiner's half — it anchors the founder's owner keys in this node's node-local trusted
-  // set (`trustOwnerKeys` with source 'invite'), which is what lets this node VERIFY
-  // owner-signed control state rather than merely being admitted. tools/multipeer-gate runs
-  // both halves for its drone-B; do the same here so the two stay comparable.
+  // joiner's half — anchoring the founder's owner keys in this node's node-local trusted set
+  // (`trustOwnerKeys` with source 'invite'), which is what lets this node VERIFY owner-signed
+  // control state rather than merely being admitted. `dialInvite` does NOT do that: it only
+  // dials. Until 2026-10-08 this branch called dialInvite alone, so drone-B's anchor stayed
+  // EMPTY, it authorized nobody, and it refused strand-addr from every node incl. drone-A.
   try {
-    await node.dialInvite(node.decodeInvite(DRONE_INVITE));
+    const invite = node.decodeInvite(DRONE_INVITE);
+    const ownerKeys = invite.ownerKeys ?? [];
+    if (ownerKeys.length > 0) {
+      await node.trustOwnerKeys(ownerKeys, 'invite');
+    }
+    L(`ENROL_OWNER_KEYS_ANCHORED=${ownerKeys.length}`);
+    await node.dialInvite(invite);
     L('ENROL_DIALED — redeemed the founder invite');
   } catch (e) {
     // Not fatal: the founder's acceptPhone can still confer membership. Loud, then continue.
