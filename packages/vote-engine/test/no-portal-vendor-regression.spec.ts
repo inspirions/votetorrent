@@ -167,9 +167,12 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // patch RETIRED — every timer now goes through upstream's guarded `unrefTimer`).
       // 2026-10-08: @optimystic 1.11.0 -> 1.12.1 (Optimystic#32 stream-open fallback across
       // connections; a catching-up member abstains instead of vetoing). @serfab stays 1.13.0 (latest).
+      // 2026-10-09: @serfab 1.13.0 -> 1.14.0 (cadre invitations replace the invite/accept ceremony,
+      // per-stream control-protocol guard, provisional stranger admission; the public-observer +
+      // cohort-topic patch forward-ported with a new guard-classification hunk). @optimystic stays 1.12.1.
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.13.' : '1.12.'
+        : pkg.startsWith('@serfab/') ? '1.14.' : '1.12.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

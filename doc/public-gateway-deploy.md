@@ -96,7 +96,7 @@ yarn workspace p2p-probe-host gateway
 ```
 
 Prints machine-readable `[gateway] KEY=value` lines: `GATEWAY_CADRE_CORE_PATH=`,
-`GATEWAY_RELAY=on|off`, `GATEWAY_AUTHORIZED_MEMBERS=`, `GATEWAY_ENROLLMENT_WINDOW_UNTIL=`,
+`GATEWAY_RELAY=on|off`, `GATEWAY_AUTHORIZED_MEMBERS=`, `GATEWAY_LIVE_CADRE_INVITATIONS=` (must be `0`),
 `GATEWAY_CONTROL_ADDR=` (the `/tls/ws` control multiaddr), `GATEWAY_CONTROL_ADDR_DNS=` (a
 `/dns4/localhost` rewrite of the same address, labeled as a rewrite, not an independent
 observation), and one `GATEWAY_STRAND_ADDR[<strandId>]=` per hosted strand.

@@ -264,12 +264,12 @@ jest.mock(
           : [];
       }
 
-      // Cadre membership ceremony (P2P-11). The runner redeems an injected invite after the
-      // relay reservation and before the strand work; with the committed placeholder it takes
-      // the skip branch, so these exist to be ASSERTED ON — chiefly that they are NOT called
-      // when no invite is injected.
-      public dialInvite = jest.fn(async () => {});
-      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+      // Cadre membership ceremony (P2P-11). The runner redeems an injected cadre invitation after
+      // the relay reservation and before the strand work; with the committed placeholder it takes
+      // the skip branch, so this exists to be ASSERTED ON — chiefly that it is NOT called when no
+      // invite is injected.
+      public partyId = 'votetorrent';
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
 
       // Section 4b write gate (run 18): the runner will not write until this peer's own
       // CadrePeer row carries a voucher from an owner anchored in the local trust store — the
@@ -336,6 +336,8 @@ jest.mock(
     return {
       CadreNode: FakeCadreNode,
       verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+      verifyInvitationAdmission: () => false,
+      decodeCadreInvitation: (s: string) => ({ v: 1, partyId: 'votetorrent', ownerKeys: [], members: [], encoded: s }),
     };
   },
   { virtual: true },
@@ -412,8 +414,8 @@ function reloadRunnerFullMock(): void {
           ? [{ toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' }]
           : [];
       }
-      public dialInvite = jest.fn(async () => {});
-      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+      public partyId = 'votetorrent';
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
       // Section 4b write gate — mirrors the module-level mock; vouched by default.
       // listAuthorizedMembers ALWAYS excludes self (check 1) — exactly what hid the defect.
       public listAuthorizedMembers = jest.fn(async () => []);
@@ -446,6 +448,8 @@ function reloadRunnerFullMock(): void {
     return {
       CadreNode: FakeCadreNode,
       verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+      verifyInvitationAdmission: () => false,
+      decodeCadreInvitation: (s: string) => ({ v: 1, partyId: 'votetorrent', ownerKeys: [], members: [], encoded: s }),
     };
   }, { virtual: true });
   jest.mock('@libp2p/websockets', () => ({ webSockets: () => ({}) }), { virtual: true });
@@ -829,12 +833,8 @@ describe('REPL-01 strand cohort markers', () => {
       expect(String(enrolCall![1])).toContain('skipped');
 
       // The placeholder must not be dialed as if it were an invite.
-      const node = mockConstructedNodes[0] as unknown as {
-        dialInvite: jest.Mock;
-        decodeInvite: jest.Mock;
-      };
-      expect(node.dialInvite).not.toHaveBeenCalled();
-      expect(node.decodeInvite).not.toHaveBeenCalled();
+      const node = mockConstructedNodes[0] as unknown as { redeemCadreInvitation: jest.Mock };
+      expect(node.redeemCadreInvitation).not.toHaveBeenCalled();
     });
 
     it('emits the enrolment marker AFTER relayReservation= and BEFORE strandPeers=', async () => {
@@ -933,7 +933,7 @@ describe('REPL-01 strand cohort markers', () => {
       // L('cadreAuthorized=', selfAuthorized, 'after', <n>, 's') — args[2] is the boolean.
       expect(authCall![2]).toBe(true);
       expect(mockVerifyCadrePeerVoucher).toHaveBeenCalledWith(
-        'fakePeerIdABC123', 'stamp-1', 'ownerKeyB64', 'sigB64',
+        'votetorrent', 'fakePeerIdABC123', 'stamp-1', 'ownerKeyB64', 'sigB64',
       );
     }, 120000);
 
@@ -1089,8 +1089,8 @@ function reloadRunnerWithControlledDb(): void {
           ? [{ toString: () => '/ip4/10.0.2.2/tcp/1/ws/p2p/fakeRelay/p2p-circuit' }]
           : [];
       }
-      public dialInvite = jest.fn(async () => {});
-      public decodeInvite = jest.fn((s: string) => ({ partyId: 'votetorrent', encoded: s }));
+      public partyId = 'votetorrent';
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
       public listAuthorizedMembers = jest.fn(async () => []);
       private _selfAuthorized = true;
       public queryCadrePeers = jest.fn(async (): Promise<VoucherRow[]> => [
@@ -1121,6 +1121,8 @@ function reloadRunnerWithControlledDb(): void {
     return {
       CadreNode: FakeCadreNode,
       verifyCadrePeerVoucher: (...a: unknown[]) => mockVerifyCadrePeerVoucher(...a),
+      verifyInvitationAdmission: () => false,
+      decodeCadreInvitation: (s: string) => ({ v: 1, partyId: 'votetorrent', ownerKeys: [], members: [], encoded: s }),
     };
   }, { virtual: true });
   jest.mock('@libp2p/websockets', () => ({ webSockets: () => ({}) }), { virtual: true });
@@ -1591,7 +1593,7 @@ describe('replication-proof-runner — self-record publish after enrol', () => {
   const runner: string = fs.readFileSync(path.resolve(__dirname, '../replication-proof-runner.ts'), 'utf8');
 
   it('starts the publish only after a successful enrol', () => {
-    const enrolOk = runner.indexOf("L('enrolInvite=ok');");
+    const enrolOk = runner.indexOf("L('enrolInvite=ok'");
     const start = runner.indexOf('selfRecordPublish = publishSelfRecordAfterEnrol(node);');
     expect(enrolOk).toBeGreaterThan(-1);
     expect(start).toBeGreaterThan(enrolOk);

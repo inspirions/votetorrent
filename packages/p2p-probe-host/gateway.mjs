@@ -27,22 +27,19 @@
  *      node — see the `--self-check` mode below.
  *
  * DELIBERATE MEMBER-SEEDING DECISION — read this before touching the boot sequence.
- * This gateway calls `acceptPhone`, a name that also appears in `drone.mjs`'s ceremony. That is
- * the ONE place this file's boot sequence intentionally overlaps `drone.mjs`'s vocabulary, and it
- * is load-bearing, not copied ceremony machinery: `acceptPhone({ phonePeerId })` with NO
- * `issuedInvite` argument authorizes a peer directly with no token/expiry check
- * (`seed-bootstrap.js:960-980`) and leaves `enrollmentWindowUntil` at `0` — 56-01's seeding
- * recipe. This gateway does NOT call `createInvite` (which opens a 30-minute enrollment window as
- * a side effect that `openEnrollmentWindow` can never narrow back down — every stranger would
- * then be admitted unconditionally for the life of that window), does NOT run an
- * `openEnrollmentWindow` refresher, does NOT run `watchForJoiners`, does NOT call `dialInvite`,
- * and has no `DRONE_ENROL_DIR`. Without the single seeded member below,
- * `admitInboundControlConnection`'s `authorized.length === 0` cold-start carve-out
- * (`cadre-node.js:1118`) would admit EVERY stranger for a reason that has nothing to do with the
- * 56-04 patch — which would make `56-11`'s mesh-read gate pass for the wrong reason and make
- * `56-13`'s patch-removal control unable to fail. Seeding one member and asserting
- * `enrollmentWindowUntil === 0` is what makes stranger admission on this gateway attributable to
- * the patch instead.
+ * This gateway seeds one member with `authorizePeer(peerId)` — an owner-signed CadrePeer voucher
+ * written directly, with no invitation (56-01's seeding recipe; on cadre-core <= 1.13 the same
+ * write was spelled `acceptPhone({ phonePeerId })` with no invite). It does NOT mint a cadre
+ * invitation: on cadre-core 1.14 a LIVE `CadreInvite` row is the stranger window — while one is
+ * held, `/sereus/cadre-invite/1.0.0` is open to strangers and their connections stay up — so an
+ * invitation here would admit strangers for a reason that has nothing to do with the 56-04
+ * patch. It runs no auto-accept loop and has no `DRONE_ENROL_DIR`. Without the single seeded
+ * member below, `admitInboundControlConnection`'s cold-start carve-out (an empty authorized set
+ * admits everyone outright) would admit EVERY stranger for the same wrong reason — which would
+ * make `56-11`'s mesh-read gate pass for the wrong reason and make `56-13`'s patch-removal
+ * control unable to fail. Seeding one member and asserting ZERO live cadre invitations is what
+ * makes stranger admission on this gateway attributable to the patch instead. (The pre-1.14
+ * equivalent asserted `enrollmentWindowUntil === 0`; 1.14 deleted the enrollment window.)
  *
  * RELAY POSTURE. `enableRelay` is a REQUIRED node-local config key with NO default — it is
  * transcribed by the operator from `56-01-WALL-PROOF.md`'s measured posture
@@ -59,7 +56,7 @@ import { resolve as resolvePath, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate, createHash } from 'node:crypto';
-import { CadreNode, RELAY_ADMISSION_RESERVE_DEADLINE_MS } from '@serfab/cadre-core';
+import { CadreNode, PROVISIONAL_ADMISSION_DEADLINE_MS, PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
@@ -549,7 +546,12 @@ async function checkGaterRung(node, config) {
   const dialAddr = controlAddrs.find((a) => a.includes('/tls/ws'));
   if (!dialAddr) throw new Error('no /tls/ws control address to dial');
 
-  const holdMs = RELAY_ADMISSION_RESERVE_DEADLINE_MS + 3000; // comfortably past the deadline
+  // cadre-core 1.14: a stranger this node cannot place is admitted PROVISIONALLY and closed at
+  // the provisional deadline (+ a bounded graceful close). The patch's carve-out admits an
+  // observer outright, with no deadline, so surviving past both is the carve-out's observable.
+  // This gateway sets no `linkRoundTripMs`, so its deadline is the exported default.
+  const deadlineMs = PROVISIONAL_ADMISSION_DEADLINE_MS + PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS;
+  const holdMs = deadlineMs + 3000; // comfortably past the deadline
   let outsider;
   try {
     outsider = await createLibp2pNode({
@@ -577,18 +579,18 @@ async function checkGaterRung(node, config) {
     if (!stillOpen) {
       throw new Error(
         `connection did not survive ${holdMs}ms past dial (relay deadline is ` +
-          `${RELAY_ADMISSION_RESERVE_DEADLINE_MS}ms; status=${conn.status}) — classify as DENIED, ` +
+          `${deadlineMs}ms incl. close; status=${conn.status}) — classify as DENIED, ` +
           `not as an unclassifiable timeout.`,
       );
     }
-    if (survivedMs < RELAY_ADMISSION_RESERVE_DEADLINE_MS) {
+    if (survivedMs < deadlineMs) {
       throw new Error(
         `unclassifiable: survived only ${survivedMs}ms, less than the relay deadline ` +
-          `${RELAY_ADMISSION_RESERVE_DEADLINE_MS}ms — refusing to report a verdict rather than ` +
+          `${deadlineMs}ms — refusing to report a verdict rather than ` +
           `guess.`,
       );
     }
-    return { survivedMs, relayDeadlineMs: RELAY_ADMISSION_RESERVE_DEADLINE_MS, relayEnabled: config.enableRelay };
+    return { survivedMs, provisionalDeadlineMs: deadlineMs, relayEnabled: config.enableRelay };
   } finally {
     try {
       await outsider?.stop();
@@ -736,7 +738,7 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
     effects.gater = { pass: true, ...(await checkGaterRung(node, config)) };
     L(
       `EFFECT_GATER=PASS survivedMs=${effects.gater.survivedMs} ` +
-        `relayDeadlineMs=${effects.gater.relayDeadlineMs} relayEnabled=${effects.gater.relayEnabled}`,
+        `provisionalDeadlineMs=${effects.gater.provisionalDeadlineMs} relayEnabled=${effects.gater.relayEnabled}`,
     );
   } catch (e) {
     ok = false;
@@ -812,7 +814,7 @@ async function runSelfCheck({ node, config, provenanceResult, runtimeJsonPath, c
  *   publicObserverStrandIds: string[],
  *   enableRelay: boolean,
  *   authorizedMemberCount: number,
- *   enrollmentWindowUntil: number,
+ *   liveCadreInvitations: number,
  *   tls: { certPath: string, caRoot: string | null, spkiSha256Base64: string | null },
  *   stop: () => Promise<void>,
  *   config: unknown,
@@ -880,7 +882,7 @@ export async function startGateway(options = {}) {
   // DECISION". This gateway is never a cold-start node. ──────────────────────────────────────
   const seedMemberKey = await generateKeyPair('Ed25519');
   const seedMemberPeerId = peerIdFromPrivateKey(seedMemberKey).toString();
-  await node.acceptPhone({ phonePeerId: seedMemberPeerId });
+  await node.authorizePeer(seedMemberPeerId);
   const authorizedMembers = await node.listAuthorizedMembers();
   if (!(authorizedMembers.length >= 1)) {
     fatal(
@@ -890,11 +892,12 @@ export async function startGateway(options = {}) {
         `cause).`,
     );
   }
-  if (node.enrollmentWindowUntil !== 0) {
+  const liveCadreInvitations = (await node.listCadreInvitations()).filter((s) => s.live).length;
+  if (liveCadreInvitations !== 0) {
     fatal(
-      `gateway's enrollmentWindowUntil is ${node.enrollmentWindowUntil}, expected 0 — an open ` +
-        `enrollment window would admit every stranger unconditionally, not just observers of the ` +
-        `allowlisted strands.`,
+      `gateway holds ${liveCadreInvitations} live cadre invitation(s), expected 0 — a live ` +
+        `invitation opens the cadre-invite protocol to strangers, so stranger admission could not ` +
+        `be attributed to the observer allowlist.`,
     );
   }
 
@@ -909,7 +912,10 @@ export async function startGateway(options = {}) {
         schema,
         latencyHint: 'interactive',
       },
-      mode: 'bootstrap',
+      // `mode: 'bootstrap'` was deleted from StrandConfig in cadre-core 0.11 and has been ignored
+      // since; this gateway hosts each allowlisted strand solo, so it must FOUND it, or addStrand
+      // waits forever for a founder that never comes.
+      founder: true,
     });
   }
 
@@ -928,7 +934,7 @@ export async function startGateway(options = {}) {
   L('GATEWAY_RELAY=' + (config.enableRelay ? 'on' : 'off'));
   L('GATEWAY_COHORT_TOPIC=' + (config.strandCohortTopic.enabled ? 'on' : 'off'));
   L('GATEWAY_AUTHORIZED_MEMBERS=' + authorizedMembers.length);
-  L('GATEWAY_ENROLLMENT_WINDOW_UNTIL=' + node.enrollmentWindowUntil);
+  L('GATEWAY_LIVE_CADRE_INVITATIONS=' + liveCadreInvitations);
   L('GATEWAY_CONTROL_ADDR=' + controlAddr);
   // Rewrite, not an independently observed listen — the mkcert leaf covers both names.
   L('GATEWAY_CONTROL_ADDR_DNS=' + controlAddrDns);
@@ -977,7 +983,7 @@ export async function startGateway(options = {}) {
     publicObserverStrandIds: config.publicObserverStrandIds,
     enableRelay: config.enableRelay,
     authorizedMemberCount: authorizedMembers.length,
-    enrollmentWindowUntil: node.enrollmentWindowUntil,
+    liveCadreInvitations,
     cohortEffect,
     tls: {
       certPath,

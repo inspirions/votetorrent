@@ -234,8 +234,11 @@ async function main() {
 	if (!(handle.authorizedMemberCount >= 1)) {
 		fatal('origin-cold-start', `authorizedMemberCount is ${handle.authorizedMemberCount}, expected >= 1`);
 	}
-	if (handle.enrollmentWindowUntil !== 0) {
-		fatal('origin-enrollment-window-open', `enrollmentWindowUntil is ${handle.enrollmentWindowUntil}, expected 0`);
+	// cadre-core 1.14 deleted the enrollment window; a LIVE cadre invitation is the stranger
+	// window that replaced it, so the gateway must hold none for admission to be attributable to
+	// the observer allowlist.
+	if (handle.liveCadreInvitations !== 0) {
+		fatal('origin-stranger-window-open', `liveCadreInvitations is ${handle.liveCadreInvitations}, expected 0`);
 	}
 	for (const addr of handle.controlAddrs) {
 		if (!addr.includes('/tls/ws')) {
@@ -252,7 +255,7 @@ async function main() {
 	// consumer that keeps the LAST value silently read a different fact from
 	// one that keeps the FIRST.
 	console.log('ORIGIN_AUTHORIZED_MEMBERS=' + handle.authorizedMemberCount);
-	console.log('ORIGIN_ENROLLMENT_WINDOW_UNTIL=' + handle.enrollmentWindowUntil);
+	console.log('ORIGIN_LIVE_CADRE_INVITATIONS=' + handle.liveCadreInvitations);
 	console.log('ORIGIN_RELAY=' + (handle.enableRelay ? 'on' : 'off'));
 	console.log('ORIGIN_STRAND_ID=' + args.strandId);
 	for (const addr of handle.controlAddrs) {

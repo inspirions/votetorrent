@@ -380,9 +380,9 @@ export async function bootOrigin(strandId, originConfig = GATEWAY_CONFIG) {
 	if (!(authorizedMembers >= 1)) {
 		throw new PreflightFailedError(`origin-cold-start: ORIGIN_AUTHORIZED_MEMBERS is "${origin.facts.ORIGIN_AUTHORIZED_MEMBERS}", expected >= 1`);
 	}
-	if (origin.facts.ORIGIN_ENROLLMENT_WINDOW_UNTIL !== '0') {
+	if (origin.facts.ORIGIN_LIVE_CADRE_INVITATIONS !== '0') {
 		throw new PreflightFailedError(
-			`origin-enrollment-window-open: ORIGIN_ENROLLMENT_WINDOW_UNTIL is "${origin.facts.ORIGIN_ENROLLMENT_WINDOW_UNTIL}", expected "0"`,
+			`origin-stranger-window-open: ORIGIN_LIVE_CADRE_INVITATIONS is "${origin.facts.ORIGIN_LIVE_CADRE_INVITATIONS}", expected "0"`,
 		);
 	}
 	if (origin.controlAddrs.length === 0 || !origin.controlAddrs.every((addr) => addr.includes('/tls/ws'))) {

@@ -389,13 +389,16 @@ async function enrolNodeB (nodeA: any, nodeB: any, log: (line: string) => void):
     }
 
     try {
-      const { encodedInvite } = await withTimeout<any>(nodeA.createInvite(), HARNESS_TIMEOUTS.enrolMs, 'node-A createInvite')
-      await withTimeout(nodeB.dialInvite(nodeB.decodeInvite(encodedInvite)), HARNESS_TIMEOUTS.enrolMs, 'node-B dialInvite')
-      try {
-        await nodeA.acceptPhone({ phonePeerId: peerId }, nodeA.decodeInvite(encodedInvite))
-      } catch (e) {
-        log(`node-A acceptPhone attempt ${attempt} logged (non-fatal): ${(e as Error)?.message ?? e}`)
-      }
+      // cadre-core 1.14: one-sided redemption. Node-A mints a cadre invitation targeted at
+      // node-B; node-B redeems it at node-A, which seats node-B's CadrePeer row during the
+      // redemption (no owner-side accept). A retry mints a fresh invitation, so a seat spent by
+      // an attempt whose reply was lost never blocks the next one.
+      const { invitation } = await withTimeout<any>(
+        nodeA.createCadreInvitation({ peerId, grantsOwner: false }),
+        HARNESS_TIMEOUTS.enrolMs,
+        'node-A createCadreInvitation'
+      )
+      await withTimeout(nodeB.redeemCadreInvitation(invitation), HARNESS_TIMEOUTS.enrolMs, 'node-B redeemCadreInvitation')
       log(`enrol ceremony ran (attempt ${attempt})`)
     } catch (e) {
       lastErr = e
@@ -608,7 +611,7 @@ export async function startTwoNodeHarness (options: TwoNodeHarnessOptions = {}):
       founderCtl.nodeB = founder
     },
     async connectAndEnrolNodeB () {
-      // A peerless node-B has no route to node-A; dialInvite (inside enrolNodeB) is the dial.
+      // A peerless node-B has no route to node-A; redeemCadreInvitation (inside enrolNodeB) dials the invitation members.
       // Settle is checked afterwards, never faked: a failure throws.
       await enrolNodeB(nodeA, nodeB, log)
       const settled = await pollSettle(nodeA, nodeB, HARNESS_TIMEOUTS.meshMs)
