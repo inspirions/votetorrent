@@ -74,7 +74,7 @@ was left open; this document is where it was settled):
 | `listenHost` | string | Required, non-empty. |
 | `publicObserverStrandIds` | string[] | Required, **non-empty**. An empty or absent list refuses to boot — on a node whose entire purpose is public observation, an empty allowlist is a silently useless gateway, and that is exactly what gets misread downstream as a fourth wall. The key name matches `CadreNodeConfig.publicObserverStrandIds` **exactly** — there is no translation layer to get wrong — and it is node-local (D-03): never replicated, never reachable from the control DB. |
 | `enableRelay` | boolean | Required — **absent is fatal**, present-and-`false` boots normally. This is **transcribed from `56-01-WALL-PROOF.md`'s measured relay posture**, not a shortcut default. Inheriting `drone.mjs`'s posture, or the storage profile's implicit `relayServerEnabled()` default of `on`, is a **configuration error**, not a convenience. |
-| `strandCohortTopic` | `{ enabled: boolean, minSigs?: integer }` | Required — **absent, or a non-object, is fatal**; `enabled: false` boots normally (the fail-closed default). When `enabled` is `true`, `minSigs` is also required and must be an integer `>= 1`. This is the master switch for whether the gateway's strand node ORIGINATES reactivity notifications — see below for why `minSigs` is a two-sided number. |
+| `strandCohortTopic` | `{ enabled: boolean }` | Required — **absent, or a non-object, is fatal**; `enabled: false` boots normally (the fail-closed default). This is the master switch for whether the gateway's strand node ORIGINATES reactivity notifications; the gateway passes it to cadre-core's own `strandReactivity` option. A `minSigs` key is **refused** — see below. |
 | `tls.certPath` / `tls.keyPath` | string | Must resolve (relative to the config file) to a readable file. |
 
 **Operator action required.** `gateway.config.json` is gitignored, per-operator state. If your
@@ -82,12 +82,13 @@ existing config file predates this key, boot will now refuse with a named fatal
 (`config key "strandCohortTopic" is required...`) until you add it — transcribe the shape from
 `gateway.config.example.json`.
 
-**`minSigs` is a TWO-SIDED number.** The gateway signs reactivity certificates with this
-threshold; the browser subscriber (`apps/VoteTorrentPublic/src/peer/edge-node.js`'s exported
-`PUBLIC_COHORT_MIN_SIGS`) verifies against the SAME number. A subscriber configured for a
-different `minSigs` than the cohort that signs its certificates either verifies too little or
-rejects everything. Raising this deployment's serving cohort past one signer means raising BOTH
-sides together, in the same change — never one without the other.
+**`minSigs` is no longer a gateway setting.** Earlier gateways took
+`strandCohortTopic.minSigs` and treated it as a two-sided number shared with the browser's
+`PUBLIC_COHORT_MIN_SIGS`. cadre-core's own `strandReactivity` (1.12+) takes no host tuning, and
+upstream states that `cohortTopic.host.minSigs` does not govern the reactivity root: a reactivity
+root is the tail block's storage group, verified at the consensus super-majority. The gateway now
+refuses a config that still sets it, so an operator never believes it does something. If your
+`gateway.config.json` has `"minSigs"`, delete that key.
 
 ## 5. Running it
 
@@ -167,7 +168,7 @@ its frame-size cap and read timeout, libp2p's own connection-manager limits, and
 D-03's allowlist bounds **what** is served; it says nothing about **how many** peers may ask.
 `56-15` carries this into `SECURITY.md` and files the upstream issue.
 
-**strandCohortTopic widens the reachable surface, named as such.** Enabling the cohort-topic
+**`strandCohortTopic` (cadre-core `strandReactivity`) widens the reachable surface, named as such.** Enabling the cohort-topic
 host on a strand node registers the cohort-topic register/renew/sign/gossip protocols and the
 reactivity notify/recover protocols on a node an unauthenticated observer can already reach (via
 Section 6's provenance-gated address resolution). This is a real widening, not incidental tuning

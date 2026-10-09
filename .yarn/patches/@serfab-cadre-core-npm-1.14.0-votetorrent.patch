@@ -96,19 +96,6 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
          // Unregister the cadre invitation redemption handler, for the same reason.
          if (this.cadreInviteHandler && this.controlNode) {
              await this.cadreInviteHandler.unregister(this.controlNode);
-@@ -5604,7 +5654,11 @@ export class CadreNode {
-             founder: resolvedFounder,
-             // Retained with the launch config, so a hibernation wake rebuilds under the
-             // same identity without re-reading the control DB.
--            partyMemberPrivateKey
-+            partyMemberPrivateKey,
-+            // VoteTorrent patch (strand-cohort-topic): node-local, operator-supplied only — never
-+            // read from the replicated control database, a strand row, or a peer, exactly the
-+            // discipline the public-observer allowlist follows.
-+            strandCohortTopic: this.config.strandCohortTopic
-         }));
-         // The seed reached the node as `bootstrapNodes`, which only enters the
-         // address book via @libp2p/bootstrap discovery. Merge it directly too, so a
 diff --git a/dist/control-protocol-guard.js b/dist/control-protocol-guard.js
 index baab420cdcacf0f29b44c04db3df5b6d9f6951a9..fe20c918852979c99aaf4423a74030c449791bb4 100644
 --- a/dist/control-protocol-guard.js
@@ -151,17 +138,6 @@ index 7fd8755988ed773216e1ec79b747e971e773410b..1e1ada4e99985c38077bc85949e820ab
  // Peer-address record (self-published, signed, freshness-stamped CadrePeer row)
  export { peerRecordSignedPayload, signPeerRecord, verifyPeerRecordSignature, isPeerRecordFresh, isSignalingAddr, orderSignalingFirst, withTrailingPeerId, currentMemberTrustPolicy, DEFAULT_PEER_RECORD_MAX_AGE_MS, DEFAULT_PEER_RECORD_HEARTBEAT_MS } from './peer-record.js';
  // Device-token record (self-published, signed FCM/APNs push token — CadrePeer sibling)
-@@ -219,4 +222,9 @@ export { resolveRelayServer, PARTY_RELAY_MAX_RESERVATIONS, PARTY_RELAY_RESERVATI
- export { circuitMultiaddrs, superviseRelayReservation, DEFAULT_RELAY_RESERVE_TIMEOUT_MS, DEFAULT_RELAY_RESERVE_POLL_MS, DEFAULT_RELAY_CHECK_MS, DEFAULT_RELAY_MIN_BACKOFF_MS, DEFAULT_RELAY_MAX_BACKOFF_MS } from './relay-reservation.js';
- // Connection-path diagnostics (relayed vs direct classification + summary)
- export { classifyTransport, summarizeConnectionPaths, emptyConnectionPathSummary, DEFAULT_SETTLE_WINDOW_MS } from './diagnostics/connection-path.js';
-+// VoteTorrent patch (strand-cohort-topic): a provenance token only — its VALUE is the node-local
-+// launch-config key name this patch introduces on `buildStrandRuntime`/`startStrand`. Not a
-+// module, not a service: a consumer imports and compares this value, never a literal copied into
-+// the consumer's own source.
-+export const STRAND_COHORT_TOPIC_CONFIG_KEY = 'strandCohortTopic';
- //# sourceMappingURL=index.js.map
-\ No newline at end of file
 diff --git a/dist/membership-connection-gater.js b/dist/membership-connection-gater.js
 index 4ea1e3458a147b661820c0bdaba4bf51ec0a0cd4..9fa3bd551f26fa2b77ca819ae85ed21a3e1b90e9 100644
 --- a/dist/membership-connection-gater.js
@@ -211,39 +187,6 @@ index 4ea1e3458a147b661820c0bdaba4bf51ec0a0cd4..9fa3bd551f26fa2b77ca819ae85ed21a
              let verdict;
              try {
                  verdict = await decideInbound(remotePeerId);
-diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
-index c4b19076bfb2e01cb1475da8bbe54414474bf308..8dee0f60dcce4eb79fc35fed23d1c31c5beacfe8 100644
---- a/dist/strand-instance-manager.js
-+++ b/dist/strand-instance-manager.js
-@@ -509,6 +509,28 @@ export class StrandInstanceManager {
-                     enableRingZulu: config.profile === 'storage'
-                 },
-                 ...(config.privateKey && { privateKey: config.privateKey }),
-+                // VoteTorrent patch (strand-cohort-topic): a node-local, fail-closed cohort-topic
-+                // surface. Contributes a `cohortTopic` key ONLY when the launch config's
-+                // `strandCohortTopic` says so — strictly `enabled === true`, AND (when `strandIds`
-+                // is a non-empty array) `strandIds.includes(strandId)`. When either fails this
-+                // contributes NOTHING: no `cohortTopic: undefined` key, because the upstream read
-+                // is `options.cohortTopic?.enabled === true` and an explicitly-undefined key is
-+                // still a behavioural difference in a diff. This patch never supplies a
-+                // requested-cohort-size override (both sides must resolve node-base's own
-+                // default), never supplies a host-profile override (the strand node WANTS the
-+                // host's own default so it is willing at the reactivity tier), and never supplies
-+                // a gossip-cadence override.
-+                ...(config.strandCohortTopic?.enabled === true &&
-+                    (!Array.isArray(config.strandCohortTopic.strandIds) ||
-+                        config.strandCohortTopic.strandIds.length === 0 ||
-+                        config.strandCohortTopic.strandIds.includes(strandId)) && {
-+                    cohortTopic: {
-+                        enabled: true,
-+                        ...(typeof config.strandCohortTopic.minSigs === 'number' && {
-+                            host: { minSigs: config.strandCohortTopic.minSigs }
-+                        })
-+                    }
-+                }),
-                 // Built per runtime, not per launch: the adapter stops saving once the strand's
-                 // state is forgotten, and a rebuilt runtime is what starts it saving again.
-                 //
 diff --git a/dist/strand-observer-protocol.js b/dist/strand-observer-protocol.js
 new file mode 100644
 index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbdfa8b6762
