@@ -203,8 +203,11 @@ const execAsync = promisify(exec);
 // @optimystic 1.10.1 -> 1.11.0 + @serfab 1.12.0 -> 1.13.0 bump (2026-10-06): same single
 // mismatch, re-keyed. The peer range moved to ^4.20.1, which dragged @quereus/quereus 4.20.0 ->
 // 4.20.1; YN0002 still names packages/attestation-native as the workspace that does not provide it.
+//
+// @optimystic 1.11.0 -> 1.12.1 bump (2026-10-08, @serfab stays 1.13.0, already latest): same single
+// mismatch, re-keyed. The peer range is still ^4.20.1; the cause is unchanged.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.11.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.12.1',
 ]);
 
 // The ✘ marker (U+2718)

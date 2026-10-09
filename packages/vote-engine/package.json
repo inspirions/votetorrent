@@ -55,7 +55,7 @@
 	"devDependencies": {
 		"@libp2p/crypto": "^5.1.13",
 		"@libp2p/websockets": "^10",
-		"@optimystic/db-p2p": "^1.11.0",
+		"@optimystic/db-p2p": "^1.12.1",
 		"@quereus/store": "^4.20.1",
 		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.13.0#~/.yarn/patches/@serfab-cadre-core-npm-1.13.0-votetorrent.patch",
 		"@types/mocha": "^10.0.10",
@@ -73,7 +73,7 @@
 		"@noble/ciphers": "2.2.0",
 		"@noble/curves": "2.2.0",
 		"@noble/hashes": "2.2.0",
-		"@optimystic/quereus-plugin-crypto": "^1.11.0",
+		"@optimystic/quereus-plugin-crypto": "^1.12.1",
 		"@peculiar/asn1-android": "^2.8.0",
 		"@peculiar/asn1-schema": "^2.8.0",
 		"@peculiar/x509": "^2.0.0",

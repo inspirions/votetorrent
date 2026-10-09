@@ -136,6 +136,19 @@ const STRAND_BOOTSTRAP_ADDR = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RES
 // unset, no crash — backward compatible with a single-drone run).
 const STRAND_BOOTSTRAP_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 
+// SECOND drone's CONTROL-node ws multiaddr (drone-B). Injected per-run like CONTROL_ADDR. It
+// is a second control bootstrap AND a second relay candidate: before it existed the phones
+// dialled drone-A alone, so drone-B held no connection to either phone and every dial-back
+// ended in NO_RESERVATION (2026-10-08 runs 2-6). Placeholder-aware: a single-drone run omits it.
+const CONTROL_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
+
+// Where the joiner fetches the founder's Authority invite share (dev proof channel, 62-102).
+// NetworkEngine.respondToInvite signs with the invite's one-time PRIVATE key, which only the
+// founder phone holds. The founder logs it as PROOF_INVITE_SHARE=; the harness serves the
+// latest one over plain HTTP on the host, which the emulator reaches at 10.0.2.2. Throwaway
+// keys from a throwaway proof network, never a device key. Placeholder disables the channel.
+const PROOF_INVITE_SHARE_URL = 'UPDATE_AFTER_DRONE_RESTART';
+
 // Cadre invite — the base64url-encoded CadreInvite drone-A mints at boot and advertises as
 // PROOF_INVITE=. The harness injects it here per-run, exactly like the addresses above (D-07).
 //
@@ -157,10 +170,33 @@ function resolveBootstrapNodes(addr: string): string[] {
   return [addr];
 }
 
+// The dev invite-share channel (PROOF_INVITE_SHARE_URL). The harness serves every
+// PROOF_INVITE_SHARE= line it has seen, one `<inviteKey>.<invitePrivate>` per line.
+const INVITE_SHARE_CHANNEL = !PROOF_INVITE_SHARE_URL.includes(BOOTSTRAP_PLACEHOLDER);
+
+/** The shares published so far, by inviteKey. Empty on any fetch failure (the caller re-polls). */
+async function fetchInviteShares(): Promise<Map<string, string>> {
+  const shares = new Map<string, string>();
+  try {
+    const res = await fetch(PROOF_INVITE_SHARE_URL, { cache: 'no-store' });
+    if (res.ok) {
+      for (const line of (await res.text()).split('\n')) {
+        const [key, priv] = line.trim().split('.');
+        if (key && priv) {
+          shares.set(key, priv);
+        }
+      }
+    }
+  } catch {
+    // Unreachable channel reads as "no share yet"; the joiner's bounded poll reports the miss.
+  }
+  return shares;
+}
+
 // In solo bootstrap mode (harness Step 1) the drone address has not been injected yet,
 // so CONTROL_ADDR is still the placeholder. Boot with NO bootstrap node — the runner is
 // genuinely solo (CF-02 bootstrap mode), creates the proof network, and emits strandId=.
-const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
+const BOOTSTRAP_NODES = [...resolveBootstrapNodes(CONTROL_ADDR), ...resolveBootstrapNodes(CONTROL_ADDR_B)];
 
 // The `STRAND_RELAY_LISTEN_ADDRS` constant that stood here is REMOVED.
 //
@@ -196,7 +232,9 @@ const BOOTSTRAP_NODES = resolveBootstrapNodes(CONTROL_ADDR);
 // Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
 // through the placeholder-aware resolveBootstrapNodes guard, so a solo/placeholder boot
 // yields [] (degraded, not a crash).
-const CONTROL_RELAY_ADDRS = resolveBootstrapNodes(CONTROL_ADDR);
+// drone-B is listed second: cadre-core reserves through the FIRST relay that answers, so
+// drone-A stays the primary and drone-B is the fallback when drone-A does not answer.
+const CONTROL_RELAY_ADDRS = [...resolveBootstrapNodes(CONTROL_ADDR), ...resolveBootstrapNodes(CONTROL_ADDR_B)];
 
 // Poll constants (consistent with dial-probe.ts connection-poll shape).
 // PEER_POLL_MAX: 3 ticks × 1 s = 3 s peer-connection wait (exits early when peers appear).
@@ -602,7 +640,17 @@ export async function runReplicationProof(): Promise<void> {
       L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
     } else {
       try {
-        await node.dialInvite(node.decodeInvite(PROOF_INVITE));
+        const invite = node.decodeInvite(PROOF_INVITE);
+        // dialInvite only DIALS. Anchoring the invite's ownerKeys is the joiner's half of
+        // redemption (cadre-core's trustOwnerKeys doc), and without it this node's trusted-owner
+        // anchor stays EMPTY: it authorizes nobody, and isSelfVouched can never be true
+        // (cadreAuthorized=false on every run before 2026-10-08).
+        const ownerKeys = invite.ownerKeys ?? [];
+        if (ownerKeys.length > 0) {
+          await node.trustOwnerKeys(ownerKeys, 'invite');
+        }
+        L('ownerKeysAnchored=', ownerKeys.length);
+        await node.dialInvite(invite);
         L('enrolInvite=ok');
         selfRecordPublish = publishSelfRecordAfterEnrol(node);
       } catch (enrolErr) {
@@ -887,6 +935,13 @@ export async function runReplicationProof(): Promise<void> {
       // createStrandDbFactory (D-14).
       const db = strandDb;
       const proofUserId = `repl-user-${peerTail}`;
+      // ONE founder signing key per run. Harness-only identity, never the device's real key
+      // (mirrors vote-engine/test/fixtures/test-context.ts's makeTestSignCallback). The signer
+      // checks (04c15797, 2026-10-02) require the signer to be a registered, unexpired UserKey of
+      // the signing user, so genesis registers it below and every invite signing (incl. the
+      // re-issue retry) must use this same key, not a fresh one per call.
+      const founderPrivateKey = secp256k1.utils.randomSecretKey();
+      const founderPublicKeyHex = bytesToHex(secp256k1.getPublicKey(founderPrivateKey));
       const nowDt = (): string =>
         // Canonical datetime form — NO trailing 'Z', no milliseconds (19 chars). Matches
         // vote-engine's nowCanonicalDatetime() exactly; reimplemented locally rather than
@@ -929,6 +984,16 @@ export async function runReplicationProof(): Promise<void> {
             `insert into User (Id, Name, ImageRef)
               with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 0
               values ('${proofUserId}', 'Proof User ${peerTail}', null);`,
+          ),
+        );
+        // The founder's first key, exactly as NetworksEngine.createNetwork registers one
+        // (UserKey.InsertValid's first-key branch: count = 1 and context.UserKey is null).
+        const keyExpiration = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+        await withControlRetry('write phase founder: user key insert', () =>
+          db.exec(
+            `insert into UserKey (UserId, Type, PubKey, Expiration)
+              with context UserKey = null, Signature = null, Tid = 0, now = '${nowDt()}', IsSignatureValid = true
+              values ('${proofUserId}', 'M', '${founderPublicKeyHex}', '${keyExpiration}');`,
           ),
         );
         await withControlRetry('write phase founder: authority insert', () =>
@@ -977,18 +1042,24 @@ export async function runReplicationProof(): Promise<void> {
           { db, user: { id: proofUserId, name: `Proof User ${peerTail}`, activeKeys: [] } as User },
         );
         const inviteShare = authorityEngine.createAuthorityInvite(FOUNDER_AUTHORITY_NAME);
-        // Harness-only signing identity — never the device's real key (mirrors
-        // vote-engine/test/fixtures/test-context.ts's makeTestSignCallback, reimplemented
-        // locally since test fixtures are not importable into app/dev-tooling code).
-        const founderPrivateKey = secp256k1.utils.randomSecretKey();
-        const founderPublicKeyHex = bytesToHex(secp256k1.getPublicKey(founderPrivateKey));
+        // Signs with the run's founderPrivateKey (registered as a UserKey at genesis).
         const signCallback = async (digest: Uint8Array): Promise<Signature> => ({
           signature: bytesToHex(secp256k1.sign(digest, founderPrivateKey)),
           signerKey: founderPublicKeyHex,
           signerUserId: proofUserId,
         });
         await authorityEngine.saveInviteWithSigning(inviteShare, 'iad' as Scope, signCallback);
+        // Hand the share to the joiner through the harness (see PROOF_INVITE_SHARE_URL). Logged
+        // only after the slot is saved, so the share always names a slot that exists.
+        L(`PROOF_INVITE_SHARE=${inviteShare.inviteKey}.${inviteShare.invitePrivate}`);
+        sharePublished = true;
       }
+
+      // Set once THIS founder has published an invite share. With the share channel on, only that
+      // counts as an open invite: a slot the signing ceremony left half-done (2026-10-09 run 10:
+      // a strand read failed mid-signing with `Some peers did not complete`) has no share, so the
+      // joiner could never redeem it, and treating it as open stopped the founder re-issuing.
+      let sharePublished = false;
 
       /** Is an Authority InviteSlot visible that nobody has redeemed yet? */
       async function unredeemedAuthoritySlotExists(): Promise<boolean> {
@@ -1009,35 +1080,47 @@ export async function runReplicationProof(): Promise<void> {
        * real invite-bound NetworkEngine.createAuthority(..., { inviteSlotCid, inviteSignature }).
        */
       async function attemptJoinViaInvite(): Promise<string> {
-        type SlotRow = { cid: string; inviteKey: string; inviteSignature: string };
+        type SlotRow = { cid: string; inviteKey: string; inviteSignature: string; invitePrivate?: string };
         let slot: SlotRow | undefined;
         for (let i = 0; i < INVITE_SLOT_POLL_MAX && !slot; i++) {
           slot = await withControlRetry('write phase joiner: poll InviteSlot', async () => {
+            // With the share channel on, take only a slot whose share the founder published: a
+            // half-signed slot left by a failed ceremony can never be redeemed (run 10).
+            const shares = INVITE_SHARE_CHANNEL ? await fetchInviteShares() : undefined;
             for await (const row of db.eval(
               // Unredeemed only: a slot with an InviteResult is spent, and redeeming it again fails
               // `UNIQUE constraint failed: InviteResult.SlotCid` (spike 095 leg 3, Peer A).
               `SELECT Cid, InviteKey, InviteSignature FROM InviteSlot WHERE Type = 'au' AND Cid NOT IN (SELECT SlotCid FROM InviteResult)`,
             )) {
               if (row && row['Cid']) {
-                return {
+                const candidate: SlotRow = {
                   cid: String(row['Cid']),
                   inviteKey: String(row['InviteKey']),
                   inviteSignature: String(row['InviteSignature'] ?? ''),
                 };
+                if (!shares) {
+                  return candidate;
+                }
+                const invitePrivate = shares.get(candidate.inviteKey);
+                if (invitePrivate) {
+                  return { ...candidate, invitePrivate };
+                }
               }
             }
             return undefined;
           });
           if (!slot) {
             if (i === 0) {
-              L('write phase joiner: no Authority InviteSlot yet, waiting for the founder to publish one');
+              L(INVITE_SHARE_CHANNEL
+                ? 'write phase joiner: no Authority InviteSlot with a published share yet, waiting for the founder'
+                : 'write phase joiner: no Authority InviteSlot yet, waiting for the founder to publish one');
             }
             await new Promise<void>(r => setTimeout(r, POLL_INTERVAL_MS));
           }
         }
         if (!slot) {
           throw new Error(
-            `write phase joiner: no Authority InviteSlot appeared within ${INVITE_SLOT_POLL_MAX * POLL_INTERVAL_MS / 1000}s`,
+            `write phase joiner: no Authority InviteSlot${INVITE_SHARE_CHANNEL ? ' with a published share' : ''} appeared within ${INVITE_SLOT_POLL_MAX} polls`,
           );
         }
 
@@ -1068,6 +1151,8 @@ export async function runReplicationProof(): Promise<void> {
           }
         }
 
+        // Undefined without the share channel, so respondToInvite fails closed (invite-key-required).
+        const invitePrivate = slot.invitePrivate;
         const joinAdminEffectiveAt = nowDt();
         const inviteAction: InviteAction<AuthorityInviteInvokes> = {
           invite: { type: 'au', expiration: '', inviteKey: slot.inviteKey, inviteSignature: '' },
@@ -1084,10 +1169,11 @@ export async function runReplicationProof(): Promise<void> {
               },
             ],
           },
-          // 62-102: NetworkEngine.respondToInvite now signs with the invite's one-time private key
-          // itself and refuses (code invite-key-required) without it. This dev two-device joiner
-          // has no invite private key, so this fallback fails closed. That is two-device proof
-          // debt; see the two-device todo. The field below is ignored by the engine.
+          // 62-102: NetworkEngine.respondToInvite signs with the invite's one-time private key
+          // itself and refuses (code invite-key-required) without it. The founder phone hands
+          // it over through the harness share channel (fetchInviteShares). The field below is
+          // ignored by the engine.
+          invitePrivate,
           inviteSignature: 'a'.repeat(128),
         };
         const networkEngine = new NetworkEngine(
@@ -1149,7 +1235,9 @@ export async function runReplicationProof(): Promise<void> {
             // InviteSlot and redeem it, leaving the sibling nothing to join through (the leg-6b
             // self-orphan shape again). A founder never redeems an invite. It makes sure one is
             // open for the sibling, and its committed Authority row is its own write.
-            let published = await unredeemedAuthoritySlotExists();
+            const inviteOpen = async (): Promise<boolean> =>
+              INVITE_SHARE_CHANNEL ? sharePublished : unredeemedAuthoritySlotExists();
+            let published = await inviteOpen();
             for (let attempt = 1; !published && attempt <= FOUNDER_INVITE_RETRIES; attempt++) {
               L('write phase founder: row committed but no open invite, re-issuing, attempt', attempt);
               try {
@@ -1157,7 +1245,7 @@ export async function runReplicationProof(): Promise<void> {
                 published = true;
               } catch (inviteErr) {
                 L('write phase founder: invite re-issue failed:', inviteErr instanceof Error ? inviteErr.message : String(inviteErr));
-                published = await unredeemedAuthoritySlotExists();
+                published = await inviteOpen();
               }
             }
             if (!published) {
