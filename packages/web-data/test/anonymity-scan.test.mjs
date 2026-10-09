@@ -135,10 +135,15 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * table (the whole point of publishing it is that voters encrypt to it) and the released-share
  * table (public by design once released, D-17 — anyone with k shares may reconstruct).
  * 31 -> 33 forbidden, 37 -> 39 public-safe, 68 -> 72 total.
+ *
+ * 2026-10-09 (vote-block schema): +2 vote-block tables, both AGGREGATE (counts only). Their
+ * counts are turnout; their rows name registrants (the block's frozen voter list, and who voted
+ * in which block), so no row is ever published. Forbidden stays 33, 39 -> 41 public-safe,
+ * 72 -> 74 total.
  */
 const EXPECTED_FORBIDDEN_COUNT = 33;
-const EXPECTED_PUBLIC_SAFE_COUNT = 39;
-const EXPECTED_TABLE_COUNT = 72;
+const EXPECTED_PUBLIC_SAFE_COUNT = 41;
+const EXPECTED_TABLE_COUNT = 74;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above
