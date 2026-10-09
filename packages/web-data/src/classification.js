@@ -93,6 +93,10 @@ export const CLASSIFICATION = {
 	AssociationRequest: [CLASS.AGGREGATE, 'Counts by AssociationRequestStatus', ['pre','voting']],
 	AttestationVerdict: [CLASS.AGGREGATE, 'Device-integrity verdicts; per-device rows identify hardware', ['pre','voting']],
 	RegistrantAccessEvent:[CLASS.AGGREGATE,'Audit of who READ registrant data — publishing rows would leak the very access it audits', ['pre','voting','settling','closed']],
+	// Vote blocks. Counts are the turnout an observer wants (gap A); a row is per-person: the block
+	// row lists its voters' RegistrantIds (frozen voter set) and a voter row names who voted where.
+	VoteBlock:          [CLASS.AGGREGATE, 'Encrypted ballot block. count(*) and sum(EntryCount) are public turnout; the row also carries VoterRegistrantIds, so rows are never published', ['voting','settling','closed']],
+	VoteBlockVoter:     [CLASS.AGGREGATE, 'Who voted on which ballot, and in which block — never what they voted. count(*) by ballot is turnout; a row names a registrant, so rows are never published', ['voting','settling','closed']],
 
 	// ── D-15 CORRECTION (both differ from spike 087, which said NEVER).
 	Task:               [CLASS.AGGREGATE, 'D-15: the ROW is still never published — an operational work-queue row names the user it belongs to. Only count(*) / sum(IsCompleted) over it may reach an anonymous reader (D-14: "N of M keyholders have released", with no task row exposed). Classified AGGREGATE rather than allowlisted so the existing counts-only rule covers it with no carve-out to rot. IsCompleted (votetorrent.qsql:1138) lives HERE, not on the extension table, which is why D-14 needs a join', ['settling','closed']],
@@ -155,7 +159,7 @@ export const CLASSIFICATION = {
  * @type {ReadonlyArray<readonly [string, string, string, string]>}
  */
 export const NO_SOURCE = [
-	['A', 'Ballots cast so far / turnout during voting', 'doc/election.md:95-110', 'No Vote or VoteEntry table. Vote and voter entries live in negotiated blocks, which the schema does not model.'],
+	['A', 'Ballots cast so far / turnout during voting', 'doc/election.md:95-110', 'The schema now models blocks (VoteBlock, VoteBlockVoter; both AGGREGATE, so count(*) by ballot is turnout), but no public reader counts them yet and nothing writes them until a block former exists.'],
 	['B', 'Voter-verifiable receipt (check my vote nonce is included)', 'doc/election.md:97', 'The nonce is held privately by the voter; nothing on the network to check it against.'],
 	['C', 'Merkle root of the vote blocks', 'doc/election.md:114', 'No Block or MerkleNode table. Prose still asks "Q: Where is this stored and cached?".'],
 	['D', 'Keyholder key-release status (how many of N released)', 'doc/election.md:118-122', 'Keyholder names WHO holds a key; nothing records WHETHER one was released. Only ReleaseKeyTaskExtension exists, and Task is internal.'],

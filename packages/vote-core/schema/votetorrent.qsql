@@ -3265,6 +3265,153 @@ declare schema main
 		)
 	)
 		with context ( SigningNonce text, Tid int );
+
+	-- ---------------------------------------------------------------------------------------------
+	-- Vote blocks (doc/election.md "Voter votes" and "Vote Block Negotiation").
+	--
+	-- A vote block is one ballot's batch of vote entries and voter entries, encrypted TOGETHER
+	-- under the election's joint key Y (D-18, doc/encryption-formats.md section 3, `vt-block-1`).
+	-- Named VoteBlock, not Block, because doc/election.md asks for a name that cannot be confused
+	-- with database blocks. One block holds ONE ballot: pools form per ballot template
+	-- (doc/election.md "Pool Merging"), and a voter casts one vote entry per ballot.
+	--
+	-- Two tables, because the spec needs two things the ciphertext cannot give before tally:
+	--   VoteBlock       the encrypted payload plus the clear facts a peer must check before it
+	--                   accepts the block (election, revision, ballot, entry count).
+	--   VoteBlockVoter  the clear "who voted, and in which block" record (doc/election.md: the app
+	--                   "checks that a vote hasn't already been submitted by the user's
+	--                   registrationKey"; doc/architecture.md: "a pointer to the block is noted in
+	--                   the registration tree collection"). Its primary key is what enforces ONE
+	--                   vote per registrant per ballot. The vote itself is never in clear: answers
+	--                   and nonces exist only inside the ciphertext, sorted per D-28, so a voter row
+	--                   names a block but never a vote.
+	--
+	-- Write shape: the block row and ALL of its voter rows are inserted in ONE transaction by the
+	-- peer that formed the block. VoteBlock.VotersMatchEntries is a subquery CHECK, so Quereus
+	-- evaluates it at COMMIT, after the voter rows exist. A block whose voters are not all present
+	-- cannot commit, and a duplicate voter (already in another block) fails the whole transaction,
+	-- so no honest voter in the block loses their vote to one bad member; the pool renegotiates.
+	--
+	-- What the schema does NOT check, and who must:
+	--   * that the ciphertext really contains EntryCount entries for this ballot, that VoteBlock.Id
+	--     is the digest of the plaintext, and that every voter entry inside matches a VoteBlockVoter
+	--     row: unverifiable until the election key is released. Tally-time validators check it after
+	--     decryption (doc/election.md "Validation": count of voters matches count of votes).
+	--   * TemplateDigest against the ballot (D-24's field order): the digest is built from a
+	--     JSON.stringify of question tuples that SQL cannot reproduce byte-for-byte, so the block
+	--     former checks it with `ballotTemplateDigest` before forming and validators re-check it.
+	--   * eligibility via ElectionRegistrant: nothing in the real registration flow writes that
+	--     roster today (only the dev seed does), so requiring it would refuse every real vote. The
+	--     check here is the same one Submit uses: an active, unexpired Registrant with a current
+	--     Association for the signing device key.
+	--   * a minimum block size. A block of one links a vote to its voter after decryption, but
+	--     doc/election.md allows a singular block as a last resort, so the floor is 1 and the
+	--     negotiation layer decides when to settle for less than a full pool.
+	-- ---------------------------------------------------------------------------------------------
+
+	table VoteBlock (
+		Cid text primary key, -- cid(Digest(Ciphertext)); content-addressed, so an id cannot be squatted without the exact ciphertext
+		Id text, -- the block id bound into the cipher AAD (vt-block-1: electionId, revision, blockId); the base64url Digest of the canonical plaintext payload, which pool members check before they sign
+		ElectionId text, -- references Election.Id
+		ElectionRevision integer, -- references ElectionRevision.Revision; must be the CURRENT revision (a vote signed under r only decrypts under r, spike 098 finding 2)
+		BallotId text, -- references Ballot.Id; one ballot per block
+		TemplateDigest text, -- ballotTemplateDigest(ballot, revision) the votes were cast against (D-24); engine-checked, see header
+		EntryCount integer, -- number of vote entries = number of voter entries = number of VoteBlockVoter rows
+		-- json array of the block's RegistrantIds, sorted. Freezes the voter set at formation: a
+		-- VoteBlockVoter row must be listed here, so nobody holding a withheld member's signature can
+		-- add a voter to a block after it commits. Per-person, so the block row is never public.
+		VoterRegistrantIds text,
+		Ciphertext text, -- BlockCiphertext JSON { v: 1, alg: 'vt-block-1', eph, nonce, kc, ct } over ElectionBlockPayload { v: 1, votes, voterRecords }
+		constraint CidValid check (Cid = cid(Digest(Ciphertext))),
+		constraint IdPresent check (typeof(new.Id) = 'text' and length(new.Id) > 0),
+		constraint IntegersValid check (typeof(new.ElectionRevision) = 'integer' and typeof(new.EntryCount) = 'integer'),
+		constraint EntryCountValid check (new.EntryCount >= 1),
+		constraint VoterListValid check (
+			coalesce(json_valid(new.VoterRegistrantIds), 0) = 1
+				and (select count(*) from json_each(new.VoterRegistrantIds)) = new.EntryCount
+				and (select count(distinct value) from json_each(new.VoterRegistrantIds)) = new.EntryCount
+		),
+		constraint CiphertextFormat check (
+			coalesce(json_valid(new.Ciphertext) and json_extract(new.Ciphertext, '$.alg') = 'vt-block-1' and json_extract(new.Ciphertext, '$.v') = 1, 0) = 1
+		),
+		constraint BallotInElection check on insert (
+			exists (select 1 from Ballot B where B.Id = new.BallotId and B.ElectionId = new.ElectionId)
+		),
+		constraint CurrentRevision check on insert (
+			exists (select 1 from ElectionRevision ER where ER.ElectionId = new.ElectionId and ER.Revision = new.ElectionRevision)
+		),
+		-- Votes are encrypted to Y, so Y must be published for this exact revision (D-13/D-16).
+		constraint ElectionKeyPublished check on insert (
+			exists (select 1 from ElectionKey EK where EK.ElectionId = new.ElectionId and EK.ElectionRevision = new.ElectionRevision)
+		),
+		-- The voting period is [votingStarts, accruingVotes): doc/election.md "Vote hashing" says no
+		-- votes are accepted during accruing. Timeline values are epoch ms. A missing or non-numeric
+		-- boundary makes the exists() false, so an unreadable timeline refuses rather than admits.
+		constraint WithinVotingWindow check on insert (
+			exists (
+				select 1 from ElectionRevision ER
+					where ER.ElectionId = new.ElectionId
+						and ER.Revision = new.ElectionRevision
+						and json_extract(ER.Timeline, '$.votingStarts') <= context.NowMs
+						and context.NowMs < json_extract(ER.Timeline, '$.accruingVotes')
+			)
+		),
+		constraint VotersMatchEntries check on insert (
+			new.EntryCount = (select count(*) from VoteBlockVoter V where V.BlockCid = new.Cid)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	)
+		with context ( NowMs integer );
+
+	index VoteBlockBallot on VoteBlock (ElectionId, BallotId);
+
+	table VoteBlockVoter (
+		ElectionId text, -- references Election.Id
+		BallotId text, -- references Ballot.Id
+		RegistrantId text, -- references Registrant.Id
+		BlockCid text, -- references VoteBlock.Cid
+		BlockId text, -- VoteBlock.Id (the plaintext digest the voter checked); signed so the voter's consent names both the plaintext and the stored ciphertext
+		ElectionRevision integer, -- VoteBlock.ElectionRevision
+		DeviceKey text, -- Association.DeviceKey, exactly as stored; P-256 compressed hex (D-26)
+		Signature text, -- P-256 compact low-S hex by DeviceKey over Digest('VoteBlockVoter', ElectionId, ElectionRevision, BallotId, BlockCid, BlockId, RegistrantId, DeviceKey)
+		primary key (ElectionId, BallotId, RegistrantId), -- one vote per registrant per ballot, across revisions
+		constraint ElectionRevisionValid check (typeof(new.ElectionRevision) = 'integer'),
+		constraint BlockMatches check on insert (
+			exists (
+				select 1 from VoteBlock B
+					where B.Cid = new.BlockCid and B.Id = new.BlockId and B.ElectionId = new.ElectionId
+						and B.BallotId = new.BallotId and B.ElectionRevision = new.ElectionRevision
+						and exists (select 1 from json_each(B.VoterRegistrantIds) where value = new.RegistrantId)
+			)
+		),
+		-- No revision or voting-window CHECK here: a voter row can only land in its block's own
+		-- transaction (it must be on the block's frozen list, and the block cannot commit until every
+		-- listed voter is present), so VoteBlock's CurrentRevision and WithinVotingWindow already
+		-- cover it. Copies here were measured unreachable: disabling them changed no outcome.
+		-- The same registered-device test Submit runs (Phase 63 D-06): an active, unexpired
+		-- registrant with an unexpired association for this exact device key.
+		constraint VoterAssociated check on insert (
+			exists (
+				select 1 from Association A join Registrant R on R.Id = A.RegistrantId
+					where A.RegistrantId = new.RegistrantId and A.DeviceKey = new.DeviceKey
+						and A.Expiration > context.now and R.Status = 'a' and R.Expiration > context.now
+			)
+		),
+		-- No subquery, so this stays an immediate CHECK and needs no deferred datetime handling.
+		constraint SignatureValid check (
+			SignatureValidP256(
+				Digest('VoteBlockVoter', new.ElectionId, new.ElectionRevision, new.BallotId, new.BlockCid, new.BlockId, new.RegistrantId, new.DeviceKey),
+				new.Signature,
+				new.DeviceKey
+			)
+		),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	)
+		with context ( now datetime );
+
+	index VoteBlockVoterBlock on VoteBlockVoter (BlockCid);
 }
 
 apply schema main;
