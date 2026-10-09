@@ -182,26 +182,57 @@ const mockGetElection = jest.fn(async () => {
 	throw new Error('getElection() must never be called by TimelineScreen (D-04 read-scope fence)');
 });
 
-// ---- 59-09: `resolveAttestationProducer().provisionDeviceKey()` -- mocked exactly as
+// ---- 59-09: `resolveAttestationProducer().getCurrentDeviceKey()` -- mocked exactly as
 // `ConfirmationScreen.test.tsx` mocks the same module, so this suite never reaches the REAL
 // hardware-backed producer (`@votetorrent/attestation-native`'s `TurboModuleRegistry` call,
 // which is unregistered under Jest and throws `Invariant Violation`).
 const mockProvisionDeviceKey = jest.fn(async () => ({publicKey: 'p256-stub-device-key'}));
-const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({provisionDeviceKey: mockProvisionDeviceKey}));
+// 63-18: the status read is a LOOKUP; it must use getCurrentDeviceKey and never the creating call.
+const mockGetCurrentDeviceKey = jest.fn(async () => ({publicKey: 'p256-stub-device-key'}));
+const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
+	provisionDeviceKey: mockProvisionDeviceKey,
+	getCurrentDeviceKey: mockGetCurrentDeviceKey,
+}));
 jest.mock('../../../engines/attestation-producer', () => ({
 	resolveAttestationProducer: (...args: unknown[]) => mockResolveAttestationProducer(...args),
 }));
 
+// 63-14: the saved-vote marker read. `mock`-prefixed so babel-plugin-jest-hoist accepts the closure.
+const mockReadSavedVoteStatus = jest.fn((..._args: unknown[]) => Promise.resolve<unknown>({state: 'none'}));
+jest.mock('../../../engines/saved-vote-status', () => ({
+	readSavedVoteStatus: (...args: unknown[]) => mockReadSavedVoteStatus(...args),
+}));
+
 let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 
+const mockSetClockOffsetMs = jest.fn();
+
 jest.mock('../../../providers/VoterAppProvider', () => ({
-	useVoterApp: () => ({
-		getEngine: mockGetEngine,
-		getElection: mockGetElection,
-		get seededElectionId() {
-			return mockSeededElectionId;
-		},
-	}),
+	useVoterApp: () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const {useState, useCallback} = jest.requireActual('react');
+		const [clockOffsetMs, setOffset] = useState(0);
+		const dev = () => (globalThis as {__DEV__?: boolean}).__DEV__ === true;
+		// stable identities per offset, like the real provider's useCallbacks (an unstable nowMs
+		// would re-fire the screen's read effect every render).
+		const setClockOffsetMs = useCallback((ms: number) => {
+			mockSetClockOffsetMs(ms);
+			if (dev() && Number.isFinite(ms)) {
+				setOffset(ms);
+			}
+		}, []);
+		const nowMs = useCallback(() => Date.now() + (dev() ? clockOffsetMs : 0), [clockOffsetMs]);
+		return {
+			getEngine: mockGetEngine,
+			getElection: mockGetElection,
+			get seededElectionId() {
+				return mockSeededElectionId;
+			},
+			clockOffsetMs,
+			setClockOffsetMs,
+			nowMs,
+		};
+	},
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -285,8 +316,11 @@ beforeEach(() => {
 	mockGetElectionDetails.mockClear();
 	mockGetNetworkDetails.mockClear();
 	mockProvisionDeviceKey.mockClear();
+	mockGetCurrentDeviceKey.mockClear();
 	mockGetAssociationsByDeviceKey.mockClear();
 	mockListAssociationRequests.mockClear();
+	mockReadSavedVoteStatus.mockReset();
+	mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'none'}));
 
 	mockGetEngine.mockImplementation(async (engineName: string) => {
 		if (engineName === 'elections') {
@@ -488,16 +522,63 @@ describe('TimelineScreen — retry (D-03)', () => {
 });
 
 describe('TimelineScreen — D-04/D-12 read-scope source fence', () => {
-	it('the screen source references none of ElectionCard, mockData, LIFECYCLE_CONTENT, keysReleased, checksComplete', () => {
+	it('the screen source references none of ElectionCard, mockData, devLifecycleFixtures, LIFECYCLE_CONTENT, keysReleased, checksComplete', () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require('fs');
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const path = require('path');
 		const source: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
 
-		for (const forbidden of ['ElectionCard', 'mockData', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
+		for (const forbidden of ['ElectionCard', 'mockData', 'devLifecycleFixtures', 'LIFECYCLE_CONTENT', 'keysReleased', 'checksComplete']) {
 			expect(source).not.toContain(forbidden);
 		}
+	});
+});
+
+function stripCommentsPreservingLines(src: string): string {
+	const noBlock = src.replace(/\/\*[\s\S]*?\*\//g, block => block.replace(/[^\n]/g, ' '));
+	return noBlock.replace(/\/\/.*$/gm, '');
+}
+
+/** D-02: returns the list of violations of the shared-clock contract in a TimelineScreen source. */
+function sharedClockViolations(rawSource: string): string[] {
+	const source = stripCommentsPreservingLines(rawSource);
+	const violations: string[] = [];
+	if (/\[\s*clockOffsetMs\s*,\s*setClockOffsetMs\s*\]\s*=\s*useState/.test(source)) {
+		violations.push('local clockOffsetMs useState');
+	}
+	if (source.includes('Date.now() + clockOffsetMs')) {
+		violations.push('Date.now() + clockOffsetMs');
+	}
+	const destructure = /const\s*\{([^}]*)\}\s*=\s*useVoterApp\(\)/.exec(source);
+	for (const name of ['clockOffsetMs', 'setClockOffsetMs', 'nowMs']) {
+		if (!destructure || !new RegExp(`\\b${name}\\b`).test(destructure[1])) {
+			violations.push(`useVoterApp() does not name ${name}`);
+		}
+	}
+	return violations;
+}
+
+describe('TimelineScreen — shared __DEV__ clock source fence (D-02)', () => {
+	it('the screen holds no local clock offset state and reads the shared clock', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path');
+		const source: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
+		expect(sharedClockViolations(source)).toEqual([]);
+	});
+
+	it('self-check: a planted local-clock source is reported', () => {
+		const planted = [
+			'const {getEngine} = useVoterApp();',
+			'const [clockOffsetMs, setClockOffsetMs] = useState(0);',
+			'const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs]);',
+		].join('\n');
+		const found = sharedClockViolations(planted);
+		expect(found).toContain('local clockOffsetMs useState');
+		expect(found).toContain('Date.now() + clockOffsetMs');
+		expect(found.length).toBeGreaterThanOrEqual(3);
 	});
 });
 
@@ -657,6 +738,44 @@ describe('TimelineScreen — device-local time zone default (CR-01)', () => {
 	});
 });
 
+describe('TimelineScreen — row subtitle weekday follows the active language', () => {
+	let previousLanguage: string;
+
+	beforeEach(() => {
+		previousLanguage = i18n.language;
+	});
+
+	afterEach(async () => {
+		await renderer.act(async () => {
+			await i18n.changeLanguage(previousLanguage);
+		});
+	});
+
+	it('under Español, a near-future row\'s {{weekday}} param is the Spanish weekday name, not the English one', async () => {
+		// Anchored 3 days out so several rows (votingStarts .. tallyingStarts) fall 1-6 calendar
+		// days ahead and carry `subtitle.futureWeekday` with a `weekday` param.
+		const anchor = Date.now() + 3 * 86_400_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+		await renderer.act(async () => {
+			await i18n.changeLanguage('es');
+		});
+
+		const tr = await renderAndFlush();
+		type Row = {stageId: string; instantMs: number | null; subtitle: {key: string; params?: {weekday?: string}} | null};
+		const rows = tr.root.findByType(TimelineRail).props.rows as Row[];
+		const weekdayRows = rows.filter(r => typeof r.subtitle?.params?.weekday === 'string');
+		expect(weekdayRows.length).toBeGreaterThan(0);
+
+		for (const row of weekdayRows) {
+			const at = new Date(row.instantMs as number);
+			const es = new RealDateTimeFormat('es', {timeZone: 'UTC', weekday: 'long'}).format(at);
+			const en = new RealDateTimeFormat('en', {timeZone: 'UTC', weekday: 'long'}).format(at);
+			expect(row.subtitle?.params?.weekday).toBe(es);
+			expect(row.subtitle?.params?.weekday).not.toBe(en);
+		}
+	});
+});
+
 describe('TimelineScreen — rail composition and callback wiring (Task 2)', () => {
 	it('TimelineRail is mounted exactly once in the ready state, zero times in the indeterminate state', async () => {
 		const ready = await renderAndFlush();
@@ -679,17 +798,17 @@ describe('TimelineScreen — rail composition and callback wiring (Task 2)', () 
 			'onEditRegistration',
 			'onPreviewBallot',
 			'onVoteNow',
-			'onViewSubmission',
 			'onViewKeyholders',
 		]) {
 			expect(typeof rail.props[propName]).toBe('function');
 		}
+		// 63-14: the saved-vote link is offered only when a vote is saved, so it is unbound by default.
+		expect(rail.props.onViewSubmission).toBeUndefined();
 	});
 
 	it.each([
 		['onVoteNow', 'Ballot'],
 		['onPreviewBallot', 'Ballot'],
-		['onViewSubmission', 'ReviewSubmit'],
 		['onEditRegistration', 'RegistrationHome'],
 		['onViewKeyholders', 'Keyholders'],
 	])('%s navigates to %s', async (propName, routeName) => {
@@ -781,6 +900,26 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		const label = tr.root.findByProps({testID: 'timeline-dev-clock-offset-label'});
 		expect(textOf(label)).toContain('0');
 		expect(currentStageId(tr)).toBeUndefined();
+	});
+
+	it('a press moves the SHARED clock through setClockOffsetMs with a finite non-zero offset (D-02)', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+		await pressClockOffset(tr);
+		expect(mockSetClockOffsetMs).toHaveBeenCalled();
+		const arg = mockSetClockOffsetMs.mock.calls[mockSetClockOffsetMs.mock.calls.length - 1][0];
+		expect(Number.isFinite(arg)).toBe(true);
+		expect(arg).not.toBe(0);
+	});
+
+	it('wrapping back to live sets the shared offset to exactly 0 (D-02)', async () => {
+		(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+		const tr = await renderAndFlush();
+		// stages + final-day probe + the wrap back to live (same cycle the WR-01 probe test walks)
+		for (let i = 0; i < TIMELINE_STAGE_IDS.length + 2; i++) {
+			await pressClockOffset(tr);
+		}
+		expect(mockSetClockOffsetMs.mock.calls[mockSetClockOffsetMs.mock.calls.length - 1][0]).toBe(0);
 	});
 
 	it('walking the full press cycle makes each of the ten stages current exactly once, collected as a SET (D-09) -- not a spot check', async () => {
@@ -916,20 +1055,20 @@ describe('TimelineScreen — __DEV__ clock-offset control (Task 3, D-05)', () =>
 		expect(textOf(label)).toContain('Registration Ends');
 	});
 
-	it('never calls setLifecycleState and never imports LIFECYCLE_ORDER; HomeScreen keeps its own cycler untouched', () => {
+	it('never calls setLifecycleOverride and never imports LIFECYCLE_ORDER; HomeScreen keeps its own cycler untouched', () => {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require('fs');
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const path = require('path');
 
 		const screenSource: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
-		expect(screenSource).not.toContain('setLifecycleState');
+		expect(screenSource).not.toContain('setLifecycleOverride');
 		expect(screenSource).not.toContain('LIFECYCLE_ORDER');
 
 		const homeSource: string = fs.readFileSync(path.resolve(__dirname, '../../home/HomeScreen.tsx'), 'utf8');
-		expect(homeSource).toContain('nextLifecycleState');
+		expect(homeSource).toContain('nextLifecycleOverride');
 		expect(homeSource).toContain('LIFECYCLE_ORDER');
-		expect(homeSource).toContain('setLifecycleState');
+		expect(homeSource).toContain('setLifecycleOverride');
 	});
 });
 
@@ -974,6 +1113,10 @@ describe('TimelineScreen — registration panel re-reads on focus (regression, s
 		const refocusedSentence = tr.root.findByProps({testID: 'timeline-registration-panel-sentence'});
 		expect(textOf(refocusedSentence)).toContain('awaiting a decision');
 		expect(textOf(refocusedSentence)).not.toContain('You are not registered');
+
+		// 63-18: the status read is a lookup; refocusing must NEVER mint a device key.
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalled();
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
 	});
 
 	it('a refocus with an unchanged answer does not spam the association engine (no refresh storm)', async () => {
@@ -1000,5 +1143,139 @@ describe('TimelineScreen — device time-zone resolution degrades safely (WR-01)
 		// The rail must still be on screen. Before the fix this line is never reached: the throw
 		// escapes `resolveDeviceTimeZone()` during render and takes the whole screen down.
 		expect(hasTestId(tr, 'timeline-rail')).toBe(true);
+	});
+});
+
+describe('TimelineScreen — saved vote on the Voting Period row (D-12, D-21)', () => {
+	const STALE = 'The election changed after you voted. Please vote again.';
+
+	// anchor = now + 1 day puts votingStarts one day back and accruingVotes ahead: CURRENT.
+	function openVoting(): void {
+		const anchor = Date.now() + 86_400_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+	}
+	function hostsById(tr: renderer.ReactTestRenderer, id: string) {
+		return tr.root.findAll(n => typeof n.type === 'string' && n.props.testID === id);
+	}
+	function nodeText(n: renderer.ReactTestInstance | string): string {
+		return typeof n === 'string' ? n : n.children.map(c => nodeText(c as renderer.ReactTestInstance | string)).join('');
+	}
+	async function mountWith(status: unknown) {
+		openVoting();
+		mockReadSavedVoteStatus.mockImplementation(async () => status);
+		return renderAndFlush();
+	}
+	const railOf = (tr: renderer.ReactTestRenderer) => tr.root.findByType(TimelineRail);
+
+	it('TS1: reads the status with the engine deps, a numeric clock and the resolved election id (D-19)', async () => {
+		await mountWith({state: 'none'});
+		expect(mockReadSavedVoteStatus).toHaveBeenCalled();
+		const [deps, nowMs, electionId] = mockReadSavedVoteStatus.mock.calls[0];
+		expect(deps).toEqual({getEngine: mockGetEngine, fallbackElectionId: 'election-1'});
+		expect(typeof nowMs).toBe('number');
+		expect(electionId).toBe('election-1');
+	});
+
+	it('TS2: none offers Vote now and no saved-vote link or panel', async () => {
+		const tr = await mountWith({state: 'none'});
+		expect(typeof railOf(tr).props.onVoteNow).toBe('function');
+		expect(railOf(tr).props.onViewSubmission).toBeUndefined();
+		expect(JSON.stringify(tr.toJSON())).not.toContain('timeline-saved-vote');
+	});
+
+	it('TS3: saved hides Vote now, shows the status, and the link opens the receipt with electionId only', async () => {
+		const tr = await mountWith({state: 'saved', revisionKnown: true});
+		const rail = railOf(tr);
+		expect(rail.props.onVoteNow).toBeUndefined();
+		expect(typeof rail.props.onViewSubmission).toBe('function');
+		renderer.act(() => {
+			(rail.props.onViewSubmission as () => void)();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith('VoteReceipt', {electionId: 'election-1'});
+		expect(nodeText(hostsById(tr, 'timeline-saved-vote-status')[0])).toBe('Vote saved — not sent');
+		expect(hostsById(tr, 'timeline-row-view-submission-votingStarts').length).toBeGreaterThan(0);
+		expect(hostsById(tr, 'timeline-row-vote-now-votingStarts').length).toBe(0);
+	});
+
+	it('TS4: stale shows the exact D-21 line and keeps Vote now', async () => {
+		const tr = await mountWith({state: 'stale', revisionKnown: true});
+		expect(typeof railOf(tr).props.onVoteNow).toBe('function');
+		expect(typeof railOf(tr).props.onViewSubmission).toBe('function');
+		expect(nodeText(hostsById(tr, 'timeline-saved-vote-stale')[0])).toBe(STALE);
+	});
+
+	it('TS5: unreadable hides Vote now and shows the unreadable line', async () => {
+		const tr = await mountWith({state: 'unreadable'});
+		expect(railOf(tr).props.onVoteNow).toBeUndefined();
+		expect(typeof railOf(tr).props.onViewSubmission).toBe('function');
+		expect(hostsById(tr, 'timeline-saved-vote-unreadable').length).toBe(1);
+	});
+
+	it('TS6: an unknown revision adds the honest note', async () => {
+		const tr = await mountWith({state: 'saved', revisionKnown: false});
+		expect(hostsById(tr, 'timeline-saved-vote-revision-unknown').length).toBe(1);
+	});
+
+	it('TS7: re-reads on every focus and never caches', async () => {
+		const tr = await mountWith({state: 'none'});
+		expect(hostsById(tr, 'timeline-saved-vote-status').length).toBe(0);
+		const before = mockReadSavedVoteStatus.mock.calls.length;
+		mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'saved', revisionKnown: true}));
+		await renderer.act(async () => {
+			mockTriggerFocus();
+			await flushMicrotasks(30);
+		});
+		expect(mockReadSavedVoteStatus.mock.calls.length).toBe(before + 1);
+		expect(hostsById(tr, 'timeline-saved-vote-status').length).toBe(1);
+	});
+
+	it('TS8: a rejected read fails closed to unreadable', async () => {
+		openVoting();
+		mockReadSavedVoteStatus.mockImplementation(async () => {
+			throw new Error('secret failure detail');
+		});
+		const tr = await renderAndFlush();
+		expect(hostsById(tr, 'timeline-saved-vote-unreadable').length).toBe(1);
+		expect(railOf(tr).props.onVoteNow).toBeUndefined();
+		expect(JSON.stringify(tr.toJSON())).not.toContain('secret failure detail');
+	});
+
+	it('TS9: on a past Voting Period row the link appears only when a vote is saved', async () => {
+		const anchor = Date.now() - 2 * 3_600_000 + 20 * 3_600_000;
+		mockGetElectionDetails.mockImplementation(async () => buildElectionDetails(buildValidTimeline(anchor), anchor));
+		const none = await renderAndFlush();
+		const row = (railOf(none).props.rows as Array<{stageId: string; status: string}>).find(r => r.stageId === 'votingStarts');
+		expect(row?.status).toBe('past');
+		expect(hostsById(none, 'timeline-row-view-submission-votingStarts').length).toBe(0);
+
+		mockReadSavedVoteStatus.mockImplementation(async () => ({state: 'saved', revisionKnown: true}));
+		const saved = await renderAndFlush();
+		expect(hostsById(saved, 'timeline-row-view-submission-votingStarts').length).toBeGreaterThan(0);
+	});
+
+	it('TS10: with no readable election no saved-vote read happens', async () => {
+		mockGetElections.mockImplementation(async () => {
+			throw new Error('boom');
+		});
+		await renderAndFlush();
+		expect(mockReadSavedVoteStatus).not.toHaveBeenCalled();
+	});
+
+	describe('TS11: source discipline', () => {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require('fs');
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const path = require('path');
+		const raw: string = fs.readFileSync(path.resolve(__dirname, '../TimelineScreen.tsx'), 'utf8');
+		const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+		it.each(['readSavedVoteStatus(', "navigation.navigate('VoteReceipt', {electionId", 'useFocusEffect('])('contains %s', needle => {
+			expect(code).toContain(needle);
+		});
+		it.each(["navigation.navigate('ReviewSubmit')", 'revealOnOpen', 'AsyncStorage', 'openVoteRecord', 'console.'])(
+			'does not contain %s',
+			needle => {
+				expect(code).not.toContain(needle);
+			},
+		);
 	});
 });

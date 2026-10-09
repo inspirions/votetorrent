@@ -36,7 +36,7 @@ export async function handleLanguageChange(lng: LanguageCode): Promise<void> {
 }
 
 export default function SettingsScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
 	useVoterApp();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('settings');

@@ -1,4 +1,10 @@
+import { sha256 } from '@noble/hashes/sha2.js'
+import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { AssociationAssociateBuilder } from './builders/association-associate-builder.js'
+import {
+  REASSOCIATION_NOT_APPROVED_REASON,
+  encodeRegistrationCodeBits
+} from '@votetorrent/vote-core'
 import type {
   AssociateInit,
   Association,
@@ -9,8 +15,19 @@ import type {
   AttestationChallenge,
   AttestationVerdict,
   AttestationVerification,
+  DeviceRetirement,
   IAssociationAssociateBuilder,
   IAssociationEngine,
+  IReassociationEngine,
+  ReassociationApprovalInput,
+  ReassociationApprovalResult,
+  ReassociationDecisionSource,
+  ReassociationIntake,
+  ReassociationOpener,
+  ReassociationProcessingSummary,
+  ReassociationRejectionResult,
+  ReassociationReview,
+  ReassociationSignatureOrCallback,
   Signature
 } from '@votetorrent/vote-core'
 
@@ -59,7 +76,7 @@ export interface MockAssociationEngineOptions {
  *      the real engine's `AttestationRequired = 0` path — association written,
  *      no verdict row — which is `VerdictBadge`'s "none" state.
  */
-export class MockAssociationEngine implements IAssociationEngine {
+export class MockAssociationEngine implements IAssociationEngine, IReassociationEngine {
   private readonly challenges = new Map<string, AttestationChallenge>()
   private readonly associations = new Map<string, Association>()
   /**
@@ -272,5 +289,107 @@ export class MockAssociationEngine implements IAssociationEngine {
   /** D-06 mock parity — returns `undefined` for an unknown id rather than throwing. */
   async getAssociationRequest (requestId: string): Promise<AssociationRequestRead | undefined> {
     return this.associationRequests.get(requestId)
+  }
+
+  // ---------- 62-18: IReassociationEngine mock parity ----------
+  // The mock holds no schema, no intake transport and no opener — every re-association method is
+  // SEEDED (a screen test wires in exactly the review/retirement shape it needs) rather than
+  // derived from staged rows. `approveReassociation`/`rejectReassociation` record their own calls
+  // (`approvedReassociations`/`rejectedReassociations`) so a screen test can assert the officer
+  // action actually happened, without a real schema to read back.
+
+  private readonly reassociationReviews = new Map<string, ReassociationReview>()
+  private readonly deviceRetirements = new Map<string, DeviceRetirement>()
+  /** Recorded `{requestId, registrantId}` pairs, in call order — mock parity for a screen test
+   * asserting an approval happened (no real AssociationRequest row exists to read back). */
+  readonly approvedReassociations: Array<{ requestId: string; registrantId: string }> = []
+  /** Recorded `requestId`s, in call order. */
+  readonly rejectedReassociations: string[] = []
+
+  /** Seeds a review `listPendingReassociations`/`getReassociationReview` will return. */
+  seedReassociationReview (review: ReassociationReview): void {
+    this.reassociationReviews.set(review.requestId, review)
+  }
+
+  /** Seeds a retirement `getDeviceRetirement` will return for `retirement.deviceKey`. */
+  seedDeviceRetirement (retirement: DeviceRetirement): void {
+    this.deviceRetirements.set(retirement.deviceKey, retirement)
+  }
+
+  /**
+   * D-01 mock parity — never reads `sign`'s private key (there is none to read: a callback is the
+   * only key input). Not reproducible against the REAL engine's derivation (that requires the
+   * same PRF this mock does not implement) — documented as a mock-only divergence, same
+   * discipline as `associate()`'s always-pass-verdict note in this class's own header.
+   */
+  async deriveRegistrationCode (registrantId: string, _sign: (digest: Uint8Array) => Promise<Signature>): Promise<string> {
+    return encodeRegistrationCodeBits(sha256(utf8ToBytes(`mock-reassociation-code:${registrantId}`)))
+  }
+
+  /** Mock parity — no registration-request store; always undefined. */
+  async getRegistrationCodeHolderKey (_registrantId: string): Promise<string | undefined> {
+    return undefined
+  }
+
+  /** Mock parity — never drives a real sync; reports every seeded review as still awaiting. */
+  async processPendingReassociations (
+    _authorityId: string,
+    _signatureOrCallback: ReassociationSignatureOrCallback,
+    _intake: ReassociationIntake,
+    _opener: ReassociationOpener
+  ): Promise<ReassociationProcessingSummary> {
+    return { challengesIssued: 0, associated: 0, rejected: 0, awaitingReview: this.reassociationReviews.size }
+  }
+
+  async listPendingReassociations (
+    _authorityId: string,
+    _intake: ReassociationIntake,
+    _opener: ReassociationOpener
+  ): Promise<ReassociationReview[]> {
+    return [...this.reassociationReviews.values()]
+  }
+
+  async getReassociationReview (
+    requestId: string,
+    _intake: ReassociationIntake,
+    _opener: ReassociationOpener,
+    _options?: { readonly registrantId?: string }
+  ): Promise<ReassociationReview | undefined> {
+    return this.reassociationReviews.get(requestId)
+  }
+
+  /** Mock parity — records the call; never verifies the threshold, the evidence, or issues a real
+   * challenge (there is no schema to issue one against). */
+  async approveReassociation (
+    requestId: string,
+    input: ReassociationApprovalInput,
+    _signatureOrCallback: ReassociationSignatureOrCallback,
+    _intake: ReassociationIntake,
+    _opener: ReassociationOpener
+  ): Promise<ReassociationApprovalResult> {
+    this.approvedReassociations.push({ requestId, registrantId: input.registrantId })
+    const review = this.reassociationReviews.get(requestId)
+    return {
+      requestId,
+      registrantId: input.registrantId,
+      matchMethod: review?.matchMethod ?? 'identity',
+      devicesToRetire: review?.existingDevices.map((a) => a.deviceKey) ?? [],
+      challengeNonce: crypto.randomUUID(),
+      outcome: 'awaiting-device-attestation'
+    }
+  }
+
+  async rejectReassociation (
+    requestId: string,
+    _signatureOrCallback: ReassociationSignatureOrCallback,
+    _intake: ReassociationIntake
+  ): Promise<ReassociationRejectionResult> {
+    this.rejectedReassociations.push(requestId)
+    return { requestId, reason: REASSOCIATION_NOT_APPROVED_REASON }
+  }
+
+  /** Mock parity — returns a seeded retirement, or `undefined` when none was seeded. */
+  async getDeviceRetirement (deviceKey: string, _source?: ReassociationDecisionSource): Promise<DeviceRetirement | undefined> {
+    return this.deviceRetirements.get(deviceKey)
   }
 }

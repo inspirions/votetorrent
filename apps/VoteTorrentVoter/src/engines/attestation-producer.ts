@@ -47,11 +47,16 @@
  * but any producer actually used for the association ceremony MUST implement it. A caller must
  * treat its absence as "cannot self-sign," never silently skip it (`ConfirmationScreen.tsx`'s
  * `associationSign` guard does exactly this, unchanged by 51-14).
+ *
+ * Vote signing: `resolveVoteSigningProducer()` (bottom of file) always returns the REAL producer, and
+ * `signDeviceKeyDigest` takes an optional `{ prompt }` carrying the biometric prompt copy.
  */
 
 import type { AttestationChallenge, DeviceAttestation, Signature } from '@votetorrent/vote-core'
 import { createRealAttestationProducer } from '@votetorrent/attestation-native'
+import type { SignDeviceKeyDigestOptions } from '@votetorrent/attestation-native'
 import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-flags.generated'
+import { dismissKeyboardForSystemPrompt } from '../utils/dismissKeyboardForSystemPrompt'
 
 /**
  * A device-side attestation producer (D-11 two-step seam):
@@ -69,8 +74,23 @@ import { USE_STUB_PLAY_INTEGRITY, USE_REAL_ATTESTATION_PRODUCER } from './proof-
  */
 export interface AttestationProducer {
 	provisionDeviceKey(): Promise<{ publicKey: string }>
+	/**
+	 * READ-ONLY lookup of the CURRENT device key (63-18 fix): never generates, rotates or prompts.
+	 * Every LOOKUP (association queries, registration status, continuity) must use this;
+	 * `provisionDeviceKey` is for CREATION flows only, because on Android it mints a NEW key on
+	 * every call. Rejects with code `DEVICE_KEY_ABSENT` / `DEVICE_KEY_INVALIDATED`.
+	 */
+	getCurrentDeviceKey(): Promise<{ publicKey: string }>
 	produce(challenge: AttestationChallenge): Promise<DeviceAttestation>
-	signDeviceKeyDigest?(digest: Uint8Array): Promise<Signature>
+	signDeviceKeyDigest?(digest: Uint8Array, options?: SignDeviceKeyDigestOptions): Promise<Signature>
+}
+
+/**
+ * An `AttestationProducer` whose `signDeviceKeyDigest` is statically present. Vote signing has no
+ * "cannot sign" branch: `resolveVoteSigningProducer` returns this type.
+ */
+export type VoteSigningProducer = AttestationProducer & {
+	signDeviceKeyDigest(digest: Uint8Array, options?: SignDeviceKeyDigestOptions): Promise<Signature>
 }
 
 /**
@@ -88,10 +108,16 @@ export const StubAttestationProducer: AttestationProducer = {
 		return { publicKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL' }
 	},
 
+	// Same placeholder as provisionDeviceKey: the stub has one fixed key, so lookup === creation.
+	async getCurrentDeviceKey(): Promise<{ publicKey: string }> {
+		return { publicKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL' }
+	},
+
 	// Plan 11 (D-02/D-18): a clearly-non-real placeholder signature — never a real cryptographic
 	// signature, and never something a schema SignatureValid check will accept. Dev-only, mirrors
 	// the other STUB_* placeholder values in this file.
-	async signDeviceKeyDigest(_digest: Uint8Array): Promise<Signature> {
+	// The stub ignores prompt copy.
+	async signDeviceKeyDigest(_digest: Uint8Array, _options?: SignDeviceKeyDigestOptions): Promise<Signature> {
 		return {
 			signature: 'STUB_DEVICE_KEY_SIGNATURE_PLACEHOLDER_NOT_REAL',
 			signerKey: 'STUB_DEVICE_PUBLIC_KEY_PLACEHOLDER_NOT_REAL',
@@ -173,15 +199,62 @@ export function resolveRealProducerForced(): boolean {
  * way, so the two flags (`USE_REAL_ATTESTATION_PRODUCER` / `USE_STUB_PLAY_INTEGRITY`)
  * stay independent of each other.
  */
+/**
+ * Wraps the REAL producer so the soft keyboard is closed (and gone) before either call that raises
+ * a native BiometricPrompt: `produce` and `signDeviceKeyDigest`. On MIUI/Android 10 a prompt
+ * started over an open IME is never drawn and times out ~10 min later; the continue-on-another-
+ * device flow reaches `produce` straight from a typed code with the keyboard still up.
+ * `provisionDeviceKey` and `getCurrentDeviceKey` raise no prompt and pass through untouched (including any extra fields
+ * the real producer returns).
+ */
+export function withKeyboardDismissedBeforePrompts(producer: AttestationProducer): AttestationProducer {
+	const wrapped: AttestationProducer = {
+		provisionDeviceKey: () => producer.provisionDeviceKey(),
+		getCurrentDeviceKey: () => producer.getCurrentDeviceKey(),
+		produce: async (challenge: AttestationChallenge) => {
+			await dismissKeyboardForSystemPrompt()
+			return producer.produce(challenge)
+		},
+	}
+	if (typeof producer.signDeviceKeyDigest === 'function') {
+		const sign = producer.signDeviceKeyDigest.bind(producer)
+		wrapped.signDeviceKeyDigest = async (digest: Uint8Array, options?: SignDeviceKeyDigestOptions) => {
+			await dismissKeyboardForSystemPrompt()
+			// Forward the prompt copy only when supplied, so single-argument callers see no change.
+			return options === undefined ? sign(digest) : sign(digest, options)
+		}
+	}
+	return wrapped
+}
+
 export function resolveAttestationProducer(realProducer?: AttestationProducer): AttestationProducer {
 	if (realProducer !== undefined) {
 		return realProducer
 	}
 	if (resolveRealProducerForced()) {
-		return createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() })
+		return withKeyboardDismissedBeforePrompts(createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() }))
 	}
 	if (__DEV__) {
 		return StubAttestationProducer
+	}
+	return withKeyboardDismissedBeforePrompts(createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() }))
+}
+
+/**
+ * The producer the voter's vote signing uses. Vote signing is REAL in `__DEV__` and in release
+ * alike, so dev voting needs an enrolled fingerprint. This resolver deliberately bypasses the stub
+ * and the forced-real flag: it never consults `__DEV__`. `override` is a dependency-injection seam
+ * for jest and the device probe; it is returned unchanged when it can sign. The ban on the stub
+ * token in vote-casting code is enforced by the vote-casting source gate, and on device by the
+ * device proof. Each call returns a FRESH instance: call `provisionDeviceKey()` and then
+ * `signDeviceKeyDigest()` on the SAME returned instance, because the current key is per instance.
+ */
+export function resolveVoteSigningProducer(override?: AttestationProducer): VoteSigningProducer {
+	if (override !== undefined) {
+		if (typeof override.signDeviceKeyDigest !== 'function') {
+			throw new Error('resolveVoteSigningProducer: the supplied producer cannot sign (signDeviceKeyDigest missing)')
+		}
+		return override as VoteSigningProducer
 	}
 	return createRealAttestationProducer({ enablePlayIntegrity: resolvePlayIntegrityEnabled() })
 }

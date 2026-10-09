@@ -29,8 +29,7 @@ import { MockAssociationEngine } from '../src/association/mock-association-engin
 import { StubAttestationVerifier } from '../src/association/stub-attestation-verifier.js'
 import { AssociationAssociateBuilder } from '../src/association/builders/association-associate-builder.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
-import { createTestNetwork, addTestAuthority, addTestElection, seedAuthorityInvite, seedSignedMutation as seedSignedMutationFixture } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, addTestElection, seedAuthorityInvite, seedSignedMutation as seedSignedMutationFixture, testKeyPairFor } from './fixtures/test-context.js'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import { toIsoZDatetime, toDeferredCheckDatetime } from '../src/signing/ceremony-helpers.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
@@ -51,7 +50,7 @@ async function resolveElectionId (ctx: EngineContext, authorityId: string): Prom
 
 /** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
 function makeRealSigner (userId: string): { sign: (digest: Uint8Array) => Promise<Signature>; publicHex: string; privateHex: string } {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   const sign = async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes) // v2 default: prehash:true

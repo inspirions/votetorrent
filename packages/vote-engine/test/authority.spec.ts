@@ -24,6 +24,7 @@ import { nowCanonicalDatetime, toCanonicalDatetime, fromCanonicalDatetime, diges
 import type { EngineContext } from '../src/types.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createTestNetwork, addTestAuthority, seedAuthorityInvite, seedUserInvite, makeDistinctTestUser, makeTestSignCallback, makeTestSignature, signInviteResult } from './fixtures/test-context.js'
+import { computeAdminPromotionDigest, computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 import { AsyncStorage } from './shims/react-native'
 import { UserHistoryEvent } from '@votetorrent/vote-core'
@@ -408,6 +409,20 @@ async function computeRosterDigest (
 }
 
 /**
+ * 62-65: the founder's `User.Name` is the ENTERED admin name (`officerInit.name`), not
+ * `auth.user.name` — and `resolveAdminRoster` resolves an `.existing` entry's
+ * `proposedName` from that DB row. Any hand-built roster for the founder must use this
+ * value, exactly as the engine does, or the pre-signed digest will not match.
+ */
+async function founderDisplayName (auth: TestAuthorityContext): Promise<string> {
+  const row = await auth.ctx.db
+    .prepare('select Name from User where Id = :id')
+    .get({ id: auth.user.id })
+  if (!row) throw new Error('founderDisplayName: founder User row missing')
+  return row.Name as string
+}
+
+/**
  * 57-14 (CR-01, promote-side closure): seed a THIRD, fully-independent User
  * row beyond `createPromotionFixture()`'s founder + `secondUser` — the
  * hijack case needs an attacker identity distinct from both. Mirrors
@@ -506,7 +521,7 @@ async function primeUserForRename (auth: TestAuthorityContext, user: User, effec
   const rosterDigest = await computeRosterDigest(
     auth,
     [
-      { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+      { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
       { proposedName: user.name, userId: user.id, title: 'Priming Officer', scopes: ['vrg'] }
     ],
     effectiveAt,
@@ -682,6 +697,93 @@ describe('AuthorityEngine', () => {
         (details.proposed as { proposed?: { officers?: unknown[] } } | undefined)
           ?.proposed?.officers
       expect(proposedOfficers).to.be.an('array').with.length.greaterThan(0)
+    })
+
+    // UAT 62: ProposedAdmin rows are never deleted, and the read used to be an unordered
+    // `.get()` — so it returned the EARLIEST row. On device that was an older empty proposal:
+    // the proposed roster read empty and the new invitee had no Invite button.
+    async function seedProposedAdmin (ctx: EngineContext, authorityId: string, effectiveAt: string): Promise<void> {
+      const sig = makeRealSignature('user-1')
+      await ctx.db.exec(
+        `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
+         with context UserId = :uid, UserKey = :pubKey, Signature = :sig, Tid = 7, now = ${Date.now()}, IsUserValid = true
+         values (:authId, :eff, :tp)`,
+        {
+          uid: 'user-1',
+          pubKey: sig.signerKey,
+          sig: sig.signature,
+          authId: authorityId,
+          eff: effectiveAt,
+          tp: JSON.stringify([{ policy: 'rad', threshold: 1 }])
+        }
+      )
+    }
+
+    async function seedProposedOfficer (
+      ctx: EngineContext,
+      authorityId: string,
+      effectiveAt: string,
+      officer: { name: string, title: string, scopes: string[], userId: string | null }
+    ): Promise<void> {
+      const sig = makeRealSignature('user-1')
+      await ctx.db.exec(
+        `insert into ProposedOfficer (AuthorityId, AdminEffectiveAt, ProposedName, Title, Scopes, UserId)
+         with context UserId = :uid, UserKey = :pubKey, Signature = :sig, Tid = 7, now = ${Date.now()}, IsUserValid = true
+         values (:authId, :eff, :name, :title, :scopes, :officerUserId)`,
+        {
+          uid: 'user-1',
+          pubKey: sig.signerKey,
+          sig: sig.signature,
+          authId: authorityId,
+          eff: effectiveAt,
+          name: officer.name,
+          title: officer.title,
+          scopes: JSON.stringify(officer.scopes),
+          officerUserId: officer.userId
+        }
+      )
+    }
+
+    it('UAT 62: returns the LATEST unpromoted proposal, not an older empty one, with existing and init officers shaped apart', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      const before = await authorityEngine.getAdminDetails()
+      const foundingUserId = before.admin.officers[0]!.userId
+
+      const olderEmpty = toCanonicalDatetime(Date.now() + 60_000)
+      const newer = toCanonicalDatetime(Date.now() + 120_000)
+      await seedProposedAdmin(ctx, authority.id, olderEmpty)
+      await seedProposedAdmin(ctx, authority.id, newer)
+      await seedProposedOfficer(ctx, authority.id, newer, { name: 'Founding Chair', title: 'Chair', scopes: ['rad', 'rn'], userId: foundingUserId })
+      await seedProposedOfficer(ctx, authority.id, newer, { name: 'Bea Two', title: 'Clerk', scopes: ['vrg'], userId: null })
+
+      const details = await authorityEngine.getAdminDetails()
+      expect(details.proposed, 'a proposal is pending').to.not.equal(undefined)
+      expect(details.proposed!.proposed.effectiveAt).to.equal(fromCanonicalDatetime(newer))
+      const officers = details.proposed!.proposed.officers
+      expect(officers).to.have.length(2)
+      const existing = officers.find((o) => o.existing)
+      const init = officers.find((o) => o.init)
+      expect(existing, 'the officer with a UserId is an existing officer').to.deep.equal({
+        existing: { userId: foundingUserId, authorityId: authority.id, title: 'Chair', scopes: ['rad', 'rn'] }
+      })
+      expect(init, 'the null-UserId invitee stays an init officer').to.deep.equal({
+        init: { name: 'Bea Two', title: 'Clerk', scopes: ['vrg'] }
+      })
+    })
+
+    it('UAT 62: a ProposedAdmin already promoted to Admin is not reported as a pending proposal', async () => {
+      const { authority, authorityEngine } = await createNetworkAndAuthority()
+      const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
+      // Promotion inserts Admin at the proposal's own EffectiveAt, so a ProposedAdmin whose
+      // EffectiveAt matches an Admin row is history (also the debug task-seed's shape).
+      const adminRow = await ctx.db
+        .prepare('select EffectiveAt from Admin where AuthorityId = :id')
+        .get({ id: authority.id })
+      await seedProposedAdmin(ctx, authority.id, adminRow!.EffectiveAt as string)
+
+      const details = await authorityEngine.getAdminDetails()
+      expect(details.proposed).to.equal(undefined)
     })
 
     it('should throw Admin not found when the AuthorityEngine is bound to an unknown authority id', async () => {
@@ -1290,44 +1392,44 @@ describe('AuthorityEngine', () => {
   describe('applyAdminProposal (promotion)', () => {
     // -----------------------------------------------------------------
     // GROUP 1 — schema branch digest-shape derivation probes (P1-P4).
-    // Raw SQL only; depend on no new engine code. Must be GREEN now.
+    // 62-03 (D-33b): rewritten to the SINGLE-SESSION, full-roster promotion shape —
+    // the former two-session (Admin-side null-officer-part + shared min-UserId
+    // officer-part) design is gone; every promotion now mints exactly ONE session
+    // whose roster argument is sourced from ProposedOfficer, shared by the Admin
+    // insert AND every Officer insert. Raw SQL + the shared rad-roster-digest
+    // module only; depend on no applyAdminProposal call. Must be GREEN now.
     // -----------------------------------------------------------------
 
-    it('P1: Digest() over a null officer-part argument produces a non-null comparable value', async () => {
+    it('P1: computeAdminPromotionDigest over an EMPTY roster argument produces a non-null comparable value', async () => {
       const { auth } = await createPromotionFixture()
-      const row = await auth.ctx.db
-        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
-        .get({
-          tid: 12345,
-          authorityId: auth.authority.id,
-          effectiveAt: toCanonicalDatetime(Date.now() + 60_000),
-          thresholdPolicies: JSON.stringify([{ policy: 'rad', threshold: 1 }]),
-          officerPart: null
-        })
-      expect(row?.d, 'Digest() over a null argument must still yield a non-null comparable value').to.not.be.null
-      expect(row?.d).to.not.be.undefined
+      const digest = await computeAdminPromotionDigest(auth.ctx.db, {
+        tid: 12345,
+        authorityId: auth.authority.id,
+        effectiveAt: toCanonicalDatetime(Date.now() + 60_000),
+        thresholdPolicies: JSON.stringify([{ policy: 'rad', threshold: 1 }]),
+        officers: '[]'
+      })
+      expect(digest, 'computeAdminPromotionDigest over an empty roster must still yield a non-null comparable value').to.not.be.null
+      expect(digest).to.not.be.undefined
     })
 
-    it('P2: a minted real-signed AdminSigning session satisfies Admin.MutationValid signing-nonce branch (self-visible admin subquery)', async () => {
+    it('P2: a minted real-signed AdminSigning session (empty roster) satisfies Admin.MutationValid signing-nonce branch (self-visible admin + roster subqueries)', async () => {
       const { auth } = await createPromotionFixture()
       const tid = Date.now()
       const newEffectiveAt = toCanonicalDatetime(Date.now() + 120_000)
       const thresholdPolicies = JSON.stringify([{ policy: 'rad', threshold: 1 }])
 
-      // Candidate shape (self-visible): the Admin subquery in
-      // Admin.MutationValid resolves to the ROW BEING INSERTED's own
-      // (EffectiveAt, ThresholdPolicies) — i.e. new.EffectiveAt/new.ThresholdPolicies
-      // directly, since Ad.AuthorityId/Ad.EffectiveAt exactly match new.*.
-      const digestRow = await auth.ctx.db
-        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
-        .get({
-          tid,
-          authorityId: auth.authority.id,
-          effectiveAt: newEffectiveAt,
-          thresholdPolicies,
-          officerPart: null
-        })
-      const digest = digestRow!.d as string
+      // Candidate shape (self-visible): the Admin subquery in Admin.MutationValid
+      // resolves to the ROW BEING INSERTED's own (EffectiveAt, ThresholdPolicies),
+      // and the roster subquery resolves against the (still-empty) ProposedOfficer
+      // set for this (AuthorityId, EffectiveAt) — no ProposedOfficer rows are
+      // seeded here on purpose, proving the zero-row roster path integrates
+      // correctly with the REAL Admin.MutationValid CHECK, not just the scratch
+      // probe (Task 1's P2).
+      const rosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, newEffectiveAt)
+      const digest = await computeAdminPromotionDigest(auth.ctx.db, {
+        tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies, officers: rosterJson
+      })
 
       const adminRow = await auth.ctx.db
         .prepare(
@@ -1387,17 +1489,11 @@ describe('AuthorityEngine', () => {
       const newEffectiveAt = toCanonicalDatetime(Date.now() + 130_000)
       const thresholdPolicies = JSON.stringify([{ policy: 'rad', threshold: 1 }])
       const wrongThresholdPolicies = JSON.stringify([{ policy: 'rad', threshold: 2 }])
+      const rosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, newEffectiveAt)
 
-      const digestRow = await auth.ctx.db
-        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
-        .get({
-          tid,
-          authorityId: auth.authority.id,
-          effectiveAt: newEffectiveAt,
-          thresholdPolicies: wrongThresholdPolicies,
-          officerPart: null
-        })
-      const digest = digestRow!.d as string
+      const digest = await computeAdminPromotionDigest(auth.ctx.db, {
+        tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies: wrongThresholdPolicies, officers: rosterJson
+      })
 
       const adminRow = await auth.ctx.db
         .prepare(
@@ -1449,34 +1545,23 @@ describe('AuthorityEngine', () => {
       expect(caught, 'P3: a digest/roster mismatch must be REJECTED by Admin.MutationValid').to.be.instanceOf(Error)
     })
 
-    it('P4: the whole promotion (Admin + N officers) succeeds inside ONE explicit transaction using exactly TWO minted sessions, when the deferred-constraint queue is drained after each insert', async () => {
+    it('P4: the whole promotion (Admin + N officers) succeeds inside ONE explicit transaction using exactly ONE minted session, when the deferred-constraint queue is drained after each insert', async () => {
       // T-57-07-01..T-57-07-06 backdrop: quereus's deferred-constraint queue
       // mis-evaluates self-referential correlated subqueries (Admin.MutationValid /
       // Officer.InsertValid both read from the SAME table they mutate) when MORE
       // THAN ONE deferred entry is pending at COMMIT time — a live `select` inside
       // the SAME open transaction shows the correct, self-visible value, but the
       // deferred evaluator computes something else and the CHECK spuriously fails.
-      // Reproduced directly: batching an Admin insert with even ONE Officer insert
-      // inside a single BEGIN…COMMIT fails Admin.MutationValid, even though every
-      // digest is provably correct by a live read. Matches the open quereus
-      // "deferred-CHECK sibling-row visibility" class of issue.
+      // WORKAROUND (verified here, adopted by applyAdminProposal): call the
+      // database's public `runDeferredRowConstraints()` immediately after EACH
+      // insert, while still inside the open transaction.
       //
-      // WORKAROUND (verified here, adopted by Task 2): call the database's public
-      // `runDeferredRowConstraints()` immediately after EACH insert, while still
-      // inside the open transaction. This drains the queue down to zero pending
-      // entries before the NEXT insert enqueues its own, so every deferred CHECK
-      // always evaluates alone — matching the single-entry case already proven
-      // correct by P2 — while the surrounding BEGIN…COMMIT/ROLLBACK still provides
-      // real, whole-transaction atomicity (a later failure still rolls back
-      // everything, including earlier drained-but-uncommitted inserts).
-      //
-      // Consequence for the digest shapes: because each insert's deferred CHECK is
-      // drained (and therefore evaluated as self-visible, per P2) before the next
-      // insert is even issued, EVERY officer insert — including the very FIRST —
-      // may use the SAME officer-part tuple: the minimum-UserId officer's own
-      // (AdminEffectiveAt, UserId, Title, Scopes). Exactly TWO minted sessions
-      // suffice for the whole promotion (Admin-side + ONE shared officer-side),
-      // matching key fact 2's simpler case for every officer, not just the second.
+      // 62-03 (D-33b): ONE promotion session now covers the Admin insert AND every
+      // Officer insert — the roster argument is sourced from ProposedOfficer,
+      // seeded here first (mirroring applyAdminProposal's Step 3/4 read of the
+      // SAME table). Officer.InsertValid's RosterMember clause additionally
+      // requires each inserted (UserId, Title, Scopes) to be an entry of that
+      // signed roster.
       const { auth, secondUser } = await createPromotionFixture()
       const tid = Date.now()
       const newEffectiveAt = toCanonicalDatetime(Date.now() + 140_000)
@@ -1495,58 +1580,50 @@ describe('AuthorityEngine', () => {
       if (!adminRow) throw new Error('P4: CurrentAdmin/Officer lookup failed for the fixture officer')
 
       const officersAscending = [auth.user.id, secondUser.id].sort()
-      const firstUserId = officersAscending[0]!
-      const secondUserId = officersAscending[1]!
-      const officerMeta: Record<string, { title: string, scopes: string }> = {
-        [auth.user.id]: { title: 'Chair', scopes: JSON.stringify(['rad']) },
-        [secondUser.id]: { title: 'Clerk', scopes: JSON.stringify(['vrg']) }
+      const officerMeta: Record<string, { title: string, scopes: string[] }> = {
+        [auth.user.id]: { title: 'Chair', scopes: ['rad'] },
+        [secondUser.id]: { title: 'Clerk', scopes: ['vrg'] }
       }
-      const firstMeta = officerMeta[firstUserId]!
-      const secondMeta = officerMeta[secondUserId]!
 
-      // Session 1 — Admin-side. Officer part is null: no Officer row exists for
-      // this brand-new AdminEffectiveAt yet, under ANY UserId.
-      const adminDigestRow = await auth.ctx.db
-        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
-        .get({ tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies, officerPart: null })
-      const adminDigest = adminDigestRow!.d as string
-      const adminSignature = await signCallback(digestToBytes(adminDigest))
-      const adminNonce = 'p4-admin-' + crypto.randomUUID()
+      // Seed ProposedAdmin + ProposedOfficer rows matching the officers — the
+      // SAME table applyAdminProposal's Step 3/4 (and the schema CHECKs) read.
+      const seedNow = nowCanonicalDatetime()
+      await auth.ctx.db.exec(
+        `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
+         with context IsUserValid = true, Tid = :tid, now = :now, UserId = null, UserKey = null, Signature = null
+         values (:authorityId, :effectiveAt, :thresholdPolicies)`,
+        { authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies, tid, now: seedNow }
+      )
+      for (const uid of officersAscending) {
+        const meta = officerMeta[uid]!
+        await auth.ctx.db.exec(
+          `insert into ProposedOfficer (AuthorityId, AdminEffectiveAt, ProposedName, Title, Scopes, UserId)
+           with context IsUserValid = true, Tid = :tid, now = :now, UserId = null, UserKey = null, Signature = null
+           values (:authorityId, :effectiveAt, :proposedName, :title, :scopes, :userId)`,
+          {
+            authorityId: auth.authority.id, effectiveAt: newEffectiveAt, proposedName: `P4 Officer ${uid}`,
+            title: meta.title, scopes: JSON.stringify(meta.scopes), userId: uid, tid, now: seedNow
+          }
+        )
+      }
+      const rosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, newEffectiveAt)
+
+      const promotionDigest = await computeAdminPromotionDigest(auth.ctx.db, {
+        tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies, officers: rosterJson
+      })
+      const promotionSignature = await signCallback(digestToBytes(promotionDigest))
+      const promotionNonce = 'p4-promotion-' + crypto.randomUUID()
       await auth.ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
          values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
         {
-          nonce: adminNonce, authorityId: auth.authority.id, adminEffectiveAt: adminRow.EffectiveAt as string,
-          digest: adminDigest, userId: adminSignature.signerUserId, signerKey: adminSignature.signerKey,
-          signature: adminSignature.signature, now: nowCanonicalDatetime()
+          nonce: promotionNonce, authorityId: auth.authority.id, adminEffectiveAt: adminRow.EffectiveAt as string,
+          digest: promotionDigest, userId: promotionSignature.signerUserId, signerKey: promotionSignature.signerKey,
+          signature: promotionSignature.signature, now: nowCanonicalDatetime()
         }
       )
-      await new SigningEngine(auth.ctx).sign(adminNonce, adminSignature, { ownsTransaction: true })
-
-      // Session 2 — the ONE shared officer-side session for every officer,
-      // keyed to the minimum-UserId officer's own tuple.
-      const officerPartRow = await auth.ctx.db
-        .prepare('select Digest(:effectiveAt, :userId, :title, :scopes) as d')
-        .get({ effectiveAt: newEffectiveAt, userId: firstUserId, title: firstMeta.title, scopes: firstMeta.scopes })
-      const officerPart = officerPartRow!.d as string
-      const officerDigestRow = await auth.ctx.db
-        .prepare('select Digest(:tid, :authorityId, Digest(:effectiveAt, :thresholdPolicies), :officerPart) as d')
-        .get({ tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies, officerPart })
-      const officerDigest = officerDigestRow!.d as string
-      const officerSignature = await signCallback(digestToBytes(officerDigest))
-      const officerNonce = 'p4-officer-' + crypto.randomUUID()
-      await auth.ctx.db.exec(
-        `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
-         with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = false
-         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :signature)`,
-        {
-          nonce: officerNonce, authorityId: auth.authority.id, adminEffectiveAt: adminRow.EffectiveAt as string,
-          digest: officerDigest, userId: officerSignature.signerUserId, signerKey: officerSignature.signerKey,
-          signature: officerSignature.signature, now: nowCanonicalDatetime()
-        }
-      )
-      await new SigningEngine(auth.ctx).sign(officerNonce, officerSignature, { ownsTransaction: true })
+      await new SigningEngine(auth.ctx).sign(promotionNonce, promotionSignature, { ownsTransaction: true })
 
       let caught: unknown
       try {
@@ -1555,23 +1632,19 @@ describe('AuthorityEngine', () => {
           `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
            with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
            values (:authorityId, :effectiveAt, :thresholdPolicies)`,
-          { nonce: adminNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies }
+          { nonce: promotionNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies }
         )
         await auth.ctx.db.runDeferredRowConstraints()
-        await auth.ctx.db.exec(
-          `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
-           with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
-           values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
-          { nonce: officerNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, userId: firstUserId, title: firstMeta.title, scopes: firstMeta.scopes }
-        )
-        await auth.ctx.db.runDeferredRowConstraints()
-        await auth.ctx.db.exec(
-          `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
-           with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
-           values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
-          { nonce: officerNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, userId: secondUserId, title: secondMeta.title, scopes: secondMeta.scopes }
-        )
-        await auth.ctx.db.runDeferredRowConstraints()
+        for (const uid of officersAscending) {
+          const meta = officerMeta[uid]!
+          await auth.ctx.db.exec(
+            `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
+             with context SigningNonce = :nonce, InviteSlotCid = null, InviteSignature = null, Tid = :tid
+             values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
+            { nonce: promotionNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, userId: uid, title: meta.title, scopes: JSON.stringify(meta.scopes) }
+          )
+          await auth.ctx.db.runDeferredRowConstraints()
+        }
         await auth.ctx.db.exec('COMMIT')
       } catch (err) {
         caught = err
@@ -1617,7 +1690,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1665,7 +1738,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1709,7 +1782,7 @@ describe('AuthorityEngine', () => {
       // 57-08 (Trigger A): bare Signature, not the callback — see C1's comment.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1757,7 +1830,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1780,7 +1853,7 @@ describe('AuthorityEngine', () => {
       const recomputed = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -1834,7 +1907,7 @@ describe('AuthorityEngine', () => {
       // "zero writes" assertion for a reason unrelated to what N1 tests.
       const rosterDigest = await computeRosterDigest(
         auth,
-        [{ proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
+        [{ proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] }],
         effectiveAt,
         proposal.proposed.thresholdPolicies
       )
@@ -1914,7 +1987,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2054,7 +2127,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2141,7 +2214,7 @@ describe('AuthorityEngine', () => {
       // the SAME userIds the real proposeAdmin call above resolved, or this
       // regression guard's recomputed digest will not match.
       const rebuiltRoster = sortRosterEntriesExported([
-        { proposedName: 'Test User', userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+        { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
         { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
       ])
       const officersJson = JSON.stringify(rebuiltRoster)
@@ -2204,7 +2277,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['rad', 'vrg'] }
         ],
         effectiveAt,
@@ -2324,7 +2397,7 @@ describe('AuthorityEngine', () => {
       const rosterDigest = await computeRosterDigest(
         auth,
         [
-          { proposedName: auth.user.name, userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
+          { proposedName: await founderDisplayName(auth), userId: auth.user.id, title: 'Chair', scopes: ['rad'] },
           { proposedName: secondUser.name, userId: secondUser.id, title: 'Clerk', scopes: ['vrg'] }
         ],
         effectiveAt,
@@ -2646,6 +2719,47 @@ describe('AuthorityEngine', () => {
       expect(after.admin.effectiveAt).to.not.equal(before.admin.effectiveAt)
     })
 
+    // 62-65 regression guard: the founder's display name (User.Name = the entered
+    // officerInit.name) deliberately differs from the provisioned device user's name.
+    // Identity is the userId + registered key, never the name — so the production shape
+    // (proposeAdmin with a device-signer callback, Trigger A promotion) must still work,
+    // and the persisted roster must carry the ENTERED name bound to the founder's userId.
+    it('62-65: a founder whose display name differs from the device user name can still propose and promote', async () => {
+      const foundingEffectiveAtMs = Date.now() - FOUNDING_PAST_MS
+      const { auth, secondUser } = await createPromotionFixture({ foundingEffectiveAt: foundingEffectiveAtMs })
+      const displayName = await founderDisplayName(auth)
+      expect(displayName, 'fixture precondition: founded with the entered admin name').to.equal('Admin A')
+      expect(displayName, 'fixture precondition: display name differs from the device user name').to.not.equal(auth.user.name)
+
+      const proposedEffectiveAtMs = Date.now() - PROMOTION_PAST_MS
+      const proposal: Proposal<AdminInit> = {
+        proposed: {
+          officers: [
+            { existing: { userId: auth.user.id, authorityId: auth.authority.id, title: 'Chair', scopes: ['rad'] as Scope[] } },
+            { existing: { userId: secondUser.id, authorityId: auth.authority.id, title: 'Clerk', scopes: ['vrg'] as Scope[] } }
+          ],
+          effectiveAt: proposedEffectiveAtMs,
+          thresholdPolicies: [{ policy: 'rad', threshold: 1 }]
+        },
+        signers: [auth.user.id]
+      }
+      await auth.authorityEngine.proposeAdmin(proposal, makeTestSignCallback(auth.user))
+
+      const outcome = (auth.authorityEngine as unknown as { lastPromotionOutcome?: { status?: string, reason?: string } }).lastPromotionOutcome
+      expect(outcome?.status, `promotion must apply (reason=${outcome?.reason})`).to.equal('promoted')
+
+      const proposedFounder = await auth.ctx.db
+        .prepare('select ProposedName from ProposedOfficer where AuthorityId = :a and AdminEffectiveAt = :e and UserId = :u')
+        .get({ a: auth.authority.id, e: toCanonicalDatetime(proposedEffectiveAtMs), u: auth.user.id })
+      expect(proposedFounder?.ProposedName, 'the signed roster carries the entered display name').to.equal(displayName)
+
+      const after = await auth.authorityEngine.getAdminDetails()
+      expect(after.admin.effectiveAt).to.equal(fromCanonicalDatetime(toCanonicalDatetime(proposedEffectiveAtMs)))
+      const founderOfficer = after.admin.officers.find((o) => o.userId === auth.user.id)
+      expect(founderOfficer?.title, 'the founder is promoted by userId despite the name difference').to.equal('Chair')
+      expect(after.admin.officers.find((o) => o.userId === secondUser.id)?.scopes).to.deep.equal(['vrg'])
+    })
+
     // D-03's cost made visible instead of silent (inherited finding 4): an `.init` officer
     // has no matching `User` row, so applyAdminProposal refuses with 'unresolvable-officer'
     // rather than silently promoting a smaller roster than the one that was signed.
@@ -2703,32 +2817,19 @@ describe('AuthorityEngine', () => {
     })
 
     // -----------------------------------------------------------------
-    // GROUP 4 — Trigger B (completeSignature 'admin' branch), constructed
-    // state (Task 3). Trigger B's NATURAL path is unreachable today:
-    // inherited finding 3 collapses every threshold to 1, so proposeAdmin
-    // (Trigger A) always reaches threshold first and applies the proposal
-    // before any co-signer task could exist.
-    //
-    // A SECOND, independent obstacle surfaced while building this case
-    // (recorded prominently in 57-08-SUMMARY.md, not hidden): the schema's
-    // own `AdminSignatureTaskExtension.MutationValid` CHECK
-    // (votetorrent.qsql:1241-1257) independently recomputes the PRE-57-01
-    // `Digest(Tid, AuthorityId, EffectiveAt, ThresholdPolicies)` formula —
-    // architecturally divorced from 57-01's roster-covering
-    // `Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies)` that
-    // proposeAdmin/applyAdminProposal actually use. A Task can therefore
-    // NEVER be legitimately seeded against a real, roster-matching 'rad'
-    // session — only against a legacy-shaped, non-roster AdminSigning +
-    // ProposedAdmin pair (the same shape elections.spec.ts's
-    // "debugSeedPendingTasks"-style fixtures already use). Fixing that
-    // mismatch is a schema change, out of this plan's scope (no schema diff
-    // is permitted). This case therefore proves Trigger B's MECHANICS
-    // genuinely execute — the composed BEGIN / sign() / promote / COMMIT
-    // transaction, with a typed refusal recorded rather than thrown — and
-    // does NOT and CANNOT prove the 'vrg' grant through this path. An
-    // unreachable production path covered by a test that pretends otherwise
-    // would be worse than this honest one.
-    it('Trigger B: completeSignature drives the composed sign+promote transaction, recording (not throwing) the refusal this schema shape forces', async () => {
+    // GROUP 4 — Trigger B legacy-digest regression (D-34, 62-03). Before this
+    // plan, `AdminSignatureTaskExtension.MutationValid` independently recomputed
+    // the PRE-57-01 `Digest(Tid, AuthorityId, EffectiveAt, ThresholdPolicies)`
+    // formula — architecturally divorced from 57-01's roster-covering formula
+    // `proposeAdmin`/`applyAdminProposal` actually use — so a Task could never be
+    // legitimately seeded against a real, roster-matching 'rad' session (only
+    // against this SAME legacy-shaped, non-roster AdminSigning + ProposedAdmin
+    // pair). 62-03 (D-33a) fixes Trigger B to recompute the REAL formula, which
+    // means this legacy shape is now the thing that correctly FAILS: a 'rad'
+    // session signed with the stale 4-argument digest can no longer seed a
+    // co-signer task at all, and — per D-34 — any later promotion attempt on
+    // that SAME nonce refuses with 'roster-mismatch', fail-closed, no migration.
+    it("D-34: a legacy 4-arg 'rad' session can no longer seed a co-signer task, and promoting it refuses with roster-mismatch (fail-closed, no migration)", async () => {
       const { auth } = await createPromotionFixture()
       const nonce = crypto.randomUUID()
       const taskId = crypto.randomUUID()
@@ -2744,11 +2845,6 @@ describe('AuthorityEngine', () => {
       if (!adminRow) throw new Error('setup: CurrentAdmin not found')
       const adminEffectiveAt = adminRow.EffectiveAt as string
 
-      // Legacy-shaped ProposedAdmin + AdminSigning pair — the ONLY shape
-      // AdminSignatureTaskExtension.MutationValid's schema CHECK accepts (see
-      // the describe-block comment above). No ProposedOfficer roster exists,
-      // so applyAdminProposal's Step 3 roster-match is EXPECTED to refuse —
-      // that refusal being RECORDED, not thrown, is what this test proves.
       try {
         await auth.ctx.db.exec(
           `insert into ProposedAdmin (AuthorityId, EffectiveAt, ThresholdPolicies)
@@ -2760,6 +2856,7 @@ describe('AuthorityEngine', () => {
       } catch {
         // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
       }
+      // The LEGACY, pre-62-03 4-argument formula — exactly the shape D-34 targets.
       await auth.ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
@@ -2769,8 +2866,11 @@ describe('AuthorityEngine', () => {
         { nonce, authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
       )
 
-      await auth.ctx.db.exec('BEGIN')
+      // The legacy extension insert THROWS — MutationValid now recomputes the
+      // full-roster formula and never matches this stale digest.
+      let extensionCaught: unknown
       try {
+        await auth.ctx.db.exec('BEGIN')
         await auth.ctx.db.exec(
           `insert into Task (Id, UserId, Type, SignatureType, SigningNonce, IsCompleted)
            with context IsMutationValid = true, Tid = :tid
@@ -2785,54 +2885,33 @@ describe('AuthorityEngine', () => {
         )
         await auth.ctx.db.exec('COMMIT')
       } catch (err) {
-        await auth.ctx.db.exec('ROLLBACK')
-        throw err
+        extensionCaught = err
+        try { await auth.ctx.db.exec('ROLLBACK') } catch { /* best-effort */ }
       }
+      expect(extensionCaught, 'a legacy 4-arg session must no longer be able to seed a co-signer task').to.be.instanceOf(Error)
 
+      // applyAdminProposal on that SAME nonce — after a header sign() reaches
+      // threshold — refuses with 'roster-mismatch' and writes no Admin row.
       const digestRow = await auth.ctx.db.prepare('select Digest from AdminSigning where Nonce = :nonce').get({ nonce })
       const digestB64 = digestRow!.Digest as string
       const signCb = makeTestSignCallback(auth.user)
       const realSig = await signCb(digestToBytes(digestB64))
+      const { SigningEngine } = await import('../src/signing/signing-engine.js')
+      const signResult = await new SigningEngine(auth.ctx).sign(nonce, realSig, { ownsTransaction: true })
+      expect(signResult, 'setup: threshold=1 must complete on the instigator signature alone').to.equal(true)
 
-      const networkRef = { hash: 'trigger-b-hash', name: 'Trigger B Network', relays: [], primaryAuthorityDomainName: 'trigger-b.example.com' }
-      const tasksEngine = new (await import('../src/tasks/signature-tasks-engine.js')).SignatureTasksEngine(networkRef, auth.ctx)
-      const task = {
-        type: 'signature' as const,
-        userId: auth.user.id,
-        network: networkRef,
-        signatureType: 'admin' as const,
-        authority: auth.authority,
-        administration: { proposed: { officers: [], effectiveAt: adminEffectiveAt, thresholdPolicies: [] }, signers: [auth.user.id] }
-      }
+      const adminCountBefore = await auth.ctx.db.prepare('select count(*) as n from Admin where AuthorityId = :id').get({ id: auth.authority.id })
 
-      const warnings: string[] = []
-      const originalWarn = console.warn
-      console.warn = ((...args: unknown[]) => { warnings.push(String(args[0])) }) as typeof console.warn
+      let promoCaught: unknown
       try {
-        await tasksEngine.completeSignature(task, { isAccepted: true, signature: realSig, sign: signCb })
-      } finally {
-        console.warn = originalWarn
+        await auth.authorityEngine.applyAdminProposal(nonce, signCb)
+      } catch (err) {
+        promoCaught = err
       }
+      expect((promoCaught as { reason?: string })?.reason, "D-34 refusal must be 'roster-mismatch'").to.equal('roster-mismatch')
 
-      expect(
-        warnings.some((w) => w.includes('finalize admin') && w.includes('roster-mismatch')),
-        'Trigger B must have ATTEMPTED and RECORDED (not thrown) the promotion refusal'
-      ).to.equal(true)
-
-      const officerSigRow = await auth.ctx.db
-        .prepare('select UserId from OfficerSignature where SigningNonce = :nonce')
-        .get({ nonce })
-      expect(officerSigRow?.UserId, "the officer's real signature must still be committed despite the promotion refusal").to.equal(auth.user.id)
-
-      const adminSigRow = await auth.ctx.db
-        .prepare('select SigningNonce from AdminSignature where SigningNonce = :nonce')
-        .get({ nonce })
-      expect(adminSigRow?.SigningNonce, 'the threshold-reached AdminSignature must still be committed').to.equal(nonce)
-
-      const taskRow = await auth.ctx.db
-        .prepare('select IsCompleted from Task where Id = :id')
-        .get({ id: taskId })
-      expect(taskRow?.IsCompleted, 'the Task must still close').to.satisfy((v: unknown) => v === 1 || v === true)
+      const adminCountAfter = await auth.ctx.db.prepare('select count(*) as n from Admin where AuthorityId = :id').get({ id: auth.authority.id })
+      expect(Number(adminCountAfter?.n), 'a refused promotion must write NO Admin row').to.equal(Number(adminCountBefore?.n))
     })
 
     it('WR-01: a degraded admin task whose authority join missed records the fault and does NOT destroy the officer signature', async () => {
@@ -2872,13 +2951,19 @@ describe('AuthorityEngine', () => {
       } catch {
         // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
       }
+      // 62-03 (D-33/D-34): the valid full-roster 'rad' PROPOSAL digest (zero
+      // ProposedOfficer rows seeded here — the zero-row roster value) — WR-01's
+      // own scenario (a degraded task missing `authority`) is orthogonal to the
+      // roster shape; it just needs a session the extension insert ACCEPTS.
+      const wr01RosterJson = await readProposedRosterJson(auth.ctx.db, auth.authority.id, adminEffectiveAt)
+      const wr01Digest = await computeRadProposalDigest(auth.ctx.db, {
+        authorityId: auth.authority.id, effectiveAt: adminEffectiveAt, officers: wr01RosterJson, thresholdPolicies
+      })
       await auth.ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-                 :userId, :signerKey, :sig)`,
-        { nonce, authorityId: auth.authority.id, adminEffectiveAt, thresholdPolicies, tid, now, userId: auth.user.id, signerKey, sig: placeholderSig }
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :sig)`,
+        { nonce, authorityId: auth.authority.id, adminEffectiveAt, digest: wr01Digest, now, userId: auth.user.id, signerKey, sig: placeholderSig }
       )
 
       await auth.ctx.db.exec('BEGIN')
@@ -3188,6 +3273,7 @@ describe('AuthorityEngine', () => {
       await authorityEngine.saveInviteWithSigning(invite, 'iad', sig)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'Accepted', domainName: 'a.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -3214,6 +3300,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotRow.Cid, 'null', false)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: false,
         invokes: undefined,
         inviteSignature,
@@ -3308,7 +3395,7 @@ describe('AuthorityEngine', () => {
       expect(slot?.Cid).to.equal(inviteSlotCid)
     })
 
-    it('resendInvite emits a fresh slot (new Cid) reusing the original nonce/signature; no auto-supersede', async () => {
+    it('resendInvite emits a fresh slot (new Cid) reusing the original nonce/signature; the pending list shows only the newest copy', async () => {
       const { authorityEngine, ctx, inviteSlotCid } = await seedPendingInvite()
 
       const orig = await ctx.db
@@ -3326,9 +3413,9 @@ describe('AuthorityEngine', () => {
       expect(fresh.SigningNonce).to.equal(orig.SigningNonce)
       expect(fresh.InviteSignature).to.equal(orig.InviteSignature)
 
-      // No auto-supersede: original was NOT cancelled, so BOTH appear in pending.
+      // One entry per invitation (CR-01): only the newest copy is listed.
       const pending = await authorityEngine.getPendingInviteCids()
-      expect(pending).to.include(inviteSlotCid)
+      expect(pending).to.not.include(inviteSlotCid)
       expect(pending).to.include(newCid)
     })
 
@@ -3375,10 +3462,10 @@ describe('AuthorityEngine', () => {
       expect(row.InviteSignature).to.equal(orig.InviteSignature)
       expect(row.ResendSalt, 'a genuine resend row must persist a non-null ResendSalt').to.be.a('string').and.have.length.greaterThan(0)
 
-      // All three generations remain independently present (no auto-supersede).
+      // One entry per invitation (CR-01): only the newest generation is listed.
       const pending = await authorityEngine.getPendingInviteCids()
-      expect(pending).to.include(origCid)
-      expect(pending).to.include(resend1Cid)
+      expect(pending).to.not.include(origCid)
+      expect(pending).to.not.include(resend1Cid)
       expect(pending).to.include(resend2Cid)
     })
 
@@ -3555,16 +3642,15 @@ describe('AuthorityEngine', () => {
     it('Admin.OfficerRequired CHECK evaluates cleanly (no phantom `scope` column error) when a rad-scoped Officer exists — confirmed on quereus@4.2.1', async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthority()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
-      // Insert a second Admin row for the same authority (shoe-in path: only one
-      // authority exists, no SigningNonce, no invite), then UPDATE it with a real
-      // column change so the OfficerRequired CHECK is genuinely evaluated.
+      // 62-03 (D-48): a second unsigned Admin row can no longer be inserted on a
+      // single-Authority network — formulation A admits only the first. This case
+      // never needed a second row anyway: the UPDATE below targets a raw (non-
+      // canonicalized) `newEffectiveAt` that can never MATCH the founding Admin's
+      // own canonically-stored EffectiveAt (same D-09 pitfall the negative test below
+      // documents), so it was ALWAYS a zero-row no-op — no CHECK, including
+      // OfficerRequired, is ever evaluated either way. Targeting the EXISTING founding
+      // Admin row directly (no insert at all) reproduces the exact same outcome.
       const newEffectiveAt = Date.now() + 99_000
-      await ctx.db.exec(
-        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
-         with context Tid = 9, SigningNonce = null, InviteSlotCid = null, InviteSignature = null
-         values (:id, :e, '[]')`,
-        { id: authority.id, e: newEffectiveAt }
-      )
       let caught: unknown
       try {
         await ctx.db.exec(
@@ -3594,21 +3680,20 @@ describe('AuthorityEngine', () => {
     // false for every possible correlation the CHECK could bind to (whether it
     // correlates strictly on new.EffectiveAt or, per the quereus behavior noted in
     // the regression-lock test above, reaches any Officer row for the authority).
-    // Mirrors the positive test's shoe-in insert + UPDATE shape exactly (D-06 setup
-    // parity) so this is a true apples-to-apples negative counterpart.
+    //
+    // 62-03 (D-48): a second unsigned Admin row can no longer be inserted. Targets the
+    // EXISTING founding Admin row directly instead — read back its own canonical
+    // EffectiveAt so the UPDATE genuinely matches it (D-09 pitfall: a raw JS-number
+    // parameter never matches the canonicalized stored value).
     it('Admin.OfficerRequired CHECK rejects an Admin update when NO rad-scoped Officer exists for the authority', async () => {
       const { authority, authorityEngine } = await createNetworkAndAuthorityWithoutRadOfficer()
       const ctx = (authorityEngine as unknown as { ctx: EngineContext }).ctx
-      // D-09 pitfall: EffectiveAt is a `datetime` column — the WHERE-clause parameter
-      // must be canonicalized (toCanonicalDatetime) or the UPDATE matches zero rows
-      // (a silent no-op, not a genuine CHECK evaluation either way).
-      const newEffectiveAt = toCanonicalDatetime(Date.now() + 99_000)
-      await ctx.db.exec(
-        `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies)
-         with context Tid = 9, SigningNonce = null, InviteSlotCid = null, InviteSignature = null
-         values (:id, :e, '[]')`,
-        { id: authority.id, e: newEffectiveAt }
-      )
+      const foundingAdminRow = await ctx.db
+        .prepare('select EffectiveAt from Admin where AuthorityId = :id')
+        .get({ id: authority.id })
+      // D-09 pitfall (kept, per the original test): canonicalize explicitly rather than
+      // trust the read-back shape — idempotent on an already-canonical value.
+      const newEffectiveAt = toCanonicalDatetime(foundingAdminRow?.EffectiveAt as string)
       let caught: unknown
       try {
         await ctx.db.exec(
@@ -4709,6 +4794,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'NewAuthority', domainName: 'na.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4735,6 +4821,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'X', domainName: 'x.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4745,6 +4832,7 @@ describe('AuthorityEngine', () => {
       try {
         await networkEngine.respondToInvite({
           invite,
+          invitePrivate: invite.invitePrivate,
           isAccepted: true,
           invokes: { authority: { name: 'Y', domainName: 'y.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
           inviteSignature: invite.inviteSignature,
@@ -4773,6 +4861,7 @@ describe('AuthorityEngine', () => {
       const slotCid = slotRow!.Cid as string
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: { authority: { name: 'AC', domainName: 'ac.example' }, admin: { effectiveAt: '2026-01-01T00:00:00', thresholdPolicies: '[{"policy":"rad","threshold":1}]' }, officers: [{ adminEffectiveAt: '2026-01-01T00:00:00', userId: 'user-1', title: 'Officer', scopes: '["rad"]' }] },
         inviteSignature: invite.inviteSignature,
@@ -4786,7 +4875,9 @@ describe('AuthorityEngine', () => {
         .get({ c: slotCid })
       expect(Boolean(row?.IsAccepted)).to.equal(true)
       expect(row?.Digest).to.not.equal(null)
-      expect(row?.InviteSignature).to.equal(invite.inviteSignature)
+      // 62-102: the engine signs the result with the invite key itself; the stored value is not the caller's string.
+      expect(row?.InviteSignature).to.be.a('string').with.length(128)
+      expect(row?.InviteSignature).to.not.equal(invite.inviteSignature)
     })
 
     it('should create InviteResult marking rejection with null digest', async () => {
@@ -4801,6 +4892,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotCid, 'null', false)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: false,
         invokes: undefined,
         inviteSignature,
@@ -4865,6 +4957,7 @@ describe('AuthorityEngine', () => {
       const inviteSignature = signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes), true)
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes,
         inviteSignature,
@@ -4892,6 +4985,7 @@ describe('AuthorityEngine', () => {
       const invokes1 = { officer: { userId: 'user-3', title: 'A' } }
       await networkEngine.respondToInvite({
         invite,
+        invitePrivate: invite.invitePrivate,
         isAccepted: true,
         invokes: invokes1,
         inviteSignature: signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes1), true),
@@ -4903,6 +4997,7 @@ describe('AuthorityEngine', () => {
         const invokes2 = { officer: { userId: 'user-4', title: 'B' } }
         await networkEngine.respondToInvite({
           invite,
+          invitePrivate: invite.invitePrivate,
           isAccepted: true,
           invokes: invokes2,
           inviteSignature: signInviteResult(invite.invitePrivate, slotCid, JSON.stringify(invokes2), true),
@@ -4977,6 +5072,7 @@ function makeStubAuthorityEngine (): IAuthorityEngine {
     async applyAdminProposal () { throw new Error('not implemented') },
     async saveInviteWithSigning (): Promise<void> {},
     async cancelInvite (): Promise<void> {},
+    async getPendingInviteCids (): Promise<string[]> { return [] },
     async resendInvite (): Promise<string> { return '' },
     async getAdminDetails () { throw new Error('not implemented') },
     async getAuthorityInvites () { throw new Error('not implemented') },
@@ -5475,8 +5571,11 @@ describe('AuthoritySaveInviteWithSigningBuilder', () => {
     expect(err1).to.equal(undefined)
     const { authorityEngine: eng2 } = await createNetworkAndAuthority()
     const invite2 = eng2.createAuthorityInvite('Invite2')
+    // The second network re-registers 'user-1' with a fresh key, so the signer must be
+    // rebuilt against it (SignerKeyValid requires the key registered in THIS network).
+    const sig2 = makeRealSignCallback('user-1')
     let err2: unknown
-    try { await eng2.buildSaveInviteWithSigning().fromPayload({ invite: invite2, scope: 'iad', signature: sig }).commit() } catch (e) { err2 = e }
+    try { await eng2.buildSaveInviteWithSigning().fromPayload({ invite: invite2, scope: 'iad', signature: sig2 }).commit() } catch (e) { err2 = e }
     expect(err2).to.equal(undefined)
   })
 })

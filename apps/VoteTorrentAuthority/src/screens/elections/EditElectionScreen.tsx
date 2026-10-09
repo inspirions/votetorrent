@@ -2,6 +2,7 @@ import { ExtendedTheme, useTheme, useNavigation, useRoute } from "@react-navigat
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { errorCopy } from "../../utils/errorCopy";
 import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
@@ -14,9 +15,9 @@ import { ElectionRevisionForm, ElectionRevisionFormValue } from "./components/El
 import { useApp } from "../../providers/AppProvider";
 import { ElectionType } from "@votetorrent/vote-core";
 import type { IElectionEngine, IElectionsEngine, ElectionInit, ElectionDetails } from "@votetorrent/vote-core";
-import { getLocalKeyholders, saveLocalKeyholders } from "../../engines/local-keyholders";
 import { mapElectionError } from "./election-error-messages";
 import { InlineError } from "../../components/InlineError";
+import { KEYHOLDER_POLICY_ERROR_KEY, validateKeyholderPolicy } from "./keyholder-policy";
 import {
 	resolveElectionTimeline,
 	findTimelineOrderViolation,
@@ -98,17 +99,15 @@ export default function EditElectionScreen() {
 					validation: toISO(cur.timeline.validation),
 					certificationStarts: toISO(cur.timeline.certificationStarts),
 					closed: toISO(cur.timeline.closed),
-					// TEMP scaffold: engine returns []; fall back to locally-stored names.
-					keyholders: cur.keyholders.length
-						? cur.keyholders.map((kh) => kh.invite.name)
-						: await getLocalKeyholders(loaded.election.id),
+					// D-27: keyholders come from the engine only.
+					keyholders: cur.keyholders.map((kh) => kh.invite.name),
 					threshold: cur.keyholderThreshold,
 					tags: cur.tags ?? [],
 					instructions: cur.instructions ?? "",
 				});
 			} catch (error) {
 				console.warn("Error loading election for edit:", error);
-				setErrorMessage(error instanceof Error ? error.message : String(error));
+				setErrorMessage(errorCopy(error, t, "read"));
 			}
 		}
 		loadElection();
@@ -131,6 +130,12 @@ export default function EditElectionScreen() {
 			.filter(Boolean);
 		if (cleanKeyholders.length === 0) {
 			setErrorMessage(t("atLeastOneKeyholderRequired"));
+			return;
+		}
+
+		const policy = validateKeyholderPolicy(cleanKeyholders, Math.trunc(revision.threshold));
+		if (!policy.ok) {
+			setErrorMessage(t(KEYHOLDER_POLICY_ERROR_KEY[policy.reason]));
 			return;
 		}
 
@@ -194,9 +199,8 @@ export default function EditElectionScreen() {
 			};
 			// No seedElectionSigning — adjustElection is non-signing (D-01, RESEARCH Pattern 1)
 			await electionsEngine.adjustElection(init);
-			// TEMP scaffold (delete with cadre P2P invite flow): persist the latest
-			// keyholder names locally so the detail / revise screens display them.
-			await saveLocalKeyholders(details.election.id, cleanKeyholders);
+			// D-27: no local scaffold persistence — adjustElection already persists
+			// ProposedElectionRevision.Keyholders, and the engine is the single source.
 			// goBack only on success (D-19 — NOT after the catch)
 			navigation.goBack();
 		} catch (err) {

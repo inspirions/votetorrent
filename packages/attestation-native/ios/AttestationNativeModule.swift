@@ -40,12 +40,31 @@ import DeviceCheck
 import CryptoKit
 import LocalAuthentication
 import Security
+import UIKit
 
 @objc(AttestationNative)
 class AttestationNativeModule: NSObject {
 
   // Distinct from the Android aliases by design (D-07: different apps, different threat surfaces).
   private static let voteKeyTag = "org.votetorrent.voter.VOTE_KEY_V1"
+  // The two device-key aliases in use today (Voter real-attestation-producer.ts, Authority
+  // device-signer.ts). They keep the original tag so no installed Keychain key is orphaned (62-127).
+  private static let legacyDeviceKeyAliases: Set<String> = [
+    "VOTETORRENT_DEVICE_KEY_V1",
+    "VOTETORRENT_AUTHORITY_SIGNING_KEY_V1"
+  ]
+  private static let deviceKeyAliasPattern = try! NSRegularExpression(pattern: "^[A-Z0-9_]{1,64}$")
+
+  /// The single alias -> Keychain tag mapping for the device-key methods. A legacy alias maps to
+  /// `voteKeyTag`; any other valid alias gets its own tag; an invalid alias yields nil (the caller
+  /// rejects INVALID_ARGUMENT before touching the Keychain).
+  private static func deviceKeyTag(for alias: String) -> String? {
+    if legacyDeviceKeyAliases.contains(alias) { return Self.voteKeyTag }
+    let range = NSRange(alias.startIndex..<alias.endIndex, in: alias)
+    guard deviceKeyAliasPattern.firstMatch(in: alias, range: range) != nil else { return nil }
+    return "org.votetorrent.devicekey." + alias
+  }
+
   private static let recoveryKeyTag = "org.votetorrent.voter.RECOVERY_KEY_V1"
   private static let appAttestKeyIdDefaultsKey = "org.votetorrent.voter.APPATTEST_KEY_ID"
 
@@ -218,6 +237,10 @@ class AttestationNativeModule: NSObject {
   func provisionDeviceKey(_ keyAlias: String,
                           resolver resolve: @escaping RCTPromiseResolveBlock,
                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
     let service = DCAppAttestService.shared
     // Simulator and unsupported hardware land here. This is the ONLY honest place to fail — do not
     // fall back to a software key: an unattestable device must not silently become attestable.
@@ -241,20 +264,20 @@ class AttestationNativeModule: NSObject {
         // Recover from a destroyed vote key instead of handing it back forever. Only a POSITIVE
         // invalidation signal deletes; `.indeterminate` keeps the existing key, because wrongly
         // deleting a live one destroys the voter's device identity.
-        var existing = self.loadKey(tag: Self.voteKeyTag)
+        var existing = self.loadKey(tag: deviceTag)
         var reprovisioned = false
         var probeDetail = "no-existing-key"
         if existing != nil {
-          let probe = self.probeKeyLiveness(tag: Self.voteKeyTag)
+          let probe = self.probeKeyLiveness(tag: deviceTag)
           probeDetail = probe.detail
           if probe.liveness == .invalidated {
-            self.deleteKey(tag: Self.voteKeyTag)
+            self.deleteKey(tag: deviceTag)
             existing = nil
             reprovisioned = true
           }
         }
         let voteKey = try existing
-          ?? self.createSecureEnclaveKey(tag: Self.voteKeyTag, requireBiometry: true)
+          ?? self.createSecureEnclaveKey(tag: deviceTag, requireBiometry: true)
         guard let pub = SecKeyCopyPublicKey(voteKey) else {
           reject("KEY_ERROR", "could not derive the vote key's public key", nil); return
         }
@@ -272,6 +295,42 @@ class AttestationNativeModule: NSObject {
       } catch {
         reject("KEY_ERROR", error.localizedDescription, error)
       }
+    }
+  }
+
+  // MARK: - (1b) getCurrentDeviceKey
+
+  /// READ-ONLY lookup of the existing Secure Enclave vote key (63-18 fix). Never generates, deletes,
+  /// prompts or mutates the Keychain. Resolves `{ publicKeyCompressedHex, keyAlias }` — the same
+  /// key `provisionDeviceKey` would reuse. Rejects `DEVICE_KEY_ABSENT` (no key) or
+  /// `DEVICE_KEY_INVALIDATED` (POSITIVE invalidation signal only; `.indeterminate` is treated usable).
+  @objc(getCurrentDeviceKey:resolver:rejecter:)
+  func getCurrentDeviceKey(_ keyAlias: String,
+                           resolver resolve: @escaping RCTPromiseResolveBlock,
+                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
+    guard let voteKey = self.loadKey(tag: deviceTag) else {
+      reject("DEVICE_KEY_ABSENT", "no device key exists (read-only lookup — nothing was generated)", nil)
+      return
+    }
+    let probe = self.probeKeyLiveness(tag: deviceTag)
+    if probe.liveness == .invalidated {
+      reject("DEVICE_KEY_INVALIDATED", "device key is permanently invalidated (\(probe.detail))", nil)
+      return
+    }
+    guard let pub = SecKeyCopyPublicKey(voteKey) else {
+      reject("DEVICE_KEY_READ_FAILED", "could not derive the vote key's public key", nil); return
+    }
+    do {
+      resolve([
+        "publicKeyCompressedHex": try self.compressedHex(from: pub),
+        "keyAlias": keyAlias
+      ])
+    } catch {
+      reject("DEVICE_KEY_READ_FAILED", error.localizedDescription, error)
     }
   }
 
@@ -313,6 +372,10 @@ class AttestationNativeModule: NSObject {
                           enableDeviceCheck: Bool,
                           resolver resolve: @escaping RCTPromiseResolveBlock,
                           rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
     let service = DCAppAttestService.shared
     guard service.isSupported else {
       reject("ATTESTATION_UNSUPPORTED", "App Attest is not supported on this device", nil); return
@@ -320,7 +383,7 @@ class AttestationNativeModule: NSObject {
     guard let keyId = UserDefaults.standard.string(forKey: Self.appAttestKeyIdDefaultsKey) else {
       reject("NO_KEY_PROVISIONED", "provisionDeviceKey has not run", nil); return
     }
-    guard let voteKey = self.loadKey(tag: Self.voteKeyTag), let votePub = SecKeyCopyPublicKey(voteKey) else {
+    guard let voteKey = self.loadKey(tag: deviceTag), let votePub = SecKeyCopyPublicKey(voteKey) else {
       reject("NO_KEY_PROVISIONED", "no vote key present", nil); return
     }
 
@@ -368,7 +431,9 @@ class AttestationNativeModule: NSObject {
 
   /// Biometric-gated P-256 signature over `digestBase64`.
   /// `digestBase64` is PLAIN base64 of the RAW digest bytes — never base64url, never UTF-8-of-a-
-  /// string. Identical contract to Android's `signWithDeviceKey`.
+  /// string. The base64 ENCODING is identical to Android's `signWithDeviceKey`; the signing DOMAIN
+  /// is not: iOS signs the input as the FINAL hash, so callers pre-hash via `nativeSignInputBytes`
+  /// (packages/attestation-native/src/native-sign-input.ts).
   @objc(signWithDeviceKey:digestBase64:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
   func signWithDeviceKey(_ keyAlias: String,
                          digestBase64: String,
@@ -377,7 +442,11 @@ class AttestationNativeModule: NSObject {
                          promptNegativeButton: String,
                          resolver resolve: @escaping RCTPromiseResolveBlock,
                          rejecter reject: @escaping RCTPromiseRejectBlock) {
-    signWith(tag: Self.voteKeyTag, digestBase64: digestBase64, reason: promptSubtitle,
+    guard let deviceTag = Self.deviceKeyTag(for: keyAlias) else {
+      reject("INVALID_ARGUMENT", "invalid device key alias", nil)
+      return
+    }
+    signWith(tag: deviceTag, digestBase64: digestBase64, reason: promptSubtitle,
              resolve: resolve, reject: reject)
   }
 
@@ -433,9 +502,11 @@ class AttestationNativeModule: NSObject {
     }
 
     var error: Unmanaged<CFError>?
-    // `.ecdsaSignatureDigestX962SHA256` signs an ALREADY-HASHED 32-byte digest — the `prehash: true`
-    // half of the contract. Using the `...MessageX962...` variant would hash the digest a second
-    // time and silently produce a signature over the wrong bytes.
+    // `.ecdsaSignatureDigestX962SHA256` treats the input as the FINAL ECDSA hash (no internal
+    // hash) = noble `prehash: false`. Android's SHA256withECDSA hashes once, so the shared JS helper
+    // (nativeSignInputBytes) pre-hashes on iOS to compensate. The PoP relies on this raw behaviour:
+    // do NOT switch to the `...MessageX962...` variant without changing the PoP verifier, the
+    // contract doc and the pinned hardware vector together.
     guard let sig = SecKeyCreateSignature(key, .ecdsaSignatureDigestX962SHA256,
                                           digest as CFData, &error) as Data? else {
       let err = error!.takeRetainedValue() as Error as NSError
@@ -478,5 +549,428 @@ class AttestationNativeModule: NSObject {
     } catch {
       reject("KEY_ERROR", error.localizedDescription, error)
     }
+  }
+
+  // MARK: - Secret wrap (D-42)
+  //
+  // Generic, alias-keyed AES-256-GCM secret-at-rest wrap — distinct from every P-256 key above.
+  // The wrap key is a Keychain-protected AES-256 key, NOT a Secure Enclave key: the Secure
+  // Enclave holds only EC P-256 keys (there is no `kSecAttrKeyTypeAES`). Used through CryptoKit.
+  // Unproven on device — D-23 proof debt; a clean typecheck is not working Keychain behaviour.
+
+  private static let secretWrapService = "org.votetorrent.secretwrap"
+  private let secretWrapQueue = DispatchQueue(label: "org.votetorrent.secretwrap")
+  private static let wrapKeyAliasPattern = try! NSRegularExpression(pattern: "^VOTETORRENT_[A-Z0-9_]+_WRAP_KEY_V[0-9]+$")
+
+  private func isValidWrapKeyAlias(_ alias: String) -> Bool {
+    let range = NSRange(alias.startIndex..<alias.endIndex, in: alias)
+    return Self.wrapKeyAliasPattern.firstMatch(in: alias, range: range) != nil
+  }
+
+  private enum SecretWrapNativeError: Error {
+    case code(String, String)
+  }
+
+  /// Reads the stored policy marker ("auth=1"/"auth=0") for [alias] WITHOUT prompting —
+  /// `interactionNotAllowed = true` mirrors `probeKeyLiveness`'s no-UI probe above. Returns nil if
+  /// no item exists yet.
+  private func readWrapKeyPolicyMarker(alias: String) -> String? {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnAttributes as String: true,
+      kSecUseAuthenticationContext as String: context
+    ]
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+          let attrs = item as? [String: Any],
+          let label = attrs[kSecAttrLabel as String] as? String else {
+      return nil
+    }
+    return label
+  }
+
+  /// Does an item exist under [alias]? A no-UI attributes-only probe (no data, no prompt). Used on
+  /// the unwrap path when the policy marker read returned nil, so an invalidated
+  /// `.biometryCurrentSet` item is still known to exist and its data read's errSecItemNotFound can
+  /// be reported KEY_INVALIDATED instead of the replaceable NO_WRAP_KEY. errSecSuccess and
+  /// errSecInteractionNotAllowed (present but withheld without UI) count as present; only
+  /// errSecItemNotFound counts as absent. Any other status is treated as absent, which leaves the
+  /// data read to decide exactly as before.
+  private func wrapKeyItemExists(alias: String) -> Bool {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnAttributes as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecUseAuthenticationContext as String: context
+    ]
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    return status == errSecSuccess || status == errSecInteractionNotAllowed
+  }
+
+  /// Loads the wrap key under [alias], keyed by `service` + `kSecAttrAccount == alias`, creating it
+  /// only when [createIfMissing] is true (wrap). NEVER updates or overwrites an existing item — a
+  /// policy mismatch is rejected, never reconciled (T-62-08-11). Returns the raw 32-byte AES key.
+  /// [reason] becomes the Keychain prompt's `localizedReason` (the caller's promptSubtitle).
+  private func loadWrapKey(alias: String, requireAuth: Bool, createIfMissing: Bool, reason: String) throws -> Data {
+    guard isValidWrapKeyAlias(alias) else {
+      throw SecretWrapNativeError.code("INVALID_ARGUMENT", "invalid wrap key alias: \(alias)")
+    }
+
+    let wantedMarker = requireAuth ? "auth=1" : "auth=0"
+    // CR-02: true once we know an item already exists under the alias (marker read, or a duplicate on
+    // add). A `.biometryCurrentSet` item that then reads as errSecItemNotFound was invalidated by a
+    // biometric enrollment change, and is reported KEY_INVALIDATED rather than NO_WRAP_KEY.
+    var itemExisted = false
+    if let existingMarker = readWrapKeyPolicyMarker(alias: alias) {
+      itemExisted = true
+      if existingMarker != wantedMarker {
+        throw SecretWrapNativeError.code(
+          "WRAP_KEY_POLICY_MISMATCH",
+          "alias \(alias) was created with \(existingMarker), but this call requested \(wantedMarker)"
+        )
+      }
+    } else if createIfMissing {
+      var randomBytes = [UInt8](repeating: 0, count: 32)
+      guard SecRandomCopyBytes(kSecRandomDefault, 32, &randomBytes) == errSecSuccess else {
+        throw SecretWrapNativeError.code("WRAP_FAILED", "SecRandomCopyBytes failed")
+      }
+      let keyData = Data(randomBytes)
+
+      var addQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.secretWrapService,
+        kSecAttrAccount as String: alias,
+        kSecAttrLabel as String: wantedMarker,
+        kSecAttrSynchronizable as String: false,
+        kSecValueData as String: keyData
+      ]
+      if requireAuth {
+        var accessError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+          kCFAllocatorDefault,
+          kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+          .biometryCurrentSet,
+          &accessError
+        ) else {
+          throw accessError!.takeRetainedValue() as Error
+        }
+        addQuery[kSecAttrAccessControl as String] = access
+      } else {
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+      }
+
+      let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+      // A concurrent create lost the race — re-read rather than treat as a failure. NEVER update
+      // or overwrite an existing item (T-62-08-03).
+      if addStatus == errSecDuplicateItem {
+        itemExisted = true
+      } else if addStatus != errSecSuccess {
+        throw SecretWrapNativeError.code("WRAP_FAILED", "SecItemAdd failed with OSStatus \(addStatus)")
+      }
+    } else {
+      // Unwrap with a nil marker: learn whether the item exists without reading its data, so an
+      // invalidated item is reported KEY_INVALIDATED below rather than replaceable NO_WRAP_KEY.
+      itemExisted = wrapKeyItemExists(alias: alias)
+    }
+    // A nil marker with createIfMissing == false (unwrap) deliberately falls through to the data read
+    // below. It must NOT throw NO_WRAP_KEY early: the marker read is no-UI and can spuriously return
+    // nil for an item that exists, and the JS callers treat NO_WRAP_KEY as replaceable, so an early
+    // throw could overwrite a saved vote or identity. The data read decides: a present one is
+    // decrypted; errSecItemNotFound is KEY_INVALIDATED when the existence probe above saw the item
+    // (an invalidated auth-required item), and NO_WRAP_KEY only when it did not.
+
+    var readQuery: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.secretWrapService,
+      kSecAttrAccount as String: alias,
+      kSecReturnData as String: true
+    ]
+    if requireAuth {
+      let context = LAContext()
+      // The caller's promptSubtitle is the localizedReason — iOS has no separate title/subtitle/negative
+      // button surface for a Keychain item read the way BiometricPrompt does. An empty reason keeps
+      // the empty string (iOS then shows its default).
+      context.localizedReason = reason
+      readQuery[kSecUseAuthenticationContext as String] = context
+    }
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(readQuery as CFDictionary, &item)
+    guard status == errSecSuccess, let data = item as? Data else {
+      if status == errSecItemNotFound {
+        // CR-02: an auth-required item that exists but cannot be found on a data read is the
+        // reported iOS behaviour of an invalidated `.biometryCurrentSet` item (unproven on device).
+        if requireAuth && itemExisted {
+          throw SecretWrapNativeError.code("KEY_INVALIDATED", "wrap key under alias \(alias) was invalidated")
+        }
+        throw SecretWrapNativeError.code("NO_WRAP_KEY", "no wrap key under alias \(alias)")
+      }
+      throw mapOSStatusOrLAError(status)
+    }
+    return data
+  }
+
+  private func mapOSStatusOrLAError(_ status: OSStatus) -> SecretWrapNativeError {
+    switch status {
+    case errSecItemNotFound:
+      return .code("NO_WRAP_KEY", "no wrap key present")
+    case errSecInteractionNotAllowed:
+      return .code("DEVICE_LOCKED", "device is locked")
+    case errSecUserCanceled, OSStatus(LAError.userCancel.rawValue), OSStatus(LAError.systemCancel.rawValue),
+         OSStatus(LAError.appCancel.rawValue), OSStatus(LAError.userFallback.rawValue):
+      return .code("CANCELED", "authentication cancelled")
+    case OSStatus(LAError.biometryNotEnrolled.rawValue):
+      return .code("NO_BIOMETRICS_ENROLLED", "no biometrics enrolled")
+    case OSStatus(LAError.biometryLockout.rawValue):
+      return .code("LOCKOUT_PERMANENT", "biometry locked out")
+    default:
+      return .code("WRAP_FAILED", "Keychain operation failed with OSStatus \(status)")
+    }
+  }
+
+  private func zeroize(_ data: inout Data) {
+    data.withUnsafeMutableBytes { raw in
+      guard let base = raw.baseAddress else { return }
+      memset(base, 0, raw.count)
+    }
+  }
+
+  /// Answers `wrapSecret`. `promptTitle`/`promptNegativeButton` are accepted for ABI parity with
+  /// Android (used only when `requireAuth` is true, which iOS surfaces via `promptSubtitle` as
+  /// the Keychain read's `LAContext.localizedReason` — there is no separate title/negative-button
+  /// surface for a Keychain item read the way `BiometricPrompt` has one).
+  ///
+  /// D-14 (63-16): `authWindowSeconds` is accepted for ABI parity and deliberately IGNORED. iOS keeps
+  /// the per-use `.biometryCurrentSet` item with a fresh `LAContext` per call, so Submit costs two
+  /// prompts on iOS by design (D-14 accept-two; an iOS window is unproven and its device proof is
+  /// deferred).
+  @objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)
+  func wrapSecret(_ keyAlias: String,
+                  plaintextBase64: String,
+                  aadBase64: String,
+                  requireAuth: Bool,
+                  promptTitle: String,
+                  promptSubtitle: String,
+                  promptNegativeButton: String,
+                  authWindowSeconds: Double,
+                  resolver resolve: @escaping RCTPromiseResolveBlock,
+                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      guard let plaintext = Data(base64Encoded: plaintextBase64) else {
+        reject("INVALID_ENCODING", "plaintextBase64 did not decode", nil); return
+      }
+      guard let aad = Data(base64Encoded: aadBase64) else {
+        reject("INVALID_ENCODING", "aadBase64 did not decode", nil); return
+      }
+      do {
+        var keyData = try self.loadWrapKey(alias: keyAlias, requireAuth: requireAuth, createIfMissing: true, reason: promptSubtitle)
+        defer { self.zeroize(&keyData) }
+        let sealed = try AES.GCM.seal(plaintext, using: SymmetricKey(data: keyData), nonce: AES.GCM.Nonce(), authenticating: aad)
+        let ciphertext = sealed.ciphertext + sealed.tag
+        let iv = Data(sealed.nonce)
+        resolve([
+          "ciphertextBase64": ciphertext.base64EncodedString(),
+          "ivBase64": iv.base64EncodedString(),
+          "keyAlias": keyAlias,
+          "securityLevel": "keychain"
+        ])
+      } catch let SecretWrapNativeError.code(code, message) {
+        reject(code, message, nil)
+      } catch {
+        reject("WRAP_FAILED", error.localizedDescription, error)
+      }
+    }
+  }
+
+  /// Answers `unwrapSecret`. Same prompt-surface note as `wrapSecret` above. Unwrap never creates a
+  /// key (parity with Android `SecretWrapHelper.unwrap`): an absent item rejects NO_WRAP_KEY with no
+  /// Keychain write. `promptSubtitle` is forwarded as the Keychain prompt's reason.
+  @objc(unwrapSecret:ciphertextBase64:ivBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)
+  func unwrapSecret(_ keyAlias: String,
+                    ciphertextBase64: String,
+                    ivBase64: String,
+                    aadBase64: String,
+                    requireAuth: Bool,
+                    promptTitle: String,
+                    promptSubtitle: String,
+                    promptNegativeButton: String,
+                    authWindowSeconds: Double,
+                    resolver resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      guard let combined = Data(base64Encoded: ciphertextBase64), combined.count >= 16 else {
+        reject("INVALID_ENCODING", "ciphertextBase64 did not decode to at least 16 bytes", nil); return
+      }
+      guard let iv = Data(base64Encoded: ivBase64), iv.count == 12 else {
+        reject("INVALID_ENCODING", "ivBase64 must decode to 12 bytes", nil); return
+      }
+      guard let aad = Data(base64Encoded: aadBase64) else {
+        reject("INVALID_ENCODING", "aadBase64 did not decode", nil); return
+      }
+      if !self.isValidWrapKeyAlias(keyAlias) {
+        reject("INVALID_ARGUMENT", "invalid wrap key alias: \(keyAlias)", nil); return
+      }
+      do {
+        var keyData = try self.loadWrapKey(alias: keyAlias, requireAuth: requireAuth, createIfMissing: false, reason: promptSubtitle)
+        defer { self.zeroize(&keyData) }
+        let ciphertext = combined.prefix(combined.count - 16)
+        let tag = combined.suffix(16)
+        let sealedBox = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: iv), ciphertext: ciphertext, tag: tag)
+        let plaintext = try AES.GCM.open(sealedBox, using: SymmetricKey(data: keyData), authenticating: aad)
+        resolve(["plaintextBase64": plaintext.base64EncodedString()])
+      } catch let SecretWrapNativeError.code(code, message) {
+        reject(code, message, nil)
+      } catch let error as CryptoKitError {
+        // Domain-specific: only `.authenticationFailure` is a GCM tag mismatch; other
+        // CryptoKitError cases (e.g. incorrectParameterSize) are not.
+        if case .authenticationFailure = error {
+          reject("UNWRAP_TAG_MISMATCH", "GCM authentication failed", nil)
+        } else {
+          reject("UNWRAP_FAILED", "\(error)", nil)
+        }
+      } catch {
+        reject("UNWRAP_FAILED", error.localizedDescription, error)
+      }
+    }
+  }
+
+  // MARK: - Phase 63 review: wrap-key replacement, secure screen, sensitive copy
+
+  /// CR-02: the ONLY aliases `deleteWrapKey` may delete (the vote-record family). Must equal
+  /// `DELETABLE_WRAP_KEY_ALIAS_PATTERN` in SecretWrapHelper.kt and `VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN`
+  /// in secret-wrap.ts.
+  private static let deletableWrapKeyAliasPattern = try! NSRegularExpression(pattern: "^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$")
+
+  /// CR-02: deletes the wrap-key item under `keyAlias` so the next `wrapSecret` creates a fresh one.
+  /// Refuses every alias outside the vote-record family before touching the Keychain. Deletion needs
+  /// no authentication, so an invalidated item is deletable. Resolves `["deleted": Bool]`.
+  @objc(deleteWrapKey:resolver:rejecter:)
+  func deleteWrapKey(_ keyAlias: String,
+                     resolver resolve: @escaping RCTPromiseResolveBlock,
+                     rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretWrapQueue.async {
+      let range = NSRange(keyAlias.startIndex..<keyAlias.endIndex, in: keyAlias)
+      guard Self.deletableWrapKeyAliasPattern.firstMatch(in: keyAlias, range: range) != nil else {
+        reject("INVALID_ARGUMENT", "alias \(keyAlias) may not be deleted", nil); return
+      }
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: Self.secretWrapService,
+        kSecAttrAccount as String: keyAlias
+      ]
+      let status = SecItemDelete(query as CFDictionary)
+      if status == errSecSuccess {
+        resolve(["deleted": true])
+      } else if status == errSecItemNotFound {
+        resolve(["deleted": false])
+      } else {
+        reject("WRAP_FAILED", "SecItemDelete failed with OSStatus \(status)", nil)
+      }
+    }
+  }
+
+  /// CR-01: iOS has no FLAG_SECURE. Resolves `["applied": false]`; the receipt screen renders its own
+  /// opaque privacy cover on AppState 'inactive' instead.
+  @objc(setSecureScreen:resolver:rejecter:)
+  func setSecureScreen(_ enabled: Bool,
+                       resolver resolve: @escaping RCTPromiseResolveBlock,
+                       rejecter reject: @escaping RCTPromiseRejectBlock) {
+    resolve(["applied": false])
+  }
+
+  /// WR-03: SYNCHRONOUS (blocking) method. Puts `text` on the general pasteboard as a local-only item
+  /// (no Universal Clipboard) that expires after 60 s. The write is dispatched to the main queue;
+  /// `setItems` has no failure signal, so this returns true once the write is scheduled.
+  @objc(copySensitiveText:)
+  func copySensitiveText(_ text: String) -> NSNumber {
+    DispatchQueue.main.async {
+      UIPasteboard.general.setItems(
+        [["public.utf8-plain-text": text]],
+        options: [
+          UIPasteboard.OptionsKey.localOnly: true,
+          UIPasteboard.OptionsKey.expirationDate: Date().addingTimeInterval(60)
+        ]
+      )
+    }
+    return NSNumber(value: true)
+  }
+
+  // MARK: - Plan 62-75 file share (D-36)
+
+  /// Writes UTF-8 `contents` to `NSTemporaryDirectory()/vt-share/<fileName>`, emptying the directory
+  /// first. Resolves `["uri": file URL string]`. Name rule mirrors Android and the JS wrapper.
+  @objc(writeShareFile:contents:resolver:rejecter:)
+  func writeShareFile(_ fileName: String,
+                      contents: String,
+                      resolver resolve: @escaping RCTPromiseResolveBlock,
+                      rejecter reject: @escaping RCTPromiseRejectBlock) {
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    let nameOk = !fileName.isEmpty
+      && fileName.count <= 100
+      && !fileName.contains("..")
+      && fileName.unicodeScalars.allSatisfy { allowed.contains($0) }
+    if !nameOk {
+      reject("INVALID_NAME", "file name must match [A-Za-z0-9._-]{1,100} and not contain '..'", nil); return
+    }
+    do {
+      let fm = FileManager.default
+      let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("vt-share", isDirectory: true)
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+      for existing in try fm.contentsOfDirectory(atPath: dir.path) {
+        try fm.removeItem(at: dir.appendingPathComponent(existing))
+      }
+      let url = dir.appendingPathComponent(fileName)
+      try contents.write(to: url, atomically: true, encoding: .utf8)
+      resolve(["uri": url.absoluteString])
+    } catch {
+      reject("WRITE_FAILED", error.localizedDescription, error)
+    }
+  }
+
+  /// Plan 62-138: deletes the regular file at the `file://` `uri` iff its symlink-resolved, standardized
+  /// path is a strict child of NSCachesDirectory. Resolves `["deleted": Bool]`; rejects OUTSIDE_CACHE /
+  /// DELETE_FAILED.
+  @objc(deleteCachedFile:resolver:rejecter:)
+  func deleteCachedFile(_ uri: String,
+                        resolver resolve: @escaping RCTPromiseResolveBlock,
+                        rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard let url = URL(string: uri), url.isFileURL else {
+      reject("OUTSIDE_CACHE", "uri is not a file URL", nil); return
+    }
+    let fm = FileManager.default
+    guard let cachesDir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+      reject("DELETE_FAILED", "no caches directory", nil); return
+    }
+    let root = cachesDir.resolvingSymlinksInPath().standardizedFileURL.path
+    let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+    var isDir: ObjCBool = false
+    guard target.hasPrefix(root + "/"), fm.fileExists(atPath: target, isDirectory: &isDir), !isDir.boolValue else {
+      reject("OUTSIDE_CACHE", "file is not a regular file inside the caches directory", nil); return
+    }
+    do {
+      try fm.removeItem(atPath: target)
+      resolve(["deleted": true])
+    } catch {
+      reject("DELETE_FAILED", error.localizedDescription, error)
+    }
+  }
+
+  /// Android-only seam. iOS shares through RN `Share.share({ url })`, whose sheet includes Save to Files.
+  @objc(shareFile:mimeType:subject:dialogTitle:resolver:rejecter:)
+  func shareFile(_ uri: String,
+                 mimeType: String,
+                 subject: String,
+                 dialogTitle: String,
+                 resolver resolve: @escaping RCTPromiseResolveBlock,
+                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED", "shareFile is Android-only; on iOS share the file URL through RN Share.share({ url })", nil)
   }
 }

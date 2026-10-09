@@ -3,7 +3,7 @@ import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import React, { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import { ScrollView, StyleSheet, TouchableOpacity, View, Image, type LayoutChangeEvent, type NativeScrollEvent, type NativeSyntheticEvent, type ScrollViewInstance } from "react-native";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
@@ -17,11 +17,15 @@ import type { IDefaultUserEngine, INetworksEngine, NetworkInit, NetworkReference
 import { ElectionType } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { InlineError } from "../../components/InlineError";
+import { builderErrorsCopy } from "../../utils/errorCopy";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { useRecoveryKeyRegistrationGate } from "../../hooks/useRecoveryKeyRegistrationGate";
+import { useMediaPin } from "../../hooks/useMediaPin";
 import {
 	RECONCILE_TIMEOUT_MS,
+	LATE_COMMIT_BUDGET_MS,
+	awaitLateCommit,
 	createStepTimeoutError,
 	timedOutStep,
 	findLandedNetwork,
@@ -31,7 +35,7 @@ import { normalizeRelayAddresses, findInvalidRelayAddress } from "../../utils/re
 export default function AddNetworkScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
-	const { getEngine, networksEngine, selectNetwork } = useApp();
+	const { getEngine, networksEngine, selectNetwork, isNetworkSelected } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 	const promptRecoveryKeyRegistrationIfNeeded = useRecoveryKeyRegistrationGate();
@@ -39,6 +43,9 @@ export default function AddNetworkScreen() {
 	const [networkImageUrl, setNetworkImageUrl] = useState("");
 	const [authorityName, setAuthorityName] = useState("");
 	const [authorityImageUrl, setAuthorityImageUrl] = useState("");
+	// "Make Permanent": records the content id of each image's bytes (useMediaPin).
+	const networkImagePin = useMediaPin();
+	const authorityImagePin = useMediaPin();
 	const [domainName, setDomainName] = useState("");
 	const [adminName, setAdminName] = useState("");
 	const [adminTitle, setAdminTitle] = useState("");
@@ -56,7 +63,20 @@ export default function AddNetworkScreen() {
 	// this the screen looks frozen for the whole `builder.commit()` await — indistinguishable
 	// from a hang.
 	const [creating, setCreating] = useState(false);
-	const scrollViewRef = useRef<ScrollView>(null);
+	// Neutral status shown while a commit that missed its 45 s deadline is still being awaited.
+	const [stillFinishing, setStillFinishing] = useState(false);
+	// A late commit can land after the officer left this screen. When the session has NO selected
+	// network it is selected then (and the recovery-key gate runs); when another network is already
+	// selected it is left alone for the officer to pick from Networks. Either way nothing may
+	// setState or goBack after unmount.
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
+	const scrollViewRef = useRef<ScrollViewInstance>(null);
 	// When the inline error appears it grows the footer, which shrinks the scroll
 	// viewport. Android keeps the old scroll offset, so if the user was at the bottom
 	// the last controls (e.g. ADD RELAY) slide out of view behind the error. Track
@@ -142,10 +162,6 @@ export default function AddNetworkScreen() {
 			const newAddresses = relayAddresses.filter((_, i) => i !== index);
 			setRelayAddresses(newAddresses);
 		}
-	};
-
-	const handleMakePermanent = () => {
-		// Phase 22: media-pin to content-addressed storage (CID) — not yet implemented.
 	};
 
 	// network-create-release-hang: on real devices `builder.commit()` (strand/cadre/libp2p
@@ -247,6 +263,7 @@ export default function AddNetworkScreen() {
 			const networkInit: NetworkInit = {
 				name: networkName,
 				imageUrl: networkImageUrl || undefined,
+				imageCid: networkImageUrl ? networkImagePin.cidFor(networkImageUrl) : undefined,
 				// R4 (D-11, T-58-06-02): the SAME array that was just validated above — never
 				// re-derive a second array from relayAddresses here, which would validate one
 				// value and persist another.
@@ -254,6 +271,8 @@ export default function AddNetworkScreen() {
 				primaryAuthority: {
 					name: authorityName,
 					domainName: domainName,
+					imageUrl: authorityImageUrl || undefined,
+					imageCid: authorityImageUrl ? authorityImagePin.cidFor(authorityImageUrl) : undefined,
 				},
 				admin: {
 					officers: [
@@ -284,7 +303,7 @@ export default function AddNetworkScreen() {
 			// (setNetworkInit/setUser are on the concrete class, not the interface).
 			const builder = networksEng.buildCreate().update({ networkInit, user });
 			if (!builder.isValid()) {
-				console.error("handleCreate: validation errors", builder.errors());
+				console.error("handleCreate: validation errors", builder.errors().map((e) => e.code));
 				const relayMissing = builder.errors().some((e) => e.path === "networkInit.relays");
 				setErrorMessage(
 					// network-create-release-hang: replace the raw "networkInit.relays must not be
@@ -292,7 +311,7 @@ export default function AddNetworkScreen() {
 					// section. Other validation errors fall through unchanged.
 					relayMissing
 						? t("errRelayRequired")
-						: builder.errors().map((e) => e.message).join("\n") || t("validationFailed"),
+						: builderErrorsCopy([...builder.errors()], t),
 				);
 				if (relayMissing) scrollToRelays();
 				return;
@@ -310,7 +329,10 @@ export default function AddNetworkScreen() {
 					RECONCILE_TIMEOUT_MS,
 				);
 			} catch (snapshotErr) {
-				console.info("[network-create] snapshot() failed", snapshotErr);
+				console.info(
+					"[network-create] snapshot() failed",
+					snapshotErr instanceof Error ? snapshotErr.name : typeof snapshotErr,
+				);
 				recentsSnapshot = undefined;
 			}
 
@@ -319,8 +341,10 @@ export default function AddNetworkScreen() {
 			// stub guard). Race against a timeout so an indefinite stall surfaces an error.
 			console.info("[network-create] commit() start", { network: networkName });
 			let networkRef: NetworkReference;
+			// Held un-raced: after the 45 s deadline the SAME promise is handed to awaitLateCommit.
+			const commitPromise = builder.commit();
 			try {
-				const networkEngine = await withTimeout(builder.commit(), "commit");
+				const networkEngine = await withTimeout(commitPromise, "commit");
 				console.info("[network-create] commit() done");
 				// Pitfall 4: re-establish currentNetworkHash in the factory by calling
 				// getEngine("network", ref) with the full NetworkReference that the concrete
@@ -335,21 +359,69 @@ export default function AddNetworkScreen() {
 				// timely commit and a reconciled-landed commit must produce the identical tail
 				// (selectNetwork -> the recovery-key gate -> goBack), never a duplicated copy of it.
 				const landed = await reconcileLandedNetwork(networksEng, recentsSnapshot);
-				if (!landed) {
-					// D-03: never claim failure, never blame the connection -- only that the
-					// outcome could not be confirmed.
-					setErrorMessage(t("networkCreateUnconfirmed"));
-					return;
+				if (landed) {
+					networkRef = landed;
+				} else {
+					// The commit is most likely still running (a low-end phone can block the JS
+					// thread for minutes), so keep awaiting the ORIGINAL promise for a bounded
+					// budget instead of reporting anything. Neutral status only -- not an error.
+					if (mountedRef.current) setStillFinishing(true);
+					console.info("[network-create] late commit: waiting");
+					const late = await awaitLateCommit(commitPromise, LATE_COMMIT_BUDGET_MS);
+					if (mountedRef.current) setStillFinishing(false);
+					console.info(`[network-create] late commit: ${late.status}`);
+					if (late.status === "landed") {
+						networkRef = (late.value as unknown as { init: NetworkReference }).init;
+					} else if (late.status === "failed") {
+						throw late.error;
+					} else {
+						const second = await reconcileLandedNetwork(networksEng, recentsSnapshot);
+						if (!second) {
+							// D-03: never claim failure, never blame the connection -- only that
+							// the outcome could not be confirmed.
+							if (mountedRef.current) setErrorMessage(t("networkCreateUnconfirmed"));
+							return;
+						}
+						networkRef = second;
+					}
 				}
-				networkRef = landed;
 			}
 			// Auto-select the just-created network: bind it AND flip hasNetwork so the
 			// app lands on the populated network home instead of "No network selected".
 			// (selectNetwork re-establishes currentNetworkHash like the old getEngine call,
 			// plus sets hasNetwork — Pitfall 4 still satisfied via its internal getEngine.)
+			// WR-01 (62-88): a commit that lands after the officer left Add Network must NOT re-point
+			// the session behind their back (up to LATE_COMMIT_BUDGET_MS later, they may already be
+			// working in another network). The network is in recents; they select it from Networks.
+			// The one exception: when the session has NO network selected, nothing is re-pointed, and
+			// leaving the officer on "No network selected" with a network they just created would lose
+			// it. An unknown answer (no accessor) counts as "selected": the safe default.
+			if (!mountedRef.current) {
+				if (isNetworkSelected?.() === false) {
+					console.info("[network-create] late commit landed after leave; selecting (no network selected)");
+					try {
+						await selectNetwork(networkRef);
+						// Same recovery-key path as the in-screen tail (49-19): skipping it here would leave
+						// the founder's recovery key unregistered with no prompt. The gate navigates only
+						// when registration is needed. No goBack: this screen is gone.
+						await promptRecoveryKeyRegistrationIfNeeded();
+					} catch (lateErr) {
+						console.info(
+							"[network-create] late recovery-key gate failed:",
+							lateErr instanceof Error ? lateErr.name : typeof lateErr,
+						);
+					}
+				} else {
+					console.info("[network-create] late commit landed after leave; not auto-selecting");
+				}
+				return;
+			}
 			console.info("[network-create] selectNetwork() start");
 			await withTimeout(selectNetwork(networkRef), "select");
 			console.info("[network-create] selectNetwork() done");
+			// selectNetwork itself can outlive an unmount (the officer leaves while it runs): the
+			// session now has its user, but there is nothing to show and nowhere to navigate.
+			if (!mountedRef.current) return;
 
 			// 49-19 (recovery-key-registration gap): networks-engine.create() registers ONLY the
 			// founding signing key -- its bootstrap branch writes user.activeKeys[0] and has no
@@ -376,7 +448,16 @@ export default function AddNetworkScreen() {
 			// in-flight flag is cleared exactly as it is on every other exit.
 			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
 		} catch (err) {
-			console.error("handleCreate error:", err);
+			// WR-01 (62-88): a failure that arrives after the officer left neither routes nor sets
+			// screen state. Log the error class name only.
+			if (!mountedRef.current) {
+				console.info(
+					"[network-create] late commit failed after leave:",
+					err instanceof Error ? err.name : typeof err,
+				);
+				return;
+			}
+			console.error("handleCreate error:", err instanceof Error ? err.name : typeof err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
 			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
 			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
@@ -388,12 +469,17 @@ export default function AddNetworkScreen() {
 			// screen's own raw-message handling unchanged.
 			const outcome = handleDeviceSigningError(err);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (err instanceof Error ? err.message : String(err)));
+			// Engine text carries ids and table names: never rendered. 62-96's peer copy arrives
+			// through outcome.message.
+			setErrorMessage(outcome.message ?? t("networkCreateFailed"));
 			return;
 		} finally {
 			// Always clear the in-flight flag so the button re-enables on error/timeout
 			// (on success the screen unmounts via goBack, so this is a harmless no-op).
-			setCreating(false);
+			if (mountedRef.current) {
+				setCreating(false);
+				setStillFinishing(false);
+			}
 		}
 		navigation.goBack();
 	};
@@ -419,7 +505,9 @@ export default function AddNetworkScreen() {
 						placeholder={t("optionalImageAddress")}
 						onChangeText={setNetworkImageUrl}
 						isImageUrlField={true}
-						makePermanentPressed={handleMakePermanent}
+						makePermanentPressed={() => networkImagePin.pin(networkImageUrl)}
+						makePermanentDisabled={!networkImageUrl.trim() || networkImagePin.isPinning}
+						permanentStatus={networkImagePin.statusFor(networkImageUrl)}
 					/>
 					{networkImageUrl ? (
 						<Image
@@ -492,7 +580,9 @@ export default function AddNetworkScreen() {
 						placeholder={t("optionalImageAddress")}
 						onChangeText={setAuthorityImageUrl}
 						isImageUrlField={true}
-						makePermanentPressed={handleMakePermanent}
+						makePermanentPressed={() => authorityImagePin.pin(authorityImageUrl)}
+						makePermanentDisabled={!authorityImageUrl.trim() || authorityImagePin.isPinning}
+						permanentStatus={authorityImagePin.statusFor(authorityImageUrl)}
 					/>
 					{authorityImageUrl ? (
 						<Image
@@ -576,6 +666,15 @@ export default function AddNetworkScreen() {
 				{/* Inside the Footer so it picks up the footer's horizontal padding
 				    instead of running flush against the screen edge. */}
 				<InlineError message={errorMessage} />
+				{stillFinishing ? (
+					<ThemedText
+						type="small"
+						testID="network-create-still-finishing"
+						style={{ color: colors.textSecondary }}
+					>
+						{t("networkCreateStillFinishing")}
+					</ThemedText>
+				) : null}
 				<CustomButton
 					title={creating ? t("creating") : t("create")}
 					icon={creating ? "spinner" : "floppy-disk"}

@@ -224,6 +224,13 @@ test('the settling instant sits strictly inside the timeline it claims to (D-14)
 
 test('readKeyReleaseProgress reports a non-zero released strictly below total (D-14)', async () => {
 	const progress = await readKeyReleaseProgress(db, FIXTURE_ELECTION_DB_ID, FIXTURE_REVISION);
+	// 62-126: `released` is the number of PUBLISHED KeyholderShareRelease rows (3), and `total` is the
+	// keyholders of record. The completed-task count (also 3, a different set of users) no longer
+	// feeds it.
+	const shares = await db
+		.prepare('select count(*) as c from KeyholderShareRelease where ElectionId = :eid and ElectionRevision = :rev')
+		.get({ eid: FIXTURE_ELECTION_DB_ID, rev: FIXTURE_REVISION });
+	assert.equal(progress.released, Number(shares?.c ?? -1), 'released must equal the published share-row count');
 	assert.equal(progress.released, EXPECTED_RELEASED);
 	assert.equal(progress.total, EXPECTED_TOTAL);
 	assert.equal(progress.keyholderCount, EXPECTED_KEYHOLDERS);
@@ -235,7 +242,7 @@ test('readKeyReleaseProgress reports a non-zero released strictly below total (D
 	assert.ok(progress.released > 0, 'released must be non-zero — a stuck-at-zero aggregate would look correct at 0 of 0');
 	assert.ok(
 		progress.released < progress.total,
-		'released must be strictly below total — an aggregate counting tasks instead of completions looks correct at N of N',
+		'released must be strictly below total — an aggregate counting every row instead of the released ones looks correct at N of N',
 	);
 });
 

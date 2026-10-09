@@ -30,6 +30,9 @@
  *              published range".
  *
  * This is a lockfile/manifest guard, not a runtime-behaviour guard.
+ *
+ * The 2026-09-30 sereus-master vendor exception (`portal:./vendor/@serfab/*` for sereus#19-#22)
+ * ended with the adoption of @serfab 1.9.0, which ships those fixes; all 6 are guarded again.
  */
 
 import { expect } from 'chai'
@@ -125,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 0.13.x, @optimystic/db-* 1.1.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.13.x, @optimystic/db-* 1.12.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -146,8 +149,30 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // admits 1.1.0, so the families were decoupled for this hop on purpose.
       // This assertion had drifted TWO bumps behind once already (it still named 0.12.x /
       // 0.27.x) because nothing re-runs it on a dependency change.
-      const expectedPrefix = pkg === '@serfab/strand-proto' ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '0.13.' : '1.1.'
+      // It drifted AGAIN (still 0.13.x / 1.1.x) across the cadre-core 1.2.0 and the
+      // @optimystic 1.2.0 -> 1.3.0 -> 1.5.0 bumps; re-keyed 2026-09-28 with the
+      // @optimystic 1.5.0 -> 1.7.0 and @serfab 1.2.0 -> 1.6.0 bumps to what yarn.lock actually resolves.
+      // Spike 094: @serfab 1.6.0 -> 1.7.0 (strand peer book; the local fwdport patch carried verbatim).
+      // 2026-10-01: @serfab 1.9.0 (sereus#19-#22 released; peer book replaced by strand network
+      // state) and @optimystic 1.8.1, ending the sereus-master vendor copy.
+      // 2026-10-02: @optimystic 1.8.1 -> 1.9.0 (needs libp2p ^3.3.11 / @libp2p/interface ^3.3.0;
+      // the db-p2p `.unref?.()` patch carried forward unchanged). @serfab stays 1.9.0.
+      // 2026-10-05: @serfab 1.9.0 -> 1.12.0 (strandReactivity, pending joins, formation
+      // responder installed by start(); the public-observer + cohort-topic patch re-seated) and
+      // @optimystic 1.9.0 -> 1.10.1 (reactivity substrate; the `.unref?.()` patch carried forward
+      // unchanged — Optimystic#28 still open). The two families are on DIFFERENT lines from here on.
+      // 2026-10-06: @serfab 1.12.0 -> 1.13.0 (control node dials bootstrap peers after bring-up;
+      // native block digest in cadre-rn; the public-observer + cohort-topic patch carried verbatim)
+      // and @optimystic 1.10.1 -> 1.11.0 (Optimystic#27 and #28 fixed; the db-p2p `.unref?.()`
+      // patch RETIRED — every timer now goes through upstream's guarded `unrefTimer`).
+      // 2026-10-08: @optimystic 1.11.0 -> 1.12.1 (Optimystic#32 stream-open fallback across
+      // connections; a catching-up member abstains instead of vetoing). @serfab stays 1.13.0 (latest).
+      // 2026-10-09: @serfab 1.13.0 -> 1.14.0 (cadre invitations replace the invite/accept ceremony,
+      // per-stream control-protocol guard, provisional stranger admission; the public-observer +
+      // cohort-topic patch forward-ported with a new guard-classification hunk). @optimystic stays 1.12.1.
+      const expectedPrefix = pkg === '@serfab/strand-proto'
+        ? '0.11.'
+        : pkg.startsWith('@serfab/') ? '1.14.' : '1.12.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

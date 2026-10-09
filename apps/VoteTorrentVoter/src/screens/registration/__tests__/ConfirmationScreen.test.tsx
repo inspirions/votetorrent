@@ -18,13 +18,23 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
-import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
+import {Linking, Platform} from 'react-native';
+import i18n from '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
 const mockSendIntent = jest.fn(async (..._args: unknown[]) => undefined);
 
+let latestFocusCallback: (() => void) | null = null;
+
 jest.mock('@react-navigation/native', () => ({
 	useNavigation: () => ({popToTop: mockPopToTop}),
+	useFocusEffect: (cb: () => void) => {
+		latestFocusCallback = cb;
+		// eslint-disable-next-line @typescript-eslint/no-var-requires, react-hooks/rules-of-hooks
+		require('react').useEffect(() => {
+			cb();
+		}, [cb]);
+	},
 	useTheme: () => ({
 		colors: {
 			primary: '#2196f3',
@@ -32,6 +42,8 @@ jest.mock('@react-navigation/native', () => ({
 			text: '#000000',
 			textSecondary: '#7d7d7d',
 			light: '#ffffff',
+			card: '#ffffff',
+			link: '#0b5fff',
 		},
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
@@ -39,16 +51,18 @@ jest.mock('@react-navigation/native', () => ({
 		},
 		type: {
 			h2: {fontSize: 28, lineHeight: 34},
+			h4: {fontSize: 20, lineHeight: 26},
 			body: {fontSize: 16, lineHeight: 22},
 			caption: {fontSize: 16, lineHeight: 20},
+			display: {fontSize: 40, lineHeight: 48},
 		},
 		radii: {pill: 999},
 	}),
 }));
 
-jest.mock('react-native/Libraries/Linking/Linking', () => ({
-	sendIntent: (...args: unknown[]) => mockSendIntent(...args),
-}));
+// Route the public `Linking.sendIntent` through mockSendIntent. A jest.mock of the deep
+// `react-native/Libraries/Linking/Linking` path stopped working on RN 0.79+ (internal modules
+// moved to `export default`, so a factory without `default` yields an undefined Linking).
 
 // ---- Mocked engine boundary: getEngine('network') ----
 
@@ -59,14 +73,23 @@ const mockGetDetails = jest.fn(async () => ({
 }));
 const mockNetworkEngine = {getDetails: mockGetDetails};
 
+// Plan 28 (D-45) — the real `continuity.ts`'s `mintRegistrationCodeForSubmit` reaches
+// getEngine('association').deriveRegistrationCode(registrantId, sign) directly.
+const mockDeriveRegistrationCode = jest.fn(async (_registrantId: string, _sign: unknown) => 'ABCDE12345');
+const mockAssociationEngine = {deriveRegistrationCode: mockDeriveRegistrationCode};
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
+	}
+	if (engineName === 'association') {
+		return mockAssociationEngine;
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
 
 const SEEDED_ELECTION_ID = 'election-1';
+let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 const P256_PUB = 'P256_PUB';
 const CHALLENGE_NONCE = 'challenge-nonce-abc';
 const DEVICE_IDENTITY_PUBLIC_KEY = 'DEVICE_IDENTITY_SECP256K1_PUBLIC_KEY';
@@ -79,9 +102,13 @@ const mockSign = jest.fn(async () => ({
 	signature: 'stub-officer-signature',
 }));
 
+// WR-02: the provider's explicit, user-confirmed identity replacement (re-runs the boot).
+const mockCreateNewIdentity = jest.fn(async (): Promise<void> => undefined);
+
 jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
-		seededElectionId: SEEDED_ELECTION_ID,
+		createNewIdentity: mockCreateNewIdentity,
+		seededElectionId: mockSeededElectionId,
 		// Kept on the provider mock (51-12 owns the provider blast radius) even though this
 		// rewritten screen never destructures it — the point under test is that it is never REACHED,
 		// not that the provider stopped exposing it.
@@ -171,10 +198,10 @@ const registrationRequestInits: any[] = [];
 const registrationSubmitCalls: any[] = [];
 const mockRegistrationSubmitRequest = jest.fn(
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	async (init: any, requesterKey: string, signatureOrCallback: unknown) => {
+	async (init: any, requesterKey: string, signatureOrCallback: unknown, extras?: unknown) => {
 		callOrder.push('registration.submitRequest');
 		registrationRequestInits.push(init);
-		registrationSubmitCalls.push({init, requesterKey, signatureOrCallback});
+		registrationSubmitCalls.push({init, requesterKey, signatureOrCallback, extras});
 		return init.id as string;
 	},
 );
@@ -218,6 +245,8 @@ const mockRegistrationTransport = {
 	submitRequest: mockRegistrationSubmitRequest,
 	pollDecisions: jest.fn(async () => []),
 };
+const mockOwnAssociationRequestIds = jest.fn(async (_requesterKey: string) => [] as string[]);
+const mockOwnStagedRegistrationRequestIds = jest.fn(async (_requesterKey: string) => [] as string[]);
 const mockAssociationTransport = {
 	submitRequest: mockAssociationSubmitRequest,
 	submitAttestation: mockAssociationSubmitAttestation,
@@ -227,15 +256,37 @@ const mockAssociationTransport = {
 type ResolvedTransports = {
 	registrationTransport: typeof mockRegistrationTransport;
 	associationTransport: typeof mockAssociationTransport;
+	registrationRoute: 'peer' | 'rest-bridge';
+	ownAssociationRequestIds: typeof mockOwnAssociationRequestIds;
+	ownStagedRegistrationRequestIds: typeof mockOwnStagedRegistrationRequestIds;
 };
+// Plan 28 (D-45): per-test route override — defaults to 'peer' (62-22's existing default).
+let mockRegistrationRoute: 'peer' | 'rest-bridge' = 'peer';
+// Phase 62 Plan 22 (D-28/D-32): the resolver is now ASYNC (`Promise<VoterRequestTransports |
+// undefined>`), called with `{getEngine, authorityId}` rather than no arguments.
 const mockResolveVoterRequestTransports = jest.fn(
-	(..._args: unknown[]): ResolvedTransports | undefined => ({
+	async (..._args: unknown[]): Promise<ResolvedTransports | undefined> => ({
 		registrationTransport: mockRegistrationTransport,
 		associationTransport: mockAssociationTransport,
+		registrationRoute: mockRegistrationRoute,
+		ownAssociationRequestIds: mockOwnAssociationRequestIds,
+		ownStagedRegistrationRequestIds: mockOwnStagedRegistrationRequestIds,
 	}),
 );
 jest.mock('../attach-voter-request-transport', () => ({
 	resolveVoterRequestTransports: (...args: unknown[]) => mockResolveVoterRequestTransports(...args),
+}));
+
+// Plan 28 (D-45): mock `resolveRegistrationCodeAvailability` only — everything else (including
+// the signer-propagation helper `mintRegistrationCodeForSubmit`, exercised for real against
+// `mockAssociationEngine` above) comes from the real module.
+const mockResolveRegistrationCodeAvailability = jest.fn(
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	async (..._args: unknown[]): Promise<any> => ({kind: 'unavailable'}),
+);
+jest.mock('../../../engines/continuity', () => ({
+	...jest.requireActual('../../../engines/continuity'),
+	resolveRegistrationCodeAvailability: (...args: unknown[]) => mockResolveRegistrationCodeAvailability(...args),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -306,7 +357,9 @@ beforeEach(() => {
 	mockCreateDeviceSigner.mockClear();
 	mockDeviceSign.mockClear();
 	mockGetOrCreateDeviceUser.mockClear();
+	mockCreateNewIdentity.mockClear();
 	mockSendIntent.mockClear();
+	jest.spyOn(Linking, 'sendIntent').mockImplementation((...args: Parameters<typeof Linking.sendIntent>) => mockSendIntent(...args));
 	mockProvisionDeviceKey.mockClear();
 	mockProduce.mockClear();
 	mockSignDeviceKeyDigest.mockClear();
@@ -315,6 +368,12 @@ beforeEach(() => {
 	mockAssociationSubmitAttestation.mockClear();
 	mockPollDecisions.mockClear();
 	mockResolveVoterRequestTransports.mockClear();
+	mockOwnAssociationRequestIds.mockClear();
+	mockOwnStagedRegistrationRequestIds.mockClear();
+	mockDeriveRegistrationCode.mockClear();
+	mockResolveRegistrationCodeAvailability.mockClear();
+	mockResolveRegistrationCodeAvailability.mockImplementation(async () => ({kind: 'unavailable'}));
+	mockRegistrationRoute = 'peer';
 
 	mockProvisionDeviceKey.mockImplementation(async () => {
 		callOrder.push('provisionDeviceKey');
@@ -341,9 +400,12 @@ beforeEach(() => {
 			},
 		];
 	});
-	mockResolveVoterRequestTransports.mockImplementation(() => ({
+	mockResolveVoterRequestTransports.mockImplementation(async () => ({
 		registrationTransport: mockRegistrationTransport,
 		associationTransport: mockAssociationTransport,
+		registrationRoute: mockRegistrationRoute,
+		ownAssociationRequestIds: mockOwnAssociationRequestIds,
+		ownStagedRegistrationRequestIds: mockOwnStagedRegistrationRequestIds,
 	}));
 
 	callOrder.length = 0;
@@ -363,6 +425,70 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 
 		const cta = tr.root.findByProps({testID: 'confirmation-confirm-face-id'});
 		expect(cta).toBeDefined();
+	});
+
+	describe('platform-appropriate biometric copy', () => {
+		const originalOS = Platform.OS;
+		afterEach(() => {
+			Object.defineProperty(Platform, 'OS', {value: originalOS, configurable: true});
+		});
+
+		it('iOS keeps the Face ID framing', () => {
+			Object.defineProperty(Platform, 'OS', {value: 'ios', configurable: true});
+			const text = JSON.stringify(renderScreen().toJSON());
+			expect(text).toContain('Confirm your registration with Face ID');
+			expect(text).toContain('Look at your device to confirm');
+			expect(text).toContain('Confirm with Face ID');
+		});
+
+		it('Android never mentions Face ID — fingerprint / face unlock framing instead', () => {
+			Object.defineProperty(Platform, 'OS', {value: 'android', configurable: true});
+			const text = JSON.stringify(renderScreen().toJSON());
+			expect(text).not.toContain('Face ID');
+			expect(text).not.toContain('Look at your device');
+			expect(text).toContain('Confirm your registration with your fingerprint or face unlock');
+			expect(text).toContain('Follow the prompt on your device to confirm');
+			expect(text).toContain('Confirm with biometrics');
+		});
+	});
+
+	describe('localized pending + retry copy (no hard-coded English)', () => {
+		afterEach(async () => {
+			await renderer.act(async () => {
+				await i18n.changeLanguage('en');
+			});
+		});
+
+		it('en: the pending text and the retry label come from the bundle', async () => {
+			const ok = renderScreen();
+			await pressConfirm(ok);
+			expect(JSON.stringify(ok.toJSON())).toContain(
+				"Your registration has been submitted. We'll let you know once the authority confirms your device.",
+			);
+
+			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
+			const failed = renderScreen();
+			await pressConfirm(failed);
+			expect(JSON.stringify(failed.toJSON())).toContain('Try Again');
+		});
+
+		it('es: the pending text and the retry label render in Spanish', async () => {
+			await renderer.act(async () => {
+				await i18n.changeLanguage('es');
+			});
+			const ok = renderScreen();
+			await pressConfirm(ok);
+			const okText = JSON.stringify(ok.toJSON());
+			expect(okText).toContain('Tu registro ha sido enviado. Te avisaremos cuando la autoridad confirme tu dispositivo.');
+			expect(okText).not.toContain('Your registration has been submitted');
+
+			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
+			const failed = renderScreen();
+			await pressConfirm(failed);
+			const failedText = JSON.stringify(failed.toJSON());
+			expect(failedText).toContain('Intentar de nuevo');
+			expect(failedText).not.toContain('Try Again');
+		});
 	});
 
 	it('does NOT navigate on mount (only on the deliberate press)', () => {
@@ -444,8 +570,8 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(registrationRequestInits[0].payload.electionId).toBe(SEEDED_ELECTION_ID);
 	});
 
-	it('the transport resolver returning undefined (both dev gates closed) surfaces the generic failure class and does not crash', async () => {
-		mockResolveVoterRequestTransports.mockReturnValueOnce(undefined);
+	it('the transport resolver returning undefined (no delivery path, D-28) surfaces the generic failure class and does not crash', async () => {
+		mockResolveVoterRequestTransports.mockResolvedValueOnce(undefined);
 
 		const tr = renderScreen();
 		await pressConfirm(tr);
@@ -454,6 +580,66 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(text).toContain('Something went wrong verifying your device. Try again.');
 		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
 		expect(mockClearDraft).not.toHaveBeenCalled();
+	});
+
+	it("the transport resolver rejecting with {code: 'no-recipients'} (D-32/D-04 zero recipients) surfaces the same generic failure class", async () => {
+		mockResolveVoterRequestTransports.mockRejectedValueOnce({code: 'no-recipients'});
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('Something went wrong verifying your device. Try again.');
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+		expect(mockClearDraft).not.toHaveBeenCalled();
+	});
+
+	it('a vote-engine IntakeError from submitRequest surfaces the intake-unavailable copy (never device blame, never raw text) with a retry', async () => {
+		const intakeError = Object.assign(new Error('createIntakeSealer.seal: no-recipients'), {
+			name: 'IntakeError',
+			code: 'no-recipients',
+		});
+		mockRegistrationSubmitRequest.mockRejectedValueOnce(intakeError);
+
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain("We couldn't send your registration to the authority right now. Try again later.");
+		expect(text).not.toContain('Something went wrong verifying your device');
+		expect(text).not.toContain('no-recipients');
+		expect(text).not.toContain('createIntakeSealer');
+		expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+		expect(text).toContain('Try Again');
+		expect(mockClearDraft).not.toHaveBeenCalled();
+		expect(mockPopToTop).not.toHaveBeenCalled();
+	});
+
+	it('classifyAttestationFailure maps NoElectionConfiguredError to no-election and leaves IntakeError alone', () => {
+		const {classifyAttestationFailure} = require('../../../engines/attestation-failure');
+		expect(classifyAttestationFailure(Object.assign(new Error('x'), {name: 'NoElectionConfiguredError'}))).toBe('no-election');
+		expect(classifyAttestationFailure(Object.assign(new Error('x'), {name: 'IntakeError', code: 'no-recipients'}))).toBe(
+			'intake-unavailable',
+		);
+	});
+
+	it('no election on this phone shows its own copy, never device blame, and never touches the device key', async () => {
+		mockSeededElectionId = undefined;
+		try {
+			const tr = renderScreen();
+			await pressConfirm(tr);
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('There is no election to register for on this phone yet.');
+			expect(text).not.toContain('verifying your device');
+			expect(text).not.toContain("This device can't be used to vote");
+			expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+			// Retrying cannot help: no retry CTA, no retry label.
+			expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'}).length).toBe(0);
+			expect(text).not.toContain('Try Again');
+		} finally {
+			mockSeededElectionId = SEEDED_ELECTION_ID;
+		}
 	});
 
 	it('a pollDecisions that never yields a challenge-issued notice within the bounded attempts surfaces the generic failure class', async () => {
@@ -503,6 +689,56 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(associationSubmitRequestCalls[0].init.id).toBe(associationSubmitRequestCalls[1].init.id);
 		expect(associationSubmitRequestCalls[0].init.registrantId).toBe(associationSubmitRequestCalls[1].init.registrantId);
 	});
+
+	it(
+		'idempotent retry (D-05/D-32): a bounded-poll-exhaustion failure, then a successful retry, re-submits the ' +
+			'SAME registration and association init objects (not merely equal ids), with identical submittedAt',
+		async () => {
+			// Attempt 1: EVERY poll call returns [] (never a challenge-issued notice), so the bounded
+			// poll exhausts and the attempt fails with the generic transient copy. A single
+			// `mockImplementationOnce` would not be enough — `pollForNotice` loops up to
+			// MAX_POLL_ATTEMPTS times within ONE attempt, so the whole-attempt implementation must be
+			// overridden, not just its first call.
+			mockPollDecisions.mockImplementation(async () => {
+				callOrder.push('association.pollDecisions');
+				return [];
+			});
+
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 400); // attempt 1 — poll exhausts
+
+			const text1 = JSON.stringify(tr.toJSON());
+			expect(text1).toContain('Something went wrong verifying your device. Try again.');
+
+			// Attempt 2 ("Try Again"): restore the default pollDecisions implementation (the 'c'
+			// notice), so the retry completes to the pending state.
+			mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+				callOrder.push('association.pollDecisions');
+				return [
+					{
+						requestId: capturedAssociationRequestId,
+						status: 'c',
+						challengeNonce: CHALLENGE_NONCE,
+						cursor: 'cursor-1',
+					},
+				];
+			});
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2 — retry succeeds
+
+			const text2 = JSON.stringify(tr.toJSON());
+			expect(text2).toContain('submitted');
+
+			expect(registrationRequestInits).toHaveLength(2);
+			// Object IDENTITY (toBe), not merely equal fields — the exact same init object is
+			// re-submitted on retry.
+			expect(registrationRequestInits[0]).toBe(registrationRequestInits[1]);
+			expect(registrationRequestInits[0].submittedAt).toBe(registrationRequestInits[1].submittedAt);
+
+			expect(associationSubmitRequestCalls).toHaveLength(2);
+			expect(associationSubmitRequestCalls[0].init).toBe(associationSubmitRequestCalls[1].init);
+			expect(associationSubmitRequestCalls[0].init.submittedAt).toBe(associationSubmitRequestCalls[1].init.submittedAt);
+		},
+	);
 
 	it('does not furnish a blank required field on the registration payload (WR-04 — empty required rejected by policy)', async () => {
 		// A blank required private field (email) must NOT be furnished as {name:'email', value:''}
@@ -579,6 +815,106 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			expect(cta).toBeDefined();
 		});
 
+		describe("'identity-lost' — the identity can no longer be unwrapped (WR-02)", () => {
+			const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
+			afterEach(() => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = originalDev;
+			});
+
+			function identityError(reason: string): Error {
+				return Object.assign(new Error(`device identity key unavailable (${reason})`), {
+					name: 'DeviceIdentityKeyUnavailableError',
+					reason,
+				});
+			}
+
+			// 62-REVIEW WR-04: this is the REAL provider's release state. Outside __DEV__ the provider
+			// never writes seededElectionId (only the dev seed does), so it is undefined here, and the
+			// permanent reason comes from where production raises it: createDeviceSigner's unwrap
+			// (getOrCreateDeviceUser returns the wrapped record without unwrapping). The identity is
+			// read before the election and network preconditions, so the voter meets the recovery
+			// view, never the no-election copy that would otherwise hide the loss.
+			it('release build (__DEV__ false, no seeded election): a lost identity read from createDeviceSigner renders the recovery view before any precondition, and Create -> Confirm calls createNewIdentity once', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockSeededElectionId = undefined;
+				mockCreateDeviceSigner.mockRejectedValueOnce(identityError('no-wrap-key'));
+				try {
+					const tr = renderScreen();
+					await pressConfirm(tr);
+
+					expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+					const text = JSON.stringify(tr.toJSON());
+					expect(text).not.toContain('There is no election to register for on this phone yet.');
+					expect(text).not.toContain('Something went wrong verifying your device');
+					expect(text).not.toContain('no-wrap-key');
+					expect(text).not.toContain('DeviceIdentityKeyUnavailableError');
+					expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
+					expect(tr.root.findAllByProps({testID: 'confirmation-retry-cta'})).toHaveLength(0);
+					expect(tr.root.findAllByProps({testID: 'confirmation-error'})).toHaveLength(0);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledWith('Device User');
+					// Nothing after the identity read ran: no hardware key, no network, no transport.
+					expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+					expect(mockResolveVoterRequestTransports).not.toHaveBeenCalled();
+					expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+
+					renderer.act(() => {
+						tr.root.findByProps({testID: 'identity-recovery-create'}).props.onPress();
+					});
+					expect(mockCreateNewIdentity).not.toHaveBeenCalled();
+					await renderer.act(async () => {
+						tr.root.findByProps({testID: 'identity-recovery-confirm'}).props.onPress();
+						await flushMicrotasks(5);
+					});
+					expect(mockCreateNewIdentity).toHaveBeenCalledTimes(1);
+				} finally {
+					mockSeededElectionId = SEEDED_ELECTION_ID;
+				}
+			});
+
+			it('release build, readable identity, no seeded election: the identity read runs (no prompt) and the no-election copy still shows', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockSeededElectionId = undefined;
+				try {
+					const tr = renderScreen();
+					await pressConfirm(tr);
+
+					const text = JSON.stringify(tr.toJSON());
+					expect(text).toContain('There is no election to register for on this phone yet.');
+					expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+					expect(mockCreateDeviceSigner).toHaveBeenCalledTimes(1);
+					expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+					expect(mockProduce).not.toHaveBeenCalled();
+				} finally {
+					mockSeededElectionId = SEEDED_ELECTION_ID;
+				}
+			});
+
+			it.each(['tag-mismatch', 'key-mismatch'])('__DEV__ true: %s also renders the recovery view', async reason => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = true;
+				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError(reason));
+
+				const tr = renderScreen();
+				await pressConfirm(tr);
+
+				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view').length).toBeGreaterThan(0);
+			});
+
+			it('a transient identity reason keeps the generic transient copy and its Try Again', async () => {
+				(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+				mockGetOrCreateDeviceUser.mockRejectedValueOnce(identityError('wrap-unavailable'));
+
+				const tr = renderScreen();
+				await pressConfirm(tr);
+
+				const text = JSON.stringify(tr.toJSON());
+				expect(text).toContain('Something went wrong verifying your device. Try again.');
+				expect(text).toContain('Try Again');
+				expect(tr.root.findAll(n => n.props.testID === 'identity-recovery-view')).toHaveLength(0);
+				expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+			});
+		});
+
 		it('a terminal-class code (release build, __DEV__ false) renders the terminal wall with NO retry CTA', async () => {
 			const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
 			(globalThis as {__DEV__?: boolean}).__DEV__ = false;
@@ -595,6 +931,113 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 
 			(globalThis as {__DEV__?: boolean}).__DEV__ = originalDev;
 		});
+	});
+});
+
+describe('ConfirmationScreen — registration code on submit (D-45)', () => {
+	it('peer route: deriveRegistrationCode is called once with (registrantId, the device signer), and submitRequest receives 4 arguments, the 4th deep-equal {registrationCode}', async () => {
+		mockRegistrationRoute = 'peer';
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		expect(mockDeriveRegistrationCode).toHaveBeenCalledTimes(1);
+		const registrantId = registrationRequestInits[0].id;
+		expect(mockDeriveRegistrationCode).toHaveBeenCalledWith(registrantId, mockDeviceSign);
+
+		expect(mockRegistrationSubmitRequest).toHaveBeenCalledTimes(1);
+		const call = mockRegistrationSubmitRequest.mock.calls[0];
+		expect(call).toHaveLength(4);
+		expect(call[3]).toEqual({registrationCode: 'ABCDE12345'});
+	});
+
+	it("peer route retry: after a failed attempt, \"Try Again\" does NOT re-derive the code, and the 4th argument deep-equals the first attempt's", async () => {
+		mockRegistrationRoute = 'peer';
+		mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+		const tr = renderScreen();
+		await pressConfirm(tr); // attempt 1 — both submits + mint ok, submitAttestation fails
+		await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2 — retry
+
+		expect(mockDeriveRegistrationCode).toHaveBeenCalledTimes(1);
+		expect(mockRegistrationSubmitRequest).toHaveBeenCalledTimes(2);
+		expect(mockRegistrationSubmitRequest.mock.calls[0][3]).toEqual(mockRegistrationSubmitRequest.mock.calls[1][3]);
+	});
+
+	it('REST bridge route: deriveRegistrationCode is never called and submitRequest is called with exactly 3 arguments', async () => {
+		mockRegistrationRoute = 'rest-bridge';
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		expect(mockDeriveRegistrationCode).not.toHaveBeenCalled();
+		expect(mockRegistrationSubmitRequest).toHaveBeenCalledTimes(1);
+		expect(mockRegistrationSubmitRequest.mock.calls[0]).toHaveLength(3);
+	});
+
+	it('a rejecting deriveRegistrationCode renders the transient error, with the retry CTA, and makes zero submitRequest calls', async () => {
+		mockRegistrationRoute = 'peer';
+		mockDeriveRegistrationCode.mockRejectedValueOnce(new Error('derive failed'));
+		const tr = renderScreen();
+		await pressConfirm(tr);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('Something went wrong verifying your device. Try again.');
+		const cta = tr.root.findByProps({testID: 'confirmation-confirm-face-id'});
+		expect(cta).toBeDefined();
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+	});
+});
+
+describe('ConfirmationScreen — registration code card (D-45)', () => {
+	it('available: the card renders AFTER the pending text, inside the same RCTScrollView (never replacing it)', async () => {
+		mockResolveRegistrationCodeAvailability.mockResolvedValue({kind: 'available', code: 'ABCDE12345'});
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		await renderer.act(async () => {
+			await flushMicrotasks(10);
+		});
+
+		const text = JSON.stringify(tr.toJSON());
+		const pendingIdx = text.indexOf('submitted');
+		const codeIdx = text.indexOf('ABCDE-12345');
+		expect(pendingIdx).toBeGreaterThan(-1);
+		expect(codeIdx).toBeGreaterThan(pendingIdx);
+
+		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
+		expect(scrollNode).not.toBeNull();
+	});
+
+	it('not-sent / not-holder: no card renders; code.notAvailableOnDevice renders in its place', async () => {
+		mockResolveRegistrationCodeAvailability.mockResolvedValueOnce({kind: 'not-sent'});
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		await renderer.act(async () => {
+			await flushMicrotasks(10);
+		});
+
+		expect(tr.root.findByProps({testID: 'confirmation-code-not-available'})).toBeDefined();
+		expect(tr.root.findAllByProps({testID: 'registration-code-value'})).toHaveLength(0);
+	});
+
+	it('unavailable / not-registered: neither the card nor the notAvailableOnDevice notice renders', async () => {
+		mockResolveRegistrationCodeAvailability.mockResolvedValueOnce({kind: 'unavailable'});
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		await renderer.act(async () => {
+			await flushMicrotasks(10);
+		});
+
+		expect(tr.root.findAllByProps({testID: 'confirmation-code-not-available'})).toHaveLength(0);
+		expect(tr.root.findAllByProps({testID: 'registration-code-value'})).toHaveLength(0);
+	});
+
+	it('re-firing the focus callback re-calls the resolver', async () => {
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		const callsBefore = mockResolveRegistrationCodeAvailability.mock.calls.length;
+		await renderer.act(async () => {
+			latestFocusCallback?.();
+			await flushMicrotasks(10);
+		});
+		expect(mockResolveRegistrationCodeAvailability.mock.calls.length).toBeGreaterThan(callsBefore);
 	});
 });
 

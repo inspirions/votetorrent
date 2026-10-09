@@ -12,7 +12,8 @@
 //
 // Two real modes, driven by run-reattach-proof.sh:
 //   node reattach-proof.mjs --seed <dbPath> --schema <file> [--negative-control]
-//   node reattach-proof.mjs --reopen <dbPath> [--negative-control]
+//   node reattach-proof.mjs --reopen <dbPath> [--expected-counts <file>] [--baseline-schema <file>]
+//                           [--seed-manifest <file>] [--negative-control]
 //
 // --seed applies the schema read from <file> (a `schema-sql.ts`-shaped module
 // exporting `VOTETORRENT_SCHEMA_SQL`) to a FRESH on-disk store at <dbPath>,
@@ -93,7 +94,7 @@ import {
 import { allocateTid } from '../src/database/tid-allocator.js'
 import { seedSignedMutation } from '../src/signing/signed-mutation.js'
 import { toIsoZDatetime, toDeferredCheckDatetime } from '../src/signing/ceremony-helpers.js'
-import { nowCanonicalDatetime } from '../src/utils.js'
+import { nowCanonicalDatetime, digestToBytes } from '../src/utils.js'
 import { NetworksEngine } from '../src/networks/networks-engine.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { AsyncStorage } from '../test/shims/react-native.js'
@@ -305,10 +306,14 @@ const negativeControl = argv.includes('--negative-control')
 const seedPath = flagValue('--seed')
 const reopenPath = flagValue('--reopen')
 const schemaFile = flagValue('--schema')
+// 62-03 (D-22): generalizes this harness to run against ANY baseline, not just the
+// hardcoded pre-Phase-51 AttestationChallenge shape — a phase-62 baseline has neither
+// the Expiration column nor the 7-arg digest.
+const baselineSchemaFile = flagValue('--baseline-schema')
 
 if (!seedPath && !reopenPath) {
 	console.error('usage: node reattach-proof.mjs --seed <dbPath> --schema <file> [--negative-control]')
-	console.error('       node reattach-proof.mjs --reopen <dbPath> [--negative-control]')
+	console.error('       node reattach-proof.mjs --reopen <dbPath> [--expected-counts <file>] [--baseline-schema <file>] [--seed-manifest <file>] [--negative-control]')
 	process.exit(2)
 }
 
@@ -411,55 +416,137 @@ async function runSeed (dbPath) {
 		sign
 	)
 
-	// 3. AttestationChallenge, hand-built against the OLD (pre-change) 7-arg digest tuple —
-	//    the exact shape `association-engine.ts`'s `issueAttestationChallenge` used before Task 1
-	//    (git history, commit b0de604): `Digest(Tid, Nonce, AuthorityId, RegistrantId, DeviceKey,
-	//    ElectionId, Expiration)`, with `Expiration` deferred-check-normalized. The CURRENT engine
-	//    method no longer accepts an expiration argument, so this cannot be done by calling it —
-	//    only the OLD schema requires this shape, and this IS that shape.
+	// 3. AttestationChallenge — 62-03 (D-22): the challenge SHAPE is now detected from the
+	//    OLD schema text itself, rather than hardcoded, so this harness works against any
+	//    baseline. Extract the `table AttestationChallenge (` block (from that text up to
+	//    the first line that is exactly a tab then `)`); `legacyChallenge` is true iff the
+	//    block declares an `Expiration` column.
+	const challengeBlockMatch = oldSchemaSql.match(/\ttable AttestationChallenge \([\s\S]*?\n\t\)/)
+	if (!challengeBlockMatch) {
+		throw new Error('runSeed: could not locate `table AttestationChallenge (` in the baseline schema')
+	}
+	const challengeBlock = challengeBlockMatch[0]
+	const legacyChallenge = /^\s*Expiration\s/m.test(challengeBlock)
+
 	const deviceKey = randomTestKeyPair().publicHex
 	const tid = await allocateTid(ctx.db, 'association')
 	const nonce = crypto.randomUUID()
 	const electionIdValue = null
-	const expirationZ = toIsoZDatetime(Date.now() + 600_000)
-	const expirationDeferred = toDeferredCheckDatetime(expirationZ)
 
-	const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId, :expirationDeferred) as d'
-	const digestParams = {
-		tid,
-		challengeNonce: nonce,
-		challengeAuthorityId: authorityId,
-		registrantId,
-		deviceKey,
-		electionId: electionIdValue,
-		expirationDeferred,
-	}
-	const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
-
-	await ctx.db.exec(
-		`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration)
-		 with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
-		 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId, :expiration)`,
-		{
-			nonce,
-			authorityId,
-			registrantId,
-			deviceKey,
-			electionId: electionIdValue,
-			expiration: expirationZ,
-			signingNonce,
-			now: nowCanonicalDatetime(),
+	if (legacyChallenge) {
+		// Pre-Phase-51 shape: `Digest(Tid, Nonce, AuthorityId, RegistrantId, DeviceKey,
+		// ElectionId, Expiration)`, with `Expiration` deferred-check-normalized.
+		const expirationZ = toIsoZDatetime(Date.now() + 600_000)
+		const expirationDeferred = toDeferredCheckDatetime(expirationZ)
+		const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId, :expirationDeferred) as d'
+		const digestParams = {
+			tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId,
+			deviceKey, electionId: electionIdValue, expirationDeferred,
 		}
-	)
+		const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+		await ctx.db.exec(
+			`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId, Expiration)
+			 with context SigningNonce = :signingNonce, Tid = ${tid}, now = :now
+			 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId, :expiration)`,
+			{
+				nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue,
+				expiration: expirationZ, signingNonce, now: nowCanonicalDatetime(),
+			}
+		)
+	} else {
+		// Current (post-51-05) shape: 6-arg digest, no Expiration column, context
+		// (SigningNonce, Tid) only.
+		const digestExpr = 'select Digest(:tid, :challengeNonce, :challengeAuthorityId, :registrantId, :deviceKey, :electionId) as d'
+		const digestParams = {
+			tid, challengeNonce: nonce, challengeAuthorityId: authorityId, registrantId,
+			deviceKey, electionId: electionIdValue,
+		}
+		const signingNonce = await seedSignedMutation(ctx, authorityId, 'vrg', tid, digestExpr, digestParams, sign)
+		await ctx.db.exec(
+			`insert into AttestationChallenge (Nonce, AuthorityId, RegistrantId, DeviceKey, ElectionId)
+			 with context SigningNonce = :signingNonce, Tid = ${tid}
+			 values (:nonce, :authorityId, :registrantId, :deviceKey, :electionId)`,
+			{ nonce, authorityId, registrantId, deviceKey, electionId: electionIdValue, signingNonce }
+		)
+	}
+
+	// 4. 62-46 / 62-49 (D-22, CR-01, D-07): the decision-row SHAPE is chosen from the BASELINE's own
+	//    decision-table CHECK text, never assumed:
+	//      absent                - the baseline declares neither decision table: nothing is seeded.
+	//      legacy-non-conforming - both tables declare only the length-only CursorWidth check: seed
+	//                              one astral-cursor row each (16 UTF-16 units: 14 zeros + one astral
+	//                              code point), legal there but violating the current
+	//                              CursorWellFormed. This exercises the real drift trap (amending a
+	//                              CHECK on a live table already holding violating rows).
+	//      conforming            - both tables already declare CursorWellFormed: that baseline cannot
+	//                              hold a non-conforming row, so seed 16-digit rows. The drift-trap leg
+	//                              is therefore only exercised against a pre-0655ea77 baseline such
+	//                              as 1c7e3593.
+	//    Signed over the same Digest arguments the transports use, by the founding officer (who
+	//    holds vrg). The seeded cursors are printed so --reopen compares against what was SEEDED.
+	const decisionCheckKind = (table) => {
+		const m = oldSchemaSql.match(new RegExp('\\ttable ' + table + ' \\([\\s\\S]*?\\n\\t\\)'))
+		if (!m) return 'none'
+		const lines = m[0].split('\n').filter((l) => !/^\s*--/.test(l))
+		const wellFormed = lines.some((l) => l.includes('constraint CursorWellFormed check'))
+		const width = lines.some((l) => l.includes('constraint CursorWidth check (length(new.Cursor) = 16)'))
+		if (wellFormed) return 'cursor-well-formed'
+		if (width) return 'cursor-width'
+		return 'unknown'
+	}
+	const regKind = decisionCheckKind('RegistrationDecision')
+	const assocKind = decisionCheckKind('AssociationDecision')
+	let decisionShape
+	if (regKind === 'none' && assocKind === 'none') decisionShape = 'absent'
+	else if (regKind === 'cursor-width' && assocKind === 'cursor-width') decisionShape = 'legacy-non-conforming'
+	else if (regKind === 'cursor-well-formed' && assocKind === 'cursor-well-formed') decisionShape = 'conforming'
+	else throw new Error(`runSeed: unsupported decision-table baseline (RegistrationDecision=${regKind}, AssociationDecision=${assocKind})`)
+	const seededDecisionCursors = {}
+	if (decisionShape !== 'absent') {
+		const decidedAt = toIsoZDatetime(Date.now())
+		const strandId = 'reattach-proof-strand'
+		const regCursor = decisionShape === 'legacy-non-conforming' ? '00000000000000' + String.fromCodePoint(0x1F600) : '0000000000000001'
+		const assocCursor = decisionShape === 'legacy-non-conforming' ? '00000000000000' + String.fromCodePoint(0x1F601) : '0000000000000002'
+		const regRequestId = 'reattach-proof-legacy-reg'
+		const regDigest = (await ctx.db.prepare("select Digest('RegistrationDecision', :strandId, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt) as d")
+			.get({ strandId, requestId: regRequestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt }))?.d
+		const regSig = await sign(digestToBytes(regDigest))
+		await ctx.db.exec(
+			`insert into RegistrationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, Reason, ClosesRequestId, DecidedAt, DeciderKey, DeciderSignature)
+			 with context now = :now
+			 values (:strandId, :cursor, :requestId, :authorityId, :status, :reason, :closesRequestId, :decidedAt, :deciderKey, :deciderSignature)`,
+			{ strandId, cursor: regCursor, requestId: regRequestId, authorityId, status: 'a', reason: null, closesRequestId: null, decidedAt, deciderKey: regSig.signerKey, deciderSignature: regSig.signature, now: nowCanonicalDatetime() }
+		)
+		const assocRequestId = 'reattach-proof-legacy-assoc'
+		const assocDigest = (await ctx.db.prepare("select Digest('AssociationDecision', :strandId, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt) as d")
+			.get({ strandId, requestId: assocRequestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt }))?.d
+		const assocSig = await sign(digestToBytes(assocDigest))
+		await ctx.db.exec(
+			`insert into AssociationDecision (StrandId, Cursor, RequestId, AuthorityId, Status, ChallengeNonce, Reason, RevokesDeviceKey, MatchMethod, DecidedAt, DeciderKey, DeciderSignature)
+			 with context now = :now
+			 values (:strandId, :cursor, :requestId, :authorityId, :status, :challengeNonce, :reason, :revokesDeviceKey, :matchMethod, :decidedAt, :deciderKey, :deciderSignature)`,
+			{ strandId, cursor: assocCursor, requestId: assocRequestId, authorityId, status: 'a', challengeNonce: null, reason: null, revokesDeviceKey: null, matchMethod: 'code', decidedAt, deciderKey: assocSig.signerKey, deciderSignature: assocSig.signature, now: nowCanonicalDatetime() }
+		)
+		seededDecisionCursors.RegistrationDecision = regCursor
+		seededDecisionCursors.AssociationDecision = assocCursor
+	}
 
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge']) {
+	const countedTables = ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']
+	if (decisionShape !== 'absent') countedTables.push('RegistrationDecision', 'AssociationDecision')
+	for (const table of countedTables) {
 		const row = await ctx.db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
 
 	await ctx.db.close()
-	console.log(JSON.stringify({ mode: 'seed', negativeControl: false, dbPath, counts }, null, 2))
+	console.log(JSON.stringify({
+		mode: 'seed', negativeControl: false, dbPath,
+		challengeShape: legacyChallenge ? 'legacy-7-arg' : 'current-6-arg',
+		decisionShape,
+		seededDecisionCursors,
+		counts,
+	}, null, 2))
 }
 
 // ---------------------------------------------------------------------------
@@ -539,17 +626,87 @@ async function runReopen (dbPath) {
 		expectedCounts = JSON.parse(readFileSync(expectedCountsPath, 'utf8'))
 	}
 
+	// 62-03 (D-22): counted tables extended with Admin/Officer/UserKey (seeded by
+	// NetworksEngine.create() in runSeed) on top of the three original tables.
 	const counts = {}
-	for (const table of ['Authority', 'Registrant', 'AttestationChallenge']) {
+	// 62-46: the decision tables are counted whenever the seed counted them (and the current schema
+	// always declares them), so --expected-counts equality covers them too.
+	const reopenTables = ['Authority', 'Registrant', 'AttestationChallenge', 'Admin', 'Officer', 'UserKey']
+	for (const t of ['RegistrationDecision', 'AssociationDecision']) {
+		if (expectedCounts && t in expectedCounts) reopenTables.push(t)
+	}
+	for (const table of reopenTables) {
 		const row = await db.prepare(`select count(*) as n from ${table}`).get()
 		counts[table] = Number(row?.n ?? 0)
 	}
+	// rowsReadable stays exactly the original three-table non-zero check (unaffected by the
+	// wider count set) — then require EQUALITY for every key present in --expected-counts,
+	// not just the original three.
 	assertions.rowsReadable = counts.Authority > 0 && counts.Registrant > 0 && counts.AttestationChallenge > 0
 	if (expectedCounts) {
-		assertions.rowsReadable = assertions.rowsReadable
-			&& counts.Authority === expectedCounts.Authority
-			&& counts.Registrant === expectedCounts.Registrant
-			&& counts.AttestationChallenge === expectedCounts.AttestationChallenge
+		for (const key of Object.keys(expectedCounts)) {
+			if (counts[key] !== expectedCounts[key]) {
+				assertions.rowsReadable = false
+			}
+		}
+	}
+
+	// 62-49 (D-22, CR-01, WR-01): the decision leg compares the observed cursors to the SEEDED
+	// cursors recorded in the seed manifest, never to hardcoded literals. null means "not
+	// exercised"; only an explicit false fails the verdict, and an unusable manifest fails closed.
+	assertions.decisionCursorsIntact = null
+	assertions.legacyDecisionCursorsIntact = null
+	let manifestConsistent = true
+	let decisionLeg = null
+	let decisionLegProblem = null
+	let manifest = null
+	const manifestPath = flagValue('--seed-manifest')
+	if (manifestPath && existsSync(manifestPath)) {
+		manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+	}
+	const decisionTables = ['RegistrationDecision', 'AssociationDecision']
+	const countsHaveDecision = decisionTables.map((t) => !!expectedCounts && t in expectedCounts)
+	const shape = manifest?.decisionShape ?? null
+	const seededCursors = manifest?.seededDecisionCursors ?? {}
+	if (!manifest) {
+		if (countsHaveDecision.some(Boolean)) {
+			manifestConsistent = false
+			decisionLegProblem = 'expected counts include the decision tables but no --seed-manifest was given'
+		}
+	} else if (!['absent', 'legacy-non-conforming', 'conforming'].includes(shape)) {
+		manifestConsistent = false
+		decisionLegProblem = `unrecognized decisionShape in the seed manifest: ${String(shape)}`
+	} else if (shape === 'absent' && countsHaveDecision.some(Boolean)) {
+		manifestConsistent = false
+		decisionLegProblem = 'manifest says decisionShape=absent but expected counts include a decision table'
+	} else if (shape !== 'absent' && !countsHaveDecision.every(Boolean)) {
+		manifestConsistent = false
+		decisionLegProblem = `manifest says decisionShape=${shape} but expected counts lack a decision table`
+	} else if (shape !== 'absent' && !decisionTables.every((t) => typeof seededCursors[t] === 'string' && seededCursors[t].length > 0)) {
+		manifestConsistent = false
+		decisionLegProblem = 'manifest is missing a seeded cursor for a decision table'
+	}
+	const observedCursors = {}
+	if (manifestConsistent && shape === 'absent') {
+		decisionLeg = 'skipped-absent'
+	} else if (manifestConsistent && manifest) {
+		let intact = true
+		for (const table of decisionTables) {
+			const rows = []
+			for await (const r of db.eval(`select Cursor from ${table}`)) rows.push(r)
+			observedCursors[table] = rows.map((r) => r.Cursor)
+			if (rows.length !== 1 || rows[0].Cursor !== seededCursors[table]) intact = false
+		}
+		const allConforming = decisionTables.every((t) => /^[0-9]{16}$/.test(seededCursors[t]))
+		const noneConforming = decisionTables.every((t) => !/^[0-9]{16}$/.test(seededCursors[t]))
+		if (shape === 'legacy-non-conforming') {
+			assertions.decisionCursorsIntact = intact
+			assertions.legacyDecisionCursorsIntact = intact && noneConforming
+			decisionLeg = 'legacy-checked'
+		} else {
+			assertions.decisionCursorsIntact = intact && allConforming
+			decisionLeg = 'conforming-checked'
+		}
 	}
 
 	// Column-shape proof: the reopened row must NOT carry an Expiration column any more
@@ -558,11 +715,46 @@ async function runReopen (dbPath) {
 	const columnNames = challengeRow ? Object.keys(challengeRow) : []
 	const expirationGone = !columnNames.includes('Expiration')
 
+	// 62-03 (D-22): new-table queryability. When --baseline-schema is given, every table
+	// the CURRENT bundled schema declares that the baseline did NOT must be queryable
+	// (select count(*) does not throw) and empty (the re-attach replayed no rows for it —
+	// it is new since the baseline).
+	let newTables = null
+	let newTablesQueryable = null
+	if (baselineSchemaFile) {
+		// Load via the SAME module-import path --seed uses (loadSchemaSqlFrom), not a raw
+		// readFileSync: the baseline file is a `schema-sql.ts`-shaped module exporting a
+		// JSON.stringify'd string — reading it as raw text would see literal `\t`/`\n`
+		// escape sequences, not real tab/newline characters, and the table-name regex
+		// below would never match.
+		const baselineSchemaSql = await loadSchemaSqlFrom(baselineSchemaFile)
+		const currentSchemaSql = (await import('../src/database/schema-sql.js')).VOTETORRENT_SCHEMA_SQL
+		const declaredTables = (sql) => {
+			const names = new Set()
+			for (const m of sql.matchAll(/^\ttable\s+(\w+)\s*\(/gm)) names.add(m[1])
+			return names
+		}
+		const baselineTables = declaredTables(baselineSchemaSql)
+		const currentTables = declaredTables(currentSchemaSql)
+		newTables = [...currentTables].filter((t) => !baselineTables.has(t)).sort()
+		newTablesQueryable = true
+		for (const table of newTables) {
+			try {
+				const row = await db.prepare(`select count(*) as n from ${table}`).get()
+				if (Number(row?.n ?? -1) !== 0) newTablesQueryable = false
+			} catch {
+				newTablesQueryable = false
+			}
+		}
+	}
+
 	await db.close()
 
-	const verdict = (assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone)
-		? 'PASS'
-		: 'FAIL'
+	const verdict = (
+		assertions.noThrow && assertions.noAlterColumn && assertions.rowsReadable && expirationGone
+		&& manifestConsistent && assertions.decisionCursorsIntact !== false && assertions.legacyDecisionCursorsIntact !== false
+		&& (baselineSchemaFile ? newTablesQueryable === true : true)
+	) ? 'PASS' : 'FAIL'
 
 	console.log(JSON.stringify({
 		mode: 'reopen',
@@ -570,8 +762,14 @@ async function runReopen (dbPath) {
 		dbPath,
 		assertions: { ...assertions, expirationColumnGone: expirationGone },
 		counts,
+		observedDecisionCursors: observedCursors,
+		decisionLeg,
+		seededDecisionShape: shape,
+		decisionLegProblem,
 		expectedCounts: expectedCounts ?? null,
 		attestationChallengeColumns: columnNames,
+		newTables,
+		newTablesQueryable,
 		verdict,
 	}, null, 2))
 

@@ -491,7 +491,8 @@ rather than a hypothetical.
 
 The two are `patches/serfab-cadre-core-public-observer.md` and
 `patches/serfab-cadre-core-strand-cohort-topic.md`, each a written forward-port record beside the
-pinned patch it describes. A third patch was anticipated by an earlier plan's text and **was never
+pinned patch it describes. (2026-10-09: the strand-cohort-topic patch is retired on cadre-core
+1.14.0 — cadre-core's own `strandReactivity` replaces it, without `minSigs` — so one patch remains.) A third patch was anticipated by an earlier plan's text and **was never
 authored** — the design was superseded before a line of it was written.
 
 This entry exists so a later reader does not go looking for a third dependency because an older

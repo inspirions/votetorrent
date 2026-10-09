@@ -151,7 +151,17 @@ async function attemptNoPeerRead(strandId, bootstrapNodes) {
 		const timeout = new Promise((resolve) => setTimeout(() => resolve(TIMEOUT_SENTINEL), 25_000));
 
 		const attempt = (async () => {
-			const handle = await openStrandReadHandle({ networkHash: strandId, node: edge.node, coordinatedRepo: edge.node.coordinatedRepo });
+			// Opening the handle is part of the attempt: since @optimystic 1.11.0 a node that has
+			// not heard from its bootstrap peers refuses to conclude the catalog is absent, so the
+			// open itself throws `BlockUnavailableError` (cohort-unreachable) rather than hydrating
+			// an empty catalog. That is the 'error' outcome class, not a test failure.
+			let handle;
+			try {
+				handle = await openStrandReadHandle({ networkHash: strandId, node: edge.node, coordinatedRepo: edge.node.coordinatedRepo });
+			} catch (err) {
+				const name = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
+				return { kind: /** @type {const} */ ('error'), name };
+			}
 			try {
 				const { readRows, close } = createStrandRowSource({ uiDb: makeUiDbForAllTables(), strandDb: handle });
 				const batches = await readRows({ collectionId: 'x', revision: 1, invalidation: false });

@@ -20,6 +20,10 @@ RCT_EXTERN_METHOD(provisionDeviceKey:(NSString *)keyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(getCurrentDeviceKey:(NSString *)keyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(produceAttestation:(NSString *)keyAlias
                   boundDigest:(NSString *)boundDigest
                   assertionDigest:(NSString *)assertionDigest
@@ -46,6 +50,66 @@ RCT_EXTERN_METHOD(signWithRecoveryKey:(NSString *)keyAlias
                   promptNegativeButton:(NSString *)promptNegativeButton
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
+
+// D-42 (Phase 62 plan 08) — generic secret-wrap. Selectors must match the Swift
+// `@objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:
+// promptNegativeButton:authWindowSeconds:resolver:rejecter:)` / `@objc(unwrapSecret:ciphertextBase64:ivBase64:
+// aadBase64:requireAuth:promptTitle:promptSubtitle:promptNegativeButton:authWindowSeconds:resolver:rejecter:)`
+// strings EXACTLY (see this file's header comment).
+RCT_EXTERN_METHOD(wrapSecret:(NSString *)keyAlias
+                  plaintextBase64:(NSString *)plaintextBase64
+                  aadBase64:(NSString *)aadBase64
+                  requireAuth:(BOOL)requireAuth
+                  promptTitle:(NSString *)promptTitle
+                  promptSubtitle:(NSString *)promptSubtitle
+                  promptNegativeButton:(NSString *)promptNegativeButton
+                  authWindowSeconds:(double)authWindowSeconds
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unwrapSecret:(NSString *)keyAlias
+                  ciphertextBase64:(NSString *)ciphertextBase64
+                  ivBase64:(NSString *)ivBase64
+                  aadBase64:(NSString *)aadBase64
+                  requireAuth:(BOOL)requireAuth
+                  promptTitle:(NSString *)promptTitle
+                  promptSubtitle:(NSString *)promptSubtitle
+                  promptNegativeButton:(NSString *)promptNegativeButton
+                  authWindowSeconds:(double)authWindowSeconds
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Plan 62-75 (D-36) — file share. Selectors must match the Swift `@objc(writeShareFile:contents:
+// resolver:rejecter:)` / `@objc(shareFile:mimeType:subject:dialogTitle:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(writeShareFile:(NSString *)fileName
+                  contents:(NSString *)contents
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(shareFile:(NSString *)uri
+                  mimeType:(NSString *)mimeType
+                  subject:(NSString *)subject
+                  dialogTitle:(NSString *)dialogTitle
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Plan 62-138. Selector must match the Swift `@objc(deleteCachedFile:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(deleteCachedFile:(NSString *)uri
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Phase 63 review (CR-02, CR-01, WR-03). Selectors must match the Swift `@objc(deleteWrapKey:resolver:
+// rejecter:)`, `@objc(setSecureScreen:resolver:rejecter:)` and `@objc(copySensitiveText:)` EXACTLY.
+// copySensitiveText is a blocking synchronous method (the codegen spec returns `boolean`).
+RCT_EXTERN_METHOD(deleteWrapKey:(NSString *)keyAlias
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setSecureScreen:(BOOL)enabled
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(copySensitiveText:(NSString *)text)
 
 + (BOOL)requiresMainQueueSetup { return NO; }
 

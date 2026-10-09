@@ -180,8 +180,37 @@ const execAsync = promisify(exec);
 // @optimystic/quereus-plugin-crypto version (1.5.0), the peer range is still ^4.19.4, and the
 // cause is still the missing @quereus/quereus declaration in packages/attestation-native.
 // The @serfab family again did NOT move (cadre-core / quereus-plugin-sereus stay 1.2.0).
+//
+// @optimystic 1.5.0 -> 1.7.0 bump (2026-09-28): same single mismatch, re-keyed once more
+// (1.6.0 skipped). Re-verified: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.7.0). Its peer range moved to ^4.20.0, which
+// dragged @quereus/quereus 4.19.4 -> 4.20.0 in the same commit, but the cause is still the
+// missing @quereus/quereus declaration in packages/attestation-native (YN0002 names it).
+// The @serfab family moved in the same commit (cadre-core / quereus-plugin-sereus 1.2.0 -> 1.6.0,
+// strand-proto still 0.11.0); it does not touch this mismatch.
+//
+// @optimystic 1.8.1 -> 1.9.0 bump (2026-10-02): same single mismatch, re-keyed. The 1.7.0 ->
+// 1.8.1 bump never re-keyed this entry, so the guard had been reporting 1.7.0 as `disappeared`
+// and 1.8.1 as `unexpected` since then. Re-verified: yarn.lock holds exactly ONE resolved
+// @optimystic/quereus-plugin-crypto version (1.9.0), and YN0002 still names
+// packages/attestation-native as the workspace that does not provide @quereus/quereus.
+//
+// @optimystic 1.9.0 -> 1.10.1 + @serfab 1.9.0 -> 1.12.0 bump (2026-10-05): same single mismatch,
+// re-keyed. yarn.lock holds exactly ONE resolved @optimystic/quereus-plugin-crypto version
+// (1.10.1); its peer range is still ^4.20.0 (satisfied by the single patched 4.20.0 copy) and the
+// cause is still the missing @quereus/quereus declaration in packages/attestation-native.
+//
+// @optimystic 1.10.1 -> 1.11.0 + @serfab 1.12.0 -> 1.13.0 bump (2026-10-06): same single
+// mismatch, re-keyed. The peer range moved to ^4.20.1, which dragged @quereus/quereus 4.20.0 ->
+// 4.20.1; YN0002 still names packages/attestation-native as the workspace that does not provide it.
+//
+// @optimystic 1.11.0 -> 1.12.1 bump (2026-10-08, @serfab stays 1.13.0, already latest): same single
+// mismatch, re-keyed. The peer range is still ^4.20.1; the cause is unchanged.
+//
+// @serfab 1.13.0 -> 1.14.0 bump (2026-10-09, @optimystic stays 1.12.1): no change to this set —
+// cadre-core 1.14 requires ^1.12.0, which the single 1.12.1 copy already satisfies.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.5.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.12.1',
 ]);
 
 // The ✘ marker (U+2718)

@@ -15,6 +15,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { errorCopy } from "../../utils/errorCopy";
 
 export function ReviseUserScreen() {
 	const { user, userEngine } = useRoute().params as {
@@ -52,7 +53,7 @@ export function ReviseUserScreen() {
 			await userEngine.revise(reviseUserHistory);
 			navigation.popTo("UserDetails", { user: userState, userEngine });
 		} catch (error) {
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setErrorMessage(errorCopy(error, t, "write"));
 		}
 	};
 
@@ -87,7 +88,7 @@ export function ReviseUserScreen() {
 		} catch (error) {
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? errorCopy(error, t, "write"));
 		} finally {
 			setIsSigning(false);
 		}

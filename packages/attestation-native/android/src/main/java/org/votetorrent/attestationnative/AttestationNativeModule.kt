@@ -1,11 +1,21 @@
 package org.votetorrent.attestationnative
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Context
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PersistableBundle
 import android.util.Base64
+import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.fragment.app.FragmentActivity
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.UiThreadUtil
 import com.facebook.react.module.annotations.ReactModule
 
 /**
@@ -73,6 +83,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 
 	private val keyAttestationHelper by lazy { KeyAttestationHelper(reactApplicationContext) }
 	private val playIntegrityHelper by lazy { PlayIntegrityHelper(reactApplicationContext) }
+	private val secretWrapHelper by lazy { SecretWrapHelper(reactApplicationContext) }
 
 	override fun getName(): String {
 		return NAME
@@ -103,6 +114,25 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 			} else {
 				promise.reject("PROVISION_FAILED", e)
 			}
+		}
+	}
+
+	override fun getCurrentDeviceKey(keyAlias: String, promise: Promise) {
+		try {
+			// READ-ONLY (63-18 fix): never generates, prompts or mutates the Keystore.
+			val result = keyAttestationHelper.readCurrentKey(keyAlias)
+			promise.resolve(Arguments.createMap().apply {
+				putString("publicKeyBase64", result.publicKeyBase64)
+				putString("keyAlias", result.keyAlias)
+				putString("securityLevel", result.securityLevel)
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
+			})
+		} catch (e: DeviceKeyAbsentException) {
+			promise.reject("DEVICE_KEY_ABSENT", e)
+		} catch (e: DeviceKeyInvalidatedException) {
+			promise.reject("DEVICE_KEY_INVALIDATED", e)
+		} catch (e: Exception) {
+			promise.reject("DEVICE_KEY_READ_FAILED", e)
 		}
 	}
 
@@ -149,7 +179,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		enablePlayIntegrity: Boolean,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 			return
@@ -200,7 +230,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptNegativeButton: String,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 			return
@@ -247,7 +277,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		promptNegativeButton: String,
 		promise: Promise,
 	) {
-		val activity = currentActivity as? FragmentActivity
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the recovery ceremony")
 			return
@@ -321,7 +351,272 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		)
 	}
 
+	/**
+	 * D-42 (Phase 62 plan 08): generic alias-keyed AES-256-GCM secret-at-rest wrap, distinct from
+	 * every P-256 signing-key method above. Reject codes this pair adds to the module's taxonomy:
+	 * `INVALID_ARGUMENT`, `INVALID_ENCODING`, `NO_WRAP_KEY`, `WRAP_KEY_POLICY_MISMATCH`,
+	 * `UNWRAP_TAG_MISMATCH`, `KEY_INVALIDATED`, `WRAP_FAILED`, `UNWRAP_FAILED` — plus the existing
+	 * `NO_ACTIVITY`/`CANCELED`/`NO_BIOMETRICS_ENROLLED`/`LOCKOUT`/`LOCKOUT_PERMANENT`/
+	 * `BIOMETRIC_ERROR` classes, reused verbatim when `requireAuth` is true.
+	 *
+	 * D-14 (63-16): both methods take a trailing `authWindowSeconds`; Android honours a window above 0
+	 * with a time-bound key (try-init, then one prompt without a CryptoObject); iOS accepts and
+	 * ignores it.
+	 */
+	override fun wrapSecret(
+		keyAlias: String,
+		plaintextBase64: String,
+		aadBase64: String,
+		requireAuth: Boolean,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		authWindowSeconds: Double,
+		promise: Promise,
+	) {
+		val plaintext: ByteArray
+		val aad: ByteArray
+		try {
+			plaintext = Base64.decode(plaintextBase64, Base64.NO_WRAP)
+			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val window = authWindowSecondsOrNull(authWindowSeconds, requireAuth)
+		if (window == null) {
+			promise.reject("INVALID_ARGUMENT", "authWindowSeconds must be an integer in 0..$MAX_AUTH_WINDOW_SECONDS, and 0 unless requireAuth")
+			return
+		}
+
+		val activity = if (requireAuth) {
+			val a = reactApplicationContext.currentActivity as? FragmentActivity
+			if (a == null) {
+				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+				return
+			}
+			a
+		} else {
+			null
+		}
+
+		secretWrapHelper.wrap(
+			alias = keyAlias,
+			plaintext = plaintext,
+			aad = aad,
+			requireAuth = requireAuth,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			authWindowSeconds = window,
+			onResult = { ciphertext, iv, securityLevel ->
+				promise.resolve(Arguments.createMap().apply {
+					putString("ciphertextBase64", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+					putString("ivBase64", Base64.encodeToString(iv, Base64.NO_WRAP))
+					putString("keyAlias", keyAlias)
+					putString("securityLevel", securityLevel)
+				})
+			},
+			onError = { code, throwable -> promise.reject(code, throwable) },
+		)
+	}
+
+	override fun unwrapSecret(
+		keyAlias: String,
+		ciphertextBase64: String,
+		ivBase64: String,
+		aadBase64: String,
+		requireAuth: Boolean,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		authWindowSeconds: Double,
+		promise: Promise,
+	) {
+		val ciphertext: ByteArray
+		val iv: ByteArray
+		val aad: ByteArray
+		try {
+			ciphertext = Base64.decode(ciphertextBase64, Base64.NO_WRAP)
+			iv = Base64.decode(ivBase64, Base64.NO_WRAP)
+			aad = Base64.decode(aadBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+
+		val window = authWindowSecondsOrNull(authWindowSeconds, requireAuth)
+		if (window == null) {
+			promise.reject("INVALID_ARGUMENT", "authWindowSeconds must be an integer in 0..$MAX_AUTH_WINDOW_SECONDS, and 0 unless requireAuth")
+			return
+		}
+
+		val activity = if (requireAuth) {
+			val a = reactApplicationContext.currentActivity as? FragmentActivity
+			if (a == null) {
+				promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+				return
+			}
+			a
+		} else {
+			null
+		}
+
+		secretWrapHelper.unwrap(
+			alias = keyAlias,
+			ciphertext = ciphertext,
+			iv = iv,
+			aad = aad,
+			requireAuth = requireAuth,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			authWindowSeconds = window,
+			onResult = { plaintext ->
+				promise.resolve(Arguments.createMap().apply {
+					putString("plaintextBase64", Base64.encodeToString(plaintext, Base64.NO_WRAP))
+				})
+			},
+			onError = { code, throwable -> promise.reject(code, throwable) },
+		)
+	}
+
+	/**
+	 * Phase 63 review CR-02: delete a vote-record wrap key so the next seal creates a fresh one. The
+	 * alias restriction lives in [SecretWrapHelper.deleteWrapKey] (identity and signing aliases are
+	 * refused before the Keystore is touched). Resolves `{ deleted }`.
+	 */
+	override fun deleteWrapKey(keyAlias: String, promise: Promise) {
+		try {
+			val deleted = secretWrapHelper.deleteWrapKey(keyAlias)
+			promise.resolve(Arguments.createMap().apply { putBoolean("deleted", deleted) })
+		} catch (e: InvalidWrapKeyAliasException) {
+			promise.reject("INVALID_ARGUMENT", e)
+		} catch (e: WrapKeyPolicyMismatchException) {
+			promise.reject("WRAP_KEY_POLICY_MISMATCH", e)
+		} catch (e: Exception) {
+			promise.reject("WRAP_FAILED", e)
+		}
+	}
+
+	/**
+	 * Phase 63 review CR-01: add or clear FLAG_SECURE on the current Activity's window, on the UI
+	 * thread, so the Recents snapshot and screenshots of the decrypted receipt are blank.
+	 */
+	override fun setSecureScreen(enabled: Boolean, promise: Promise) {
+		val activity = reactApplicationContext.currentActivity
+		if (activity == null) {
+			promise.reject("NO_ACTIVITY", "no current Activity to apply FLAG_SECURE to")
+			return
+		}
+		UiThreadUtil.runOnUiThread {
+			try {
+				if (enabled) {
+					activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+				} else {
+					activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+				}
+				promise.resolve(Arguments.createMap().apply { putBoolean("applied", enabled) })
+			} catch (e: Exception) {
+				promise.reject("SECURE_SCREEN_FAILED", e)
+			}
+		}
+	}
+
+	/**
+	 * Phase 63 review WR-03: SYNCHRONOUS sensitive copy. The clip's description extras carry
+	 * EXTRA_IS_SENSITIVE (API 33+; the same key by literal below 33, which older systems ignore), so the
+	 * Android 13+ overlay hides the preview and IMEs keep it out of clipboard history. A private token
+	 * in the extras lets the 60 s best-effort clear recognise its own clip from the DESCRIPTION alone,
+	 * never reading the clip text (no "pasted from clipboard" notice). The clear only happens while the
+	 * app can still see the clipboard (foreground on API 29+); otherwise it is a no-op.
+	 */
+	override fun copySensitiveText(text: String): Boolean {
+		return try {
+			val clipboard = reactApplicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+			val token = java.util.UUID.randomUUID().toString()
+			val clip = ClipData.newPlainText("", text)
+			clip.description.extras = PersistableBundle().apply {
+				putBoolean(if (Build.VERSION.SDK_INT >= 33) ClipDescription.EXTRA_IS_SENSITIVE else LEGACY_EXTRA_IS_SENSITIVE, true)
+				putString(CLIP_TOKEN_EXTRA, token)
+			}
+			clipboard.setPrimaryClip(clip)
+			Handler(Looper.getMainLooper()).postDelayed({
+				try {
+					val desc = clipboard.primaryClipDescription
+					if (desc != null && desc.extras?.getString(CLIP_TOKEN_EXTRA) == token) {
+						if (Build.VERSION.SDK_INT >= 28) {
+							clipboard.clearPrimaryClip()
+						} else {
+							clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+						}
+					}
+				} catch (e: Exception) {
+					// Best effort only.
+				}
+			}, SENSITIVE_CLIP_CLEAR_MS)
+			true
+		} catch (e: Exception) {
+			false
+		}
+	}
+
+	/** Plan 62-75: write a sanitized cache file; resolves `{ uri }`. Rejects INVALID_NAME / WRITE_FAILED. */
+	override fun writeShareFile(fileName: String, contents: String, promise: Promise) {
+		Thread {
+			try {
+				val uri = FileShareHelper.writeShareFile(reactApplicationContext, fileName, contents)
+				promise.resolve(Arguments.createMap().apply { putString("uri", uri.toString()) })
+			} catch (e: FileShareException) {
+				promise.reject(e.code, e.message, e)
+			} catch (e: Exception) {
+				promise.reject("WRITE_FAILED", e)
+			}
+		}.start()
+	}
+
+	/** Plan 62-138: delete a regular file strictly inside cacheDir; resolves `{ deleted }`. Rejects OUTSIDE_CACHE / DELETE_FAILED. */
+	override fun deleteCachedFile(uri: String, promise: Promise) {
+		Thread {
+			try {
+				val deleted = FileShareHelper.deleteCachedFile(reactApplicationContext, uri)
+				promise.resolve(Arguments.createMap().apply { putBoolean("deleted", deleted) })
+			} catch (e: FileShareException) {
+				promise.reject(e.code, e.message, e)
+			} catch (e: Exception) {
+				promise.reject("DELETE_FAILED", e)
+			}
+		}.start()
+	}
+
+	/** Plan 62-75: share a vt-share cache file as a file (never EXTRA_TEXT). Rejects SHARE_FAILED. */
+	override fun shareFile(uri: String, mimeType: String, subject: String, dialogTitle: String, promise: Promise) {
+		try {
+			FileShareHelper.shareFile(
+				reactApplicationContext.currentActivity,
+				reactApplicationContext,
+				uri,
+				mimeType,
+				subject,
+				dialogTitle,
+			)
+			promise.resolve(Arguments.createMap().apply { putBoolean("launched", true) })
+		} catch (e: FileShareException) {
+			promise.reject(e.code, e.message, e)
+		} catch (e: Exception) {
+			promise.reject("SHARE_FAILED", e)
+		}
+	}
+
 	companion object {
 		const val NAME = "AttestationNative"
+
+		/** ClipDescription.EXTRA_IS_SENSITIVE's value, for API levels whose SDK predates the constant. */
+		private const val LEGACY_EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE"
+		private const val CLIP_TOKEN_EXTRA = "org.votetorrent.clipToken"
+		private const val SENSITIVE_CLIP_CLEAR_MS = 60_000L
 	}
 }

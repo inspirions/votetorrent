@@ -1,5 +1,5 @@
-import { MisuseError, QuereusError } from '@quereus/quereus'
-import { FeatureNotAvailableError, UserHistoryEvent, UserKeyType } from '@votetorrent/vote-core'
+import { rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
+import { FeatureNotAvailableError, toImageRef, UserHistoryEvent, UserKeyType } from '@votetorrent/vote-core'
 import { bytesToBase64url, digestToBytes, fromCanonicalDatetime, nowCanonicalDatetime, parseJsonOr, toCanonicalDatetime } from '../utils.js'
 import { verifySig, verifySigP256 } from '../database/initialize.js'
 import { allocateTid } from '../database/tid-allocator.js'
@@ -357,15 +357,58 @@ export class UserEngine implements IUserEngine {
       return {
         id: row.Id as string,
         name: row.Name as string,
-        imageRef: parseJsonOr<ImageRef | undefined>(
+        imageRef: toImageRef(parseJsonOr<unknown>(
           row.ImageRef,
           undefined,
           'User.ImageRef'
-        ),
+        )),
         activeKeys
       }
     } catch (err) {
       this.rethrow(err, 'getSummary')
+    }
+  }
+
+  /**
+   * O-06 (engine half): read-only inspection for the forked-device-identity repair. Reports whether
+   * `localUserId` is a network User, and which CURRENT officers (any authority) hold `pubKey` as an
+   * active UserKey, sorted. Every UserKey read is a point lookup on the `UserId` primary-key prefix
+   * (`UserId = :userId and PubKey = :pubKey`); there is no scan of UserKey. Never logs ids.
+   */
+  async inspectDeviceIdentity (
+    localUserId: string,
+    pubKey: string
+  ): Promise<{ localIsNetworkUser: boolean, officerUserIdsHoldingKey: string[] }> {
+    this.requireCtx('inspectDeviceIdentity')
+    if (typeof localUserId !== 'string' || localUserId.length === 0) {
+      throw new Error('UserEngine.inspectDeviceIdentity: localUserId must be a non-empty string')
+    }
+    if (typeof pubKey !== 'string' || pubKey.length === 0) {
+      throw new Error('UserEngine.inspectDeviceIdentity: pubKey must be a non-empty string')
+    }
+    try {
+      const db = this.ctx!.db
+      const userRow = await db.prepare('select 1 as found from User where Id = :id').get({ id: localUserId })
+      const officerUserIds: string[] = []
+      for await (const row of db.eval(
+        `select distinct O.UserId as UserId
+           from Officer O
+           join CurrentAdmin CA on CA.AuthorityId = O.AuthorityId and CA.EffectiveAt = O.AdminEffectiveAt
+          order by O.UserId`
+      )) {
+        officerUserIds.push(row.UserId as string)
+      }
+      const now = nowCanonicalDatetime()
+      const holding: string[] = []
+      for (const userId of officerUserIds) {
+        const keyRow = await db
+          .prepare('select 1 as found from UserKey where UserId = :userId and PubKey = :pubKey and Expiration > :date')
+          .get({ userId, pubKey, date: now })
+        if (keyRow != null) holding.push(userId)
+      }
+      return { localIsNetworkUser: userRow != null, officerUserIdsHoldingKey: holding.sort() }
+    } catch (err) {
+      this.rethrow(err, 'inspectDeviceIdentity')
     }
   }
 
@@ -618,14 +661,6 @@ export class UserEngine implements IUserEngine {
   }
 
   private rethrow (err: unknown, method: string): never {
-    if (err instanceof QuereusError) {
-      throw new Error(`Quereus error (code ${err.code}): ${err.message}`)
-    } else if (err instanceof MisuseError) {
-      throw new Error(`API misuse: ${err.message}`)
-    } else if (err instanceof Error) {
-      throw new Error(`UserEngine.${method}: ${err.message}`)
-    } else {
-      throw new Error(`UserEngine.${method}: unknown error: ${String(err)}`)
-    }
+    return rethrowHelper(err, 'UserEngine', method)
   }
 }

@@ -22,6 +22,8 @@ import { globalStyles } from "../../theme/styles";
 import { useSettings } from "../../providers/SettingsProvider";
 import { InlineError } from "../../components/InlineError";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
+import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
+import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
 
 const LANGUAGES: { code: 'en' | 'es'; label: string }[] = [
 	{ code: 'en', label: 'English' },
@@ -40,6 +42,9 @@ export default function SettingsScreen() {
 	const [currentUser, setCurrentUser] = useState<User | null>(null);
 	const [seedStatus, setSeedStatus] = useState<string | null>(null);
 	const [settingsError, setSettingsError] = useState("");
+	const [peerUnavailable, setPeerUnavailable] = useState(false);
+	// Bumped by the notice's Try Again so every network-scoped load re-runs.
+	const [retryNonce, setRetryNonce] = useState(0);
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const { getEngine } = useApp();
@@ -55,7 +60,19 @@ export default function SettingsScreen() {
 		if (isNoNetworkEstablishedError(error)) {
 			return;
 		}
-		setSettingsError(error instanceof Error ? error.message : String(error));
+		const peer = classifyPeerReadFailure(error);
+		if (peer) {
+			console.warn("Settings load: peer unavailable:", peer.reason);
+			setPeerUnavailable(true);
+			return;
+		}
+		setSettingsError(t("settingsLoadFailed"));
+	}, [t]);
+
+	const retryPeerLoads = useCallback(() => {
+		setPeerUnavailable(false);
+		setSettingsError("");
+		setRetryNonce((n) => n + 1);
 	}, []);
 
 	const handleLanguageChange = async (lang: 'en' | 'es') => {
@@ -104,7 +121,7 @@ export default function SettingsScreen() {
 			}
 		};
 		loadBaseEngines();
-	}, [getEngine, defaultUserEngine, networkEngine, reportSettingsError]);
+	}, [getEngine, defaultUserEngine, networkEngine, reportSettingsError, retryNonce]);
 
 	useEffect(() => {
 		const loadNetworkName = async () => {
@@ -121,7 +138,7 @@ export default function SettingsScreen() {
 			}
 		};
 		loadNetworkName();
-	}, [networkEngine, reportSettingsError]);
+	}, [networkEngine, reportSettingsError, retryNonce]);
 
 	useEffect(() => {
 		const loadUserEngine = async () => {
@@ -146,7 +163,7 @@ export default function SettingsScreen() {
 		};
 
 		loadUserEngine();
-	}, [networkEngine, reportSettingsError]);
+	}, [networkEngine, reportSettingsError, retryNonce]);
 
 	useFocusEffect(
 		useCallback(() => {
@@ -172,7 +189,7 @@ export default function SettingsScreen() {
 			};
 
 			loadUserSummary();
-		}, [userEngine, reportSettingsError])
+		}, [userEngine, reportSettingsError, retryNonce])
 	);
 
 	useFocusEffect(
@@ -213,6 +230,7 @@ export default function SettingsScreen() {
 	return (
 		<View style={styles.content}>
 			<InlineError message={settingsError} />
+			{peerUnavailable ? <PeerReadUnavailableNotice variant="unavailable" onRetry={retryPeerLoads} /> : null}
 			<ScrollView
 				testID="settings-scroll"
 				style={[styles.content, { backgroundColor: colors.background }]}
@@ -338,6 +356,19 @@ export default function SettingsScreen() {
 						titleType="defaultSemiBold"
 						icon="chevron-right"
 						onPress={() => navigation.navigate("ProvisionSigningKey", { reason: "first-run" })}
+					/>
+				</View>
+
+				{/* Accept an Invitation: the production entry into every invitation accept flow.
+				    Deliberately NO scope gate: an invitee holds no scopes yet, by definition, the
+				    same reasoning as the provisioning rows above. Accepting still needs the
+				    sender's one-time key from the pasted share and a device-key act. */}
+				<View testID="settings-accept-invitation-entry">
+					<InfoCard
+						title={t("invitationAcceptTitle")}
+						titleType="defaultSemiBold"
+						icon="chevron-right"
+						onPress={() => navigation.navigate("AcceptInvitation")}
 					/>
 				</View>
 

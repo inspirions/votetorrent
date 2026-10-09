@@ -344,12 +344,22 @@ async function typeConfirmText(tr: renderer.ReactTestRenderer, text: string): Pr
  * Jest environment is torn down otherwise. */
 const mounted: renderer.ReactTestRenderer[] = [];
 
-async function renderScreen(): Promise<renderer.ReactTestRenderer> {
+async function renderScreen({ withToast = false } = {}): Promise<renderer.ReactTestRenderer> {
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const Screen = require("../DashboardSignInCodeScreen").default;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { ToastProvider } = require("../../../components/Toast");
 	let tr!: renderer.ReactTestRenderer;
 	await renderer.act(async () => {
-		tr = renderer.create(<Screen />);
+		tr = renderer.create(
+			withToast ? (
+				<ToastProvider>
+					<Screen />
+				</ToastProvider>
+			) : (
+				<Screen />
+			),
+		);
 	});
 	await renderer.act(async () => {
 		await Promise.resolve();
@@ -572,6 +582,17 @@ describe("DashboardSignInCodeScreen — the export cannot be reached without a p
 		});
 		mounted.length = 0;
 		expect(mockSetString).toHaveBeenCalledWith("");
+	});
+
+	it("copying the code confirms it with a toast", async () => {
+		const tr = await renderScreen({ withToast: true });
+		await confirmAndGenerate(tr);
+		const toastText = () =>
+			tr.root.findAll((n) => n.props?.testID === "toast-message" && typeof n.props?.children === "string")[0]?.props
+				.children;
+		expect(toastText()).toBeUndefined();
+		await pressByTitle(tr, "dashboardSignInCodeCopyButton");
+		expect(toastText()).toBe("dashboardSignInCodeCopied");
 	});
 
 	it("inertness control: leaving WITHOUT copying does not touch the clipboard at all", async () => {

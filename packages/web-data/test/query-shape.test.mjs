@@ -13,8 +13,8 @@
  *   Q1  the generic public-SQL rule, applied to EVERY discovered constant — so
  *       a public query written next year is covered without editing this file.
  *   Q2  D-14: the key-release aggregate's select list is aggregate functions
- *       ONLY, and the join that makes it measure completions rather than task
- *       existence is present.
+ *       ONLY, and it counts published KeyholderShareRelease rows scoped to the
+ *       election revision (62-126: no longer completed Tasks).
  *   Q3  D-19: the roll's select column set EQUALS exactly three names — set
  *       equality, not containment. 54-06's own guard checks containment, which
  *       would accept a fourth column; D-19's text is "these only".
@@ -106,9 +106,10 @@ const Q1_MUTATIONS = /** @type {ReadonlyArray<readonly [string, (sql: string) =>
 
 /** Q2's three mutations of the real aggregate. @type {ReadonlyArray<readonly [string, (sql: string) => string]>} */
 const Q2_MUTATIONS = /** @type {ReadonlyArray<readonly [string, (sql: string) => string]>} */ (Object.freeze([
-	['a bare per-row user column added', (sql) => sql.replace(' from ', ', T.UserId as who from ')],
-	['a bare task id added', (sql) => sql.replace(' from ', ', T.Id from ')],
-	['the mandatory join dropped', (sql) => sql.replace(/ join ReleaseKeyTaskExtension R on R\.TaskId = T\.Id/, '')],
+	['a bare per-row user column added', (sql) => sql.replace(' from ', ', UserId as who from ')],
+	['a bare released share added', (sql) => sql.replace(' from ', ', SigningShare from ')],
+	['the revision scope dropped', (sql) => sql.replace(' and ElectionRevision = :revision', '')],
+	['the old task source restored', (sql) => sql.replace('from KeyholderShareRelease', 'from Task T join ReleaseKeyTaskExtension R on R.TaskId = T.Id')],
 ]));
 
 /** Q3's two mutations of the real roll. @type {ReadonlyArray<readonly [string, (sql: string) => string]>} */
@@ -262,23 +263,22 @@ function q2Violations(sql) {
 			);
 		}
 	}
-	if (!/\bjoin\s+ReleaseKeyTaskExtension\b/i.test(sql)) {
+	if (!/\bfrom\s+KeyholderShareRelease\b/i.test(sql)) {
 		out.push(
-			'the aggregate no longer joins ReleaseKeyTaskExtension. Without it the query cannot be scoped to an election ' +
-				'revision at all (the extension carries ElectionId/ElectionRevision).',
+			'the aggregate no longer reads KeyholderShareRelease. 62-126: the published release row is the fact; counting ' +
+				'Task/ReleaseKeyTaskExtension measures a bookkeeping task, so a published share can read as unreleased.',
 		);
 	}
-	if (!/\bIsCompleted\b/.test(sql)) {
-		out.push(
-			'the aggregate no longer reads IsCompleted. It lives on Task, not on the extension, and without it the query ' +
-				'counts release-key tasks that EXIST rather than ones that COMPLETED — reading "0 released" forever through ' +
-				'the whole settling window this fact exists to cover.',
-		);
+	if (/\b(Task|ReleaseKeyTaskExtension|IsCompleted)\b/.test(sql)) {
+		out.push('the aggregate reads Task state again (Task / ReleaseKeyTaskExtension / IsCompleted); 62-126 moved it to share rows.');
+	}
+	if (!/\bElectionId\s*=\s*:electionId\b/.test(sql) || !/\bElectionRevision\s*=\s*:revision\b/.test(sql)) {
+		out.push('the aggregate is not scoped to BOTH the election and the revision (a primary-key-prefix count).');
 	}
 	return out;
 }
 
-test('control Q2: the T.UserId, bare T.Id and dropped-join mutants of the REAL aggregate are all rejected', async () => {
+test('control Q2: the bare UserId, bare share, dropped-scope and old-task-source mutants of the REAL aggregate are all rejected', async () => {
 	const found = await discoverPublicSql();
 	const { sql } = /** @type {{ sql: string }} */ (found.get('KEYRELEASE_AGGREGATE_SQL'));
 	for (const [label, mutate] of Q2_MUTATIONS) {
@@ -288,7 +288,7 @@ test('control Q2: the T.UserId, bare T.Id and dropped-join mutants of the REAL a
 	}
 });
 
-test('Q2 (D-14): the key-release aggregate selects counts only, joins the extension, and reads IsCompleted from Task', async () => {
+test('Q2 (D-14): the key-release aggregate selects counts only and counts share rows scoped to the revision', async () => {
 	const found = await discoverPublicSql();
 	const aggregate = found.get('KEYRELEASE_AGGREGATE_SQL');
 	assert.ok(
@@ -298,11 +298,9 @@ test('Q2 (D-14): the key-release aggregate selects counts only, joins the extens
 	);
 	assert.deepEqual(q2Violations(aggregate.sql), [], 'D-14 is broken: the key-release aggregate is no longer counts-only');
 
-	// The type filter is a LITERAL, not a bind, and that is the one documented
-	// exemption from RULE R4 in this surface: the natural bind name for a
-	// Task.Type filter is one of the engine's reserved words, and the value is a
-	// fixed schema code rather than caller input.
-	assert.ok(/Type\s*=\s*'[a-z-]+'/i.test(aggregate.sql), 'the aggregate is no longer scoped by a task-type literal');
+	// 62-126: no task-type literal any more -- the share table is keyed by (ElectionId, ElectionRevision, UserId)
+	// and every value is a bind.
+	assert.ok(!/'[a-z-]+'/i.test(aggregate.sql), 'the aggregate carries a string literal; every value must be a bound parameter');
 	assert.ok(/:electionId\b/.test(aggregate.sql), 'the aggregate no longer binds an election id');
 	assert.ok(/:revision\b/.test(aggregate.sql), 'the aggregate no longer binds a revision');
 });

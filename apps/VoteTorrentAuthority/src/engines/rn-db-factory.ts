@@ -18,6 +18,7 @@ import { Database } from '@quereus/quereus';
 import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
 import type { DbFactory } from '@votetorrent/vote-engine';
 import type { StrandConfig, StrandInstance } from '@serfab/cadre-core';
+import { isStrandAwaitingFirstSyncError, waitForStrandWritable } from './strand-first-sync';
 
 // cadre-core's StrandDatabase.executeSchema() wraps the sApp schema as
 // `declare schema App { ${schema} } apply schema App;`. VOTETORRENT_SCHEMA_SQL is
@@ -87,6 +88,20 @@ export const rnDbFactory: DbFactory = async (networkHash: string) => {
 export interface StrandHost {
 	addStrand(config: StrandConfig): Promise<StrandInstance>;
 	getControlNode(): { getConnections(): readonly unknown[] } | null;
+	whenStrandWritable(strandId: string, options?: { timeoutMs?: number }): Promise<StrandInstance>;
+}
+
+/**
+ * Options for the first-sync gate (quick task 260928-kkf — see strand-first-sync.ts).
+ *
+ * `signal` cancels a pending `whenStrandWritable` wait (node change, network switch /
+ * Start Fresh, provider unmount). `onAwaitingFirstSync` fires once, BEFORE the wait
+ * begins, so a caller can surface a "still syncing" state — it does not fire again on
+ * subsequent retry attempts within the same wait.
+ */
+export interface StrandDbFactoryOptions {
+	signal?: AbortSignal;
+	onAwaitingFirstSync?: (strandId: string) => void;
 }
 
 /**
@@ -120,35 +135,68 @@ export interface StrandHost {
  *       the entire SQL tier — zero engine query rewrites.
  *
  * Ordering (Pitfall 3): never read `strand.database` before `await addStrand`
- * resolves — cadre-core awaits the strand DB's internal initialize() and returns
- * only once the database is safe to access.
+ * resolves (or, on the first-sync gate path below, before `waitForStrandWritable`
+ * resolves) — `database` is present once the strand is active/idle, which EITHER
+ * resolution guarantees.
+ *
+ * First-sync gate (quick task 260928-kkf): since cadre-core 1.1.0, a JOINER's
+ * `addStrand` can block for its configured `strandFirstSync.timeoutMs` (default
+ * ~300s) and then REJECT with the retryable `StrandAwaitingFirstSyncError` — "no
+ * sibling has been reachable since this node joined" — rather than resolving. That is
+ * NOT a failure to open the network: the strand stays launched and keeps probing on
+ * its own, so this catches exactly that one error (name-marker + strandId match, see
+ * `strand-first-sync.ts`) and waits for `strand:writable` via `waitForStrandWritable`
+ * instead of failing the open. `addStrand` is called at most once per factory call —
+ * the wait only ever calls `whenStrandWritable`. See `strand-first-sync.ts`'s module
+ * doc comment for the full class-identity-detection and indefinite-wait rationale.
  */
-export function createStrandDbFactory(node: StrandHost): DbFactory {
+export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactoryOptions): DbFactory {
 	return async (networkHash: string) => {
 		// D-05: the network hash is already unique per network — use it as the strandId.
 		const strandId = networkHash;
 
 		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
-		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
+		const controlConnections = node.getControlNode()?.getConnections().length ?? 0;
+		const hasPeers = controlConnections > 0;
+		// Closed tokens only (never the strand id / network hash). This line exists so a device
+		// run can read which founder flag a cold start or an import attached with (O-02); the
+		// founder semantics themselves are decided in a later round.
+		console.info("[strand-factory] attach", { founder: controlConnections === 0, controlConnections });
 
-		const strand = await node.addStrand({
-			// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0: the owner key of the machine
-			// that published the row, used to derive "am I the founder?" for a launch that supplies
-			// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
-			// here rather than merely tolerated — and it is provenance, not content, so
-			// `strandRowMismatches` excludes it from the identical-content comparison.
-			strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
-			sAppConfig: {
-				id: 'org.votetorrent',
-				version: '1.0.0',
-				schema: VOTETORRENT_INNER_DDL,
-				latencyHint: 'interactive',
-			},
-			founder: !hasPeers,
-		});
+		let strand: StrandInstance;
+		try {
+			strand = await node.addStrand({
+				// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0: the owner key of the machine
+				// that published the row, used to derive "am I the founder?" for a launch that supplies
+				// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
+				// here rather than merely tolerated — and it is provenance, not content, so
+				// `strandRowMismatches` excludes it from the identical-content comparison.
+				strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
+				sAppConfig: {
+					id: 'org.votetorrent',
+					version: '1.0.0',
+					schema: VOTETORRENT_INNER_DDL,
+					latencyHint: 'interactive',
+				},
+				founder: !hasPeers,
+			});
+		} catch (error) {
+			// Only the first-sync gate error, FOR THIS strand, is retryable — every other
+			// error (including the same gate error for a different strand) rejects unchanged.
+			if (!isStrandAwaitingFirstSyncError(error, strandId)) {
+				throw error;
+			}
+			options?.onAwaitingFirstSync?.(strandId);
+			// Never re-calls addStrand — loops on whenStrandWritable only (see the doc
+			// comment above and strand-first-sync.ts). cadre-core's default
+			// `awaitFirstSync: true` is left untouched, so a non-gated/fast join is
+			// unaffected and resolves exactly as before this catch was added.
+			strand = await waitForStrandWritable(node, strandId, { signal: options?.signal });
+		}
 
-		// Safe only after addStrand resolves (Pitfall 3). `database` is present once
-		// the strand is active/idle, which addStrand guarantees on return.
+		// Safe only after addStrand OR waitForStrandWritable resolves (Pitfall 3).
+		// `database` is present once the strand is active/idle, which either
+		// resolution guarantees.
 		const db = strand.database!.getDatabase();
 		db.setSchemaPath(['App', 'main']); // D-14 transparency — never omit (Pitfall 2).
 

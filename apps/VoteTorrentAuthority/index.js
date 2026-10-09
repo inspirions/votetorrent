@@ -6,6 +6,9 @@
 // Spike 002 scaffold — see polyfills.bootstrap.js.
 import './polyfills.bootstrap';
 
+// Before App: see rnscreens-flags.js (keyboard open/close must not reset Screen sizes).
+import './rnscreens-flags';
+
 // Dev-only arming of the `debug` namespace filter, so Optimystic's diagnostic markers
 // (cluster-tx:read-repair-triggered / cluster-fetch:solo-self-skip / commit:solo-cohort)
 // actually reach logcat. Nothing else enables `debug` on React Native: its browser build
@@ -54,6 +57,12 @@ runDialProbe();
 // __DEV__ && REPLICATION_PROOF_ENABLED (see proof-flags.generated.ts). Logs under [replication-proof].
 import {runReplicationProof} from './src/engines/replication-proof-runner';
 runReplicationProof();
+
+// Spike 093 dev-only native Noise crypto parity + cost probe. No-op unless
+// __DEV__ && NOISE_PARITY_PROBE_ENABLED (a const in the probe, never committed true).
+// Logs under [noise-parity].
+import {runNoiseParityProbe} from './src/engines/noise-crypto-parity-probe';
+runNoiseParityProbe();
 
 // Phase 28 (D-07 / SIGN-04) dev-only signing round-trip proof. Fire-and-forget; no-op unless
 // __DEV__ && SIGNING_PROOF_ENABLED (see proof-flags.generated.ts). Logs under [spike013].

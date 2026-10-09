@@ -9,6 +9,12 @@ import type {
 	NetworkInit,
 	NetworkReference,
 	User,
+	FoundingBundleExporter,
+	FoundingBundleExport,
+	FoundingBundleImportOptions,
+	FoundingBundleImportResult,
+	FoundingBundleInspection,
+	FoundingBundleRows,
 } from '@votetorrent/vote-core';
 import type {
 	INetworksEngine,
@@ -22,13 +28,47 @@ import {
 	markSchemaInitialized,
 	ensureTidSequence,
 	declareViewsInMain,
+	prepareDb,
 } from '../database/initialize.js';
 import { allocateTid } from '../database/tid-allocator.js';
 import { NetworksCreateBuilder } from './builders/index.js';
+import {
+	FOUNDING_BUNDLE_TABLE_ORDER,
+	readGenesisRows,
+	replayGenesisRows,
+} from './genesis-rows.js';
+import {
+	FOUNDING_BUNDLE_FORMAT,
+	FOUNDING_BUNDLE_FORMAT_VERSION,
+	FOUNDING_FAILURE_CATEGORY,
+	FoundingBundleExportError,
+	deriveFoundingDescriptor,
+	foundingBundleFingerprint,
+	foundingBundleSigningDigest,
+	parseFoundingBundle,
+	serializeFoundingBundle,
+	verifyFoundingBundle,
+} from './founding-bundle.js';
+import { buildManifest, computeContentDigest, computeSchemaHash } from '../bootstrap/snapshot-manifest.js';
+import type { SnapshotTables } from '../bootstrap/snapshot-types.js';
 
 // D-02: default in-memory factory — keeps all 581 existing tests passing unchanged.
 // Lives at module scope (not inside the class) so it is a stable default parameter.
 const inMemoryFactory: DbFactory = async (_hash: string) => new Database();
+
+/**
+ * 62-16: parse the violated CHECK constraint's name out of a Quereus error
+ * thrown by a genesis-row replay — the only detail `importFoundingBundle`'s
+ * `replay-rejected` result carries (never a row or column value, matching
+ * the detail-string discipline `founding-bundle.ts` uses). Quereus's own
+ * constraint-violation text is `CHECK constraint failed: <name>[ (...)]`
+ * (row-constraints.js / deferred-constraint-queue.js / view-mutation-builder.js).
+ */
+function extractConstraintName(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	const match = /CHECK constraint failed:\s*([A-Za-z0-9_]+)/.exec(message);
+	return match?.[1] ?? 'unknown constraint';
+}
 
 export class NetworksEngine implements INetworksEngine {
 	// D-07: per-instance hash→EngineContext cache.
@@ -59,12 +99,11 @@ export class NetworksEngine implements INetworksEngine {
 		}
 
 		// Prepare json fields
-		const networkImageRefJson = networkInit.imageUrl
-			? JSON.stringify(networkInit.imageUrl)
-			: null;
-		const primaryAuthorityImageRefJson = networkInit.primaryAuthority.imageUrl
-			? JSON.stringify(networkInit.primaryAuthority.imageUrl)
-			: null;
+		const networkImageRefJson = storedImageRefJson(networkInit.imageUrl, networkInit.imageCid);
+		const primaryAuthorityImageRefJson = storedImageRefJson(
+			networkInit.primaryAuthority.imageUrl,
+			networkInit.primaryAuthority.imageCid,
+		);
 		const relaysJson = JSON.stringify(networkInit.relays ?? []);
 		const tsaJson = JSON.stringify(
 			networkInit.policies?.timestampAuthorities ?? [],
@@ -85,6 +124,9 @@ export class NetworksEngine implements INetworksEngine {
 			throw new Error('Failed to create network: Officer init is required');
 		}
 		const officerInit = firstOfficer.init;
+		// The entered admin name is the founder's network display name (UAT 62 gap 4 item 5);
+		// the provisioned device user's name is only a fallback.
+		const founderName = officerInit.name?.trim() || user.name;
 		const officerScopesJson = JSON.stringify(officerInit.scopes);
 
 		const firstKey = user.activeKeys?.[0];
@@ -115,7 +157,7 @@ export class NetworksEngine implements INetworksEngine {
 			userId: user.id,
 			title: officerInit.title,
 			scopes: officerScopesJson,
-			userName: user.name,
+			userName: founderName,
 			userImageRef: userImageRefJson,
 			// 49-02 bugfix: this was hardcoded to the literal string 'user' — a value
 			// that is not any valid UserKeyType code ('M'/'Y'/'P') — so the founding
@@ -263,6 +305,390 @@ export class NetworksEngine implements INetworksEngine {
 		return this.open(networkRef, user, true);
 	}
 
+	/**
+	 * D-35/62-16: export the network's founding bundle. Device A reads its own
+	 * six founding rows verbatim, builds a signed, verified envelope, and
+	 * returns it. Rejects with a `FoundingBundleExportError` (never a partial
+	 * bundle) — see the named codes on `FoundingBundleExportErrorCode`.
+	 */
+	async exportFoundingBundle(
+		networkHash: string,
+		exporter: FoundingBundleExporter,
+	): Promise<FoundingBundleExport> {
+		const ctx = this.contexts.get(networkHash);
+		if (!ctx) throw new FoundingBundleExportError('network-not-open');
+
+		const networkRow = await ctx.db
+			.prepare(
+				'select Id, Hash, PrimaryAuthorityId, Name, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType from Network',
+			)
+			.get({});
+		if (!networkRow || networkRow.Hash !== networkHash) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		const primaryAuthorityId = networkRow.PrimaryAuthorityId as string;
+
+		const adminEffectiveAtRows: Array<{ EffectiveAt: unknown }> = [];
+		for await (const row of ctx.db.eval(
+			'select EffectiveAt from Admin where AuthorityId = :authorityId',
+			{ authorityId: primaryAuthorityId },
+		)) {
+			adminEffectiveAtRows.push(row as { EffectiveAt: unknown });
+		}
+		// D-38: signed revisions carry no stored Tid, so they can never be
+		// replayed with their original Tid — export refuses once the primary
+		// authority's Admin has been revised (`admin-revised`).
+		if (adminEffectiveAtRows.length > 1) {
+			throw new FoundingBundleExportError('admin-revised');
+		}
+		if (adminEffectiveAtRows.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		const adminEffectiveAt = String(adminEffectiveAtRows[0]!.EffectiveAt);
+
+		let rows: FoundingBundleRows;
+		try {
+			rows = await readGenesisRows(ctx.db, {
+				userId: exporter.userId,
+				signerKey: exporter.signerKey,
+				authorityId: primaryAuthorityId,
+				adminEffectiveAt,
+			});
+		} catch {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+
+		if (rows.User.length === 0 || rows.Officer.length === 0) {
+			throw new FoundingBundleExportError('not-founding-officer');
+		}
+		if (rows.Authority.length === 0 || rows.Admin.length === 0 || rows.Network.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		if (rows.UserKey.length === 0) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+		const expiration = String(rows.UserKey[0]!.Expiration);
+		if (!(expiration > nowCanonicalDatetime())) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+
+		const exportedAt = nowCanonicalDatetime();
+		const schemaHash = computeSchemaHash();
+		const manifest = buildManifest(rows as unknown as SnapshotTables) as unknown as FoundingBundleExport['bundle']['manifest'];
+		const digest = computeContentDigest(rows as unknown as SnapshotTables);
+		const descriptor = deriveFoundingDescriptor(rows);
+
+		const signingDigest = foundingBundleSigningDigest({
+			networkHash: descriptor.networkHash,
+			schemaHash,
+			exportedAt,
+			exporterUserId: exporter.userId,
+			signerKey: exporter.signerKey,
+			digest,
+		});
+
+		let signature: Awaited<ReturnType<FoundingBundleExporter['sign']>>;
+		try {
+			signature = await exporter.sign(signingDigest.bytes);
+		} catch (err) {
+			// The biometric prompt and the device signer's desync check run inside sign(), so a
+			// typed code (CANCELED, LOCKOUT, KEY_INVALIDATED_REASSOCIATE, ...) must reach the caller (UAT 62 test 22).
+			if (typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'string') {
+				throw err;
+			}
+			const wrapped = new FoundingBundleExportError('signature-self-check');
+			(wrapped as { cause?: unknown }).cause = err;
+			throw wrapped;
+		}
+		if (signature.signerUserId !== exporter.userId || signature.signerKey !== exporter.signerKey) {
+			throw new FoundingBundleExportError('signature-self-check');
+		}
+
+		const bundle: FoundingBundleExport['bundle'] = {
+			format: FOUNDING_BUNDLE_FORMAT,
+			formatVersion: FOUNDING_BUNDLE_FORMAT_VERSION,
+			descriptor,
+			schemaHash,
+			exportedAt,
+			manifest,
+			digest,
+			rows,
+			exporter: {
+				userId: signature.signerUserId,
+				signerKey: signature.signerKey,
+				signature: signature.signature,
+			},
+		};
+
+		// Fail closed on a mis-encoding app signer: the bundle must verify
+		// against its own declared contents before it is ever handed out.
+		const selfCheck = verifyFoundingBundle(bundle);
+		if (!selfCheck.ok) {
+			throw new FoundingBundleExportError('signature-self-check', selfCheck.detail);
+		}
+
+		const text = serializeFoundingBundle(bundle);
+		const fileName = `votetorrent-network-${descriptor.networkHash.slice(0, 12)}.json`;
+		return { bundle, text, fileName, fingerprint: foundingBundleFingerprint(bundle.digest) };
+	}
+
+	/**
+	 * D-35/D-38/D-39/62-16: import a founding bundle produced by
+	 * `exportFoundingBundle` on a second device. NEVER throws for a bundle or
+	 * target problem — every failure is returned, categorized by
+	 * `FOUNDING_FAILURE_CATEGORY`. Verification (parse + verifyFoundingBundle)
+	 * and the already-joined check both run BEFORE any `DbFactory` call
+	 * (fail-closed, Phase 50 D-12/D-13 order); a scratch in-memory dry run then
+	 * proves the replay passes every tier-1 CHECK before the target database is
+	 * opened.
+	 */
+	async importFoundingBundle(
+		bundleText: string,
+		user: User | undefined,
+		options?: FoundingBundleImportOptions,
+	): Promise<FoundingBundleImportResult> {
+		// 62-102 (initial/G2 WR-03): an import must carry an out-of-band anchor.
+		// Decided before any parse or DbFactory call; there is no bypass option.
+		const hasAnchor = (v: string | undefined): boolean => typeof v === 'string' && v.length > 0;
+		if (
+			!hasAnchor(options?.expectedFingerprint) &&
+			!hasAnchor(options?.expectedDigest) &&
+			!hasAnchor(options?.expectedNetworkHash)
+		) {
+			return {
+				ok: false,
+				reason: 'anchor-required',
+				category: FOUNDING_FAILURE_CATEGORY['anchor-required'],
+				detail: 'founding bundle: an out-of-band anchor (the exporter\'s fingerprint) is required to import',
+			};
+		}
+
+		const parsed = parseFoundingBundle(bundleText);
+		if (!parsed.ok) {
+			return { ok: false, reason: parsed.reason, category: FOUNDING_FAILURE_CATEGORY[parsed.reason], detail: parsed.detail };
+		}
+
+		const verified = verifyFoundingBundle(parsed.bundle, {
+			expectedNetworkHash: options?.expectedNetworkHash,
+			expectedDigest: options?.expectedDigest,
+			expectedFingerprint: options?.expectedFingerprint,
+		});
+		if (!verified.ok) {
+			return {
+				ok: false,
+				reason: verified.reason,
+				category: FOUNDING_FAILURE_CATEGORY[verified.reason],
+				detail: verified.detail,
+			};
+		}
+
+		const bundle = parsed.bundle;
+		const hash = bundle.descriptor.networkHash;
+
+		// Already-joined check — before any DbFactory call.
+		const recentBefore: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
+		const existingRef = recentBefore.find((r) => r.hash === hash);
+		if (this.contexts.has(hash) || existingRef) {
+			const networkRef: NetworkReference = existingRef ?? {
+				hash,
+				imageUrl: bundle.descriptor.imageUrl,
+				relays: [...bundle.descriptor.relays],
+				name: bundle.descriptor.name,
+				primaryAuthorityDomainName: bundle.descriptor.primaryAuthorityDomainName,
+			};
+			return { ok: false, reason: 'already-joined', category: 'already-joined', networkRef };
+		}
+
+		const genesisKeys = {
+			userId: String(bundle.rows.User[0]!.Id),
+			signerKey: String(bundle.rows.UserKey[0]!.PubKey),
+			authorityId: String(bundle.rows.Authority[0]!.Id),
+			adminEffectiveAt: String(bundle.rows.Admin[0]!.EffectiveAt),
+		};
+
+		// Scratch in-memory dry run — proves the replay passes every tier-1
+		// CHECK BEFORE the target database (DbFactory) is ever opened. Not
+		// wrapped in BEGIN/COMMIT: create()'s own three execs are not one
+		// transaction either, and the batched deferred-CHECK trap applies the
+		// same way here (see genesis-rows.ts's replayGenesisRows doc comment).
+		const scratch = new Database();
+		try {
+			await prepareDb(scratch);
+			await replayGenesisRows(scratch, bundle.rows, nowCanonicalDatetime());
+			const scratchRows = await readGenesisRows(scratch, genesisKeys);
+			const scratchDigest = computeContentDigest(scratchRows as unknown as SnapshotTables);
+			if (scratchDigest !== bundle.digest) {
+				return {
+					ok: false,
+					reason: 'replay-rejected',
+					category: FOUNDING_FAILURE_CATEGORY['replay-rejected'],
+					detail: 'founding bundle: scratch replay digest does not match the bundle digest',
+				};
+			}
+		} catch (err) {
+			return {
+				ok: false,
+				reason: 'replay-rejected',
+				category: FOUNDING_FAILURE_CATEGORY['replay-rejected'],
+				detail: `founding bundle: scratch replay refused (${extractConstraintName(err)})`,
+			};
+		} finally {
+			const closable = scratch as unknown as { close?: () => Promise<void> };
+			if (typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the scratch handle is discarded either way.
+				}
+			}
+		}
+
+		// Target: the CREATE path, reached only after verification and the dry
+		// run, so no empty database is ever fabricated for an invalid bundle.
+		let ctx: EngineContext;
+		try {
+			ctx = await this.createContext(user, hash);
+		} catch {
+			return {
+				ok: false,
+				reason: 'target-open-failed',
+				category: FOUNDING_FAILURE_CATEGORY['target-open-failed'],
+				detail: 'founding bundle: target database open failed',
+			};
+		}
+
+		// 62-102 (initial/G2 WR-04): every non-success exit after the target
+		// opened evicts any cached context, so a retry is never refused as
+		// already-joined, and closes the database ONLY when this engine owns it.
+		// WR-R1-07: a strand-backed handle (the App schema applied by cadre-core's
+		// StrandDatabase before the factory returned it) belongs to the strand
+		// host, which keeps the strand registered and may still be syncing into
+		// it; closing it would leave a registered strand with a dead Database and
+		// fail every retry with target-open-failed until the app restarts. Such a
+		// handle is left open for the host to reuse on the retry.
+		const borrowedFromStrandHost = ((): boolean => {
+			try {
+				return ctx.db.declaredSchemaManager.hasDeclaredSchema('App');
+			} catch {
+				return false;
+			}
+		})();
+		const failClosed = async (
+			reason: 'target-open-failed' | 'target-replay-failed' | 'target-conflict',
+			detail: string,
+		): Promise<FoundingBundleImportResult> => {
+			this.contexts.delete(hash);
+			const closable = ctx.db as unknown as { close?: () => Promise<void> };
+			if (!borrowedFromStrandHost && typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the handle is discarded either way.
+				}
+			}
+			return { ok: false, reason, category: FOUNDING_FAILURE_CATEGORY[reason], detail };
+		};
+
+		let targetRows: FoundingBundleRows;
+		try {
+			targetRows = await readGenesisRows(ctx.db, genesisKeys);
+		} catch {
+			return failClosed('target-open-failed', 'founding bundle: target database read failed');
+		}
+
+		const presentCount = FOUNDING_BUNDLE_TABLE_ORDER.reduce(
+			(n, table) => n + (targetRows[table].length > 0 ? 1 : 0),
+			0,
+		);
+
+		let outcome: 'replayed' | 'already-present';
+		if (presentCount === FOUNDING_BUNDLE_TABLE_ORDER.length) {
+			const targetDigest = computeContentDigest(targetRows as unknown as SnapshotTables);
+			if (targetDigest !== bundle.digest) {
+				return failClosed('target-conflict', 'founding bundle: target already holds a different network (different)');
+			}
+			outcome = 'already-present';
+		} else if (presentCount === 0) {
+			try {
+				await replayGenesisRows(ctx.db, bundle.rows, nowCanonicalDatetime());
+			} catch {
+				return failClosed('target-replay-failed', 'founding bundle: target replay refused');
+			}
+			try {
+				const readBack = await readGenesisRows(ctx.db, genesisKeys);
+				const readBackDigest = computeContentDigest(readBack as unknown as SnapshotTables);
+				if (readBackDigest !== bundle.digest) {
+					return failClosed('target-replay-failed', 'founding bundle: replayed rows do not match the bundle digest');
+				}
+			} catch {
+				return failClosed('target-replay-failed', 'founding bundle: replayed rows could not be read back');
+			}
+			outcome = 'replayed';
+		} else {
+			// A failure in batch 2 or 3 of a PRIOR replay attempt can leave
+			// batch-1 rows — the dry run above makes that environmental only
+			// (proven safe before this attempt), but a partial target from a
+			// concurrent sync is a real, retryable state.
+			return failClosed(
+				'target-conflict',
+				'founding bundle: target holds a partial founding generation (partial — sync in progress, retry later)',
+			);
+		}
+
+		const networkRef: NetworkReference = {
+			hash,
+			imageUrl: bundle.descriptor.imageUrl,
+			relays: [...bundle.descriptor.relays],
+			name: bundle.descriptor.name,
+			primaryAuthorityDomainName: bundle.descriptor.primaryAuthorityDomainName,
+		};
+
+		// open() finds the context cached (D-06) and, with storeAsRecent, is the
+		// single writer of recentNetworks — nothing durable is written before it
+		// resolves. A rejection evicts and closes so the retry starts clean.
+		this.contexts.set(hash, ctx);
+		let network: INetworkEngine;
+		try {
+			network = await this.open(networkRef, user, true, options?.getPeerCount);
+		} catch {
+			return failClosed('target-open-failed', 'founding bundle: target network could not be opened');
+		}
+		return {
+			ok: true,
+			outcome,
+			networkRef,
+			network,
+			fingerprint: foundingBundleFingerprint(bundle.digest),
+		};
+	}
+
+	/**
+	 * 62-102: validity check without anchors and without any database. Returns
+	 * ONLY the network name on success, deliberately never the digest or the
+	 * fingerprint (the importing officer must type the exporter's value).
+	 * Never throws.
+	 */
+	async inspectFoundingBundle(bundleText: string): Promise<FoundingBundleInspection> {
+		try {
+			const parsed = parseFoundingBundle(bundleText);
+			if (!parsed.ok) {
+				return { ok: false, reason: parsed.reason, category: FOUNDING_FAILURE_CATEGORY[parsed.reason], detail: parsed.detail };
+			}
+			const verified = verifyFoundingBundle(parsed.bundle);
+			if (!verified.ok) {
+				return { ok: false, reason: verified.reason, category: FOUNDING_FAILURE_CATEGORY[verified.reason], detail: verified.detail };
+			}
+			return { ok: true, networkName: parsed.bundle.descriptor.name };
+		} catch {
+			return {
+				ok: false,
+				reason: 'malformed',
+				category: FOUNDING_FAILURE_CATEGORY.malformed,
+				detail: 'founding bundle: could not be inspected',
+			};
+		}
+	}
+
 	async getRecentNetworks(): Promise<NetworkReference[]> {
 		return (await this.localStorage.getItem('recentNetworks')) ?? [];
 	}
@@ -363,11 +789,13 @@ export class NetworksEngine implements INetworksEngine {
 		const isStrandDb = db.declaredSchemaManager.hasDeclaredSchema('App');
 		if (isStrandDb) {
 			// Strand re-attach: schema already applied under `App`. Do NOT run initDB.
-			// ensureTidSequence is INSERT OR IGNORE — idempotent, safe on an established store.
+			// Do NOT touch TidHighWater either: the strand store's TidHighWater is read lazily by the
+			// first allocateTid. A joiner that imported a founding bundle never holds that header block,
+			// and reading it here made every cold start depend on a block only reachable through the
+			// cohort (UAT 62 test 19: BlockUnavailableError cohort-unreachable at open()).
 			// markSchemaInitialized is deliberately NOT called here: planting the marker is the
 			// CREATE path's job, so a genuinely uninitialized strand store still fails the D-05
 			// gate below rather than being silently promoted to "initialized".
-			await ensureTidSequence(db);
 		} else if (!db.declaredSchemaManager.hasDeclaredSchema('main')) {
 			await initDB(db);           // declare schema main {...} + apply: creates vtab bindings, binds LevelDB data.
 			// initDB also declares the SchemaInit catalog (NO row) — 14-03 on-device fix: a fresh Quereus
@@ -460,11 +888,11 @@ export class NetworksEngine implements INetworksEngine {
 
 		if (isStrandDb) {
 			// Strand path: App schema already applied — skip initDB (no second main declaration).
-			// Plant only the idempotent markers so isSchemaInitialized and readTidCounter work.
-			// Both ensureTidSequence and markSchemaInitialized use INSERT OR IGNORE — fully
-			// idempotent, so a second createContext() on an already-initialized strand store
-			// (CR-01 fix) does not throw a PK-uniqueness violation.
-			await ensureTidSequence(db);                 // D-12: create TidSequence table (idempotent)
+			// Plant only the idempotent SchemaInit marker so isSchemaInitialized works. It uses
+			// INSERT OR IGNORE — fully idempotent, so a second createContext() on an already-initialized
+			// strand store (CR-01 fix) does not throw a PK-uniqueness violation.
+			// No ensureTidSequence here: it peeks TidHighWater, a header block a bundle-importing joiner
+			// never holds (UAT 62 test 19); allocateTid creates/reads it lazily on the first real write.
 			await markSchemaInitialized(db);             // D-08: plant the SchemaInit flag (idempotent)
 			// STRAND-VIEWS fix: cadre-core applies the schema under `App`, so all views
 			// live in App. Quereus resolves UNQUALIFIED views only against the current
@@ -488,4 +916,14 @@ export class NetworksEngine implements INetworksEngine {
 		const ctx: EngineContext = { db, user };
 		return ctx;
 	}
+}
+
+/**
+ * Network/Authority.ImageRef as written at create. Without a cid this is the historical bare JSON
+ * string (byte-identical to every network created before media pinning, so founding bundles and
+ * descriptors are unchanged); with one it is `{ url, cid }`. Readers accept both via `toImageRef`.
+ */
+function storedImageRefJson(url: string | undefined, cid: string | undefined): string | null {
+	if (!url) return null;
+	return cid ? JSON.stringify({ url, cid }) : JSON.stringify(url);
 }

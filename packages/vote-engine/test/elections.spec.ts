@@ -12,6 +12,7 @@ import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import { prepareDb } from '../src/database/initialize'
 import { ElectionEngine } from '../src/election/election-engine'
 import { ElectionsEngine } from '../src/elections/elections-engine'
+import { InvitationEngine } from '../src/invite/invitation-engine.js'
 import { ElectionsCreateElectionBuilder } from '../src/elections/builders/elections-create-election-builder.js'
 import { ElectionsAdjustElectionBuilder } from '../src/elections/builders/elections-adjust-election-builder.js'
 import { MockElectionsEngine } from '../src/elections/mock-elections-engine.js'
@@ -20,9 +21,11 @@ import { KeysTasksEngine } from '../src/tasks/keys-tasks-engine'
 import { OnboardingTasksEngine } from '../src/tasks/onboarding-tasks-engine'
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine'
 import type { EngineContext } from '../src/types.js'
-import { createTestNetwork, addTestAuthority, addTestElection, seedBallot, seedQuestion, seedElectionSigning, makeElectionInit as makeElectionInitFromFixture, makeTestSignature, makeTestSignCallback } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, seedBallot, seedQuestion, seedElectionSigning, makeElectionInit as makeElectionInitFromFixture, makeTestSignature, makeTestSignCallback, testKeyPairFor } from './fixtures/test-context.js'
 import { peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { digestToBytes } from '../src/utils.js'
+import { makeKeyholderProvisioning } from './fixtures/keyholder-provisioning.js'
+import { computeRadProposalDigest, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { AsyncStorage } from './shims/react-native'
 import type {
@@ -41,6 +44,7 @@ import type {
   SignatureTask,
   User
 } from '@votetorrent/vote-core'
+import { inviteeContext, invitePrivateForSlot, mintInviteKeyPair } from './fixtures/invite-keys.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -636,7 +640,7 @@ describe('ElectionEngine', () => {
         name: 'KH1',
         type: 'k',
         expiration: new Date(Date.now() + 3_600_000).toISOString(),
-        inviteKey: 'k'.repeat(66),
+        inviteKey: mintInviteKeyPair().inviteKey,
         // Empty inviteSignature hits the documented send-side carve-out.
         inviteSignature: '',
       }
@@ -652,23 +656,42 @@ describe('ElectionEngine', () => {
   })
 
   describe('revokeKeyholder', () => {
-    // Keyholder rows are seeded via createPopulatedContext. Passes on
-    // quereus@4.2.1 (the historical quereus#23 block is resolved on 4.x).
-    it('DELETEs a Keyholder row', async () => {
-      const { ctx } = await createPopulatedContext()
-      const engine = new ElectionEngine(
-        { id: 'election-1', authorityId: 'authority-1' },
-        ctx
-      )
+    // D-27 (T-62-09-01): createPopulatedContext seeds no Keyholder row, so the
+    // old 'DELETEs a Keyholder row' test was vacuous — revokeKeyholder's
+    // UserId = this.ctx.user?.id bug deleted nothing, and the test could not
+    // tell the difference between "deleted the row" and "matched no row".
+    // Rewritten to seed a REAL accepted keyholder via the invite->accept path
+    // and assert the TARGET row is gone.
+    it('DELETEs the target Keyholder row', async () => {
+      const net = await createTestNetwork()
+      const auth = await addTestAuthority(net)
+      const elec = await addTestElection(auth)
+
       const kh: KeyholderInvite = {
         name: 'KH1',
-        type: 'au',
-        expiration: '0',
-        inviteKey: 'k'.repeat(66),
-        inviteSignature: 's'.repeat(128),
+        type: 'k',
+        expiration: new Date(Date.now() + 3_600_000).toISOString(),
+        inviteKey: mintInviteKeyPair().inviteKey,
+        // Empty inviteSignature hits the documented send-side carve-out.
+        inviteSignature: '',
       }
-      await engine.revokeKeyholder(kh, 'election-1')
-      const row = await ctx.db
+      await elec.electionEngine.inviteKeyholder(kh, 'election-1', makeTestSignCallback(auth.user))
+      const slotRow = await elec.ctx.db
+        .prepare("select Cid from InviteSlot where Type = 'k' and Name = :name")
+        .get({ name: 'KH1' })
+      const invitationEngine = new InvitationEngine(inviteeContext(elec.ctx))
+      await invitationEngine.respondToInvite(slotRow!.Cid as string, true, await invitePrivateForSlot(elec.ctx, slotRow!.Cid as string), undefined, undefined, makeKeyholderProvisioning())
+
+      const before = await elec.ctx.db
+        .prepare('select UserId from Keyholder where ElectionId = :id')
+        .get({ id: 'election-1' })
+      expect(before, 'the accept-time Keyholder row exists before revoke').to.not.equal(undefined)
+
+      await elec.electionEngine.revokeKeyholder(
+        { name: 'KH1', type: 'k', expiration: '0', inviteKey: '', inviteSignature: '' },
+        'election-1'
+      )
+      const row = await elec.ctx.db
         .prepare('select UserId from Keyholder where ElectionId = :id')
         .get({ id: 'election-1' })
       expect(row).to.equal(undefined)
@@ -717,7 +740,7 @@ describe('KeysTasksEngine', () => {
       expect((caught as Error)?.message).to.include('no EngineContext bound')
     })
 
-    it('marks a release-key Task as completed', async () => {
+    it('refuses to complete a release-key Task without a keyholder signer (D-17)', async () => {
       const net = await createTestNetwork()
       const auth = await addTestAuthority(net)
       const elCtx = await addTestElection(auth)
@@ -754,7 +777,19 @@ describe('KeysTasksEngine', () => {
           current: {}
         } as never
       }
-      await engine.completeKeyRelease(task)
+      // 62-20 (D-17): completing a release-key Task now ALWAYS means a
+      // published share. With no signer, the real engine refuses closed
+      // (`KeyReleaseError('signer-required')`) and the Task stays
+      // incomplete — see key-release.spec.ts scenario J for the happy path.
+      let caught: unknown
+      try {
+        await engine.completeKeyRelease(task)
+      } catch (err) {
+        caught = err
+      }
+      expect((caught as { code?: string })?.code).to.equal('signer-required')
+      const taskRow = await elCtx.ctx.db.prepare('select IsCompleted from Task where Id = :id').get({ id: 'task-rk-1' })
+      expect(taskRow!.IsCompleted).to.equal(0)
     })
   })
 })
@@ -864,19 +899,27 @@ describe('SignatureTasksEngine', () => {
         // Idempotent — ProposedAdmin already exists for this (AuthorityId, EffectiveAt) PK.
       }
 
-      // 2. Seed AdminSigning with Digest(tid, authorityId, adminEffectiveAt, thresholdPolicies)
-      //    — the 4-arg form that MutationValid expects. Pattern from elections-engine.ts:836-843.
+      // 2. Seed AdminSigning with the full-roster 'rad' PROPOSAL digest (62-03, D-33/D-34) —
+      //    Digest(AuthorityId, EffectiveAt, Officers, ThresholdPolicies), no Tid, matching
+      //    AdminSignatureTaskExtension.MutationValid's recomputation exactly. The roster is
+      //    whatever readProposedRosterJson returns for this (AuthorityId, EffectiveAt) — zero
+      //    ProposedOfficer rows exist here, so it is the zero-row value (Task 1's P2 verdict).
       // 999.1 R-02/R-04: this row is created BEFORE the officer actually signs (the task is
       // "pending" until completeSignature runs) — same DEBT-11 shape as
       // elections-engine.ts's debugSeedPendingTasks, so it takes the explicit
       // IsPlaceholderSignature escape hatch rather than a real signature.
+      const rosterJson = await readProposedRosterJson(auth.ctx.db, authorityId, adminEffectiveAt as string)
+      const seedDigest = await computeRadProposalDigest(auth.ctx.db, {
+        authorityId,
+        effectiveAt: adminEffectiveAt as string,
+        officers: rosterJson,
+        thresholdPolicies
+      })
       await auth.ctx.db.exec(
         `insert into AdminSigning (Nonce, AuthorityId, AdminEffectiveAt, Scope, Digest, UserId, SignerKey, Signature)
          with context now = :now, IsSignerKeyValid = true, IsPlaceholderSignature = true
-         values (:nonce, :authorityId, :adminEffectiveAt, 'rad',
-                 Digest(:tid, :authorityId, :adminEffectiveAt, :thresholdPolicies),
-                 :userId, :signerKey, :sig)`,
-        { nonce: taskNonce, authorityId, adminEffectiveAt, thresholdPolicies, tid, now, userId, signerKey, sig: placeholderSig }
+         values (:nonce, :authorityId, :adminEffectiveAt, 'rad', :digest, :userId, :signerKey, :sig)`,
+        { nonce: taskNonce, authorityId, adminEffectiveAt, digest: seedDigest, now, userId, signerKey, sig: placeholderSig }
       )
 
       // 3. Seed Task + Extension in an explicit BEGIN/COMMIT transaction (D-03).
@@ -923,7 +966,7 @@ describe('SignatureTasksEngine', () => {
         .prepare('select Digest from AdminSigning where Nonce = :nonce')
         .get({ nonce: taskNonce })
       const digestB64 = digestRow!.Digest as string
-      const { privateHex, publicHex } = randomTestKeyPair()
+      const { privateHex, publicHex } = testKeyPairFor(userId)
       const realSig = bytesToHex(secp256k1.sign(digestToBytes(digestB64), hexToBytes(privateHex)))
       const result: SignatureResult = {
         isAccepted: true,

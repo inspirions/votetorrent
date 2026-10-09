@@ -81,7 +81,7 @@ try {
     const owner = a.getIdentityOwnerKey();
     await a.trustOwnerKeys([owner.publicKeyB64], 'operator');
     await a.getControlDatabase().ensureOwnerKey(owner.publicKeyB64);
-    a.initializeSeedBootstrap(owner.privateKeyB64);
+    await a.initializeSeedBootstrap(owner.privateKeyB64);
     L(`owner genesis done (${when})`);
   };
   const GENESIS_AT = Number(process.env.GENESIS_AT ?? 1);
@@ -104,10 +104,10 @@ try {
   L('--- enrolment: one attempt per joiner ---');
   for (const { name, node } of nodes.slice(1)) {
     try {
-      const { invite } = await a.createInvite();
-      await node.dialInvite(invite);
+      const { invitation } = await a.createCadreInvitation({ peerId: node.peerId.toString(), grantsOwner: false });
+      await node.redeemCadreInvitation(invitation);
       const ok = await a.isAuthorizedMember(node.peerId.toString());
-      L(`${name}: dialInvite ok, authorized=${ok}`);
+      L(`${name}: redeemCadreInvitation ok, authorized=${ok}`);
     } catch (e) { L(`${name}: enrolment threw: ${e?.message ?? e}`); }
   }
 

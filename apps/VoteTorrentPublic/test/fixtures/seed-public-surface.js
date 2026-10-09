@@ -21,7 +21,12 @@ import {
 	SEED_EXPECTED_COUNTS,
 } from '../../../../packages/web-data/test/fixtures/seed-election-surface.js';
 import { ROLL_EXPECTED_COUNTS, seedRegistrantRoll } from './registrant-roll-fixture.js';
-import { KEYRELEASE_EXPECTED_COUNTS, seedKeyReleaseTasks } from './keyrelease-fixture.js';
+import {
+	KEYRELEASE_EXPECTED_COUNTS,
+	SHARE_RELEASE_USER_IDS,
+	seedKeyReleaseTasks,
+	seedKeyReleaseShares,
+} from './keyrelease-fixture.js';
 
 /**
  * A fixed hash DISTINCT from the dashboard's `GATE_NETWORK_HASH`
@@ -139,5 +144,11 @@ export async function seedPublicSurface(db) {
 		electionId: FIXTURE_ELECTION_DB_ID,
 		revision: FIXTURE_REVISION,
 		seedNow: SEED_NOW,
+	});
+	// 62-126: the public "released" figure counts published share rows, not completed tasks.
+	await seedKeyReleaseShares(db, {
+		electionId: FIXTURE_ELECTION_DB_ID,
+		revision: FIXTURE_REVISION,
+		userIds: SHARE_RELEASE_USER_IDS,
 	});
 }

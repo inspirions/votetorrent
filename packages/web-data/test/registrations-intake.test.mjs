@@ -188,7 +188,11 @@ test('S1 real-schema validity + anti-vacuity: an empty founding-only db returns 
 	assert.deepEqual(await readRegistrationIntakeSeries(db), []);
 	const span = await db.prepare(registrationsModule.INTAKE_SPAN_SQL).get({});
 	assert.deepEqual(span, { earliest: null, latest: null, total: 0 });
-	assert.equal(REGISTRATIONS_TABLES_READ.length, 13, 'the read surface did not widen (T-60-01)');
+	// 62-01 Task 3: the registrations read surface deliberately widened 13 -> 14
+	// (AuthorityIntakePolicy, D-29/D-46) -- a DIFFERENT, deliberate widening than the one T-60-01
+	// guards against; this pin moves in the SAME commit as the schema/capability-generator edit
+	// that caused it.
+	assert.equal(REGISTRATIONS_TABLES_READ.length, 14, 'the read surface did not widen beyond the deliberate 62-01 addition (T-60-01)');
 	assert.ok(REGISTRATIONS_TABLES_READ.includes('RegistrationRequest'));
 });
 

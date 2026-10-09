@@ -18,6 +18,7 @@ import { reconcilePolicyState } from "./registration-policy-reconciliation";
 import { RegistrationFieldsSection } from "./components/RegistrationFieldsSection";
 import { DisclosurePolicySection, isDistrictAudienceAvailable } from "./components/DisclosurePolicySection";
 import { AttestationPolicySection } from "./components/AttestationPolicySection";
+import { ReassociationReviewNote } from "./components/ReassociationReviewNote";
 import { ElectionEvent, scopeDescriptions } from "@votetorrent/vote-core";
 import type {
 	IElectionEngine,
@@ -29,6 +30,7 @@ import type {
 	RegistrantTier,
 	FieldRequirement,
 } from "@votetorrent/vote-core";
+import { errorCopy } from "../../utils/errorCopy";
 
 /** Which control's home the D-13 confirmation card is intercepting on behalf of. */
 type PolicySection = "fields" | "disclosure" | "attestation" | "issues";
@@ -162,7 +164,7 @@ export default function RegistrationPolicyScreen() {
 		} catch (err) {
 			// Write failures must NOT set errorMessage here — they surface per-row inside
 			// the three section components via their own runWrite state machines.
-			if (!unmountedRef.current) setErrorMessage(err instanceof Error ? err.message : String(err));
+			if (!unmountedRef.current) setErrorMessage(errorCopy(err, t, "read"));
 		}
 	}, [getEngine, electionEngine, electionId]);
 
@@ -809,6 +811,13 @@ export default function RegistrationPolicyScreen() {
 						onRevertToDefault={onRevertToDefault}
 					/>
 				)}
+			</View>
+
+			{/* D-46: the device-change review mode is per-authority, so it is edited on the authority's
+			    Registration Requests screen (user ruling 2026-10-07); this election screen only shows
+			    the current value read-only. */}
+			<View style={styles.section} testID="registration-policy-reassociation-section">
+				<ReassociationReviewNote authorityId={authorityId} />
 			</View>
 		</ScrollView>
 	);

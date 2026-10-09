@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
@@ -13,11 +13,11 @@ import type {
 	SentOfficerInvite,
 } from "@votetorrent/vote-core";
 import { scopeDescriptions } from "@votetorrent/vote-core";
-import Clipboard from "@react-native-clipboard/clipboard";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { CustomTextInput } from "../../components/CustomTextInput";
+import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { Footer } from "../../components/Footer";
 import { InfoCard } from "../../components/InfoCard";
 import { InlineError } from "../../components/InlineError";
@@ -30,23 +30,27 @@ import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
+import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
+import { takeInviteShare } from "../invitations/invite-share-handoff";
+import { InviteSharePasteField } from "../invitations/InviteSharePasteField";
 
 type AdministratorInvitationParams = {
 	mode: "send" | "accept";
-	invitationId?: string;
+	shareToken?: string;
 	authority?: Authority;
+	officerInit?: { name: string; title: string };
 };
 
 export default function AdministratorInvitationScreen() {
 	const { t } = useTranslation();
 	const { colors } = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-	const { mode, invitationId, authority } = useRoute().params as AdministratorInvitationParams;
-	const { getEngine, hasNetwork } = useApp();
+	const { mode, shareToken, authority, officerInit } = useRoute().params as AdministratorInvitationParams;
+	const { getEngine } = useApp();
 
 	// Send-mode form state
-	const [name, setName] = useState("");
-	const [title, setTitle] = useState("");
+	const [name, setName] = useState(mode === "send" ? (officerInit?.name ?? "") : "");
+	const [title, setTitle] = useState(mode === "send" ? (officerInit?.title ?? "") : "");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
 	const [errorMessage, setErrorMessage] = useState<string>("");
@@ -54,7 +58,17 @@ export default function AdministratorInvitationScreen() {
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
 	// Accept-mode paste field (D-06 — invitee pastes the share text here)
-	const [pastedInvite, setPastedInvite] = useState<string>("");
+	const [pastedInvite, setPastedInvite] = useState<string>(() => takeInviteShare(shareToken) ?? "");
+	const parsed = useMemo(() => parseInviteShare(pastedInvite), [pastedInvite]);
+	// An expired share is shown as expired before any prompt or engine write; the engine refusal stays the authority.
+	const expiredAt = useMemo(() => {
+		if (!parsed || !isShareExpired(parsed, Date.now())) return undefined;
+		const ms = parseInviteExpirationMs(parsed.expiration as string);
+		return ms === undefined ? undefined : new Date(ms).toLocaleString();
+	}, [parsed]);
+	const expired = expiredAt !== undefined;
+	// The slot resolved from the paste (by InviteKey + type); accept and decline sign against it.
+	const [resolved, setResolved] = useState<{ slotCid: string; invitePrivate: string } | undefined>(undefined);
 
 	// Accept-mode fetched invite
 	const [invite, setInvite] = useState<InviteStatus<SentOfficerInvite> | undefined>(undefined);
@@ -70,7 +84,7 @@ export default function AdministratorInvitationScreen() {
 				const details = await engine?.getDetails();
 				if (details?.network?.name) setNetworkName(details.network.name);
 			} catch (error) {
-				console.warn("Error loading network for invitation:", error);
+				console.warn("Error loading network for invitation:", error instanceof Error ? error.name : "unknown");
 			}
 		}
 		loadNetwork();
@@ -82,31 +96,57 @@ export default function AdministratorInvitationScreen() {
 		});
 	}, [navigation, t, mode]);
 
+	// Map a failed resolve/accept/decline to user copy. Never render engine text or any Cid.
+	const mapAcceptError = (error: unknown): string => {
+		const key = inviteAcceptErrorKey(error);
+		return t(key ?? "invitationAcceptFailed");
+	};
+
+	// Resolve the slot from the pasted share, then load the invite details from the resolved Cid.
 	useEffect(() => {
-		async function loadInvite() {
-			if (mode !== "accept" || !invitationId) return;
+		if (mode !== "accept") return;
+		setResolved(undefined);
+		setInvite(undefined);
+		setInviteLoadFailed(false);
+		// gap9/IN-08: a stale error never outlives the paste that caused it.
+		setErrorMessage("");
+		if (!pastedInvite.trim()) return;
+		if (!parsed) return; // still typing; the paste hint stays up
+		if (expired) return; // expired share: no engine lookup; the notice explains
+		let cancelled = false;
+		(async () => {
 			try {
 				const engine = await getEngine<IInvitationEngine>("invitations");
-				const status = await engine.getOfficerInvite(invitationId);
+				const r = await resolveInviteFromShare(engine, pastedInvite, "of");
+				const status = r.status as InviteStatus<any> | undefined;
+				if (cancelled) return;
+				setErrorMessage("");
+				setResolved({ slotCid: r.slotCid, invitePrivate: r.invitePrivate });
 				setInvite(status);
 			} catch (error) {
-				// Log the engine detail for developers; officers get plain copy below instead of
-				// strings like `EngineFactory: Network context not established — call getEngine(...)`.
-				console.warn("Error loading officer invite:", error);
+				if (cancelled) return;
+				console.warn("Error loading officer invite:", error instanceof Error ? error.name : "unknown");
 				setInviteLoadFailed(true);
+				setErrorMessage(t(inviteLoadErrorKey(error)));
 			}
-		}
-		loadInvite();
-	}, [mode, invitationId, getEngine]);
+		})();
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [mode, pastedInvite, getEngine, expired]);
 
 	// INV-01: real officer invite send with device signature (D-01/D-03/D-04)
-	const onSend = async () => {
+	// WR-R3-08: `isSending` disables Send only after a re-render, so two taps in one frame would each
+	// mint an invitation slot. This ref latches synchronously, before any await.
+	const sendingRef = useRef(false);
+	const sendInvitation = async () => {
 		// Pattern B: clear any prior error so a retry starts clean.
 		setErrorMessage("");
 		setIsSending(true);
 		try {
 			if (!authority?.id) {
-				setErrorMessage("Authority not available — navigate from an authority context.");
+				setErrorMessage(t("invitationNeedsAuthority"));
 				return;
 			}
 
@@ -148,69 +188,52 @@ export default function AdministratorInvitationScreen() {
 			setShareText(sharePayload);
 			// D-08: do NOT navigate away immediately — keep screen so Copy affordance shows.
 		} catch (error) {
-			console.warn("onSend error:", error);
+			console.warn("onSend error:", error instanceof Error ? error.name : "unknown");
 			const outcome = handleDeviceSigningError(error);
 			if (outcome.handled) return;
-			setErrorMessage(outcome.message ?? (error instanceof Error ? error.message : String(error)));
+			setErrorMessage(outcome.message ?? t("invitationSendFailed"));
 		} finally {
 			setIsSending(false);
 		}
 	};
-
-	// D-06: accept — invitee pastes the share text; screen reconstructs ephemeral invitePrivate.
-	const onAccept = async () => {
+	const onSend = async () => {
+		if (sendingRef.current) return;
+		sendingRef.current = true;
 		try {
-			const engine = await getEngine<IInvitationEngine>("invitations");
-			// Reconstruct invitePrivate from pasted text (D-06).
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					// Not valid JSON — treat as raw invitePrivate hex
-					invitePrivate = pastedInvite.trim();
-				}
-			}
-			// T-21-11-03: accept calls the SIGNED respondToInvite path (D-09).
-			await engine.respondToInvite(
-				invitationId ?? "",
-				true,
-				invitePrivate,
-			);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
-			navigation.goBack();
-		} catch (error) {
-			console.warn("Error responding to invite (accept):", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			await sendInvitation();
+		} finally {
+			sendingRef.current = false;
 		}
 	};
 
-	const onDecline = async () => {
+	// D-06: accept - the slot is resolved from the pasted share, never from a route id.
+	const respondingRef = useRef(false);
+	const [isResponding, setIsResponding] = useState(false);
+	const respond = async (accept: boolean) => {
+		// gap6/IN-04: one in-flight answer at a time (the ref closes the window before state re-renders).
+		if (respondingRef.current) return;
+		respondingRef.current = true;
+		setIsResponding(true);
+		setErrorMessage("");
 		try {
 			const engine = await getEngine<IInvitationEngine>("invitations");
-			// T-21-11-03: decline calls the SAME signed respondToInvite path (D-09).
-			let invitePrivate: string | undefined;
-			if (pastedInvite.trim()) {
-				try {
-					const parsed = JSON.parse(pastedInvite.trim());
-					invitePrivate = parsed.invitePrivate as string | undefined;
-				} catch {
-					invitePrivate = pastedInvite.trim();
-				}
-			}
-			await engine.respondToInvite(
-				invitationId ?? "",
-				false,
-				invitePrivate,
-			);
-			// GAP-2: navigate ONLY on success — the InviteResult is now written.
+			// gap7/WR-01: always re-resolve at press time so a resend made while the screen was open is
+			// answered on the live head, not the Cid captured at mount.
+			const target = await resolveInviteFromShare(engine, pastedInvite, "of");
+			// T-21-11-03: accept and decline both call the SIGNED respondToInvite path (D-09).
+			await engine.respondToInvite(target.slotCid, accept, target.invitePrivate);
+			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
-			console.warn("Error responding to invite (decline):", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			console.warn("Error responding to invite:", error instanceof Error ? error.name : "unknown");
+			setErrorMessage(mapAcceptError(error));
+		} finally {
+			respondingRef.current = false;
+			setIsResponding(false);
 		}
 	};
+	const onAccept = () => (expired ? undefined : respond(true));
+	const onDecline = () => respond(false);
 
 	if (mode === "send") {
 		return (
@@ -225,23 +248,7 @@ export default function AdministratorInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<>
-								<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-									{t("invitationKey")}
-								</ThemedText>
-								<ThemedText
-									style={styles.shareText}
-									selectable
-									numberOfLines={4}
-								>
-									{shareText}
-								</ThemedText>
-								<CustomButton
-									title={t("share")}
-									icon="copy"
-									onPress={() => Clipboard.setString(shareText)}
-								/>
-							</>
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" />
 						) : null}
 
 						{/* Pattern B error display */}
@@ -273,6 +280,9 @@ export default function AdministratorInvitationScreen() {
 		<KeyboardAvoidingScreen>
 			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
+					{expired ? (
+						<ThemedText testID="invitation-expired-notice">{t("invitationAcceptExpired", { when: expiredAt })}</ThemedText>
+					) : null}
 					{seedInvite ? (
 						<>
 							{networkName ? (
@@ -320,32 +330,34 @@ export default function AdministratorInvitationScreen() {
 								size="thin"
 								onPress={() => {}}
 							/>
-
-							{/* D-06: paste field for the share text the sender copied */}
-							<ThemedText type="defaultSemiBold" style={styles.shareLabel}>
-								{t("invitationKey")}
-							</ThemedText>
-							<CustomTextInput
-								title={t("invitationKey")}
-								value={pastedInvite}
-								onChangeText={setPastedInvite}
-								placeholder="Paste the invite text from the sender"
-							/>
 						</>
-					) : inviteLoadFailed ? (
-						<ThemedText>{t(hasNetwork ? "invitationLoadFailed" : "invitationNeedsNetwork")}</ThemedText>
-					) : (
+					) : !parsed ? (
+						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
+					) : inviteLoadFailed || expired ? null : (
 						<ThemedText>{t("loading")}</ThemedText>
 					)}
+
+					{/* D-06: paste field for the share text the sender copied. CustomTextInput's `title` is
+					    the field's only label (a separate heading here rendered it twice). */}
+					<InviteSharePasteField
+						testIDPrefix="administrator-invitation-paste"
+						title={t("invitationKey")}
+						value={pastedInvite}
+						onChangeText={setPastedInvite}
+						placeholder={t("invitationAcceptPastePlaceholder")}
+					/>
 				</View>
 			</ScrollView>
 			{/* GAP-2: surface respondToInvite failures inline in accept mode */}
-			<InlineError message={errorMessage} />
+			<View testID="administrator-invitation-error" style={{ paddingHorizontal: globalStyles.container.padding }}>
+				<InlineError message={errorMessage} />
+			</View>
 			<SignatureTaskFooter
 				onAccept={onAccept}
 				onReject={onDecline}
 				acceptLabel={t("accept")}
 				rejectLabel={t("reject")}
+				disabled={!resolved || expired || isResponding}
 			/>
 		</KeyboardAvoidingScreen>
 	);
@@ -363,14 +375,6 @@ const localStyles = StyleSheet.create({
 	orText: {
 		textAlign: "center",
 		marginVertical: 8,
-	},
-	shareLabel: {
-		marginTop: 12,
-		marginBottom: 4,
-	},
-	shareText: {
-		marginBottom: 8,
-		fontFamily: "monospace",
 	},
 	scopesSection: {
 		marginTop: 16,

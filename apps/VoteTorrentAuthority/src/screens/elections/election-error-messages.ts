@@ -4,6 +4,9 @@
 // an organizer. This maps them to plain-language copy, with special care for the
 // deadline/timeline rules that are easy to trip.
 
+import { builderErrorLineCopy } from "../../utils/errorCopy";
+import { peerUnavailableMessage } from "../../utils/peerUnavailableMessage";
+
 /** Minimal translate signature — avoids importing i18next types into screens. */
 export type Translate = (key: string, opts?: Record<string, unknown>) => string;
 
@@ -42,9 +45,9 @@ function friendlyBuilderError(e: BuilderErrorLike, t: Translate): string {
 			if (e.path.includes("revisionDeadline")) return t("errRevisionDeadlineInvalid");
 			if (e.path.includes("date")) return t("errElectionDateInvalid");
 			if (e.path.includes("title")) return t("errTitleRequired");
-			return e.message;
+			return builderErrorLineCopy(e, t);
 		default:
-			return e.message;
+			return builderErrorLineCopy(e, t);
 	}
 }
 
@@ -67,6 +70,9 @@ export function mapElectionError(err: unknown, t: Translate): string {
 		}
 		return lines.join("\n");
 	}
+
+	const peer = peerUnavailableMessage(err, t, "write");
+	if (peer) return peer;
 
 	const raw = err instanceof Error ? err.message : String(err);
 	// Known DB CHECK constraints — especially the deadline ordering rules.

@@ -552,7 +552,8 @@ function runSelftest() {
   }
 
   // 1b. ansi-colored-clean -- byte-identical to "clean" in substance (57/57 suites, 749/749
-  // tests, 2 pre-existing typecheck errors) but every parsed line is wrapped in real ANSI CSI
+  // tests, a clean voter typecheck, the 49 pre-existing authority typecheck errors) but every
+  // parsed line is wrapped in real ANSI CSI
   // escape sequences (\x1b[1m / \x1b[22m / \x1b[31m / \x1b[32m / \x1b[39m), reproducing exactly
   // what jest and tsc emit when FORCE_COLOR reaches them -- which it does in Claude Code agent
   // shells (FORCE_COLOR=3) and several CI images, with nothing in this script's own environment
@@ -567,14 +568,22 @@ function runSelftest() {
     if (c.correct) {
       const jest = result.parsed.voterJest;
       const tc = result.parsed.voterTypecheck;
+      const atc = result.parsed.authorityTypecheck;
       if (!jest || jest.suites.passed !== 57 || jest.suites.failed !== 0 || jest.tests.passed !== 749) {
         failures.push(
           `ansi-colored-clean fixture: PASSED but parsed the wrong Voter suite counts (ANSI codes leaked through as content) -- got ${JSON.stringify(jest)}`,
         );
       }
-      if (!tc || tc.count !== 2) {
+      if (!tc || tc.count !== 0 || !tc.ranClean) {
         failures.push(
-          `ansi-colored-clean fixture: PASSED but parsed the wrong Voter typecheck error count (ANSI codes leaked through as content) -- got ${tc ? tc.count : tc}`,
+          `ansi-colored-clean fixture: PASSED but misread the clean Voter typecheck (ANSI codes leaked through as content) -- got ${JSON.stringify(tc)}`,
+        );
+      }
+      // The voter typecheck is clean (0 errors), so the colored `error TS` lines live in the
+      // authority log -- this is what keeps parseTscLog's ANSI-stripping of diagnostics proven.
+      if (!atc || atc.count !== 49) {
+        failures.push(
+          `ansi-colored-clean fixture: PASSED but parsed the wrong Authority typecheck error count (ANSI codes leaked through as content) -- got ${atc ? atc.count : atc}`,
         );
       }
     }

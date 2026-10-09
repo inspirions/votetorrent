@@ -11,7 +11,7 @@
  * duplicates a fact the `Association` table already holds, and it widens the existing plaintext-
  * `AsyncStorage` device-key surface (`device-user.ts`) for no gain.
  *
- * The device's stable handle is the P-256 public key `resolveAttestationProducer().provisionDeviceKey()`
+ * The device's stable handle is the P-256 public key `resolveAttestationProducer().getCurrentDeviceKey()`
  * returns — NOT `getOrCreateDeviceUser()`'s secp256k1 key. `ConfirmationScreen.tsx` uses two
  * distinct keypairs in the registration ceremony: the P-256 key is the one `Association.DeviceKey`
  * is keyed on; the secp256k1 key only signs the registration REQUEST document. Passing the wrong
@@ -27,6 +27,8 @@
  */
 import type {Association, IAssociationEngine, INetworkEngine, IRegistrationEngine} from '@votetorrent/vote-core';
 import {resolveVoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
+import type {VoterRequestTransportDeps, VoterRequestTransports} from '../screens/registration/attach-voter-request-transport';
+import {isDeviceKeyAbsent} from './attestation-failure';
 
 export type RegistrationStatusKind = 'registered' | 'pending' | 'notRegistered' | 'indeterminate';
 
@@ -40,12 +42,13 @@ export interface RegistrationStatusResult {
 export interface RegistrationStatusDeps {
 	/** `useVoterApp()`'s own composition-root read. */
 	getEngine: <T>(engineName: string, initParams?: unknown) => Promise<T>;
-	/** The P-256 device-key provisioner — pass `() => resolveAttestationProducer().provisionDeviceKey()`,
-	 * never `getOrCreateDeviceUser` (see this file's header). */
-	provisionDeviceKey: () => Promise<{publicKey: string}>;
+	/** READ-ONLY current P-256 device-key lookup — pass `() => resolveAttestationProducer().getCurrentDeviceKey()`,
+	 * never `provisionDeviceKey` (Android mints a NEW key per call, 63-18) and never `getOrCreateDeviceUser`
+	 * (see this file's header). */
+	getCurrentDeviceKey: () => Promise<{publicKey: string}>;
 	/** Defaults to `resolveVoterRequestTransports` — injected so every branch below is testable
-	 * without the real `__DEV__` + base-URL transport gate. */
-	resolveTransports?: () => ReturnType<typeof resolveVoterRequestTransports>;
+	 * without the real P2P/strand transport source (D-28/D-32). */
+	resolveTransports?: (deps: VoterRequestTransportDeps) => Promise<VoterRequestTransports | undefined>;
 	/** Narrows `listAssociationRequests` results to this election — a request whose own
 	 * `electionId` is set and differs is ignored; a request with no `electionId` is accepted
 	 * regardless. */
@@ -62,12 +65,21 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 	try {
 		// The P-256 device key — the SAME key `Association.DeviceKey` is keyed on
 		// (`ConfirmationScreen.tsx:154-155`). Never the secp256k1 `deviceUserKey`.
-		const {publicKey: p256DeviceKey} = await deps.provisionDeviceKey();
+		let p256DeviceKey: string | undefined;
+		try {
+			p256DeviceKey = (await deps.getCurrentDeviceKey()).publicKey;
+		} catch (err) {
+			// A fresh install has no device key: not registered. Never create one for a status read.
+			if (!isDeviceKeyAbsent(err)) throw err;
+		}
 
 		const network = await deps.getEngine<INetworkEngine>('network');
 		const details = await network.getDetails();
 		networkName = details.network.name;
 		const authorityId = details.network.primaryAuthorityId;
+		if (p256DeviceKey === undefined) {
+			return {kind: 'notRegistered', networkName};
+		}
 
 		const association = await deps.getEngine<IAssociationEngine>('association');
 		const rows: Association[] = await association.getAssociationsByDeviceKey(p256DeviceKey);
@@ -98,6 +110,28 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 			return {kind: 'notRegistered', networkName};
 		}
 
+		// Phase 62 Plan 28 (D-41): a retired key's own 'a' request with no Association row is
+		// RETIREMENT, not a contradiction — checked BEFORE the mine.some('a') contradiction branch
+		// below, which would otherwise read it as `indeterminate`. Narrow, structural check (never
+		// `association as unknown as IReassociationEngine` cast at the top of the function) so an
+		// `IAssociationEngine` without `getDeviceRetirement` — every pre-62-18 mock/engine — keeps
+		// its existing behaviour for every existing case, unchanged. Own try/catch: a failure here
+		// is corroborating-only and must fall through to the pre-existing logic below, never
+		// escalate to the outer catch's `indeterminate`.
+		try {
+			const reassociationAssociation = association as unknown as {
+				getDeviceRetirement?: (deviceKey: string) => Promise<unknown>;
+			};
+			if (typeof reassociationAssociation.getDeviceRetirement === 'function') {
+				const retirement = await reassociationAssociation.getDeviceRetirement(p256DeviceKey);
+				if (retirement !== undefined) {
+					return {kind: 'notRegistered', networkName};
+				}
+			}
+		} catch {
+			// Fall through to the pre-existing logic below, unchanged.
+		}
+
 		// F4: `getEngine('association')` only resolves once a network ctx is established —
 		// `EngineFactory.buildEngine`'s `'association'` case calls `requireEstablishedCtx()`,
 		// which THROWS when no network is established. So a resolved `association` engine always
@@ -120,24 +154,27 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 		// leg before concluding `notRegistered`.
 
 		// D-23(d)'s explicitly named corroborating leg — deliberately narrow: one call, never a
-		// loop, never a re-delivery/cursor walk. In every normal build `resolveTransports()`
-		// returns `undefined` (F2: `__DEV__` AND a configured base URL are both required), so this
-		// leg is skipped entirely outside a device-proof session.
-		const transports = (deps.resolveTransports ?? resolveVoterRequestTransports)();
-		if (transports) {
-			// `AssociationDecisionNotice` carries NO `deviceKey` (F3), and the ceremony's own
-			// `associationRequestId` lives in a `useRef` D-23 forbids persisting — so a notice
-			// cannot be attributed to THIS device. This leg is therefore permitted to move
-			// `notRegistered -> pending` ONLY, never to claim `registered`: showing "awaiting a
-			// decision" to a device whose feed happens to carry someone else's request is
-			// strictly less of a lie than telling a voter who just completed the ceremony that
-			// they are not registered.
-			const notices = await transports.associationTransport.pollDecisions();
-			if (notices.some(n => n.status === 'p' || n.status === 'c')) {
-				return {kind: 'pending', networkName};
+		// loop, never a re-delivery/cursor walk. Phase 62 Plan 22 (D-32): notices are now
+		// attributable on the Voter's own P2P strand through this device's own `RequesterKey`, so
+		// another voter's challenge no longer reads as this voter's pending state (the F2/F3
+		// `__DEV__`-gate-era caveats below are obsolete and have been removed). This leg runs in
+		// its OWN try/catch — it is corroborating-only, so a failure here must fall through to
+		// `notRegistered`, never escape to the outer catch (which would report `indeterminate`).
+		try {
+			const resolve = deps.resolveTransports ?? resolveVoterRequestTransports;
+			const transports = await resolve({getEngine: deps.getEngine, authorityId});
+			if (transports) {
+				const ownIds = new Set(await transports.ownAssociationRequestIds(p256DeviceKey));
+				const notices = await transports.associationTransport.pollDecisions();
+				const mine = notices.filter(n => ownIds.has(n.requestId));
+				if (mine.some(n => n.status === 'p' || n.status === 'c')) {
+					return {kind: 'pending', networkName};
+				}
+				// A notice with status 'a' must NEVER produce `registered` here — intentionally
+				// ignored, falling through to `notRegistered` below.
 			}
-			// A notice with status 'a' must NEVER produce `registered` here — intentionally
-			// ignored, falling through to `notRegistered` below.
+		} catch (err) {
+			console.error('resolveRegistrationStatus: transport corroboration leg failed:', err);
 		}
 
 		return {kind: 'notRegistered', networkName};

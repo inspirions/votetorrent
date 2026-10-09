@@ -13,6 +13,10 @@
  * tab's own election card and its per-state fixture data, D-12) is never referenced here — that
  * surface keeps consuming the mock data it always has, unchanged.
  *
+ * The Voting Period row reflects the vote saved on this phone, read from the non-secret marker
+ * through `readSavedVoteStatus` on every focus (D-12, D-19): no fingerprint, no direct storage
+ * access, nothing cached. Its link opens the saved-vote receipt for the resolved election.
+ *
  * `TimelineRail` / `TimelineRow` stay presentational (props only) — this file is the one place on
  * this surface that calls `useVoterApp()` and `useNavigation()`.
  */
@@ -22,7 +26,7 @@ import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native'
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
-import type {ElectionSummary, IElectionsEngine} from '@votetorrent/vote-core';
+import type {IElectionsEngine} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {TimelineRail} from '../../components/TimelineRail';
 import {InfoDialog} from '../../components/InfoDialog';
@@ -34,42 +38,14 @@ import type {TimelineStageId, TimelineViewModelConfident} from '../../timeline';
 import {resolveRegistrationStatus} from '../../engines/registration-status';
 import type {RegistrationStatusResult} from '../../engines/registration-status';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
+import {readSavedVoteStatus} from '../../engines/saved-vote-status';
+import type {SavedVoteStatus} from '../../engines/saved-vote-status';
+import {SavedVoteNotice} from '../../components/SavedVoteNotice';
 
-/**
- * D-02's election-identity rule, exported as a pure helper so it is testable without rendering.
- * `ElectionsEngine.getElections()` filters `where E.Date >= :now` (elections-engine.ts:474), so
- * every summary this function ever receives is already in the FUTURE — picking the summary
- * nearest to now is therefore picking the soonest upcoming election, not "most recent" in the
- * sense of "just happened". Ties broken by ascending `id` for determinism. The single-summary
- * case (today's dev seed and every current deployment) is identical under either reading; the
- * multi-election surface (an election picker) is a deferred phase — see 59-CONTEXT.md Deferred
- * Ideas.
- *
- * `fallbackId` is passed as `__DEV__ ? seededElectionId : undefined` at the call site so the
- * `__DEV__` gate lives in one visible place: `seededElectionId` is `undefined` in every release
- * build (`providers/types.ts:203-209`), so relying on it alone would render an empty tab in
- * production.
- */
-export function pickElectionId(summaries: ElectionSummary[], fallbackId: string | undefined): string | undefined {
-	if (summaries.length === 0) {
-		return fallbackId;
-	}
-	if (summaries.length === 1) {
-		return summaries[0].id;
-	}
-
-	const nowMs = Date.now();
-	let best: ElectionSummary | undefined;
-	let bestDiff = Number.POSITIVE_INFINITY;
-	for (const summary of summaries) {
-		const diff = Math.abs(summary.date - nowMs);
-		if (diff < bestDiff || (diff === bestDiff && best !== undefined && summary.id < best.id)) {
-			best = summary;
-			bestDiff = diff;
-		}
-	}
-	return best?.id;
-}
+// D-02's election-identity rule now lives in engines/election-read.ts (shared with the Home and
+// Ballot reads); re-exported here so existing importers keep resolving it from this module.
+import {pickElectionId} from '../../engines/election-read';
+export {pickElectionId};
 
 export interface HeaderDateRangeParts {
 	startDate: string;
@@ -161,10 +137,14 @@ export default function TimelineScreen() {
 	// D-06/SHELL-03 (mirrors HomeScreen.tsx): every screen routes through useVoterApp() — no
 	// inline mock-data-module import, and no direct election-record read either (D-04 read-scope
 	// fence: this screen touches only the engine chain below).
-	const {getEngine, seededElectionId} = useVoterApp();
+	const {getEngine, seededElectionId, clockOffsetMs, setClockOffsetMs, nowMs: readSharedNowMs} = useVoterApp();
 	const {colors, fonts, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('timeline');
 	const {t: tCommon} = useTranslation('common');
+	// Read per render: `useTranslation` re-renders this screen on a language change, and the
+	// timeline-read effect below depends on it so the rows' weekday names re-derive in the new
+	// language (`deriveTimeline` otherwise defaults to 'en').
+	const language = i18n.language;
 	const navigation = useNavigation<NativeStackNavigationProp<TimelineStackParamList, 'TimelineHome'>>();
 
 	const [state, setState] = useState<ScreenState>({kind: 'loading'});
@@ -176,6 +156,7 @@ export default function TimelineScreen() {
 	// `null` while the read is in flight; the panel renders nothing during that window rather
 	// than a guessed "not registered" placeholder (D-23 e).
 	const [resolvedElectionId, setResolvedElectionId] = useState<string | undefined>(undefined);
+	const [savedVote, setSavedVote] = useState<{electionId: string; status: SavedVoteStatus} | null>(null);
 	const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatusResult | null>(null);
 	// D-20 discretion: neither `see details` nor the row `?` help affordance has a Details route
 	// (59-05 fixed the Timeline stack's param list at five entries) or its own copy, so both open
@@ -183,21 +164,20 @@ export default function TimelineScreen() {
 	// not a push, and no new i18n key.
 	const [dialogStageId, setDialogStageId] = useState<TimelineStageId | null>(null);
 
-	// D-05: the __DEV__-only clock-offset control. `clockOffsetMs` (0 = live) is the ONLY thing
-	// the control ever touches -- it shifts the `now` the rail compares against and nothing else
-	// (never the timeline blob, never the engine read, never a write). `clockStopIndex` is the
-	// cycling position (0 = live, 1..N = the Nth present stage stop in D-09 order) -- tracked
-	// separately from the offset value itself because the offset is recomputed fresh at each
-	// press (`instant + 60_000 - Date.now()` at press time, so a later effect run still lands
-	// close to `instant + 60_000` regardless of how long the re-fetch that follows takes), and an
-	// index survives that recomputation exactly while a raw offset value would not.
-	const [clockOffsetMs, setClockOffsetMs] = useState(0);
+	// D-05/D-02: the __DEV__-only clock-offset control. The offset (0 = live) now lives in
+	// VoterAppProvider (D-02), so Home and the vote window gate see the same clock; the control only
+	// ever moves that shared offset -- it shifts the `now` the rail compares against and nothing else
+	// (never the timeline blob, never the engine read, never a write). `clockStopIndex` stays
+	// component-local control-UI state: the cycling position (0 = live, 1..N = the Nth present stage
+	// stop in D-09 order), tracked separately from the offset value because the offset is recomputed
+	// fresh at each press. If the Timeline remounts with a non-zero shared offset, `clockStopIndex`
+	// restarts at 0 and the existing IN-05 branch labels the live offset (`+N`), never as live.
 	const [clockStopIndex, setClockStopIndex] = useState(0);
 
-	// Recomputed on every clockOffsetMs/reloadNonce change, using Date.now() AT THAT MOMENT --
-	// never read once and cached, per the "no ambient clock capture" spirit this screen owns
-	// (deriveTimeline itself never reads the clock; this is the one place that does, exactly
-	// once per state change).
+	// Recomputed on every clockOffsetMs/reloadNonce change, from the provider's shared __DEV__ clock
+	// (D-02) AT THAT MOMENT -- never read once and cached, per the "no ambient clock capture" spirit
+	// this screen owns (deriveTimeline itself never reads the clock; this is the one place that
+	// does, exactly once per state change).
 	// WR-10: `reloadNonce` is a deliberate CACHE-BUSTING dependency -- it is intentionally not
 	// referenced in the callback body, which is exactly why the rule flags it. Do NOT "fix" this by
 	// deleting the dep: `nowMs` would then stay frozen across a pull-to-reload whenever
@@ -206,7 +186,7 @@ export default function TimelineScreen() {
 	// there for the same reason). No test covers reload freshness today, so this comment is the
 	// only thing standing between that dep and a well-meaning lint cleanup.
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	const nowMs = useMemo(() => Date.now() + clockOffsetMs, [clockOffsetMs, reloadNonce]);
+	const nowMs = useMemo(() => readSharedNowMs(), [readSharedNowMs, clockOffsetMs, reloadNonce]);
 
 	// CR-01: resolved once per mount, never re-read per render -- the device's zone does not
 	// change mid-session, and re-invoking `Intl.DateTimeFormat` on every render would be wasted
@@ -246,6 +226,7 @@ export default function TimelineScreen() {
 					timeline: details.current.timeline,
 					now: nowMs,
 					timeZone: deviceTimeZone,
+					language,
 					election: {
 						ballotDeadline: details.election.ballotDeadline,
 						date: details.election.date,
@@ -273,13 +254,13 @@ export default function TimelineScreen() {
 		// `reloadNonce` stays an explicit dependency (not folded into `nowMs` alone): two presses
 		// close enough in wall-clock time could otherwise recompute the SAME `nowMs` value and
 		// silently fail to re-trigger the retry the user just asked for.
-	}, [getEngine, seededElectionId, reloadNonce, nowMs, deviceTimeZone]);
+	}, [getEngine, seededElectionId, reloadNonce, nowMs, deviceTimeZone, language]);
 
 	// D-06/D-23 (59-09): the registration-status read is its OWN effect, deliberately separate
 	// from the timeline-read effect above -- `resolveRegistrationStatus` never reads the clock
 	// (it derives from `Association`/`Registrant`/`AssociationRequestRead` rows only), so it must
 	// not re-run every time the __DEV__ clock-offset control changes `nowMs`. Same `let live =
-	// true` cancellation guard; `resolveAttestationProducer().provisionDeviceKey` is passed --
+	// true` cancellation guard; `resolveAttestationProducer().getCurrentDeviceKey` is passed --
 	// NEVER `getOrCreateDeviceUser` (F1: the wrong key silently reads "not registered" forever).
 	//
 	// `useFocusEffect` (not a bare `useEffect`), matching `DeviceAttestationScreen.tsx`'s own
@@ -303,7 +284,7 @@ export default function TimelineScreen() {
 			(async () => {
 				const result = await resolveRegistrationStatus({
 					getEngine,
-					provisionDeviceKey: () => resolveAttestationProducer().provisionDeviceKey(),
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
 					electionId: resolvedElectionId,
 				});
 				if (live) setRegistrationStatus(result);
@@ -313,6 +294,34 @@ export default function TimelineScreen() {
 				live = false;
 			};
 		}, [getEngine, resolvedElectionId]),
+	);
+
+	// Separate from the timeline read above: re-run on every focus so a save made in the Ballot
+	// flow shows on return. Nothing is cached, and a failed read fails closed to unreadable (the
+	// error is never read or logged).
+	useFocusEffect(
+		useCallback(() => {
+			let live = true;
+
+			if (resolvedElectionId === undefined) {
+				return () => {
+					live = false;
+				};
+			}
+
+			readSavedVoteStatus({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined}, readSharedNowMs(), resolvedElectionId).then(
+				status => {
+					if (live) setSavedVote({electionId: resolvedElectionId, status});
+				},
+				() => {
+					if (live) setSavedVote({electionId: resolvedElectionId, status: {state: 'unreadable'}});
+				},
+			);
+
+			return () => {
+				live = false;
+			};
+		}, [getEngine, seededElectionId, resolvedElectionId, readSharedNowMs]),
 	);
 
 	if (state.kind === 'indeterminate') {
@@ -459,6 +468,10 @@ export default function TimelineScreen() {
 		setClockOffsetMs(stop.nowMs - Date.now());
 	};
 
+	// Plain render-time values (not hooks), bound to the election on screen.
+	const railSavedVote = savedVote && savedVote.electionId === resolvedElectionId ? savedVote : null;
+	const savedState = railSavedVote?.status.state ?? 'none';
+
 	return (
 		<>
 			<ScrollView style={[styles.screen, {backgroundColor: colors.background}]} contentContainerStyle={styles.content}>
@@ -514,14 +527,22 @@ export default function TimelineScreen() {
 								onEditRegistration={() => navigation.navigate('RegistrationHome')}
 								onViewRegistration={() => navigation.navigate('RegistrationHome')}
 							/>
+						) : stageId === 'votingStarts' && railSavedVote && savedState !== 'none' ? (
+							<SavedVoteNotice status={railSavedVote.status} testID="timeline-saved-vote" />
 						) : null
 					}
 					onHelp={stageId => setDialogStageId(stageId)}
 					onSeeDetails={stageId => setDialogStageId(stageId)}
 					onEditRegistration={() => navigation.navigate('RegistrationHome')}
 					onPreviewBallot={() => navigation.navigate('Ballot')}
-					onVoteNow={() => navigation.navigate('Ballot')}
-					onViewSubmission={() => navigation.navigate('ReviewSubmit')}
+					// Saved and unreadable hide Vote now, mirroring the 63-08 guard (D-20); stale offers it again (D-21).
+					onVoteNow={savedState === 'none' || savedState === 'stale' ? () => navigation.navigate('Ballot') : undefined}
+					// Params carry only electionId and no `revealOnOpen`, so the receipt asks for a fingerprint (D-13, R-4).
+					onViewSubmission={
+						railSavedVote && savedState !== 'none'
+							? () => navigation.navigate('VoteReceipt', {electionId: railSavedVote.electionId})
+							: undefined
+					}
 					onViewKeyholders={() => navigation.navigate('Keyholders')}
 				/>
 			</ScrollView>

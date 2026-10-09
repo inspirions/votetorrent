@@ -26,6 +26,9 @@ export interface AuthorityInit {
 
   /** Image url for the authority */
   imageUrl?: string
+
+  /** Content id of the bytes at `imageUrl` when it was made permanent (see `NetworkInit.imageCid`). */
+  imageCid?: string
 }
 
 export interface AuthorityDetails {

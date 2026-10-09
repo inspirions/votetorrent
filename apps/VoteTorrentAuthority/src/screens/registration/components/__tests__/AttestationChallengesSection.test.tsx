@@ -442,12 +442,13 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		expect(pressableTestIDs(tr)).toEqual(["attestation-challenges-toggle"]);
 	});
 
-	test("7: error state", async () => {
+	test("7: error state (translated, no engine text)", async () => {
 		mockAssociationEngine = new ThrowingChallengesEngine();
 		const { tr } = await renderSection();
 
 		expect(() => tr.root.findByProps({ testID: "attestation-challenges-error" })).not.toThrow();
-		expect(treeText(tr)).toContain("boom-read-failed");
+		expect(treeText(tr)).toContain("errorLoadFailedGeneric");
+		expect(treeText(tr)).not.toContain("boom-read-failed");
 		expect(treeText(tr)).not.toContain("attestation-challenges-row-");
 		expect(pressableTestIDs(tr)).toEqual(["attestation-challenges-toggle"]);
 	});
@@ -721,7 +722,8 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
 		await flush();
 
-		expect(treeText(tr)).toContain("expire-failed");
+		expect(treeText(tr)).toContain("errorActionFailedGeneric");
+		expect(treeText(tr)).not.toContain("expire-failed");
 		expect(() =>
 			tr.root.findByProps({ testID: `attestation-challenges-expire-${c1.nonce}-card` })
 		).not.toThrow();
@@ -878,7 +880,8 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
 		await flush();
 
-		expect(treeText(tr)).toContain("Device user not initialised");
+		expect(treeText(tr)).toContain("errorActionFailedGeneric");
+		expect(treeText(tr)).not.toContain("Device user not initialised");
 		// The card must stay mounted so the officer can retry, exactly as in the
 		// removeAttestationChallenge-failure case (test 16).
 		expect(() =>
@@ -886,7 +889,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		).not.toThrow();
 	});
 
-	test("22: a getEngine failure during expire surfaces InlineError too", async () => {
+	test("22: a getEngine failure during expire surfaces InlineError too (translated, no engine text)", async () => {
 		mockAssociationEngine = new MockAssociationEngine();
 		const c1 = await seedChallenge(mockAssociationEngine, { deviceKey: DEVICE_KEY_ALPHA });
 		const { tr } = await renderSection();
@@ -898,6 +901,7 @@ describe("AttestationChallengesSection — D-11/D-03/D-09", () => {
 		press(tr, `attestation-challenges-expire-${c1.nonce}-confirm`);
 		await flush();
 
-		expect(treeText(tr)).toContain("Network not established");
+		expect(treeText(tr)).toContain("errorActionFailedGeneric");
+		expect(treeText(tr)).not.toContain("Network not established");
 	});
 });

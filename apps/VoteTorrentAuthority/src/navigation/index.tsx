@@ -7,6 +7,7 @@ import type { RootStackParamList } from "./types";
 import AuthorityDetailsScreen from "../screens/authorities/AuthorityDetailsScreen";
 import ProposedAdministrationScreen from "../screens/authorities/ProposedAdministrationScreen";
 import OfficerDetailsScreen from "../screens/admin/OfficerDetailsScreen";
+import AcceptInvitationScreen from "../screens/invitations/AcceptInvitationScreen";
 import AdministratorInvitationScreen from "../screens/admin/AdministratorInvitationScreen";
 import AuthorityInvitationScreen from "../screens/authorities/AuthorityInvitationScreen";
 import ElectionsScreen from "../screens/elections/ElectionsScreen";
@@ -22,6 +23,7 @@ import NetworksScreen from "../screens/networks/NetworksScreen";
 import type { NavigationProp } from "./types";
 import AddNetworkScreen from "../screens/networks/AddNetworkScreen";
 import HostingScreen from "../screens/networks/HostingScreen";
+import ImportFoundingBundleScreen from "../screens/networks/ImportFoundingBundleScreen";
 import { useApp } from "../providers/AppProvider";
 import { useTaskCount } from "../hooks/useTaskCount";
 import EditOfficerScreen from "../screens/admin/EditOfficerScreen";
@@ -34,13 +36,12 @@ import AddKeyScreen from "../screens/users/AddKeyScreen";
 import RevokeKeyScreen from "../screens/users/RevokeKeyScreen";
 import AddDeviceScreen from "../screens/users/AddDeviceScreen";
 import AddedKeyScreen from "../screens/users/AddedKeyScreen";
-import AddedDeviceScreen from "../screens/users/AddedDeviceScreen";
 import KeyholderScreen from "../screens/keyholder/KeyholderScreen";
 import KeyholderInvitationScreen from "../screens/keyholder/KeyholderInvitationScreen";
+import KeyReleaseScreen from "../screens/keyholder/KeyReleaseScreen";
 import NetworkDetailsScreen from "../screens/networks/NetworkDetailsScreen";
 import NetworkStatisticsScreen from "../screens/networks/NetworkStatisticsScreen";
 import NetworkRevisionScreen from "../screens/networks/NetworkRevisionScreen";
-import KeyTaskScreen from "../screens/tasks/KeyTaskScreen";
 import SignatureTaskScreen from "../screens/tasks/SignatureTaskScreen";
 import EditElectionScreen from "../screens/tasks/EditElectionScreen";
 import AuthorityDetailScreen from "../screens/tasks/AuthorityDetailScreen";
@@ -53,6 +54,7 @@ import RegistrationPolicyScreen from "../screens/elections/RegistrationPolicyScr
 // Phase 48 plan 48-21 (D-12) — the three Phase 48 screen modules.
 import RegistrationInboxScreen from "../screens/registration/RegistrationInboxScreen";
 import RegistrationRequestApprovalScreen from "../screens/registration/RegistrationRequestApprovalScreen";
+import AssociationRequestApprovalScreen from "../screens/registration/AssociationRequestApprovalScreen";
 // BulkImportSyncScreen (48-20) is a named export, not a default export —
 // imported accordingly (a Rule-1 fix: the plan's "default imports" language
 // does not hold for this one file).
@@ -269,6 +271,10 @@ const styles = StyleSheet.create({
 		padding: 8,
 		marginHorizontal: 4,
 		marginVertical: -2,
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: "center",
+		justifyContent: "center",
 	},
 	headerRightContainer: {
 		flexDirection: "row",
@@ -277,10 +283,17 @@ const styles = StyleSheet.create({
 	},
 });
 
-function CloseButton({ onPress }: { onPress: () => void }) {
+export function CloseButton({ onPress }: { onPress: () => void }) {
 	const { colors } = useTheme() as ExtendedTheme;
+	const { t } = useTranslation();
 	return (
-		<Pressable onPress={onPress} style={styles.headerButton} hitSlop={8}>
+		<Pressable
+			onPress={onPress}
+			style={styles.headerButton}
+			hitSlop={8}
+			accessibilityRole="button"
+			accessibilityLabel={t("close")}
+		>
 			<FontAwesome6 name="xmark" size={22} color={colors.text} />
 		</Pressable>
 	);
@@ -310,6 +323,26 @@ export const RootNavigator = () => {
 				options={{ title: t("network") }}
 			/>
 			<Stack.Screen name="Hosting" component={HostingScreen} options={{ title: t("hosting") }} />
+			<Stack.Screen
+				name="ImportFoundingBundle"
+				component={ImportFoundingBundleScreen}
+				options={{ title: t("networkFoundingImportScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="AssociationRequestApproval"
+				component={AssociationRequestApprovalScreen}
+				options={{ title: t("associationApprovalScreenTitle") }}
+			/>
+			<Stack.Screen
+				name="KeyRelease"
+				component={KeyReleaseScreen}
+				options={({ navigation }) => ({
+					title: t("keyholderReleaseScreenTitle"),
+					presentation: "modal",
+					headerBackVisible: false,
+					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
+				})}
+			/>
 			<Stack.Screen
 				name="NetworkStatistics"
 				component={NetworkStatisticsScreen}
@@ -342,6 +375,11 @@ export const RootNavigator = () => {
 				name="ProposedAdministration"
 				component={ProposedAdministrationScreen}
 				options={{ title: t("proposedAdministration") }}
+			/>
+			<Stack.Screen
+				name="AcceptInvitation"
+				component={AcceptInvitationScreen}
+				options={{ title: t("invitationAcceptTitle") }}
 			/>
 			<Stack.Screen
 				name="AdministratorInvitation"
@@ -388,11 +426,6 @@ export const RootNavigator = () => {
 				component={AddedKeyScreen}
 				options={{ title: t("addedKey") }}
 			/>
-			<Stack.Screen
-				name="AddedDevice"
-				component={AddedDeviceScreen}
-				options={{ title: t("addedDevice") }}
-			/>
 			{/* Phase 10 plan 10-02 (KHUI-01/02; D-05) — keyholder routes */}
 			<Stack.Screen
 				name="Keyholder"
@@ -403,16 +436,6 @@ export const RootNavigator = () => {
 				name="KeyholderInvitation"
 				component={KeyholderInvitationScreen}
 				options={{ title: t("keyholderInvitation") }}
-			/>
-			<Stack.Screen
-				name="KeyTask"
-				component={KeyTaskScreen}
-				options={({ navigation }) => ({
-					title: t("keyholderRelease"),
-					presentation: "modal",
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
 			/>
 			<Stack.Screen
 				name="SignatureTask"

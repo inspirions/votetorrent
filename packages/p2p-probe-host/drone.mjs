@@ -30,7 +30,8 @@
  * Exit: Ctrl-C (SIGINT) or `kill <pid>` (SIGTERM) — both gracefully stop the node.
  */
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, decodeCadreInvitation } from '@serfab/cadre-core';
+import { resolveStrandRole, strandFounderOption } from './strand-role.mjs';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -66,6 +67,8 @@ const VOTETORRENT_QSQL = VOTETORRENT_QSQL_RAW
 // with these unset (empty defaults) — it remains the first bootstrap peer. Follows the
 // existing `process.env.X ?? default` pattern used by STRAND_ID below.
 const DRONE_BOOTSTRAP_CONTROL_ADDR = process.env.DRONE_BOOTSTRAP_CONTROL_ADDR ?? '';
+// Resolved here (same expression as IS_FOUNDER below) so a bad DRONE_STRAND_ROLE exits before the node starts.
+const STRAND_ROLE = resolveStrandRole(process.env, !DRONE_BOOTSTRAP_CONTROL_ADDR);
 const DRONE_BOOTSTRAP_STRAND_ADDR = process.env.DRONE_BOOTSTRAP_STRAND_ADDR ?? '';
 
 const node = new CadreNode({
@@ -93,20 +96,11 @@ const node = new CadreNode({
   requireSignedSchemas: false,
   strandFilter: { mode: 'all' },
   network: {
-    // The strand-addr fan-out is throttled per STRAND by `strandAddrRefreshMs`
-    // (cadre-core default 10 min), and `refreshOneStrandPeerAddrs` stamps that throttle on
-    // the pass HAPPENING, not on its answer — keyed by strandId alone, with no invalidation
-    // when the connected-sibling set GROWS. On this rig the drones boot ~2-4 min before the
-    // phones enrol, so the first pass finds only the sibling drone, answers nothing, stamps,
-    // and the strand address book stays peers=0 for the rest of the run. Run 26 shows exactly
-    // two `address book merged (peers=0 ...)` lines, at 04:31:05 and 04:31:34, on an 8 m 35 s
-    // run: next pass due 04:41:34, ~2 min after the drone was killed. That is why the cohort
-    // can never dial back and block-transfer ends in UnexpectedEOFError + NoValidAddressesError.
-    // 15 s re-asks within the formation window. Invisible to tools/multipeer-gate, which starts
-    // every node at once so its FIRST pass already sees the whole cohort.
-    controlCohort: { strandAddrRefreshMs: 15_000 },
+    // No `controlCohort.strandAddrRefreshMs` override: the 15 s workaround for the per-STRAND
+    // refresh throttle (sereus#21) is gone. cadre-core now tracks the refresh per
+    // (sibling, strand), so a sibling that connects after a pass is asked on the next tick.
     // circuitRelayTransport() is the DIALER half of circuit-relay-v2, and this node needs it
-    // even though it is itself a relay SERVER (see relayServerInit below). Supplying
+    // even though it is itself a relay SERVER (the storage profile turns that on). Supplying
     // `transports` at all REPLACES @optimystic/db-p2p's defaults wholesale —
     // `libp2p-node-base.ts` does `options.transports ?? defaults.transports` — and it is those
     // defaults (via createLibp2pNode) that would otherwise carry it. Without it libp2p's dial
@@ -120,24 +114,9 @@ const node = new CadreNode({
     // had no transport to use. cadre-core documents the same pairing for RN in types.d.ts.
     transports: [webSockets(), circuitRelayTransport()],
     listenAddrs: ['/ip4/0.0.0.0/tcp/0/ws'], // ephemeral — avoids EADDRINUSE
-    // The storage profile turns the circuit-relay-v2 relay server ON
-    // (createControlNode/startStrand derive `relay: profile === 'storage'` in
-    // the consumed vendored cadre-core, wiring circuitRelayServer() at
-    // libp2p-node-base.js). The prior WR-19 note — that the options builder
-    // forwarded only privateKey/transports/listenAddrs/connectionGater so an
-    // `enableRelay` key was a silent no-op — is now stale: the builder forwards
-    // `relayServerInit` too (T-38-12-01 transplant). Supply BOUNDED reservation
-    // limits so the relay does not run on the unlimited @libp2p/circuit-relay-v2
-    // defaults (dev-harness infra only, not shipped).
-    relayServerInit: {
-      reservations: {
-        maxReservations: 32, // n=4 mesh + headroom (circuit-relay-v2 default is 15)
-        defaultDurationLimit: 2 * 60 * 1000, // 2 min per reservation
-        defaultDataLimit: BigInt(1 << 17), // 128 KiB per reservation
-      },
-      maxInboundHopStreams: 64,
-      maxOutboundStopStreams: 64,
-    },
+    // No `relayServerInit`: cadre-core now forwards it itself (sereus#19) and defaults a
+    // party-run relay to uncapped reservations (applyDefaultLimit: false, 128 slots, 2 h),
+    // the values spike 095 had to set here after 358 TransferLimitErrors at a 1 MiB cap.
     ...(DRONE_BOOTSTRAP_STRAND_ADDR && { strandBootstrapNodes: [DRONE_BOOTSTRAP_STRAND_ADDR] }),
   },
   // STRAND CLUSTER BREADTH (spike 062 re-run). cadre-core 0.10.0 exposes
@@ -198,45 +177,39 @@ L('READY — update CONTROL_ADDR in dial-probe.ts with the /ip4/10.0.2.2/tcp/<PO
 // so their strand nodes received no cohort addresses and replication could never start.
 //
 // cadre-core deliberately never runs owner genesis implicitly — the hosting app owns it — so
-// a harness must do it explicitly or every owner-signed control write (createInvite included)
-// fails. This mirrors tools/multipeer-gate, which is the green n=4 reference for this
+// a harness must do it explicitly or every owner-signed control write (createCadreInvitation
+// included) fails. This mirrors tools/multipeer-gate, which is the green n=4 reference for this
 // ceremony; keep the two in step.
 //
-// The ceremony is TWO-SIDED and there is no auto-accept hook in cadre-core 0.12.0: the joiner
-// dials an invite, and the OWNER must then call `acceptPhone` with the joiner's peerId
-// (`AddPhoneOptions.phonePeerId` is documented as "sent by phone when it connects" — the app
-// layer is expected to carry it). Verified empirically against the gate: `dialInvite` alone
-// never authorized a joiner in any observed run; `acceptPhone` fired every time. In-process
-// that is a function call, but here the owner is this Node process and the joiners are RN
-// apps on emulators, so the peerId has to cross a process boundary.
+// cadre-core 1.14 replaced the two-sided invite ceremony (owner `createInvite`, joiner
+// `trustOwnerKeys` + `dialInvite`, owner `acceptPhone`) with ONE-SIDED redemption: the owner
+// mints a cadre invitation (`createCadreInvitation`), and the joiner redeems it at any member it
+// can reach (`redeemCadreInvitation`). The member that answers seats the joiner's `CadrePeer`
+// row itself, during the redemption — no owner-side accept, no peerId crossing a process
+// boundary, no enrollment window (1.14 deleted it: a stranger's connection is now admitted
+// provisionally and the per-stream protocol guard is the boundary). So the founder mints ONE
+// multi-use invitation, the harness injects it into the phones and drone-B, and each redeems.
 //
-// It does NOT need a harness round-trip. Every joiner dials this drone's control node to
-// bootstrap, so by the time it needs membership this node already HOLDS its peerId on an
-// inbound connection — `getControlNode().getPeers()` is the channel. Routing peerIds back out
-// through logcat and the host filesystem was the obvious design and the wrong one: the device
-// emits `peerId=` and then issues its strand-addr request seconds later, so a
-// grep-then-write round-trip races the very request it exists to authorize.
-//
-// So: while the enrollment window is open, accept every connected peer that is not yet a
-// member. That is what an open enrollment window MEANS — the connection gater already admits
-// these strangers for exactly this purpose — and it is bounded and dev-harness-only; this
-// drone is throwaway proof infrastructure and is never shipped. DRONE_ENROL_DIR stays as an
-// explicit out-of-band path (drop a file named for a peerId) for manual or scripted enrolment.
+// The pre-1.14 auto-accept loop (`watchForJoiners`: authorize every connected non-member) is
+// kept only as an OPT-IN fallback (DRONE_AUTO_ACCEPT=1), ported to `authorizePeer`. It is off by
+// default because redemption already authorizes every joiner, and because under 1.14 every
+// stranger holds a connection here for a while, so "connected" no longer implies "invited".
+// DRONE_ENROL_DIR stays as an explicit out-of-band path (drop a file named for a peerId).
 const IS_FOUNDER = !DRONE_BOOTSTRAP_CONTROL_ADDR;
 const DRONE_ENROL_DIR = process.env.DRONE_ENROL_DIR ?? '';
-// A joiner drone (drone-B) redeems the founder's invite; the harness passes it through from
+const DRONE_AUTO_ACCEPT = process.env.DRONE_AUTO_ACCEPT === '1';
+// A joiner drone (drone-B) redeems the founder's invitation; the harness passes it through from
 // the founder's PROOF_INVITE= line. Unset on the founder, which mints its own.
 const DRONE_INVITE = process.env.DRONE_INVITE ?? '';
-// The invite is a bearer credential with no consumed-flag, so ONE invite serves every joiner.
-// What actually expires is the inbound enrollment window `createInvite` opens
-// (DEFAULT_ENROLLMENT_WINDOW_MS = 30 min upstream). Device n=4 runs have been observed at
-// ~39 minutes, so the window must be REFRESHED for the life of the run or late joiners are
-// gated out — `openEnrollmentWindow` exists for exactly that.
-const ENROL_WINDOW_MS = Number(process.env.DRONE_ENROL_WINDOW_MS ?? 60 * 60 * 1000);
-// Poll interval, overridable so a test can drive ticks FASTER than acceptPhone returns —
-// which is the only way to reproduce the re-entrancy race on fast loopback, where the accept
-// completes well inside the default interval. On-device, control-DB contention makes the
-// accept slow enough that the default interval already overlaps.
+// One invitation serves every joiner of a run: drone-B and both phones redeem it (3 uses), and
+// a phone that restarts mid-run re-redeems idempotently without spending a seat. The surplus is
+// headroom for a re-run against the same drone. Lifetime covers the longest device runs (~40 min)
+// with margin; nothing has to refresh it.
+const DRONE_INVITE_USES = Number(process.env.DRONE_INVITE_USES ?? 8);
+const ENROL_WINDOW_MS = Number(process.env.DRONE_ENROL_WINDOW_MS ?? 6 * 60 * 60 * 1000);
+// Poll interval for the opt-in auto-accept fallback, overridable so a test can drive ticks
+// FASTER than an accept returns — the only way to reproduce the re-entrancy race on fast
+// loopback, where the accept completes well inside the default interval.
 const ENROL_POLL_MS = Number(process.env.DRONE_ENROL_POLL_MS ?? 2000);
 // Grace before a newly-seen peer is treated as a phone, so a strand node's delegate grant
 // can land first. Settle time after a successful accept, so the next accept in the same tick
@@ -244,8 +217,6 @@ const ENROL_POLL_MS = Number(process.env.DRONE_ENROL_POLL_MS ?? 2000);
 const DELEGATE_GRACE_MS = Number(process.env.DRONE_DELEGATE_GRACE_MS ?? 15000);
 const ENROL_SETTLE_MS = Number(process.env.DRONE_ENROL_SETTLE_MS ?? 4000);
 const ENROL_TRANSIENT_MAX_ATTEMPTS = Number(process.env.DRONE_ENROL_MAX_ATTEMPTS ?? 12);
-
-let issuedInvite = null;
 
 if (IS_FOUNDER) {
   // Owner genesis MUST run while this node is still SOLO. It writes owner-signed control
@@ -259,43 +230,40 @@ if (IS_FOUNDER) {
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('founder has no control database after start()');
   await controlDb.ensureOwnerKey(owner.publicKeyB64);
-  node.initializeSeedBootstrap(owner.privateKeyB64);
+  await node.initializeSeedBootstrap(owner.privateKeyB64);
   L(`owner genesis done (ownerKey=${owner.publicKeyB64.slice(0, 12)}…)`);
 
-  const { invite } = await node.createInvite(undefined, ENROL_WINDOW_MS);
-  issuedInvite = invite;
+  // Untargeted (any redeemer), member-only (never an owner grant), multi-use. Minted while
+  // solo, so the CadreInvite row commits locally with no quorum to wait on.
+  const { encoded } = await node.createCadreInvitation({
+    grantsOwner: false,
+    uses: DRONE_INVITE_USES,
+    expiresInMs: ENROL_WINDOW_MS,
+  });
   // Machine-readable, like PROOF_WS_ADDR= above: the harness greps this line and injects the
-  // encoded invite into the runner's PROOF_INVITE constant (D-07 injection pattern).
-  L('PROOF_INVITE=' + node.encodeInvite(invite));
+  // encoded invitation into the runner's PROOF_INVITE constant (D-07 injection pattern).
+  L('PROOF_INVITE=' + encoded);
+  L(`ENROL_INVITATION uses=${DRONE_INVITE_USES} expiresInMs=${ENROL_WINDOW_MS}`);
 
-  // Keep the window open for the whole run, not just the first 30 minutes.
-  setInterval(() => {
-    try {
-      node.openEnrollmentWindow(Date.now() + ENROL_WINDOW_MS);
-    } catch (e) {
-      L('WARN openEnrollmentWindow failed:', e?.message ?? e);
+  if (DRONE_AUTO_ACCEPT) {
+    if (DRONE_ENROL_DIR) {
+      mkdirSync(DRONE_ENROL_DIR, { recursive: true });
+      L('ENROL_WATCH=' + DRONE_ENROL_DIR);
     }
-  }, Math.max(60_000, Math.floor(ENROL_WINDOW_MS / 4))).unref?.();
-
-  if (DRONE_ENROL_DIR) {
-    mkdirSync(DRONE_ENROL_DIR, { recursive: true });
-    L('ENROL_WATCH=' + DRONE_ENROL_DIR);
+    watchForJoiners();
+    L('ENROL_ARMED — auto-accepting connected non-members for the life of this run (DRONE_AUTO_ACCEPT=1)');
   }
-  watchForJoiners();
-  L('ENROL_ARMED — accepting connected non-members for the life of this run');
 } else if (DRONE_INVITE) {
-  // A NON-founder drone (drone-B) is a joiner like any device: the founder will accept it
-  // once it connects, but acceptance is only the owner's half. Redeeming the invite is the
-  // joiner's half — it anchors the founder's owner keys in this node's node-local trusted
-  // set (`trustOwnerKeys` with source 'invite'), which is what lets this node VERIFY
-  // owner-signed control state rather than merely being admitted. tools/multipeer-gate runs
-  // both halves for its drone-B; do the same here so the two stay comparable.
+  // A NON-founder drone (drone-B) is a joiner like any device and redeems the founder's
+  // invitation. Redemption pins the invitation's owner keys into this node's anchor BEFORE it
+  // dials (so drone-B verifies owner-signed control state rather than merely being admitted —
+  // the gap fixed 2026-10-08 on the pre-1.14 API), and the answering member seats drone-B's
+  // CadrePeer row. Not fatal on failure, so the run's logs still show what the drone saw.
   try {
-    await node.dialInvite(node.decodeInvite(DRONE_INVITE));
-    L('ENROL_DIALED — redeemed the founder invite');
+    const result = await node.redeemCadreInvitation(decodeCadreInvitation(DRONE_INVITE));
+    L(`ENROL_REDEEMED — admitted by ${result.peerId ?? '<unnamed member>'} at ${result.redeemedAt}`);
   } catch (e) {
-    // Not fatal: the founder's acceptPhone can still confer membership. Loud, then continue.
-    L('WARN ENROL_DIAL_FAILED:', e?.message ?? e);
+    L('WARN ENROL_REDEEM_FAILED:', e?.name ?? '', e?.message ?? e);
   }
 }
 
@@ -314,7 +282,7 @@ function watchForJoiners() {
   const firstSeenAt = new Map();
   // peerId -> count of transient (infrastructure) accept failures, to bound the retries.
   const transientFailures = new Map();
-  // The tick body awaits (acceptPhone, the settle delay), so it outlives the ENROL_POLL_MS
+  // The tick body awaits (authorizePeer, the settle delay), so it outlives the ENROL_POLL_MS
   // interval and overlapping invocations would otherwise interleave. `settled` is only
   // written AFTER the awaited accept — so without these two guards, concurrent ticks all pass
   // the `settled.has` check before any of them records the outcome, and the same peer is
@@ -326,7 +294,7 @@ function watchForJoiners() {
   const selfId = node.peerId?.toString();
 
   // A control-DB read/write that could not be SERVED is not a membership verdict — the same
-  // distinction the multipeer gate's L3 draws. `acceptPhone` reads `Revocation`/`CadrePeer`
+  // distinction the multipeer gate's L3 draws. `authorizePeer` reads `Revocation`/`CadrePeer`
   // to evaluate the joiner, so it surfaces cluster unavailability as a throw that looks
   // exactly like a refusal. Retrying these is the whole point; retrying a real refusal spins.
   const isTransientControlFailure = (msg) =>
@@ -368,7 +336,7 @@ function watchForJoiners() {
       // A member's strand node reserves a circuit here under its OWN derived transport
       // peerId (cadre-core 0.12.0 strand-transport-key). It is admitted natively by
       // delegate-admission.js via /sereus/strand-addr/1.0.0 — it is NOT a phone, and
-      // running acceptPhone against it writes a spurious CadrePeer row. In the first n=4
+      // running authorizePeer against it writes a spurious CadrePeer row. In the first n=4
       // device run that spurious write tore a multi-tree commit: `default/CadrePeer`
       // persisted while its `_uniq_7.stampid` index did not, unrollbackable.
       if (node.hasDelegateAdmission?.(peerId)) {
@@ -386,7 +354,15 @@ function watchForJoiners() {
       if (inFlight.has(peerId)) continue;
       inFlight.add(peerId); // claimed BEFORE the await — never check-then-act across it
       try {
-        await node.acceptPhone({ phonePeerId: peerId }, issuedInvite ?? undefined);
+        // A peer that already redeemed the invitation is a member; authorizing it again would be
+        // a second concurrent CadrePeer write, the contention that once tore a multi-tree commit.
+        if (await node.isAuthorizedMember(peerId).catch(() => false)) {
+          settled.add(peerId);
+          inFlight.delete(peerId);
+          L('ENROL_ALREADY_MEMBER=' + peerId);
+          continue;
+        }
+        await node.authorizePeer(peerId);
         settled.add(peerId);
         inFlight.delete(peerId);
         L('ENROL_ACCEPTED=' + peerId);
@@ -437,7 +413,7 @@ async function confirmMember(peerId) {
     }
     await new Promise(r => setTimeout(r, 2000 * attempt));
   }
-  L('WARN ENROL_UNCONFIRMED=' + peerId + ' — acceptPhone succeeded but membership could not ' +
+  L('WARN ENROL_UNCONFIRMED=' + peerId + ' — authorizePeer succeeded but membership could not ' +
     'be read back; treat strandPeers as the authoritative signal');
 }
 
@@ -468,13 +444,19 @@ await node.addStrand({
   // machine joined" and every write fails with "no active strand database" -- which reads exactly
   // like a peer-reachability failure. An explicit value wins over the derivation. Left undefined
   // on a joiner drone, so its gating is the real thing.
-  ...(IS_FOUNDER && { founder: true }),
+  // founder:true only when this drone founds the strand. With no STRAND_ID set, an unset
+  // DRONE_STRAND_ROLE keeps the inferred options (control founder -> founder:true, joiner drone ->
+  // no founder key). With an explicit STRAND_ID, resolveStrandRole refuses to start unless
+  // DRONE_STRAND_ROLE is given; use join (founder:false) when a device created the network, else
+  // two histories share one id (round-3 test 15).
+  ...strandFounderOption(STRAND_ROLE),
   // Belt and braces for the joiner drone: `awaitFirstSync: false` returns as soon as the runtime
   // is launched (possibly 'syncing' with no database) instead of blocking the whole rig's start-up
   // on a sibling that may not be up yet -- run 30 died here after 30002 ms, as did
   // tools/multipeer-gate. The documented other half is that the caller awaits writability itself.
   awaitFirstSync: false,
 });
+L('STRAND_ROLE=' + STRAND_ROLE.role + (STRAND_ROLE.explicit ? '' : ' (default)'));
 L(`[replication-proof] strand started, strandId=${STRAND_ID}`);
 // Advertise the drone's strand-node listen multiaddr so the harness can inject it
 // into the runner's STRAND_BOOTSTRAP_ADDR and peers can dial the strand cohort.

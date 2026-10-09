@@ -308,7 +308,13 @@ test('rung 7: tickCountFor\'s D-16 boundary — at most 6 ticks at/above 400px, 
 });
 
 test('rung 7 (control): the boundary pin would catch a narrow/wide constant swap', () => {
-	/** A deliberately wrong re-derivation with the two tick counts swapped. */
+	/**
+	 * A deliberately wrong re-derivation with the two tick counts swapped.
+	 * @param {number} width
+	 * @param {number} narrow
+	 * @param {number} ticksNarrow
+	 * @param {number} ticksWide
+	 */
 	function swappedTickCountFor(width, narrow, ticksNarrow, ticksWide) {
 		return width < narrow ? ticksWide : ticksNarrow;
 	}

@@ -13,32 +13,29 @@
  *
  * THREE LOAD-BEARING FACTS ABOUT THE AGGREGATE STRING:
  *
- * 1. THE JOIN IS MANDATORY. `IsCompleted integer default 0` lives on `Task`
- *    (votetorrent.qsql:1138). `ReleaseKeyTaskExtension` (votetorrent.qsql:1162)
- *    carries only TaskId, ElectionId and ElectionRevision and has NO status
- *    column at all. A query over the extension alone measures how many
- *    release-key tasks EXIST, not how many COMPLETED, and would read
- *    "0 released" forever — mid-settling included, which is precisely the
- *    window this fact exists to cover.
+ * 1. THE COUNT READS THE PUBLISHED FACT. 62-126 (62-29 open question 2): "released" is the number
+ *    of `KeyholderShareRelease` rows for the election revision -- a keyholder's share is PUBLIC
+ *    once published (D-17), and that row is the fact. It used to join `Task` +
+ *    `ReleaseKeyTaskExtension` and sum `IsCompleted`, which measures a bookkeeping task: a share
+ *    published without a completed task read as unreleased, and a task completed without a
+ *    published share read as released. Like the officer roster (`officer/read-keyholders.js`),
+ *    the figure means PUBLISHED, NOT VALIDATED: SQL cannot run `validateReleasedShare`, and
+ *    reconstruction filters bogus rows (AR-62-007; T-62-126-03 accepted).
+ *    `KeyholderShareRelease` is PUBLIC for the settling and closed phases (AR-62-095), the only
+ *    phases this fact is live in.
  *
- * 2. THE TASK TYPE IS A LITERAL, NOT A BIND. The natural bind name for a
- *    `Task.Type` filter is one of the engine's reserved words and would parse
- *    as a keyword rather than a parameter. The value is a fixed schema code
- *    (`TaskType`), not caller input, so a literal is correct — and this is the
- *    one place in this module where R4's "every varying value is bound" does
- *    not apply, because the value does not vary.
+ * 2. THE COUNT IS ON THE PRIMARY-KEY PREFIX. `(ElectionId, ElectionRevision, UserId)` is the
+ *    key, so `ElectionId = :electionId and ElectionRevision = :revision` is a key-prefix count.
+ *    Equality predicates only: this engine returns zero rows for `AND` + `IN` (memory
+ *    project_quereus_and_in_predicate_zero_rows), and no bind is a reserved name.
  *
- * 3. ONLY COUNTS LEAVE THIS FUNCTION. Never select `Task.UserId`, `Task.Id` or
- *    `Task.SigningNonce`: any of the three answers WHICH keyholder released a
- *    key, which is exactly what D-14's "no task row exposed" forbids (54-ISSUES
- *    I-07). `T.Id` appears in the join condition and nowhere else;
- *    `assertNoIdentifyingColumns` checks the SELECT LIST only, precisely so
- *    that join condition stays legal while UserId and SigningNonce cannot
- *    appear in anything the function returns.
+ * 3. ONLY COUNTS LEAVE THIS FUNCTION. Never select `UserId`, `Identifier`, `SigningShare`,
+ *    `SignerKey`, `Signature` or `ReleasedAt`: any of them answers WHICH keyholder released,
+ *    which D-14's "no task row exposed" forbids (54-ISSUES I-07). `assertNoIdentifyingColumns`
+ *    checks the SELECT LIST at import.
  *
- * D-15 PAYING OFF: `Task` and `ReleaseKeyTaskExtension` are AGGREGATE in the
- * corrected `classification.js`, so `assertPublicSafe` passes here with no
- * special case, no named allowlist and nothing to rot.
+ * `total` is the keyholders of record (it equals `keyholderCount`): there is no longer a task
+ * table to count, and the render layer says "released of keyholderCount" anyway.
  */
 
 import { assertPublicSafe, assertNoIdentifyingColumns } from '../classification.js';
@@ -46,12 +43,12 @@ import { assertPublicSafe, assertNoIdentifyingColumns } from '../classification.
 /** @type {'public/read-keyrelease.js'} */
 const MODULE_LABEL = 'public/read-keyrelease.js';
 
-/** Task and ReleaseKeyTaskExtension are AGGREGATE (D-15) and reached by counts only; Keyholder is PUBLIC and supplies the denominator. @type {ReadonlyArray<string>} */
-export const TABLES_READ = Object.freeze(['Task', 'ReleaseKeyTaskExtension', 'Keyholder']);
+/** KeyholderShareRelease (PUBLIC from settling, AR-62-095) is counted; Keyholder is PUBLIC and supplies the denominator. @type {ReadonlyArray<string>} */
+export const TABLES_READ = Object.freeze(['KeyholderShareRelease', 'Keyholder']);
 
 /** @type {string} */
 export const KEYRELEASE_AGGREGATE_SQL =
-	`select count(*) as total, sum(T.IsCompleted) as released from Task T join ReleaseKeyTaskExtension R on R.TaskId = T.Id where T.Type = 'release-key' and R.ElectionId = :electionId and R.ElectionRevision = :revision`;
+	`select count(*) as released from KeyholderShareRelease where ElectionId = :electionId and ElectionRevision = :revision`;
 
 /** @type {string} */
 export const KEYHOLDER_COUNT_SQL =
@@ -59,24 +56,17 @@ export const KEYHOLDER_COUNT_SQL =
 
 /**
  * @typedef {object} KeyReleaseProgress
- * @property {number} released - keyholders who have completed their release-key task.
- * @property {number} total - release-key TASKS raised for this election revision.
+ * @property {number} released - PUBLISHED KeyholderShareRelease rows for this election revision (published, not validated).
+ * @property {number} total - keyholders of record; equal to keyholderCount (62-126 removed the task count).
  * @property {number} keyholderCount - keyholders of record: the denominator.
  */
 
 /**
  * D-14's fact, as three numbers.
  *
- * The render layer (54-13) says "released of keyholderCount", NOT "released of
- * total": `total` counts release-key TASKS, which is zero before any are
- * raised, and "0 of 0" is indistinguishable on screen from a genuinely empty
- * election. `total` is returned alongside anyway so a divergence between the
- * task count and the keyholder count is observable rather than hidden.
- *
- * `sum()` over zero matching rows yields `null`, not `0`, so every field is
- * coerced with `Number(...)` and defaulted to `0`. `revision` is bound as a
- * NUMBER, matching `ReleaseKeyTaskExtension.ElectionRevision`'s `integer`
- * declaration.
+ * `released` is zero when no share row exists (`count(*)` is never null, but the result is still
+ * coerced with `Number(...)` and defaulted to `0`). `revision` is bound as a NUMBER, matching
+ * `KeyholderShareRelease.ElectionRevision`'s `integer` declaration.
  *
  * @param {import('@quereus/quereus').Database} db
  * @param {string} electionId
@@ -87,10 +77,11 @@ export async function readKeyReleaseProgress(db, electionId, revision) {
 	const binds = { electionId, revision: Number(revision) };
 	const aggregateRow = await db.prepare(KEYRELEASE_AGGREGATE_SQL).get(binds);
 	const keyholderRow = await db.prepare(KEYHOLDER_COUNT_SQL).get(binds);
+	const keyholderCount = Number(keyholderRow?.keyholders ?? 0) || 0;
 	return {
 		released: Number(aggregateRow?.released ?? 0) || 0,
-		total: Number(aggregateRow?.total ?? 0) || 0,
-		keyholderCount: Number(keyholderRow?.keyholders ?? 0) || 0,
+		total: keyholderCount,
+		keyholderCount,
 	};
 }
 

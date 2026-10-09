@@ -17,10 +17,14 @@
  * taking the rest of this package. Equivalence with the rest of this harness is preserved by
  * asserting the SAME preconditions below (direct reads, not imports), not by sharing code.
  *
- * `createInvite` is never called — it opens a monotonic 30-minute enrollment window
- * (`DEFAULT_ENROLLMENT_WINDOW_MS`) that would admit every stranger and defeat every assertion in
- * this file. `acceptPhone({ phonePeerId })` with no issued invite writes the membership voucher
- * directly, with no enrollment-window side effect.
+ * No cadre invitation is ever minted — on cadre-core 1.14 a LIVE `CadreInvite` row opens the
+ * cadre-invite protocol to strangers, which would defeat every assertion in this file (on <= 1.13
+ * the equivalent hazard was `createInvite`'s 30-minute enrollment window, a mechanism 1.14
+ * deleted). `authorizePeer(peerId)` writes the membership voucher directly.
+ *
+ * On 1.14 the decision-level wall for a non-member outsider reads `'admit-provisionally'` (the
+ * policy cannot place the peer: its connection is admitted with a deadline, and the per-stream
+ * protocol guard refuses it every members-only protocol), where <= 1.13 read `'deny'`.
  *
  * ── MODE DETECTION, AND THE HOLE IT MUST NOT OPEN ────────────────────────────────────────────
  * This file resolves `@serfab/cadre-core` through ONE indirection — `process.env.CADRE_CORE_ENTRY`
@@ -62,6 +66,9 @@ import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
+
+/** What `admitInboundControlConnection` answers for a peer the policy cannot place (cadre-core 1.14+). */
+const UNPLACED_VERDICT = 'admit-provisionally';
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // Mode resolution — the single indirection, and the two-signal agreement gate
@@ -233,7 +240,10 @@ async function buildGateway({ publicObserverStrandIds } = {}) {
       schema: VOTETORRENT_QSQL,
       latencyHint: 'interactive',
     },
-    mode: 'bootstrap',
+    // `mode: 'bootstrap'` was deleted from StrandConfig in cadre-core 0.11 and has been ignored
+    // since; a solo node hosting a hand-built strand row must FOUND it, or addStrand waits forever
+    // for a founder that never comes (the hang this file used to end in).
+    founder: true,
   });
 
   // Owner genesis + one seeded member, no invite ever issued (see header) — the recipe that
@@ -243,11 +253,11 @@ async function buildGateway({ publicObserverStrandIds } = {}) {
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('gateway has no control database after start()');
   await controlDb.ensureOwnerKey(owner.publicKeyB64);
-  node.initializeSeedBootstrap(owner.privateKeyB64);
+  await node.initializeSeedBootstrap(owner.privateKeyB64);
 
   const seedMemberKeyPair = await generateKeyPair('Ed25519');
   const seedMemberPeerId = peerIdFromPrivateKey(seedMemberKeyPair).toString();
-  await node.acceptPhone({ phonePeerId: seedMemberPeerId });
+  await node.authorizePeer(seedMemberPeerId);
 
   return node;
 }
@@ -272,7 +282,8 @@ async function assertPreconditions(node, probePeerId) {
     node.admitControlPeerUnconditionally(probePeerId), false,
     'unconditional-admit branches (not-running/no-DB, empty trust anchor, bootstrap/relay peer) must be closed',
   );
-  assert.equal(node.enrollmentWindowUntil, 0, 'no enrollment window may be open');
+  const liveInvitations = (await node.listCadreInvitations()).filter((st) => st.live).length;
+  assert.equal(liveInvitations, 0, 'no live cadre invitation may be held (the 1.14 stranger window)');
   assert.equal(node.hasDelegateAdmission(probePeerId), false, 'no delegate admission for the probe peer');
 
   const authorized = await node.listAuthorizedMembers();
@@ -414,8 +425,8 @@ if (MODE === 'patched') {
       const probePeerId = peerIdFromPrivateKey(probeKeyPair).toString();
       await assertPreconditions(gw, probePeerId);
       assert.equal(
-        await gw.admitInboundControlConnection(probePeerId), 'deny',
-        'the decision-level wall is not edited by the patch — it must still deny a non-member at boot',
+        await gw.admitInboundControlConnection(probePeerId), UNPLACED_VERDICT,
+        'the decision-level wall is not edited by the patch — it must still leave a non-member unplaced at boot',
       );
 
       const controlAddrs = gw.getControlNode().getMultiaddrs().map((m) => m.toString());
@@ -428,7 +439,7 @@ if (MODE === 'patched') {
         // the observer success below to the patched connection-gater branch rather than to
         // membership, an enrollment window, a delegate grant or the cold-start carve-out.
         assert.equal(
-          await gw.admitInboundControlConnection(probePeerId), 'deny',
+          await gw.admitInboundControlConnection(probePeerId), UNPLACED_VERDICT,
           'concurrent re-check: the decision-level wall is unchanged by the patch even while the ' +
           'connection itself is admitted through the new peer-blind observer carve-out',
         );
@@ -438,8 +449,16 @@ if (MODE === 'patched') {
         assert.ok(observerResponse.multiaddrs.length > 0, 'the observer protocol must SERVE the listed strand to the outsider');
 
         // SAME outsider, SAME connection, SAME run — the entire security argument for D-02.
-        const addrStream = await outsider.dialProtocol(conn.remotePeer, STRAND_ADDR_PROTOCOL, { signal: AbortSignal.timeout(10_000) });
-        const addrResponse = await exchangeFrame(addrStream, STRAND_ID);
+        // On 1.14 the refusal is normally a stream reset by the control-protocol guard before the
+        // handler runs; an empty response (the pre-guard shape) is an equally valid refusal.
+        let addrResponse;
+        try {
+          const addrStream = await outsider.dialProtocol(conn.remotePeer, STRAND_ADDR_PROTOCOL, { signal: AbortSignal.timeout(10_000) });
+          addrResponse = await exchangeFrame(addrStream, STRAND_ID);
+        } catch (err) {
+          addrResponse = { multiaddrs: [], refusedBeforeResponse: err?.message ?? String(err) };
+        }
+        console.log(`[public-observer-blocker] PATCHED strand-addr refusal shape: ${JSON.stringify(addrResponse)}`);
         assert.equal(
           addrResponse.multiaddrs.length, 0,
           'the members-only strand-addr protocol must still refuse the IDENTICAL outsider, on the ' +

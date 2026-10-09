@@ -1,16 +1,19 @@
-import React, { useState } from "react";
-import { ScrollView, StyleSheet, View } from "react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { Platform, ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
+import type { NavigationProp } from "../../navigation/types";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import type { IDefaultUserEngine, INetworkEngine, IUserEngine, Signature } from "@votetorrent/vote-core";
 import { UserKeyType } from "@votetorrent/vote-core";
 import type { Spec as NativeAttestationSpec } from "@votetorrent/attestation-native/src/specs/NativeAttestation";
+import { nativeSignInputBase64 } from "@votetorrent/attestation-native/src/native-sign-input";
 import { ThemedText } from "../../components/ThemedText";
 import { CustomButton } from "../../components/CustomButton";
 import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
+import { renewOfficerIntakeKeyAfterKeyReplacement } from "../registration/officer-intake-key";
 import { useApp } from "../../providers/AppProvider";
 import {
 	clearRecoveryInProgress,
@@ -68,19 +71,8 @@ type ProvisionReason = "first-run" | "invalidated";
 
 /** Ten years in milliseconds — expiration epoch for every key this screen registers. */
 const TEN_YEARS_MS = 10 * 365 * 24 * 60 * 60 * 1000;
-
-/**
- * Plain base64 (`Base64.NO_WRAP` equivalent) of RAW digest bytes — never base64url. Mirrors
- * `device-signer.ts`'s identical `signWithDeviceKey`/`signWithRecoveryKey` `digestBase64`
- * contract. Duplicated locally (not imported) because that file's own helper is private, and
- * widening its exported surface for one shared 6-line helper is not worth the coupling.
- */
-function base64FromDigestBytes(digest: Uint8Array): string {
-	let binary = "";
-	for (let i = 0; i < digest.length; i++) binary += String.fromCharCode(digest[i]!);
-	const { btoa: btoaFn } = globalThis as unknown as { btoa: (data: string) => string };
-	return btoaFn(binary);
-}
+/** WR-R3-06: how long the background intake-key renewal may run before the success screen says it failed. */
+const INTAKE_RENEWAL_NOTICE_TIMEOUT_MS = 30_000;
 
 /**
  * Base64 of the UTF-8 bytes of a string — mirrors `real-attestation-producer.ts`'s identical
@@ -136,12 +128,22 @@ export default function ProvisionSigningKeyScreen() {
 	const insets = useSafeAreaInsets();
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
-	const navigation = useNavigation();
-	const { getEngine } = useApp();
+	const navigation = useNavigation<NavigationProp>();
+	const { getEngine, resolveDeviceSigner } = useApp();
 	const { reason } = useRoute().params as { reason: ProvisionReason };
 
 	const [phase, setPhase] = useState<ScreenPhase>("idle");
 	const [errorClass, setErrorClass] = useState<DeviceSigningErrorClass | undefined>(undefined);
+	const [intakeRenewalFailed, setIntakeRenewalFailed] = useState(false);
+	// WR-R3-06: the intake-key renewal runs after the success screen is shown and may settle after
+	// the officer has left it; only a mounted screen records its outcome.
+	const mountedRef = useRef(true);
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
 	const pending = phase === "pending";
 	const isFirstRun = reason === "first-run";
 
@@ -383,7 +385,7 @@ export default function ProvisionSigningKeyScreen() {
 					async (digest: Uint8Array): Promise<Signature> => {
 						const result = (await native.signWithDeviceKey(
 							SIGNING_KEY_ALIAS,
-							base64FromDigestBytes(digest),
+							nativeSignInputBase64(digest, Platform.OS),
 							t("deviceSigningPromptTitle"),
 							t("signingKeyProvisioningPromptSubtitle"),
 							t("deviceSigningPromptNegativeButton"),
@@ -523,7 +525,7 @@ export default function ProvisionSigningKeyScreen() {
 				const revokeDigest = await before.getRevokeKeyDigest(oldKey);
 				const revokeResult = (await native.signWithRecoveryKey(
 					RECOVERY_KEY_ALIAS,
-					base64FromDigestBytes(revokeDigest),
+					nativeSignInputBase64(revokeDigest, Platform.OS),
 					t("deviceSigningPromptTitle"),
 					t("signingKeyRecoveryPromptSubtitle"),
 					t("deviceSigningPromptNegativeButton"),
@@ -550,7 +552,7 @@ export default function ProvisionSigningKeyScreen() {
 				async (digest: Uint8Array): Promise<Signature> => {
 					const result = (await native.signWithRecoveryKey(
 						RECOVERY_KEY_ALIAS,
-						base64FromDigestBytes(digest),
+						nativeSignInputBase64(digest, Platform.OS),
 						t("deviceSigningPromptTitle"),
 						t("signingKeyRecoveryPromptSubtitle"),
 						t("deviceSigningPromptNegativeButton"),
@@ -564,8 +566,14 @@ export default function ProvisionSigningKeyScreen() {
 			);
 
 			// Update the persisted local device identity so activeKeys[0] is the replacement key.
-			const displayName = beforeSummary?.name ?? "Device User";
-			await persistProvisionedDeviceUser(displayName, deviceKey.publicKeyCompressedHex);
+			// Keep the NETWORK user's id and name: re-minting an id forks the device from its
+			// network User (loses officer standing, fails AdminSigning.UserIdValid).
+			if (!beforeSummary) {
+				throw new Error("ProvisionSigningKeyScreen.handleRecovery: network user summary unavailable; refusing to mint a new identity.");
+			}
+			await persistProvisionedDeviceUser(beforeSummary.name, deviceKey.publicKeyCompressedHex, {
+				userId: beforeSummary.id,
+			});
 
 			// Refresh the 49-16 provisioning record so it never keeps pointing at the previous
 			// (now-invalidated) attested key. `certificateChainBase64` is set to an empty array —
@@ -585,7 +593,27 @@ export default function ProvisionSigningKeyScreen() {
 			// follow-up); leaving it set on any earlier failure path is the entire point.
 			await clearRecoveryInProgress();
 
+			// The recovery itself is complete: show success now, never behind the renewal below.
 			setPhase("success");
+
+			// O-01: the replacement can strand the officer's intake encryption key. Renew it in the
+			// background (one extra prompt, only when stranded). It never fails or blocks the recovery
+			// (WR-R3-06): a renewal still unsettled after INTAKE_RENEWAL_NOTICE_TIMEOUT_MS (a stalled
+			// network write) shows the renewal-failed notice, and the real outcome replaces it if the
+			// renewal settles later while the screen is still mounted.
+			const noticeTimer = setTimeout(() => {
+				if (mountedRef.current) setIntakeRenewalFailed(true);
+			}, INTAKE_RENEWAL_NOTICE_TIMEOUT_MS);
+			void renewOfficerIntakeKeyAfterKeyReplacement({
+				getEngine,
+				createSigner: resolveDeviceSigner,
+			})
+				.catch(() => "failed" as const)
+				.then((renewal) => {
+					clearTimeout(noticeTimer);
+					console.info(`[intake-renewal] outcome=${renewal}`);
+					if (mountedRef.current) setIntakeRenewalFailed(renewal === "failed");
+				});
 		} catch (err) {
 			// T-49-USER-7 (deviceSigningError.ts:117-118) — mapDeviceSigningError/handleCeremonyError
 			// below classify this into a UI-safe copy string, which necessarily discards the raw
@@ -652,6 +680,13 @@ export default function ProvisionSigningKeyScreen() {
 				<ThemedText type="small" style={[localStyles.body, { color: colors.textSecondary }]}>
 					{t(bodyKey)}
 				</ThemedText>
+				{phase === "success" && intakeRenewalFailed && (
+					<View testID="signing-key-intake-renewal-failed">
+						<ThemedText type="small" style={[localStyles.body, { color: colors.warning }]}>
+							{t("officerIntakeRenewalFailedBody")}
+						</ThemedText>
+					</View>
+				)}
 				<View testID="signing-key-provisioning-continue-button">
 					<CustomButton
 						title={t("signingKeyProvisioningContinueButton")}
@@ -688,6 +723,19 @@ export default function ProvisionSigningKeyScreen() {
 						title={t("signingKeyProvisioningNetworkUserUnresolvedRetryButton")}
 						backgroundColor={colors.accent}
 						onPress={() => handleFirstRun()}
+					/>
+				</View>
+				{/* UAT 62 Q: "not synced yet" and "this device has no account on the network" are
+				    indistinguishable here (getCurrentUser finds no User row in both), and waiting never
+				    fixes the second. Settings > Connect to existing user is not a way out: its
+				    connectDevice() is still phase-gated (FeatureNotAvailableError) and an unbound device
+				    lands on its noUser state. Accepting an administrator invitation is the working path. */}
+				<View testID="signing-key-provisioning-accept-invitation-button">
+					<CustomButton
+						title={t("signingKeyProvisioningNetworkUserUnresolvedInviteButton")}
+						backgroundColor={colors.card}
+						size="thin"
+						onPress={() => navigation.navigate("AcceptInvitation")}
 					/>
 				</View>
 			</ScrollView>

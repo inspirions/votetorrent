@@ -6,22 +6,25 @@
  * WHY. P2P-11's root cause is that the device harness never enrolled its peers: drone-A
  * refused every device with `Refusing strand-addr from non-member <peerId>`, so the strand
  * cohort could not form and replication never started. `drone.mjs` now runs owner genesis and
- * accepts joiners; this proves that it does, against the REAL drone process and a REAL
- * CadreNode joiner, with no emulator and no Android in the loop.
+ * mints a multi-use cadre invitation (cadre-core 1.14+); this proves that a joiner which redeems
+ * it becomes a member, against the REAL drone process and a REAL CadreNode joiner, with no
+ * emulator and no Android in the loop.
  *
- * It is deliberately NOT the multipeer gate. The gate runs every node in ONE process, where
- * the owner can call `acceptPhone(joiner.peerId)` directly. The whole difficulty on device is
- * that the owner and the joiner are different processes, and that is exactly the seam this
- * exercises: the drone advertises `PROOF_INVITE=` on stdout, a separate node redeems it, and
- * the drone must discover and accept that node on its own.
+ * It is deliberately NOT the multipeer gate. The gate runs every node in ONE process. The whole
+ * difficulty on device is that the owner and the joiner are different processes, and that is
+ * exactly the seam this exercises: the drone advertises `PROOF_INVITE=` on stdout, separate
+ * nodes redeem it, and the drone — which is never told any joiner's peerId — seats each one.
+ *
+ * It also checks the joiner's OWN seated row with real crypto: the row a redemption seats is
+ * invitation-admitted (no owner signature), and `self-voucher.ts` (the device write gate) judges
+ * it with `verifyInvitationAdmission` over the usage and invitation rows — exactly what is done
+ * here, so a green smoke means the device gate can pass.
  *
  * Exit 0 on PASS, 1 on FAIL.
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, decodeCadreInvitation, verifyInvitationAdmission } from '@serfab/cadre-core';
+import { generateKeyPair } from '@libp2p/crypto/keys';
 import { webSockets } from '@libp2p/websockets';
 
 const L = (...a) => console.log('[enrolment-smoke]', ...a);
@@ -70,14 +73,51 @@ async function cleanup() {
   }
 }
 
-async function main() {
-  const enrolDir = mkdtempSync(join(tmpdir(), 'enrolment-smoke-'));
+/**
+ * Poll `node`'s own control DB until its own CadrePeer row is present, invitation-admitted, and
+ * verifies against its anchor — the device write gate's predicate (self-voucher.ts), real crypto.
+ */
+async function waitForSelfAdmitted(node, ms, what) {
+  const selfId = node.peerId.toString();
+  const deadline = Date.now() + ms;
+  let last = 'no read yet';
+  while (Date.now() < deadline) {
+    try {
+      const db = node.getControlDatabase();
+      const self = (await db.queryCadrePeers()).find((r) => r.peerId === selfId);
+      if (!self) {
+        last = 'own CadrePeer row not replicated yet';
+      } else if (!(self.vouchSig === null && self.vouchUsage != null)) {
+        throw new Error(`${what}: own row is not invitation-admitted (vouchSig=${self.vouchSig}, vouchUsage=${self.vouchUsage})`);
+      } else {
+        const [usages, invites] = await Promise.all([db.queryCadreInviteUsages(), db.queryCadreInvites()]);
+        const usage = usages.find((u) => u.usageStampId === self.vouchUsage);
+        const invite = usage && invites.find((i) => i.key === usage.inviteKey);
+        if (!usage || !invite) {
+          last = 'usage/invitation rows not replicated yet';
+        } else if (verifyInvitationAdmission(node.partyId, self, usage, invite, (k) => node.getTrustedOwnerStore().has(k))) {
+          return;
+        } else {
+          throw new Error(`${what}: own row present but verifyInvitationAdmission REJECTS it`);
+        }
+      }
+    } catch (e) {
+      if (String(e?.message).startsWith(what)) throw e;
+      last = e?.message ?? String(e);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`${what}: own row never verified within ${ms}ms (last: ${last})`);
+}
 
+async function main() {
   // ── 1. Boot the REAL drone as founder (no DRONE_BOOTSTRAP_CONTROL_ADDR) ─────────────────
+  // DRONE_AUTO_ACCEPT is left at its default (off), so every membership below is attributable
+  // to redemption alone, never to the opt-in authorizePeer fallback.
   L('starting drone.mjs as founder ...');
   drone = spawn(process.execPath, ['drone.mjs'], {
     cwd: import.meta.dirname,
-    env: { ...process.env, STRAND_ID, DRONE_ENROL_DIR: enrolDir },
+    env: { ...process.env, STRAND_ID, DRONE_STRAND_ROLE: 'found', DRONE_AUTO_ACCEPT: '0' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   drone.stdout.on('data', (d) => { droneOut += d.toString(); });
@@ -86,15 +126,20 @@ async function main() {
   const [, droneAddr] = await waitForDroneLine(/PROOF_WS_ADDR=(\S+)/, BOOT_TIMEOUT_MS, 'PROOF_WS_ADDR');
   L('drone control addr =', droneAddr);
 
-  // The invite is minted only by a FOUNDER, and only after owner genesis — so this line
+  // The invitation is minted only by a FOUNDER, and only after owner genesis — so this line
   // appearing at all is already evidence that genesis ran on a solo node.
   const [, encodedInvite] = await waitForDroneLine(/PROOF_INVITE=(\S+)/, BOOT_TIMEOUT_MS, 'PROOF_INVITE');
-  L('drone advertised an invite (', encodedInvite.length, 'chars )');
-  await waitForDroneLine(/ENROL_ARMED/, BOOT_TIMEOUT_MS, 'ENROL_ARMED');
+  const invitation = decodeCadreInvitation(encodedInvite);
+  L('drone advertised a cadre invitation (', encodedInvite.length, 'chars, uses =',
+    invitation.invite.totalUses, ', members =', invitation.members.length, ')');
+  if (/ENROL_ARMED/.test(droneOut)) {
+    throw new Error('drone armed the auto-accept fallback with DRONE_AUTO_ACCEPT=0 — membership would not be attributable to redemption');
+  }
 
   // ── 2. Boot a joiner in a separate node, bootstrapped to the drone ──────────────────────
   // 'transaction' profile: the device peers' profile, and the one with no relay server of its
-  // own — the shape that actually needs to be admitted.
+  // own — the shape that actually needs to be admitted. A stable identity is REQUIRED: the
+  // redemption is signed with the key behind the joiner's peer id.
   joiner = new CadreNode({
     controlNetwork: { partyId: PARTY_ID, bootstrapNodes: [droneAddr] },
     profile: 'transaction',
@@ -103,43 +148,39 @@ async function main() {
     network: { transports: [webSockets()], listenAddrs: [] },
     strandClusterSize: 2,
     hibernation: { enabled: false },
+    privateKey: await generateKeyPair('Ed25519'),
   });
   await joiner.start();
   const joinerId = joiner.peerId?.toString();
   L('joiner peerId =', joinerId);
 
-  // ── 3. Redeem the invite — the joiner's half of the ceremony ────────────────────────────
-  await joiner.dialInvite(joiner.decodeInvite(encodedInvite));
-  L('joiner dialInvite ok');
-
-  // ── 4. The drone must now accept this joiner ON ITS OWN ─────────────────────────────────
-  // No peerId is handed to the drone by this script — that is the point. It has to notice the
-  // joiner on its control node and accept it while its enrollment window is open.
-  const accepted = new RegExp(`ENROL_ACCEPTED=${joinerId}`);
-  await waitForDroneLine(accepted, ENROL_TIMEOUT_MS, `ENROL_ACCEPTED for ${joinerId}`);
-  L('drone accepted the joiner');
-
-  // Membership read-back is best-effort by design (it races the control write), so a missing
-  // ENROLLED= is reported, never failed on. ENROL_ACCEPTED above is the ceremony's outcome.
-  try {
-    await waitForDroneLine(new RegExp(`ENROLLED=${joinerId}`), 20_000, 'ENROLLED');
-    L('drone confirmed membership read-back');
-  } catch {
-    L('NOTE membership read-back not confirmed within 20s — expected under load; ' +
-      'ENROL_ACCEPTED is the authoritative signal');
+  // ── 3. Redeem — the WHOLE ceremony on 1.14 ──────────────────────────────────────────────
+  const redeemed = await joiner.redeemCadreInvitation(invitation);
+  L('joiner redeemed; admitted by', redeemed.peerId, 'at', redeemed.redeemedAt);
+  if (!joiner.getTrustedOwnerStore()?.has(invitation.ownerKeys[0])) {
+    throw new Error('redemption did not pin the invitation owner key into the joiner anchor');
   }
 
+  // ── 4. The seated row reaches the joiner and verifies (the device write gate) ──────────
+  await waitForSelfAdmitted(joiner, ENROL_TIMEOUT_MS, 'joiner');
+  L('joiner own row is invitation-admitted and verifies against its anchor');
+
+  // Idempotent re-redemption (a phone restarting with the invitation still injected) must be
+  // accepted again without spending a second seat.
+  await joiner.redeemCadreInvitation(invitation);
+  L('joiner re-redemption accepted (idempotent)');
+
   // ── 5. A JOINER DRONE (drone-B) — the harness's other half ─────────────────────────────
-  // drone-B is a second host-side process, cross-bootstrapped to drone-A. It runs both halves
-  // of the ceremony: it redeems the invite (anchoring drone-A's owner keys) and drone-A
-  // accepts it. Its ownerAddrs need no emulator rewrite — it is a host process, so it dials
-  // the drone's loopback addresses exactly as advertised.
+  // drone-B is a second host-side process, cross-bootstrapped to drone-A, redeeming the SAME
+  // invitation (multi-use). Its members need no emulator rewrite — it is a host process, so it
+  // dials the drone's loopback addresses exactly as advertised.
   L('starting a joiner drone (drone-B) ...');
   droneB = spawn(process.execPath, ['drone.mjs'], {
     cwd: import.meta.dirname,
     env: {
       ...process.env,
       STRAND_ID,
+      DRONE_STRAND_ROLE: 'join',
       DRONE_BOOTSTRAP_CONTROL_ADDR: droneAddr,
       DRONE_INVITE: encodedInvite,
     },
@@ -148,38 +189,23 @@ async function main() {
   droneB.stdout.on('data', (d) => { droneBOut += d.toString(); });
   droneB.stderr.on('data', (d) => { droneBOut += d.toString(); });
 
-  await waitForLine(() => droneBOut, () => droneB, /ENROL_DIALED/, BOOT_TIMEOUT_MS,
-    'drone-B ENROL_DIALED');
-  L('drone-B redeemed the invite');
+  await waitForLine(() => droneBOut, () => droneB, /ENROL_REDEEMED|ENROL_REDEEM_FAILED.*/, BOOT_TIMEOUT_MS,
+    'drone-B redemption outcome');
+  if (/ENROL_REDEEM_FAILED/.test(droneBOut)) {
+    throw new Error(`drone-B could not redeem the invitation:\n${droneBOut.match(/ENROL_REDEEM_FAILED.*/)[0]}`);
+  }
+  L('drone-B redeemed the same invitation');
 
   const [, droneBId] = droneBOut.match(/control peerId = (\S+)/) ?? [];
   if (!droneBId) throw new Error('could not read drone-B peerId from its output');
-  await waitForDroneLine(new RegExp(`ENROL_ACCEPTED=${droneBId}`), ENROL_TIMEOUT_MS,
-    `ENROL_ACCEPTED for drone-B ${droneBId}`);
-  L('drone-A accepted drone-B');
 
-  if (/ENROL_FAILED=/.test(droneOut)) {
-    throw new Error(`drone reported ENROL_FAILED:\n${droneOut.match(/ENROL_FAILED=.*/g)?.join('\n')}`);
+  // ── 6. Membership as a MEMBER sees it: the joiner (now a member) authorizes drone-B ─────
+  const deadline = Date.now() + ENROL_TIMEOUT_MS;
+  while (!(await joiner.isAuthorizedMember(droneBId).catch(() => false))) {
+    if (Date.now() > deadline) throw new Error(`joiner never saw drone-B ${droneBId} as an authorized member`);
+    await new Promise((r) => setTimeout(r, 1000));
   }
-
-  // Exactly-once: the watcher's tick body awaits acceptPhone and a settle delay, so it runs
-  // LONGER than its own poll interval. Without a re-entrancy guard, overlapping ticks each
-  // pass the `settled.has` check before any records the outcome and the SAME peer is accepted
-  // repeatedly (observed on-device: 12 accepts of one peerId) — concurrent writes to
-  // default/CadrePeer, which is what tore a multi-tree commit in the first n=4 device run.
-  // Waiting for the first ENROL_ACCEPTED cannot see this; only the count can.
-  const acceptCounts = new Map();
-  for (const m of droneOut.match(/ENROL_ACCEPTED=\S+/g) ?? []) {
-    acceptCounts.set(m, (acceptCounts.get(m) ?? 0) + 1);
-  }
-  const repeated = [...acceptCounts.entries()].filter(([, n]) => n > 1);
-  if (repeated.length > 0) {
-    throw new Error(
-      'the same peer was accepted more than once — the joiner watcher is re-entrant:\n' +
-        repeated.map(([id, n]) => `  ${n}x ${id}`).join('\n'),
-    );
-  }
-  L(`exactly-once accept verified for ${acceptCounts.size} peer(s)`);
+  L('joiner authorizes drone-B — both redemptions replicated');
 }
 
 main()

@@ -105,7 +105,7 @@ jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: mockGetEngine }),
 }));
 
-const mockPersistProvisionedDeviceUser = jest.fn(async (_displayName: string, publicKeyCompressedHex: string) => ({
+const mockPersistProvisionedDeviceUser = jest.fn(async (_displayName: string, publicKeyCompressedHex: string, _options?: { userId?: string }) => ({
 	id: "user-1",
 	name: "Officer One",
 	activeKeys: [{ key: publicKeyCompressedHex, type: "P", expiration: Date.now() }],
@@ -121,8 +121,11 @@ const mockMarkRecoveryInProgress = jest.fn(async () => {});
 const mockClearRecoveryInProgress = jest.fn(async () => {});
 
 jest.mock("../../../engines/device-user", () => ({
-	persistProvisionedDeviceUser: (displayName: string, publicKeyCompressedHex: string) =>
-		mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex),
+	persistProvisionedDeviceUser: (displayName: string, publicKeyCompressedHex: string, options?: { userId?: string }) =>
+		// Forward only the arguments actually passed, so first-run assertions stay two-argument.
+		options === undefined
+			? mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex)
+			: mockPersistProvisionedDeviceUser(displayName, publicKeyCompressedHex, options),
 	persistDeviceProvisioningRecord: (record: unknown) => mockPersistDeviceProvisioningRecord(record),
 	getDeviceUser: () => mockGetDeviceUser(),
 	getDeviceProvisioningRecord: () => mockGetDeviceProvisioningRecord(),
@@ -152,9 +155,19 @@ jest.mock("react-native", () => {
 			return Reflect.get(target, prop, receiver);
 		},
 	});
+	// Platform.OS is set per test via __setPlatformOS (never inherited from the jest preset's "ios").
+	let platformOS = "ios";
+	const platformProxy = new Proxy(actual.Platform as Record<string, unknown>, {
+		get(target, prop, receiver) {
+			if (prop === "OS") return platformOS;
+			return Reflect.get(target, prop, receiver);
+		},
+	});
 	return new Proxy(actual, {
 		get(target, prop, receiver) {
 			if (prop === "TurboModuleRegistry") return turboModuleRegistryProxy;
+			if (prop === "Platform") return platformProxy;
+			if (prop === "__setPlatformOS") return (os: string) => { platformOS = os; };
 			if (prop === "__attestationNativeFake") return attestationNativeFake;
 			return Reflect.get(target, prop, receiver);
 		},
@@ -165,7 +178,8 @@ import React from "react";
 import renderer from "react-test-renderer";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- reach the fake exposed by the react-native mock above.
-const { __attestationNativeFake: nativeFake } = require("react-native") as {
+const { __attestationNativeFake: nativeFake, __setPlatformOS: setPlatformOS } = require("react-native") as {
+	__setPlatformOS: (os: string) => void;
 	__attestationNativeFake: {
 		provisionDeviceKey: jest.Mock;
 		provisionRecoveryKey: jest.Mock;
@@ -625,10 +639,35 @@ describe("ProvisionSigningKeyScreen — 49-10 recovery variant (D-16) and D-18 t
 		expect(addedKey.key).toBe(NEW_SIGNING_KEY_HEX);
 		expect(typeof mockAddKey.mock.calls[0]![1]).toBe("function");
 
-		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Officer One", NEW_SIGNING_KEY_HEX);
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Officer One", NEW_SIGNING_KEY_HEX, { userId: "user-1" });
 
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("signingKeyProvisioningSuccessHeading");
+	});
+
+	it("(f) R1/R2: recovery keeps the network user's id and name end to end (one identity)", async () => {
+		mockGetSummary.mockResolvedValue({
+			id: "net-user-1",
+			name: "Una Tester",
+			activeKeys: [
+				{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+				{ key: RECOVERY_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+			],
+		});
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(mockPersistProvisionedDeviceUser).toHaveBeenCalledWith("Una Tester", NEW_SIGNING_KEY_HEX, {
+			userId: "net-user-1",
+		});
+		const revokeSignature = mockRevokeKey.mock.calls[0]![1] as { signerUserId: string };
+		expect(revokeSignature.signerUserId).toBe("net-user-1");
 	});
 
 	it("(c) refreshes the provisioning record with the new attested key and an EMPTY certificateChainBase64 — no produceAttestation on this path", async () => {
@@ -856,5 +895,89 @@ describe("ProvisionSigningKeyScreen — D-14 boot invariant", () => {
 			"utf8",
 		);
 		expect(appProviderSource).not.toContain("ProvisionSigningKey");
+	});
+});
+
+describe("ProvisionSigningKeyScreen network-user-unresolved (UAT 62 Q)", () => {
+	it("explains both causes and offers Accept an Invitation alongside Try Again", async () => {
+		mockHappyPathNative();
+		mockGetCurrentUser.mockRejectedValueOnce(new Error("User not found"));
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("signingKeyProvisioningNetworkUserUnresolvedBody");
+		expect(tr.root.findByProps({ testID: "signing-key-provisioning-retry-button" })).toBeTruthy();
+
+		const inviteButton = tr.root.findByProps({ testID: "signing-key-provisioning-accept-invitation-button" });
+		const pressable = inviteButton.findAll((node) => typeof node.props.onPress === "function")[0]!;
+		await renderer.act(async () => pressable.props.onPress());
+		expect(mockNavigate).toHaveBeenCalledWith("AcceptInvitation");
+	});
+});
+
+// The digest handed to native depends on the platform (UAT 62 test 22): iOS native signs its input as the
+// final ECDSA hash, so it receives sha256(digest); Android's SHA256withECDSA hashes itself, so it receives
+// the digest. Asserted for all three native sign calls this screen makes.
+describe.each(["ios", "android"] as const)("ProvisionSigningKeyScreen native sign input on %s", (platform) => {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const { createHash } = require("crypto") as typeof import("crypto");
+	const expected = (d: number[]) => {
+		const raw = Buffer.from(Uint8Array.from(d));
+		return (platform === "ios" ? createHash("sha256").update(raw).digest() : raw).toString("base64");
+	};
+
+	beforeEach(() => {
+		setPlatformOS(platform);
+	});
+	afterEach(() => {
+		setPlatformOS("ios");
+	});
+
+	it("first-run recovery-key addKey: signWithDeviceKey receives the platform input", async () => {
+		mockDeviceUserFixture = { id: "user-1", name: "Officer One", activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX }] };
+		mockProvisioningRecordFixture = { recoveryPublicKeyCompressedHex: RECOVERY_HEX };
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [{ key: POST_ATTESTATION_SIGNING_HEX, type: "P", expiration: Date.now() }],
+		});
+		nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: "deadbeef" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		expect(nativeFake.signWithDeviceKey).toHaveBeenCalledTimes(1);
+		expect(nativeFake.signWithDeviceKey.mock.calls[0]![1]).toBe(expected([1, 2, 3]));
+	});
+
+	it("recovery: revoke and replacement addKey both hand signWithRecoveryKey the platform input", async () => {
+		mockRouteParams = { reason: "invalidated" };
+		mockGetSummary.mockResolvedValue({
+			id: "user-1",
+			name: "Officer One",
+			activeKeys: [
+				{ key: OLD_SIGNING_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+				{ key: RECOVERY_KEY_HEX, type: "P", expiration: Date.now() + 1000 },
+			],
+		});
+		nativeFake.provisionDeviceKey.mockResolvedValue({
+			publicKeyBase64: "NEW-SIGNING-SPKI-DER-BASE64",
+			publicKeyCompressedHex: NEW_SIGNING_KEY_HEX,
+		});
+		nativeFake.provisionRecoveryKey.mockResolvedValue({
+			publicKeyBase64: "RECOVERY-SPKI-DER-BASE64",
+			publicKeyCompressedHex: RECOVERY_KEY_HEX,
+		});
+		nativeFake.signWithRecoveryKey.mockResolvedValue({ signatureHex: "cafebabe" });
+
+		const tr = await renderScreen();
+		await press(tr, primaryButton(tr));
+
+		const digests = nativeFake.signWithRecoveryKey.mock.calls.map((c: unknown[]) => c[1]);
+		expect(digests).toContain(expected([9, 9, 9]));
+		expect(digests).toContain(expected([1, 2, 3]));
+		expect(digests).toHaveLength(2);
 	});
 });

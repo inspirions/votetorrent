@@ -107,6 +107,7 @@ import {
 	SEED_ELECTION,
 	seedPublicSurface,
 } from '../fixtures/seed-public-surface.js';
+import { seedKeyholderPrerequisites, insertBoundKeyholder } from '../fixtures/seed-bound-keyholder.js';
 import { createNetworkDb, closeNetworkDb, deleteNetworkDb, writeRowCounts, upsertNetwork, notifyPeerWrite } from '@votetorrent/web-data/public';
 
 declare global {
@@ -172,11 +173,11 @@ const source: PublicSourceDeps = Object.freeze({
  * `applyLocalWrite`'s own delete. `'u1'` already carries a Keyholder row
  * against `FIXTURE_ELECTION_DB_ID` (`e1`) -- a DIFFERENT primary-key tuple
  * (`Keyholder`'s PK is `(ElectionId, ElectionRevision, UserId)`), so reusing
- * the same `UserId` here creates no collision. Inserted through GENUINE SQL
- * (the exact recipe `test/browser/live-read-gate.js`'s own rung 7 measured
- * needs no signing ceremony), never the external-write seam -- this row's
- * whole purpose is to be deleted by a real, local `db.onDataChange`-firing
- * statement later.
+ * the same `UserId` here creates no collision. Inserted through GENUINE SQL,
+ * via `seed-bound-keyholder.js` (62-02, D-26: `Keyholder.InsertValid` now
+ * requires a signed `KeyholderDkgBinding` in the same transaction), never the
+ * external-write seam -- this row's whole purpose is to be deleted by a real,
+ * local `db.onDataChange`-firing statement later.
  */
 const LOCAL_WRITE_KEYHOLDER_USER_ID = 'u1';
 
@@ -214,10 +215,17 @@ async function seedLivenessElection(db: import('@quereus/quereus').Database): Pr
 	);
 	await applyPeerRowBatch(db, 'Election', [{ op: 'upsert', row: electionRow as never }]);
 	await applyPeerRowBatch(db, 'ElectionRevision', [{ op: 'upsert', row: revisionRow as never }]);
-	await db.exec(
-		'insert into Keyholder (ElectionId, ElectionRevision, UserId) with context Tid = :tid values (:electionId, :revision, :userId)',
-		{ tid: 56014, electionId: LIVENESS_ELECTION_ID, revision: FIXTURE_REVISION, userId: LOCAL_WRITE_KEYHOLDER_USER_ID },
-	);
+	// 62-02 (D-26): prerequisites before the observed write, insertBoundKeyholder
+	// AS the write -- u1 already has a UserKey from seedPublicSurface's own
+	// seedKeyReleaseTasks call, so this only adds an InviteSlot/InviteResult
+	// scoped to LIVENESS_ELECTION_ID.
+	const prereq = await seedKeyholderPrerequisites(db, {
+		electionId: LIVENESS_ELECTION_ID,
+		userId: LOCAL_WRITE_KEYHOLDER_USER_ID,
+		userName: 'vtx-fixture Liveness Keyholder',
+		now: SEED_NOW,
+	});
+	await insertBoundKeyholder(db, prereq, { electionId: LIVENESS_ELECTION_ID, revision: FIXTURE_REVISION, tid: 56014 });
 }
 
 /**
@@ -246,6 +254,12 @@ async function seedFixtureSurface(): Promise<void> {
 			Election: PUBLIC_SURFACE_EXPECTED_COUNTS.Election + 1,
 			ElectionRevision: PUBLIC_SURFACE_EXPECTED_COUNTS.ElectionRevision + 1,
 			Keyholder: PUBLIC_SURFACE_EXPECTED_COUNTS.Keyholder + 1,
+			// 62-02 (D-26): seedLivenessElection's own InviteSlot/InviteResult/
+			// KeyholderDkgBinding trio for its one extra Keyholder (its UserKey is
+			// NOT new -- u1 already has one from seedPublicSurface).
+			InviteSlot: PUBLIC_SURFACE_EXPECTED_COUNTS.InviteSlot + 1,
+			InviteResult: PUBLIC_SURFACE_EXPECTED_COUNTS.InviteResult + 1,
+			KeyholderDkgBinding: PUBLIC_SURFACE_EXPECTED_COUNTS.KeyholderDkgBinding + 1,
 		});
 		upsertNetwork({
 			networkHash: FIXTURE_NETWORK_HASH,
@@ -340,6 +354,17 @@ async function applyLocalWrite(title: string): Promise<void> {
 		...PUBLIC_SURFACE_EXPECTED_COUNTS,
 		Election: PUBLIC_SURFACE_EXPECTED_COUNTS.Election + 1,
 		ElectionRevision: PUBLIC_SURFACE_EXPECTED_COUNTS.ElectionRevision + 1,
+		// 62-02 (D-26): the delete above removes only the Keyholder row (hence no
+		// override for it here — it reverts to the base count). Its
+		// InviteSlot/InviteResult/KeyholderDkgBinding siblings are NOT deleted
+		// (the first two are InsertOnly; the binding is NoDelete), so the live
+		// count is STILL seedLivenessElection's +1 — these three must stay
+		// overridden here or the very next re-attach (triggered by this delete's
+		// own local notice) throws RowCountMismatchError before the title ever
+		// re-renders.
+		InviteSlot: PUBLIC_SURFACE_EXPECTED_COUNTS.InviteSlot + 1,
+		InviteResult: PUBLIC_SURFACE_EXPECTED_COUNTS.InviteResult + 1,
+		KeyholderDkgBinding: PUBLIC_SURFACE_EXPECTED_COUNTS.KeyholderDkgBinding + 1,
 	});
 }
 

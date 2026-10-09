@@ -15,10 +15,14 @@ import { nowCanonicalDatetime, toCanonicalDatetime, fromCanonicalDatetime, diges
 import { ElectionsEngine, peekNextElectionTid } from '../../src/elections/elections-engine.js'
 import { SigningEngine } from '../../src/signing/signing-engine.js'
 import { NetworksEngine } from '../../src/networks/networks-engine.js'
-import { randomTestKeyPair } from './keys.js'
+import { randomTestKeyPair, type TestKeyPair } from './keys.js'
 import { AsyncStorage } from '../shims/react-native.js'
+import { IntakeEngine, createIntakeOpener } from '../../src/intake/index.js'
+import { InMemoryTestKeyVault } from '../../src/crypto/vault.js'
+import { generateEncryptionKeyPair, officerEncryptionKeyAlias, OFFICER_ENCRYPTION_KEY_POLICY } from '../../src/crypto/index.js'
 import type { EngineContext } from '../../src/types.js'
 import type { DbFactory } from '../../src/types.js'
+import type { IntakeOpener } from '../../src/intake/types.js'
 import type {
   Authority,
   AuthorityInviteInvokes,
@@ -152,6 +156,23 @@ export function makeTestSignCallback (user: User): (digest: Uint8Array) => Promi
       signerUserId: user.id,
     }
   }
+}
+
+/**
+ * The key pair registered (as UserKey) for a fixture user created via
+ * makeTestUser/makeDistinctTestUser. Signers MUST use this rather than a fresh
+ * randomTestKeyPair(): AdminSigning/OfficerSignature.SignerKeyValid now requires the
+ * signer key to be a registered, unexpired UserKey of the signing user, so a signature
+ * by an unregistered throwaway key is (correctly) refused.
+ */
+export function testKeyPairFor (userId: string): TestKeyPair {
+  const privateHex = testUserPrivateKeys.get(userId)
+  if (!privateHex) {
+    throw new Error(
+      `testKeyPairFor: no key recorded for user.id=${userId} — was this user created via makeTestUser/makeDistinctTestUser?`
+    )
+  }
+  return { privateHex, publicHex: bytesToHex(secp256k1.getPublicKey(hexToBytes(privateHex))) }
 }
 
 /**
@@ -828,6 +849,8 @@ export async function seedAuthorityInvite (
       admin: { effectiveAt: adminEffectiveAt, thresholdPolicies },
       officers,
     },
+    // 62-102: respondToInvite signs with the invite's one-time private key itself.
+    invitePrivate: inviteShare.invitePrivate,
     inviteSignature: 'a'.repeat(128),
   }
   await auth.networkEngine.respondToInvite(inviteAction)
@@ -1411,4 +1434,65 @@ export async function addSiblingAuthority (
   const row = await auth.ctx.db.prepare('select Id from Authority where Name = :n').get({ n: name })
   if (!row) throw new Error(`addSiblingAuthority: Authority row not found for name=${name}`)
   return row.Id as string
+}
+
+// ---------------------------------------------------------------------------
+// D-49 (Phase 62 Plan 31) — intake-recipient provisioning
+// ---------------------------------------------------------------------------
+
+/** Per-(ctx, authorityId) cache so a spec that calls `provisionTestIntakeRecipient` more than once
+ * for the SAME ctx/authority (e.g. once per `describe`/`it`-shared setup) never registers a SECOND
+ * officer encryption key — which would otherwise orphan the first vault/opener pair while a
+ * `UserEncryptionKey` row for the OLD key stays current for nobody. Keyed by ctx object identity, so
+ * two distinct `createTestNetwork()` calls never collide. */
+const intakeRecipientCache = new WeakMap<EngineContext, Map<string, { vault: InMemoryTestKeyVault; opener: IntakeOpener; publicKey: string }>>()
+
+/**
+ * D-49: registers `ctx.user`'s officer encryption key for `authorityId` (62-14
+ * `IntakeEngine.registerOfficerEncryptionKey`, signed with `makeTestSignCallback(ctx.user)`),
+ * stores the secret in a fresh (or caller-supplied) `InMemoryTestKeyVault`, and sets
+ * `ctx.intakeOpener = IntakeEngine(ctx).createOpener(vault)` on the SAME ctx object the engine
+ * under test holds — so the officer who registered the key is also the one `ctx.intakeOpener` can
+ * open sealed rows for. Idempotent per (ctx, authorityId): a second call (with no caller-supplied
+ * vault) returns the SAME triple rather than minting a second, newly-current key.
+ */
+export async function provisionTestIntakeRecipient (
+  ctx: EngineContext,
+  authorityId: string,
+  options?: { vault?: InMemoryTestKeyVault }
+): Promise<{ vault: InMemoryTestKeyVault; opener: IntakeOpener; publicKey: string }> {
+  if (!ctx.user) {
+    throw new Error('provisionTestIntakeRecipient: ctx.user must be bound (an officer must be signed in to register an intake key)')
+  }
+  let byAuthority = intakeRecipientCache.get(ctx)
+  if (byAuthority === undefined) {
+    byAuthority = new Map()
+    intakeRecipientCache.set(ctx, byAuthority)
+  }
+  const cached = byAuthority.get(authorityId)
+  if (cached !== undefined && options?.vault === undefined) return cached
+
+  const vault = options?.vault ?? new InMemoryTestKeyVault()
+  const intakeEngine = new IntakeEngine(ctx)
+  const registration = await intakeEngine.registerOfficerEncryptionKey(authorityId, vault, makeTestSignCallback(ctx.user))
+  const opener = intakeEngine.createOpener(vault)
+  ctx.intakeOpener = opener
+
+  const result = { vault, opener, publicKey: registration.publicKey }
+  byAuthority.set(authorityId, result)
+  return result
+}
+
+/**
+ * D-49: an opener for a fresh user id whose key lives in its own vault but is NOT a recipient of
+ * anything sealed by `provisionTestIntakeRecipient` or any production sealer — the non-recipient
+ * control D-49's specs need (an officer who joined a DIFFERENT authority, or who never registered a
+ * key for this one).
+ */
+export async function makeTestOutsiderOpener (): Promise<{ userId: string; opener: IntakeOpener }> {
+  const userId = `outsider-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  const vault = new InMemoryTestKeyVault()
+  const generated = generateEncryptionKeyPair()
+  await vault.putSecret(officerEncryptionKeyAlias(userId), generated.secretKey, OFFICER_ENCRYPTION_KEY_POLICY)
+  return { userId, opener: createIntakeOpener({ vault, userId }) }
 }

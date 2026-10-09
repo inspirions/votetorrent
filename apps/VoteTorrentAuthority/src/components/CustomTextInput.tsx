@@ -12,13 +12,18 @@ This component is used to easily enforce a standard input style across the app.
 Key features:
  - Custom placeholder component in order to have italicised placeholder text but normal input text
  - Allows for an icon to the right of the input, usually for a trash/x icon
- - Supports the widely used Image URL input scheme with a make permanent button and info icon
+ - Supports the widely used Image URL input scheme with a make permanent button and info icon,
+   plus an optional status line under the input (see hooks/useMediaPin)
 */
 
 interface CustomTextInputProps extends TextInputProps {
 	title?: string;
 	isImageUrlField?: boolean;
 	makePermanentPressed?: () => void;
+	/** Disables the Make Permanent chip (e.g. empty URL, or a pin already running). */
+	makePermanentDisabled?: boolean;
+	/** Status of the last Make Permanent for this field's current value. */
+	permanentStatus?: {label: string; tone: 'muted' | 'success' | 'error'};
 	icon?: string;
 	onIconPress?: () => void;
 }
@@ -41,7 +46,13 @@ export function CustomTextInput(props: CustomTextInputProps) {
 	};
 
 	//spreading the props to avoid custom props from being overridden
-	const {onChangeText, placeholder, ...otherProps} = props;
+	const {onChangeText, placeholder, makePermanentDisabled, permanentStatus, ...otherProps} = props;
+	const statusColor =
+		permanentStatus?.tone === 'error'
+			? colors.error
+			: permanentStatus?.tone === 'success'
+				? colors.primary
+				: colors.textSecondary;
 
 	return (
 		<View style={styles.field}>
@@ -50,7 +61,11 @@ export function CustomTextInput(props: CustomTextInputProps) {
 					<ThemedText type="defaultSemiBold">{props.title}</ThemedText>
 					{props.isImageUrlField && (
 						<View style={styles.imageButtons}>
-							<ChipButton label={t('makePermanent')} onPress={props.makePermanentPressed} />
+							<ChipButton
+								label={t('makePermanent')}
+								onPress={props.makePermanentPressed}
+								disabled={makePermanentDisabled}
+							/>
 							{showHelpIcons && <FontAwesome6 name="circle-info" size={16} color={colors.text} onPress={props.onIconPress} />}
 						</View>
 					)}
@@ -71,6 +86,11 @@ export function CustomTextInput(props: CustomTextInputProps) {
 					</View>
 				)}
 				<TextInput
+					// URL fields: no auto-capitalization/correction — a keyboard-capitalized "Http://"
+					// is refused by Android's networking. Callers can still override via otherProps.
+					{...(props.isImageUrlField
+						? {autoCapitalize: 'none' as const, autoCorrect: false, keyboardType: 'url' as const}
+						: {})}
 					// The placeholder is drawn by a separate overlay (for italics), so the native
 					// input has no hint of its own — expose the field name and placeholder to
 					// screen readers explicitly. Callers can still override via otherProps.
@@ -91,6 +111,14 @@ export function CustomTextInput(props: CustomTextInputProps) {
 					/>
 				)}
 			</View>
+			{permanentStatus && (
+				<ThemedText
+					testID="custom-text-input-permanent-status"
+					accessibilityLiveRegion="polite"
+					style={[styles.status, {color: statusColor}]}>
+					{permanentStatus.label}
+				</ThemedText>
+			)}
 		</View>
 	);
 }
@@ -132,5 +160,10 @@ const styles = StyleSheet.create({
 	icon: {
 		marginLeft: 10,
 		marginRight: 6
+	},
+	status: {
+		marginTop: 6,
+		marginLeft: 14,
+		fontSize: 13
 	}
 });
