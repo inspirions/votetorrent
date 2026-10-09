@@ -39,6 +39,7 @@
  *   echo '#MPG# {"id":1,"op":"ping"}' | node peer-agent.mjs
  */
 import { createFrameReader, encodeFrame } from './lib/wire.mjs';
+import { decodeCadreInvitation } from '@serfab/cadre-core';
 import {
   buildNode, generateKeyPair, strandConfig,
   PARTY_ID, STRAND_ID, GATE_TABLE,
@@ -139,7 +140,7 @@ const ops = {
     const db = node.getControlDatabase();
     if (!db) throw new Error('no control database after start()');
     await db.ensureOwnerKey(owner.publicKeyB64);
-    node.initializeSeedBootstrap(owner.privateKeyB64);
+    await node.initializeSeedBootstrap(owner.privateKeyB64);
     return { publicKeyB64: owner.publicKeyB64 };
   },
 
@@ -150,20 +151,15 @@ const ops = {
    * exercises the encode/decode path a device run depends on instead of quietly skipping
    * it by passing a live object between two nodes that share a heap.
    */
-  createInvite: async () => {
-    const { invite, encodedInvite } = await requireNode().createInvite();
-    return { encodedInvite, partyId: invite?.partyId ?? null };
+  createInvite: async ({ peerId }) => {
+    const { invitation, encoded } = await requireNode().createCadreInvitation({ peerId, grantsOwner: false });
+    return { encodedInvite: encoded, partyId: invitation.partyId };
   },
 
-  dialInvite: async ({ encodedInvite }) => {
-    const node = requireNode();
-    await node.dialInvite(node.decodeInvite(encodedInvite));
-    return {};
-  },
-
-  acceptPhone: async ({ phonePeerId, encodedInvite }) => {
-    const node = requireNode();
-    await node.acceptPhone({ phonePeerId }, encodedInvite ? node.decodeInvite(encodedInvite) : undefined);
+  // cadre-core 1.14: redemption is the whole joiner ceremony — the answering member seats the
+  // row, so there is no owner-side acceptPhone any more.
+  redeemInvite: async ({ encodedInvite }) => {
+    await requireNode().redeemCadreInvitation(decodeCadreInvitation(encodedInvite));
     return {};
   },
 

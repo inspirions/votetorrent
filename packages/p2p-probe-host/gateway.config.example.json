@@ -4,8 +4,7 @@
   "publicObserverStrandIds": ["UPDATE_WITH_A_REAL_PUBLIC_ELECTION_STRAND_ID"],
   "enableRelay": false,
   "strandCohortTopic": {
-    "enabled": true,
-    "minSigs": 1
+    "enabled": true
   },
   "tls": {
     "certPath": "./certs/gateway-cert.pem",

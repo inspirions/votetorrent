@@ -57,7 +57,7 @@
 		"@libp2p/websockets": "^10",
 		"@optimystic/db-p2p": "^1.12.1",
 		"@quereus/store": "^4.20.1",
-		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.13.0#~/.yarn/patches/@serfab-cadre-core-npm-1.13.0-votetorrent.patch",
+		"@serfab/cadre-core": "patch:@serfab/cadre-core@npm%3A1.14.0#~/.yarn/patches/@serfab-cadre-core-npm-1.14.0-votetorrent.patch",
 		"@types/mocha": "^10.0.10",
 		"@types/node": "^22.13.10",
 		"@types/uuid": "^11.0.0",

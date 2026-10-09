@@ -162,14 +162,19 @@ Everything underneath looks healthy while replication silently never happens —
 layer in particular looks *pristine*, because it was never handed a peer to dial. L3
 makes the gate explicit instead of letting it masquerade as an L4 or L5 failure.
 
-Membership requires a `CadrePeer` row with an **anchored voucher**: a `stampId`, a
-`vouchOwner` present in the node's trusted-owner store, and a verifying `vouchSig`.
-Connecting does not produce one. The gate runs the real ceremony:
+Membership requires a `CadrePeer` row with an **anchored proof**: either an owner voucher (a
+`stampId`, a `vouchOwner` present in the node's trusted-owner store, and a verifying `vouchSig`)
+or, since cadre-core 1.14, an invitation admission (`vouchUsage` naming a `CadreInviteUsage` row
+that chains to an anchored owner). Connecting does not produce one. The gate runs the real ceremony:
 
 ```
 getIdentityOwnerKey → trustOwnerKeys → ensureOwnerKey → initializeSeedBootstrap   (founder genesis)
-createInvite → dialInvite → acceptPhone                                           (per joiner)
+createCadreInvitation({ peerId }) → redeemCadreInvitation                           (per joiner)
 ```
+
+On cadre-core <= 1.13 the per-joiner line was `createInvite → dialInvite → acceptPhone`; 1.14
+removed that API, and the member that answers a redemption seats the joiner's row itself. The
+historical notes below still name the old calls where they describe runs made on the old API.
 
 ## Two shapes: one process, or one process per node
 

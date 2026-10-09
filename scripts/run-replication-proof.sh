@@ -473,7 +473,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-found}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission,sereus:cadre:invite-proto,sereus:cadre:control-protocol-guard}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-found}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -570,7 +570,7 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # derived founder-ness ({}) is not reproducible here; join (founder: false) is the closest match.
 echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_B_STRAND_ROLE:-join} (from DRONE_B_STRAND_ROLE) under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" \
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission,sereus:cadre:invite-proto,sereus:cadre:control-protocol-guard}" \
   STRAND_ID="${STRAND_ID}" \
   DRONE_STRAND_ROLE="${DRONE_B_STRAND_ROLE:-join}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
@@ -728,10 +728,12 @@ new_content = re.sub(
     count=1,
 )
 
-# Inject PROOF_INVITE (cadre membership). The invite is base64url-encoded JSON carrying the
-# owner's dialable multiaddrs, and dialInvite DIALS them — so the drone's own 127.0.0.1
-# addresses have to get the same emulator-alias rewrite the constants above get, or the
-# device redeems an invite it can never reach. Decode, rewrite, re-encode.
+# Inject PROOF_INVITE (cadre membership). The invitation is base64url-encoded JSON whose
+# `members` are the dialable multiaddrs of the machines it can be redeemed at, and
+# redeemCadreInvitation DIALS them — so the drone's own 127.0.0.1 addresses have to get the same
+# emulator-alias rewrite the constants above get, or the device holds an invitation it can never
+# redeem. `members` is outside the owner-signed row, so rewriting it does not break the
+# invitation's proof. Decode, rewrite, re-encode.
 import base64, json
 
 def _b64url_decode(s):
@@ -741,9 +743,12 @@ def _b64url_encode(b):
     return base64.urlsafe_b64encode(b).decode().rstrip('=')
 
 decoded = json.loads(_b64url_decode(invite))
-decoded['ownerAddrs'] = [
+if not decoded.get('members'):
+    print('[run-replication-proof] ERROR: PROOF_INVITE has no `members` - not a cadre-core 1.14 CadreInvitation', file=sys.stderr)
+    sys.exit(1)
+decoded['members'] = [
     a.replace('/ip4/127.0.0.1/', '/ip4/10.0.2.2/').replace('/ip4/0.0.0.0/', '/ip4/10.0.2.2/')
-    for a in decoded.get('ownerAddrs', [])
+    for a in decoded['members']
 ]
 invite_for_device = _b64url_encode(json.dumps(decoded).encode())
 new_content, n_invite = re.subn(
@@ -783,7 +788,7 @@ if n_invite != 1:
 
 open(path, 'w').write(new_content)
 print(f"[run-replication-proof] PROOF_INVITE in runner injected ({len(invite_for_device)} chars, "
-      f"ownerAddrs={decoded['ownerAddrs']})")
+      f"members={decoded['members']})")
 print(f"[run-replication-proof] CONTROL_ADDR in runner injected: {control_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR in runner injected: {strand_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {strand_addr_b}")

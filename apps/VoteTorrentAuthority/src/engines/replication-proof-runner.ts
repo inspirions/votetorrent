@@ -81,7 +81,7 @@
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
 import { createScopedRnStorageProvider, scopedRnStoreName } from './storage-guard';
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, decodeCadreInvitation } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { VOTETORRENT_SCHEMA_SQL, NetworkEngine, AuthorityEngine, registerDbPlugins } from '@votetorrent/vote-engine/rn';
@@ -149,15 +149,16 @@ const CONTROL_ADDR_B = '/ip4/10.0.2.2/tcp/0/ws/p2p/UPDATE_AFTER_DRONE_RESTART';
 // keys from a throwaway proof network, never a device key. Placeholder disables the channel.
 const PROOF_INVITE_SHARE_URL = 'UPDATE_AFTER_DRONE_RESTART';
 
-// Cadre invite — the base64url-encoded CadreInvite drone-A mints at boot and advertises as
-// PROOF_INVITE=. The harness injects it here per-run, exactly like the addresses above (D-07).
+// Cadre invitation — the base64url-encoded CadreInvitation (cadre-core 1.14+) drone-A mints at
+// boot and advertises as PROOF_INVITE=. The harness injects it here per-run, exactly like the
+// addresses above (D-07), after rewriting its member addresses to the emulator alias.
 //
 // Without this the peer boots addressable but UNAUTHORIZED, and drone-A refuses its
-// strand-addr request as a non-member — the P2P-11 root cause found 2026-08-24. Dialing the
-// invite is only HALF the ceremony: the owner must then accept this peer's control peerId
-// (there is no auto-accept in cadre-core 0.12.0), which the harness arranges by handing the
-// peerId marker below to the drone. Placeholder-aware like the addresses: a placeholder skips
-// the ceremony and boots unenrolled, which is the pre-fix behaviour and a deliberate arm.
+// strand-addr request as a non-member — the P2P-11 root cause found 2026-08-24. Redeeming it is
+// the WHOLE ceremony on 1.14: the member that answers seats this peer's CadrePeer row during the
+// redemption, so no owner-side accept (and no peerId hand-off to the drone) is involved any more.
+// Placeholder-aware like the addresses: a placeholder skips the ceremony and boots unenrolled,
+// which is the pre-fix behaviour and a deliberate arm.
 const PROOF_INVITE = 'UPDATE_AFTER_DRONE_RESTART';
 
 // resolveBootstrapNodes — placeholder-aware address resolver (mirrors CadreNodeProvider).
@@ -621,7 +622,7 @@ export async function runReplicationProof(): Promise<void> {
     }
     L('relayReservation=', hasRelayReservation());
 
-    // ── 2c. Cadre enrolment — dial the owner's invite (P2P-11 membership gate) ─────────────
+    // ── 2c. Cadre enrolment — redeem the owner's invitation (P2P-11 membership gate) ───────
     // Ordering matters: AFTER the relay reservation, because on cadre-core 0.12.0 a
     // relay-only peer can return from start() before it holds a circuit address, and an
     // invite dialed in that window reads owner-signed control state nobody can serve yet
@@ -640,23 +641,20 @@ export async function runReplicationProof(): Promise<void> {
       L('enrolInvite=skipped (no invite injected — this peer will be refused as a non-member)');
     } else {
       try {
-        const invite = node.decodeInvite(PROOF_INVITE);
-        // dialInvite only DIALS. Anchoring the invite's ownerKeys is the joiner's half of
-        // redemption (cadre-core's trustOwnerKeys doc), and without it this node's trusted-owner
-        // anchor stays EMPTY: it authorizes nobody, and isSelfVouched can never be true
-        // (cadreAuthorized=false on every run before 2026-10-08).
-        const ownerKeys = invite.ownerKeys ?? [];
-        if (ownerKeys.length > 0) {
-          await node.trustOwnerKeys(ownerKeys, 'invite');
-        }
-        L('ownerKeysAnchored=', ownerKeys.length);
-        await node.dialInvite(invite);
-        L('enrolInvite=ok');
+        const invitation = decodeCadreInvitation(PROOF_INVITE);
+        // redeemCadreInvitation pins the invitation's ownerKeys into this node's anchor BEFORE it
+        // dials (the step whose absence left the anchor EMPTY — cadreAuthorized=false on every
+        // run before 2026-10-08), then redeems at the listed members in order. Acceptance means
+        // a member seated this peer's row; it still has to REPLICATE here before the cohort
+        // honours this peer's streams, which is what the 4b write gate waits for.
+        L('ownerKeysAnchored=', invitation.ownerKeys.length);
+        const redeemed = await node.redeemCadreInvitation(invitation);
+        L('enrolInvite=ok', 'admittedBy=', redeemed.peerId ?? '<unnamed>', 'at', redeemed.redeemedAt);
         selfRecordPublish = publishSelfRecordAfterEnrol(node);
       } catch (enrolErr) {
-        // Never fatal: the owner-side acceptPhone is the half that actually confers
-        // membership, and it can still land. Fail loudly in the log, continue the proof, and
-        // let strandPeers= be the authoritative signal.
+        // Never fatal: a peer that could not redeem still runs the proof, so an unenrolled run
+        // reads as THAT (cadreAuthorized=false, refused strand-addr) instead of an early abort.
+        // Fail loudly in the log, continue, and let strandPeers= be the authoritative signal.
         L('enrolInvite=failed', enrolErr);
       }
     }
@@ -709,9 +707,11 @@ export async function runReplicationProof(): Promise<void> {
         .filter((addr) => addr.includes('/p2p-circuit'));
 
     // ── 4b. WRITE GATE: wait until the OWNER has actually authorized this peer ──────────────
-    // Run 18 (2026-09-11) failed here, and `enrolInvite=ok` is why. That marker means only that
-    // THIS peer dialed the invite; it says nothing about the owner-side `acceptPhone`, which is
-    // the half that confers membership. Measured gap between the two on the n=4 device run:
+    // Run 18 (2026-09-11) failed here, and `enrolInvite=ok` is why. On the pre-1.14 API that marker
+    // meant only that THIS peer dialed the invite; it said nothing about the owner-side
+    // `acceptPhone`, the half that conferred membership. (On 1.14 `enrolInvite=ok` means a member
+    // seated our row — but it must still replicate HERE, so the gate stays.) Measured gap
+    // between the two on the n=4 device run:
     //
     //     Peer A  enrolInvite=ok 04:02:18   ->  drone ENROL_ACCEPTED 04:03:48   (90 s)
     //     Peer B  enrolInvite=ok 04:02:04   ->  drone ENROL_ACCEPTED 04:04:18   (134 s)
@@ -749,7 +749,7 @@ export async function runReplicationProof(): Promise<void> {
     // "45 x 5 s = 225 s", which was already stale arithmetic for the old tick-count shape).
     // SKIPPED when nothing could possibly authorize this peer. The harness's Step 1 is a SOLO
     // bootstrap boot: no drone, no invite injected (`enrolInvite=skipped`), `peers=0`. There is no
-    // owner to run acceptPhone, so `cadreAuthorized` can never become true and waiting the full
+    // member to redeem at, so `cadreAuthorized` can never become true and waiting the full
     // budget is not caution, it is dead time — run 23 spent 122 s of it there and pushed the
     // `strandId=` handshake past the harness's 420 s Step-1 window, failing a step that was
     // otherwise healthy (the app was still alive and working when the harness gave up).
@@ -757,7 +757,7 @@ export async function runReplicationProof(): Promise<void> {
     // Emitted as `skipped` rather than silently bypassed, so a run that skipped the gate is
     // legible as that and never mistaken for one that passed it.
     // Keyed on peer count alone. `peers=0` is the structural case — with no connection there is
-    // nobody to have run acceptPhone and nobody to serve the control read, so the answer cannot
+    // nobody to have seated our row and nobody to serve the control read, so the answer cannot
     // change no matter how long we wait. (An unenrolled peer WITH peers is a different shape: the
     // gate runs, spends its budget and reports `false`, which is the honest answer and is exactly
     // how an unenrolled networked run should read.)

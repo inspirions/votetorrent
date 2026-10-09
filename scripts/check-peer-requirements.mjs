@@ -206,6 +206,9 @@ const execAsync = promisify(exec);
 //
 // @optimystic 1.11.0 -> 1.12.1 bump (2026-10-08, @serfab stays 1.13.0, already latest): same single
 // mismatch, re-keyed. The peer range is still ^4.20.1; the cause is unchanged.
+//
+// @serfab 1.13.0 -> 1.14.0 bump (2026-10-09, @optimystic stays 1.12.1): no change to this set —
+// cadre-core 1.14 requires ^1.12.0, which the single 1.12.1 copy already satisfies.
 const KNOWN_ALLOWED = new Set([
   '@optimystic/quereus-plugin-crypto@npm:1.12.1',
 ]);

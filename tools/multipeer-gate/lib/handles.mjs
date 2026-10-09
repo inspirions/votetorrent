@@ -13,6 +13,7 @@
  * the shared heap was supplying for free.
  */
 import { STRAND_ID } from './topology.mjs';
+import { decodeCadreInvitation } from '@serfab/cadre-core';
 
 /** A node built and started inside THIS process. */
 export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = {}) {
@@ -65,18 +66,17 @@ export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = 
       const db = node.getControlDatabase();
       if (!db) throw new Error('no control database after start()');
       await db.ensureOwnerKey(owner.publicKeyB64);
-      node.initializeSeedBootstrap(owner.privateKeyB64);
+      await node.initializeSeedBootstrap(owner.privateKeyB64);
       return { publicKeyB64: owner.publicKeyB64 };
     },
 
-    createInvite: async () => {
-      const { encodedInvite } = await node.createInvite();
-      return { encodedInvite };
+    // cadre-core 1.14: a cadre invitation targeted at one joiner, redeemed by that joiner; the
+    // member that answers seats the joiner's row (no owner-side accept).
+    createInvite: async (peerId) => {
+      const { encoded } = await node.createCadreInvitation({ peerId, grantsOwner: false });
+      return { encodedInvite: encoded };
     },
-    dialInvite: async (encodedInvite) => { await node.dialInvite(node.decodeInvite(encodedInvite)); },
-    acceptPhone: async (phonePeerId, encodedInvite) => {
-      await node.acceptPhone({ phonePeerId }, encodedInvite ? node.decodeInvite(encodedInvite) : undefined);
-    },
+    redeemInvite: async (encodedInvite) => { await node.redeemCadreInvitation(decodeCadreInvitation(encodedInvite)); },
 
     isAuthorizedMember: async (peerId) => {
       try { return { value: await node.isAuthorizedMember(peerId) }; }
@@ -152,9 +152,8 @@ export function agentHandle(name, client) {
     circuitAddrsFor: (peerId) => client.call('circuitAddrsFor', { peerId }),
     dial: (peerId) => client.call('dial', { peerId }),
     genesis: () => client.call('genesis'),
-    createInvite: () => client.call('createInvite'),
-    dialInvite: (encodedInvite) => client.call('dialInvite', { encodedInvite }),
-    acceptPhone: (phonePeerId, encodedInvite) => client.call('acceptPhone', { phonePeerId, encodedInvite }),
+    createInvite: (peerId) => client.call('createInvite', { peerId }),
+    redeemInvite: (encodedInvite) => client.call('redeemInvite', { encodedInvite }),
     isAuthorizedMember: (peerId) => client.call('isAuthorizedMember', { peerId }),
     listAuthorizedMembers: () => client.call('listAuthorizedMembers'),
     addStrand: (config) => client.call('addStrand', { mode: config.mode, founder: config.founder }),

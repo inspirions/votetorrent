@@ -1,42 +1,58 @@
 /**
  * self-voucher.ts — isSelfVouched (QUICK-260928-jwi).
  *
- * Mirrors @serfab/cadre-core 1.6.0's PRIVATE `CadreNode#hasAnchoredVoucher(row)`
- * (cadre-node.js:6081) — checks 2-4 of the authorized-membership predicate (complete
- * voucher, `VouchOwner` anchored in the node-local trust store, signature verifies over
- * the row's (PeerId, StampId) digest) — applied to THIS peer's own `CadrePeer` row.
+ * Mirrors @serfab/cadre-core 1.14.0's PRIVATE `CadreNode#hasAnchoredProof(row, chain)` —
+ * checks 2-4 of the authorized-membership predicate — applied to THIS peer's own `CadrePeer`
+ * row. A row carries one of two proofs, and the voucher wins when both are present:
+ *  - an owner VOUCHER (`hasAnchoredVoucher`): complete voucher, `VouchOwner` anchored in the
+ *    node-local trust store, signature valid over the row's (partyId, PeerId, StampId) digest;
+ *  - an INVITATION ADMISSION (`vouchSig` null, `vouchUsage` set): the row a member seats when
+ *    this peer redeems a cadre invitation, judged by the exported `verifyInvitationAdmission`
+ *    over the `CadreInviteUsage` row it names and the `CadreInvite` row that usage names.
  * Check 5 (revocation) is already applied upstream by `ControlDatabase.queryCadrePeers`.
  *
  * It exists because `listAuthorizedMembers()` / `isAuthorizedMember()` unconditionally
- * exclude self (check 1: `row.peerId !== selfPeerId`, cadre-node.js:6058), so neither can
- * ever answer true for our own row, and `isMember(self)` is the addressable surface — it
- * reads true before any owner has vouched at all. Only public `CadreNode` API is read
- * here (`getControlDatabase()`, `getTrustedOwnerStore()`, the exported
- * `verifyCadrePeerVoucher`) — no private cadre-core field.
+ * exclude self (check 1: `row.peerId !== selfPeerId`), so neither can ever answer true for
+ * our own row, and `isMember(self)` is the addressable surface — it reads true before any
+ * owner has vouched at all. Only public `CadreNode` API is read here (`partyId`,
+ * `getControlDatabase()`, `getTrustedOwnerStore()`, the exported `verifyCadrePeerVoucher` and
+ * `verifyInvitationAdmission`) — no private cadre-core field.
  *
- * Pinned to cadre-core 1.6.0's `hasAnchoredVoucher` shape — a future cadre-core bump
- * should re-diff this against the new `cadre-node.js` before trusting it unchanged.
- * Re-diffed on cadre-core 1.9.0 (2026-10-01), 1.12.0 (2026-10-05) and 1.13.0 (2026-10-06): `hasAnchoredVoucher` is byte-identical.
+ * Re-diffed on every cadre-core bump: `hasAnchoredVoucher` was byte-identical from 1.6.0
+ * through 1.13.0. 1.14.0 changed it twice — the voucher digest gained `partyId`, and the
+ * invitation branch was added (redemption is now the only joiner route the API offers) — so a
+ * future bump should re-diff `hasAnchoredProof`, `hasAnchoredVoucher` and
+ * `isInvitationAdmitted` in `cadre-node.js` before trusting this unchanged.
  */
+import { verifyCadrePeerVoucher, verifyInvitationAdmission } from '@serfab/cadre-core';
+import type { CadreInviteRow, CadreInviteUsageRow, CadrePeerRow } from '@serfab/cadre-core';
 
-import { verifyCadrePeerVoucher } from '@serfab/cadre-core';
-import type { CadrePeerRow } from '@serfab/cadre-core';
-
-type VoucherRow = Pick<CadrePeerRow, 'peerId' | 'stampId' | 'vouchOwner' | 'vouchSig'>;
+type VoucherRow = Pick<CadrePeerRow, 'peerId' | 'stampId' | 'vouchOwner' | 'vouchSig' | 'vouchUsage'>;
 
 /**
  * Structural subset of `CadreNode` this predicate needs — the real `CadreNode` satisfies
  * it with no cast (see replication-proof-runner.ts's `authNode` usage).
  */
 export interface SelfVoucherNode {
-  getControlDatabase(): { queryCadrePeers(retry?: boolean): Promise<ReadonlyArray<VoucherRow>> } | null;
+  readonly partyId: string;
+  getControlDatabase(): {
+    queryCadrePeers(retry?: boolean): Promise<ReadonlyArray<VoucherRow>>;
+    queryCadreInvites(retry?: boolean): Promise<ReadonlyArray<CadreInviteRow>>;
+    queryCadreInviteUsages(retry?: boolean): Promise<ReadonlyArray<CadreInviteUsageRow>>;
+  } | null;
   getTrustedOwnerStore(): { has(ownerKey: string): boolean } | null;
 }
 
+/** cadre-core's `isInvitationAdmitted`: no owner signature, a usage stamp instead. */
+function isInvitationAdmitted(row: VoucherRow): boolean {
+  return row.vouchSig === null && row.vouchUsage != null;
+}
+
 /**
- * True when THIS peer's own replicated `CadrePeer` row carries a complete voucher from an
- * owner anchored in the node-local trust store, with a signature that verifies. Cheap
- * synchronous surfaces (the store, the DB) are checked before the async row read.
+ * True when THIS peer's own replicated `CadrePeer` row carries a proof — an owner voucher or
+ * an invitation admission — that chains to an owner anchored in the node-local trust store.
+ * Cheap synchronous surfaces (the store, the DB) are checked before the async row read, and
+ * the invitation tables are read only when the row needs them.
  */
 export async function isSelfVouched(node: SelfVoucherNode, peerId: string): Promise<boolean> {
   const store = node.getTrustedOwnerStore();
@@ -52,11 +68,20 @@ export async function isSelfVouched(node: SelfVoucherNode, peerId: string): Prom
   if (!self) {
     return false;
   }
+  if (isInvitationAdmitted(self)) {
+    const [usages, invites] = await Promise.all([db.queryCadreInviteUsages(), db.queryCadreInvites()]);
+    const usage = usages.find((u) => u.usageStampId === self.vouchUsage);
+    const invite = usage === undefined ? undefined : invites.find((i) => i.key === usage.inviteKey);
+    if (usage === undefined || invite === undefined) {
+      return false;
+    }
+    return verifyInvitationAdmission(node.partyId, self, usage, invite, (key) => store.has(key));
+  }
   if (self.stampId === null || self.vouchOwner === null || self.vouchSig === null) {
     return false;
   }
   if (!store.has(self.vouchOwner)) {
     return false;
   }
-  return verifyCadrePeerVoucher(self.peerId, self.stampId, self.vouchOwner, self.vouchSig);
+  return verifyCadrePeerVoucher(node.partyId, self.peerId, self.stampId, self.vouchOwner, self.vouchSig);
 }

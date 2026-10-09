@@ -1,9 +1,10 @@
 /**
  * RED → GREEN test for isSelfVouched (QUICK-260928-jwi).
  *
- * This mirrors cadre-core 1.6.0's private CadreNode#hasAnchoredVoucher(row) — checks 2-4 of
- * the authorized-membership predicate (complete voucher, owner anchored locally, signature
- * verifies) — applied to THIS peer's own CadrePeer row. It exists because
+ * This mirrors cadre-core 1.14.0's private CadreNode#hasAnchoredProof(row, chain) — checks 2-4
+ * of the authorized-membership predicate, by either proof a row can carry (an owner voucher, or
+ * the invitation admission a member seats on redemption) — applied to THIS peer's own CadrePeer
+ * row. It exists because
  * listAuthorizedMembers()/isAuthorizedMember() unconditionally exclude self (check 1,
  * cadre-node.js:6058 `row.peerId !== selfPeerId`), and isMember(self) skips the voucher
  * check entirely (true before any owner ever vouches).
@@ -14,11 +15,13 @@
 
 // `mock`-prefixed so jest's hoisted module factory can reference it.
 const mockVerify = jest.fn();
+const mockVerifyAdmission = jest.fn();
 
 jest.mock(
   '@serfab/cadre-core',
   () => ({
     verifyCadrePeerVoucher: (...a: unknown[]) => mockVerify(...a),
+    verifyInvitationAdmission: (...a: unknown[]) => mockVerifyAdmission(...a),
   }),
   { virtual: true },
 );
@@ -26,6 +29,7 @@ jest.mock(
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import { isSelfVouched, type SelfVoucherNode } from '../self-voucher';
 
+const PARTY_ID = 'votetorrent';
 const SELF_PEER_ID = 'selfPeer';
 const OWNER_KEY = 'ownerKeyB64';
 const OTHER_OWNER_KEY = 'someOtherOwnerKeyB64';
@@ -38,7 +42,13 @@ type Row = {
   stampId: string | null;
   vouchOwner: string | null;
   vouchSig: string | null;
+  vouchUsage: string | null;
 };
+
+const USAGE_STAMP = 'usage-1';
+const INVITE_KEY = 'inviteKeyB64';
+const usageRow = { usageStampId: USAGE_STAMP, inviteKey: INVITE_KEY, peerId: SELF_PEER_ID, peerStampId: STAMP_ID };
+const inviteRow = { key: INVITE_KEY, issuerKey: OWNER_KEY };
 
 const selfRowVouched: Row = {
   peerId: SELF_PEER_ID,
@@ -46,6 +56,17 @@ const selfRowVouched: Row = {
   stampId: STAMP_ID,
   vouchOwner: OWNER_KEY,
   vouchSig: SIG,
+  vouchUsage: null,
+};
+
+/** The row a member seats when this peer redeems a cadre invitation (cadre-core 1.14+). */
+const selfRowAdmitted: Row = {
+  peerId: SELF_PEER_ID,
+  multiaddr: null,
+  stampId: STAMP_ID,
+  vouchOwner: OWNER_KEY,
+  vouchSig: null,
+  vouchUsage: USAGE_STAMP,
 };
 
 function makeNode(opts: {
@@ -53,23 +74,33 @@ function makeNode(opts: {
   ownerSet?: Set<string>;
   noDb?: boolean;
   noStore?: boolean;
-}): SelfVoucherNode {
+  usages?: unknown[];
+  invites?: unknown[];
+}): SelfVoucherNode & { queryCadreInviteUsages: jest.Mock; queryCadreInvites: jest.Mock } {
   const queryCadrePeers = jest.fn(async () => {
     if (typeof opts.rows === 'function') {
       return opts.rows();
     }
     return opts.rows ?? [];
   });
+  const queryCadreInviteUsages = jest.fn(async () => opts.usages ?? [usageRow]);
+  const queryCadreInvites = jest.fn(async () => opts.invites ?? [inviteRow]);
   return {
-    getControlDatabase: () => (opts.noDb ? null : { queryCadrePeers }),
+    partyId: PARTY_ID,
+    getControlDatabase: () =>
+      opts.noDb ? null : { queryCadrePeers, queryCadreInviteUsages, queryCadreInvites },
     getTrustedOwnerStore: () =>
       opts.noStore ? null : { has: (k: string) => (opts.ownerSet ?? new Set([OWNER_KEY])).has(k) },
-  } as unknown as SelfVoucherNode & { __queryCadrePeers: jest.Mock };
+    queryCadreInviteUsages,
+    queryCadreInvites,
+  } as unknown as SelfVoucherNode & { queryCadreInviteUsages: jest.Mock; queryCadreInvites: jest.Mock };
 }
 
 beforeEach(() => {
   mockVerify.mockReset();
   mockVerify.mockReturnValue(true);
+  mockVerifyAdmission.mockReset();
+  mockVerifyAdmission.mockReturnValue(true);
 });
 
 describe('isSelfVouched', () => {
@@ -79,7 +110,16 @@ describe('isSelfVouched', () => {
     await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(true);
 
     expect(mockVerify).toHaveBeenCalledTimes(1);
-    expect(mockVerify).toHaveBeenCalledWith(SELF_PEER_ID, STAMP_ID, OWNER_KEY, SIG);
+    expect(mockVerify).toHaveBeenCalledWith(PARTY_ID, SELF_PEER_ID, STAMP_ID, OWNER_KEY, SIG);
+  });
+
+  it('judges a vouched row as a voucher and never reads the invitation tables', async () => {
+    const node = makeNode({ rows: [selfRowVouched] });
+
+    await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(true);
+    expect(node.queryCadreInviteUsages).not.toHaveBeenCalled();
+    expect(node.queryCadreInvites).not.toHaveBeenCalled();
+    expect(mockVerifyAdmission).not.toHaveBeenCalled();
   });
 
   it('resolves false when queryCadrePeers returns only OTHER peers fully vouched rows', async () => {
@@ -91,6 +131,7 @@ describe('isSelfVouched', () => {
           stampId: STAMP_ID,
           vouchOwner: OWNER_KEY,
           vouchSig: SIG,
+          vouchUsage: null,
         },
       ],
     });
@@ -143,13 +184,49 @@ describe('isSelfVouched', () => {
 
   it('resolves false without throwing and never calls queryCadrePeers when getTrustedOwnerStore() returns null', async () => {
     const queryCadrePeers = jest.fn(async () => [selfRowVouched]);
-    const node: SelfVoucherNode = {
+    const node = {
+      partyId: PARTY_ID,
       getControlDatabase: () => ({ queryCadrePeers }),
       getTrustedOwnerStore: () => null,
-    };
+    } as unknown as SelfVoucherNode;
 
     await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(false);
     expect(queryCadrePeers).not.toHaveBeenCalled();
+  });
+
+  describe('invitation-admitted self row (redeemed cadre invitation)', () => {
+    it('resolves true when the usage and invitation it names verify against the anchor', async () => {
+      const node = makeNode({ rows: [selfRowAdmitted] });
+
+      await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(true);
+      expect(mockVerify).not.toHaveBeenCalled();
+      expect(mockVerifyAdmission).toHaveBeenCalledTimes(1);
+      const [partyId, row, usage, invite, isAnchored] = mockVerifyAdmission.mock.calls[0];
+      expect([partyId, row, usage, invite]).toEqual([PARTY_ID, selfRowAdmitted, usageRow, inviteRow]);
+      expect(isAnchored(OWNER_KEY)).toBe(true);
+      expect(isAnchored(OTHER_OWNER_KEY)).toBe(false);
+    });
+
+    it('resolves false when verifyInvitationAdmission rejects the chain', async () => {
+      mockVerifyAdmission.mockReturnValue(false);
+      const node = makeNode({ rows: [selfRowAdmitted] });
+
+      await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(false);
+    });
+
+    it('resolves false without verifying when the usage row has not replicated', async () => {
+      const node = makeNode({ rows: [selfRowAdmitted], usages: [] });
+
+      await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(false);
+      expect(mockVerifyAdmission).not.toHaveBeenCalled();
+    });
+
+    it('resolves false without verifying when the invitation row has not replicated', async () => {
+      const node = makeNode({ rows: [selfRowAdmitted], invites: [] });
+
+      await expect(isSelfVouched(node, SELF_PEER_ID)).resolves.toBe(false);
+      expect(mockVerifyAdmission).not.toHaveBeenCalled();
+    });
   });
 
   it('rejects (does not swallow) when queryCadrePeers rejects', async () => {
