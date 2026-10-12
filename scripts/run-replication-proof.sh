@@ -368,6 +368,25 @@ else
   echo "[run-replication-proof] Fresh-emulator precondition SKIPPED (FRESH_EMULATOR=0)."
 fi
 
+# prewarm_bundle WHAT
+#
+# Opt-in: with PREWARM_BUNDLE_URL set (the app's own Metro bundle URL), block until Metro has
+# rebuilt the bundle after a generated-file write, so the launch ~2 s later fetches a finished
+# bundle rather than racing the rebundle (the race the "Metro rebundle likely in flight" errors
+# below name). Unset, it does nothing.
+#
+# Not the cause of every "Unable to load script": on 2026-10-12 that was an emulator in Doze. An
+# AVD on battery ignores `svc power stayon`, sleeps, and Doze blocks the app's network, so it
+# cannot reach Metro at all ("Failed to connect to /10.0.2.2:<port>" under
+# `unknown:ReactNative`). Run `adb emu power ac on` and `dumpsys deviceidle disable` first.
+prewarm_bundle() {
+  [ -n "${PREWARM_BUNDLE_URL:-}" ] || return 0
+  local started=$SECONDS code
+  sleep 3  # let Metro's watcher see the write first, or the fetch returns the stale bundle
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 600 "${PREWARM_BUNDLE_URL}" || true)
+  echo "[run-replication-proof] prewarm (${1}): HTTP ${code} after $((SECONDS - started))s" >&2
+}
+
 # ── STEP 0: Write the enabled flag file ──────────────────────────────────────
 # Metro picks up the change on the next bundle request (force-stop clears stale JS cache).
 cat > "${FLAG_FILE}" << 'EOF'
@@ -385,6 +404,7 @@ export const RECOVERY_BRANCH_PROOF_ENABLED = false;
 export const SEALED_PAYLOAD_PROOF_ENABLED = false;
 EOF
 echo "[run-replication-proof] Flag file updated: REPLICATION_PROOF_ENABLED=true"
+prewarm_bundle "flags"
 
 # ── STEP 1: BOOTSTRAP-MODE FIRST BOOT (Peer A only, solo, no drone) ──────────
 # Peer A boots solo without the drone running. The runner's createStrandDbFactory
@@ -795,6 +815,7 @@ print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {str
 print(f"[run-replication-proof] CONTROL_ADDR_B in runner injected: {control_addr_b}")
 print(f"[run-replication-proof] PROOF_INVITE_SHARE_URL in runner injected: {share_url}")
 PYEOF
+prewarm_bundle "config"
 
 # ── STEP 4: RELAUNCH BOTH PEERS NETWORKED for the symmetric proof run ─────────
 # Both peers are stopped, logcat cleared (Pitfall 4), then relaunched. With the drone

@@ -48,10 +48,16 @@ if (globalThis.crypto && typeof globalThis.crypto.randomUUID !== 'function') {
 //    otherwise crash with a bare "undefined is not a function". Every other
 //    SubtleCrypto method is installed as a throwing stub that NAMES the gap so
 //    such a failure is immediately diagnosable instead of latent.
+//
+//    Both are TAGGED so polyfills/native-crypto.js can swap in native code once
+//    react-native-quick-crypto has loaded: the digest with the sereus kit's own tag, which
+//    `@serfab/cadre-rn/native-digest` requires before it replaces anything (untagged, every
+//    block hash stayed pure JS even with native Noise loaded), and the stubs with ours, so
+//    only these placeholders are ever replaced.
 if (globalThis.crypto && !globalThis.crypto.subtle) {
   const {sha256, sha512} = require('@noble/hashes/sha2.js');
-  const notPolyfilled = name =>
-    function () {
+  const notPolyfilled = name => {
+    const stub = function () {
       return Promise.reject(
         new Error(
           `crypto.subtle.${name} is not polyfilled (digest-only shim) — ` +
@@ -61,6 +67,9 @@ if (globalThis.crypto && !globalThis.crypto.subtle) {
         ),
       );
     };
+    stub[Symbol.for('votetorrent/subtle-stub')] = true;
+    return stub;
+  };
   globalThis.crypto.subtle = {
     digest(algorithm, data) {
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
@@ -81,6 +90,7 @@ if (globalThis.crypto && !globalThis.crypto.subtle) {
     wrapKey: notPolyfilled('wrapKey'),
     unwrapKey: notPolyfilled('unwrapKey'),
   };
+  globalThis.crypto.subtle.digest[Symbol.for('@serfab/cadre-rn/js-digest')] = true;
 }
 
 // 3. TextDecoder (UTF-8) — bare RN 0.78 Hermes lacks it (Expo provides it; that's why the
