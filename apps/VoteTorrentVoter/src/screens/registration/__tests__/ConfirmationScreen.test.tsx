@@ -181,8 +181,14 @@ const mockSignDeviceKeyDigest = jest.fn(async (_digest: Uint8Array) => ({
 	signerKey: P256_PUB,
 	signature: 'p256-request-signature',
 }));
+// Read-only lookup a retry uses to confirm the attempt's key is still there (spike 104).
+const mockGetCurrentDeviceKey = jest.fn(async () => {
+	callOrder.push('getCurrentDeviceKey');
+	return {publicKey: P256_PUB};
+});
 const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
 	provisionDeviceKey: mockProvisionDeviceKey,
+	getCurrentDeviceKey: mockGetCurrentDeviceKey,
 	produce: mockProduce,
 	signDeviceKeyDigest: mockSignDeviceKeyDigest,
 }));
@@ -361,6 +367,7 @@ beforeEach(() => {
 	mockSendIntent.mockClear();
 	jest.spyOn(Linking, 'sendIntent').mockImplementation((...args: Parameters<typeof Linking.sendIntent>) => mockSendIntent(...args));
 	mockProvisionDeviceKey.mockClear();
+	mockGetCurrentDeviceKey.mockClear();
 	mockProduce.mockClear();
 	mockSignDeviceKeyDigest.mockClear();
 	mockRegistrationSubmitRequest.mockClear();
@@ -377,6 +384,10 @@ beforeEach(() => {
 
 	mockProvisionDeviceKey.mockImplementation(async () => {
 		callOrder.push('provisionDeviceKey');
+		return {publicKey: P256_PUB};
+	});
+	mockGetCurrentDeviceKey.mockImplementation(async () => {
+		callOrder.push('getCurrentDeviceKey');
 		return {publicKey: P256_PUB};
 	});
 	mockProduce.mockImplementation(async (challenge: {nonce: string}) => {
@@ -688,6 +699,62 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(associationSubmitRequestCalls).toHaveLength(2);
 		expect(associationSubmitRequestCalls[0].init.id).toBe(associationSubmitRequestCalls[1].init.id);
 		expect(associationSubmitRequestCalls[0].init.registrantId).toBe(associationSubmitRequestCalls[1].init.registrantId);
+	});
+
+	// Spike 104: on Android `provisionDeviceKey` mints a NEW key every call, so a retry that
+	// re-provisioned would re-submit the cached association request (naming the old key) signed by a
+	// key it does not name. A retry keeps the attempt's key; only a gone or changed key starts over.
+	describe('retry keeps the attempt key (spike 104)', () => {
+		it('a retry reads the key back and never re-provisions while it is unchanged', async () => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1 fails at the answer submit
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+			expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(1);
+			expect(associationSubmitRequestCalls[1].init).toBe(associationSubmitRequestCalls[0].init);
+			expect(associationSubmitRequestCalls[1].requesterKey).toBe(P256_PUB);
+		});
+
+		it.each([
+			['a different key under the alias', async () => ({publicKey: 'P256_PUB_ROTATED'})],
+			['DEVICE_KEY_ABSENT', async () => Promise.reject(Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'}))],
+			['DEVICE_KEY_INVALIDATED', async () => Promise.reject(Object.assign(new Error('invalidated'), {code: 'DEVICE_KEY_INVALIDATED'}))],
+		])('%s: re-provisions and makes a NEW association request for the new key, keeping the registration request', async (_name, lookup) => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1
+
+			mockGetCurrentDeviceKey.mockImplementationOnce(lookup as () => Promise<{publicKey: string}>);
+			mockProvisionDeviceKey.mockImplementationOnce(async () => ({publicKey: 'P256_PUB_NEW'}));
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(2);
+			expect(registrationRequestInits[1]).toBe(registrationRequestInits[0]);
+			const [first, second] = associationSubmitRequestCalls;
+			expect(second.init).not.toBe(first.init);
+			expect(second.init.id).not.toBe(first.init.id);
+			expect(second.init.deviceKey).toBe('P256_PUB_NEW');
+			expect(second.requesterKey).toBe('P256_PUB_NEW');
+			expect(second.init.registrantId).toBe(first.init.registrantId);
+		});
+
+		it('any other lookup failure fails the attempt without minting a new key', async () => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1
+
+			mockGetCurrentDeviceKey.mockImplementationOnce(async () =>
+				Promise.reject(Object.assign(new Error('read failed'), {code: 'DEVICE_KEY_READ_FAILED'})),
+			);
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+			expect(associationSubmitRequestCalls).toHaveLength(1);
+			expect(JSON.stringify(tr.toJSON())).toContain('Try Again');
+		});
 	});
 
 	it(

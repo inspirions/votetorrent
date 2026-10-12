@@ -22,7 +22,10 @@
  *      identity reaches the recovery view in a release build too (62-REVIEW WR-04). No biometric:
  *      the identity wrap alias is `requireAuth: false`.
  *   1. `provisionDeviceKey()` — resolves the hardware-backed P-256 public key BEFORE any request is
- *      submitted. Idempotent; does NOT prompt biometric.
+ *      submitted. Does NOT prompt biometric. ONCE per attempt (spike 104): on Android it regenerates
+ *      the key, so "Try Again" reuses the attempt's key (read back, never re-provisioned) — the cached
+ *      association request names it. Only a key that is gone or changed starts a new association
+ *      request for a newly provisioned key.
  *   2. Map the shared draft onto `RegisterInit` tiers (unchanged tier mapping / WR-04).
  *   3. Submit a self-signed registration-request document through the joined network's transports
  *      (`attach-voter-request-transport.ts`), signed under the voter's OWN secp256k1 device
@@ -31,9 +34,10 @@
  *   4. Submit a self-signed association-request document bound to the P-256 device key, then poll
  *      (bounded, no timer-based background poller) for the authority's challenge-issued decision
  *      notice — never calling the authority's challenge-issuing engine method directly.
- *   5. `producer.produce(challenge)` — the D-11 second step; this is where BiometricPrompt fires
- *      ("Confirm with Face ID"). Its position is UNCHANGED: after the challenge is obtained, before
- *      the attestation answer is submitted.
+ *   5. `producer.produce(challenge)` — the D-11 second step, after the challenge is obtained and before
+ *      the attestation answer is submitted. On iOS this is where the biometric prompt fires. On
+ *      Android it raises none (spike 104, R1d): a throwaway key answers the nonce and the voting key
+ *      is left in place, so the answer below is signed by the SAME key that signed the request.
  *   6. Submit the self-signed attestation-answer document. The screen does NOT wait for a further
  *      approved/rejected decision — the authority's automatic driver is triggered separately (by
  *      "Sync Now" elsewhere), not by this submission — so it shows an honest PENDING state instead
@@ -87,7 +91,12 @@ import {useRegistrationDraft} from '../../providers/RegistrationDraftProvider';
 import {getOrCreateDeviceUser} from '../../engines/device-user';
 import {createDeviceSigner} from '../../engines/device-signer';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
-import {classifyAttestationFailure, type AttestationFailureClass} from '../../engines/attestation-failure';
+import {
+	classifyAttestationFailure,
+	isDeviceKeyAbsent,
+	isDeviceKeyInvalidated,
+	type AttestationFailureClass,
+} from '../../engines/attestation-failure';
 import {mintRegistrationCodeForSubmit, resolveRegistrationCodeAvailability} from '../../engines/continuity';
 import type {RegistrationCodeAvailability} from '../../engines/continuity';
 import {resolveVoterRequestTransports} from './attach-voter-request-transport';
@@ -177,6 +186,40 @@ export default function ConfirmationScreen() {
 	// Plan 28 (D-45): minted once per attempt, 'peer' route only — reused byte-identical on retry,
 	// same idempotency rationale as the two init refs above.
 	const registrationCodeRef = useRef<string | null>(null);
+	// Spike 104: the P-256 voting key this attempt's association request names. Provisioned once —
+	// on Android `provisionDeviceKey` mints a NEW key every call, which would leave the reused
+	// association request above naming a key the phone no longer holds.
+	const deviceKeyRef = useRef<string | null>(null);
+
+	/**
+	 * Spike 104: this attempt's voting key. A retry reads the key back (read-only) and keeps it when it
+	 * is still the one the association request names. Only a key that is absent or permanently
+	 * invalidated — or a different key — is replaced, and then the association request is made again
+	 * for the new key (the registration request is signed by the identity key and is kept). Any other
+	 * lookup failure propagates rather than silently minting a new key.
+	 */
+	async function resolveAttemptDeviceKey(producer: ReturnType<typeof resolveAttestationProducer>): Promise<string> {
+		const attemptKey = deviceKeyRef.current;
+		if (attemptKey !== null) {
+			let current: string | null;
+			try {
+				current = (await producer.getCurrentDeviceKey()).publicKey;
+			} catch (err) {
+				if (!isDeviceKeyAbsent(err) && !isDeviceKeyInvalidated(err)) {
+					throw err;
+				}
+				current = null;
+			}
+			if (current === attemptKey) {
+				return attemptKey;
+			}
+			associationRequestIdRef.current = null;
+			associationRequestInitRef.current = null;
+		}
+		const {publicKey} = await producer.provisionDeviceKey();
+		deviceKeyRef.current = publicKey;
+		return publicKey;
+	}
 
 	async function onConfirm() {
 		if (isSubmitting) {
@@ -212,10 +255,9 @@ export default function ConfirmationScreen() {
 			}
 
 			// D-11: resolve the producer once and provision the hardware P-256 key BEFORE any
-			// request is submitted — idempotent, does NOT prompt biometric (biometric fires later,
-			// inside produce()).
+			// request is submitted — does NOT prompt biometric.
 			const producer = resolveAttestationProducer();
-			const {publicKey: p256DeviceKey} = await producer.provisionDeviceKey();
+			const p256DeviceKey = await resolveAttemptDeviceKey(producer);
 
 			// The seeded network's authority — resolved from the already-established network
 			// context, never hand-rolled.
@@ -345,9 +387,10 @@ export default function ConfirmationScreen() {
 				throw new Error('The authority issued a challenge notice with no nonce.');
 			}
 
-			// (4) The D-11 second producer step answers the challenge; this is the "Confirm with
-			// Face ID" biometric step (D-06/D-15/D-16 biometric-last) — its position is UNCHANGED:
-			// after the challenge is obtained, before the attestation answer is submitted.
+			// (4) The D-11 second producer step answers the challenge — after the challenge is
+			// obtained, before the attestation answer is submitted. iOS prompts here; Android does not
+			// (spike 104, R1d): its voting key stays under the alias, so the answer below is signed by
+			// p256DeviceKey, the key the request named and the authority checks it against.
 			const challenge: AttestationChallenge = {
 				nonce: decisionNotice.challengeNonce,
 				authorityId,
