@@ -7,12 +7,13 @@ import { AttestationApplicationId, KeyDescription, KeyMintKeyDescription, Securi
 import { timingSafeEqual } from 'node:crypto'
 // `Buffer` MUST be imported explicitly — it is NOT a Hermes global (CR-01). `metro.config.js`
 // aliases the `buffer` SPECIFIER, which only helps an explicit import; nothing installs a
-// global. Without this, `decodeAndroidDeviceKeySpki` throws `ReferenceError` on device and the
+// global. Without this, the leaf-key binding check throws `ReferenceError` on device and the
 // outer fail-closed catch rejects every genuine Android attestation.
 import { Buffer } from 'buffer'
 import type { AttestationChallenge, AttestationVerification } from '@votetorrent/vote-core'
 import { recomputeChallengeDigest } from './digest-binding.js'
 import { certDigestBytesToHex, type ExpectedAppIdentity } from './app-identity.js'
+import { p256KeyToCompressedHex } from '../../voting/vote-signing.js'
 
 /**
  * key-attestation.ts — offline Android Keystore hardware Key Attestation
@@ -68,30 +69,19 @@ function bytesEqual (a: ArrayBuffer, b: ArrayBuffer): boolean {
 }
 
 /**
- * Decode `challenge.deviceKey` (Android's stored encoding: SubjectPublicKeyInfo
- * DER, base64) into the raw SPKI `Uint8Array` — or `undefined` if the value is
- * not valid base64 or does not look like a DER SEQUENCE. This is a FAIL-CLOSED
- * helper: a value this function cannot decode must be treated by the caller as
- * a REJECT, never as "no check applies" (T-51-02-02). Deliberately does not
- * attempt a full ASN.1 parse of the SPKI structure — the byte-for-byte compare
- * against the leaf's own `publicKey.rawData` is what actually proves the
- * binding; this only guards against silently comparing against garbage.
+ * `challenge.deviceKey` and the attested leaf's own SPKI, both as the one canonical P-256 form
+ * (33-byte compressed SEC1 hex) — or `undefined` if the value is not a P-256 public key. Accepts
+ * the compressed hex every device key is now stored as (spike 103) and the SPKI DER base64 that
+ * Android challenges were issued against before it. This is a FAIL-CLOSED helper: a value it
+ * cannot decode must be treated by the caller as a REJECT, never as "no check applies"
+ * (T-51-02-02). Comparing points, not encodings, is what lets one key match in either form.
  */
-function decodeAndroidDeviceKeySpki (deviceKeyBase64: string): Uint8Array | undefined {
-  // Reject anything that is not plain base64 (with optional padding) up
-  // front — `Buffer.from(str, 'base64')` silently ignores invalid
-  // characters rather than throwing, which would otherwise let a malformed
-  // value decode to a plausible-looking but meaningless byte string.
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(deviceKeyBase64) || deviceKeyBase64.length % 4 !== 0) {
+function deviceKeyAsCompressedHex (key: string): string | undefined {
+  try {
+    return p256KeyToCompressedHex(key)
+  } catch {
     return undefined
   }
-  const bytes = new Uint8Array(Buffer.from(deviceKeyBase64, 'base64'))
-  // SubjectPublicKeyInfo is always a DER SEQUENCE (tag 0x30); anything else
-  // cannot possibly be an SPKI structure.
-  if (bytes.length === 0 || bytes[0] !== 0x30) {
-    return undefined
-  }
-  return bytes
 }
 
 /**
@@ -249,16 +239,15 @@ export async function verifyKeyAttestation (
     // check above still passes because none of them look at the leaf's own
     // public key, and the resulting association would appear
     // hardware-backed while the actual voting key is exportable and
-    // shareable. Compare `leaf.publicKey.rawData` (already-parsed SPKI DER —
-    // do NOT re-parse DER by hand) against `challenge.deviceKey` decoded
-    // from Android's stored encoding (SPKI DER base64).
-    const deviceKeySpki = decodeAndroidDeviceKeySpki(challenge.deviceKey)
-    if (deviceKeySpki === undefined) {
-      return { ok: false, reason: 'challenge deviceKey could not be decoded as SPKI DER base64 — rejecting rather than treating the leaf-key binding check as inapplicable' }
+    // shareable. Compare the leaf's own public key (`leaf.publicKey.rawData`, already-parsed SPKI
+    // DER — do NOT re-parse DER by hand) against `challenge.deviceKey` as P-256 POINTS: the
+    // challenge carries compressed hex since spike 103, SPKI base64 before it.
+    const deviceKeyPoint = deviceKeyAsCompressedHex(challenge.deviceKey)
+    if (deviceKeyPoint === undefined) {
+      return { ok: false, reason: 'challenge deviceKey is not a P-256 public key — rejecting rather than treating the leaf-key binding check as inapplicable' }
     }
-    const leafSpki = new Uint8Array(leaf.publicKey.rawData)
-    const leafKeyBound = leafSpki.length === deviceKeySpki.length && timingSafeEqual(leafSpki, deviceKeySpki)
-    if (!leafKeyBound) {
+    const leafPoint = deviceKeyAsCompressedHex(Buffer.from(new Uint8Array(leaf.publicKey.rawData)).toString('base64'))
+    if (leafPoint === undefined || leafPoint !== deviceKeyPoint) {
       return { ok: false, reason: 'attested leaf certificate public key is not the challenge deviceKey — the attestation proves a hardware key exists, but not that it is the registered voting key' }
     }
 

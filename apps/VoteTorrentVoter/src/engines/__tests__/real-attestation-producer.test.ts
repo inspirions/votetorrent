@@ -112,7 +112,8 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 		deviceKey: 'device-voting-pubkey-hex',
 	}
 
-	const fakeProvisionResult = { publicKeyBase64: 'fake-public-key-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }
+	// Android native resolves BOTH encodings (KeyAttestationHelper.kt); the producer returns the hex (spike 103).
+	const fakeProvisionResult = { publicKeyBase64: 'fake-public-key-b64', publicKeyCompressedHex: '02' + 'ab'.repeat(32), keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }
 	const fakeProduceResult = {
 		certificateChainBase64: ['fake-cert-a', 'fake-cert-b'],
 		integrityToken: 'fake-integrity-token',
@@ -127,6 +128,19 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 		nativeFake.provisionDeviceKey.mockReset().mockResolvedValue(fakeProvisionResult)
 		nativeFake.produceAttestation.mockReset().mockResolvedValue(fakeProduceResult)
 		nativeFake.signWithDeviceKey.mockReset()
+	})
+
+	it('Android: provisionDeviceKey returns the compressed hex, never the SPKI publicKeyBase64 (spike 103: every SignatureValidP256 CHECK decodes hex)', async () => {
+		const producer = createRealAttestationProducer({ enablePlayIntegrity: true })
+		const { publicKey } = await producer.provisionDeviceKey()
+		expect(publicKey).toBe(fakeProvisionResult.publicKeyCompressedHex)
+		expect(publicKey).not.toBe(fakeProvisionResult.publicKeyBase64)
+	})
+
+	it('Android: fails closed when native resolves only the SPKI form', async () => {
+		nativeFake.provisionDeviceKey.mockResolvedValue({ publicKeyBase64: 'spki-only', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+		const producer = createRealAttestationProducer({ enablePlayIntegrity: true })
+		await expect(producer.provisionDeviceKey()).rejects.toThrow(/native resolved no publicKeyCompressedHex/)
 	})
 
 	describe('two-step seam ordering (D-11)', () => {
@@ -149,7 +163,7 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: true })
 
 			const { publicKey } = await producer.provisionDeviceKey()
-			expect(publicKey).toBe(fakeProvisionResult.publicKeyBase64)
+			expect(publicKey).toBe(fakeProvisionResult.publicKeyCompressedHex)
 			expect(nativeFake.provisionDeviceKey).toHaveBeenCalledTimes(1)
 
 			const attestation = await producer.produce(challenge)
@@ -268,8 +282,9 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 		it('provisionDeviceKey() fails CLOSED when native resolves only the Android-shaped fields', async () => {
 			// The exact defect: iOS `provisionDeviceKey` resolves { publicKeyCompressedHex,
 			// appAttestKeyId, keyAlias } and no `publicKeyBase64` at all. Reading the Android field
-			// returned undefined silently.
-			nativeFake.provisionDeviceKey.mockResolvedValue(fakeProvisionResult)
+			// returned undefined silently. (Spike 103: both platforms now read publicKeyCompressedHex,
+			// so a result carrying ONLY the SPKI field must still fail closed.)
+			nativeFake.provisionDeviceKey.mockResolvedValue({ publicKeyBase64: 'fake-public-key-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
 			await expect(producer.provisionDeviceKey()).rejects.toThrow(/publicKeyCompressedHex/)
 		})
@@ -439,7 +454,8 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 				const wrongPublicKeyHex = getPublicKey(wrongPrivateKeyHex, 'p256', 'hex', 'hex') as string
 
 				nativeFake.provisionDeviceKey.mockResolvedValue({
-					publicKeyBase64: correctPublicKeyHex,
+					publicKeyBase64: 'spki-der-base64-not-the-returned-form',
+					publicKeyCompressedHex: correctPublicKeyHex,
 					keyAlias: 'VOTETORRENT_DEVICE_KEY_V1',
 				})
 				const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
@@ -527,7 +543,7 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			const custom = nativeFake.signWithDeviceKey.mock.calls[1] as unknown[]
 			expect(custom.slice(2)).toEqual([VOTE_PROMPT.title, VOTE_PROMPT.subtitle, VOTE_PROMPT.negativeButton])
 			expect(custom[1]).toBe(plain[1])
-			expect(sig).toEqual({ signature: 'ab'.repeat(64), signerKey: 'fake-public-key-b64', signerUserId: '' })
+			expect(sig).toEqual({ signature: 'ab'.repeat(64), signerKey: KEY_HEX, signerUserId: '' })
 		})
 
 		it('iOS: custom subtitle is the reason; digest is still sha256 pre-hashed', async () => {
@@ -614,11 +630,11 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			nativeFake.signWithDeviceKey.mockReset()
 		})
 
-		it('Android: resolves publicKeyBase64 exactly as provisionDeviceKey would, calling ONLY the read-only native method', async () => {
+		it('Android: resolves publicKeyCompressedHex exactly as provisionDeviceKey would, calling ONLY the read-only native method', async () => {
 			platformState.OS = 'android'
 			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'cur-b64', publicKeyCompressedHex: CUR_HEX, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
-			expect(await producer.getCurrentDeviceKey()).toEqual({ publicKey: 'cur-b64' })
+			expect(await producer.getCurrentDeviceKey()).toEqual({ publicKey: CUR_HEX })
 			expect(nativeFake.getCurrentDeviceKey).toHaveBeenCalledWith('VOTETORRENT_DEVICE_KEY_V1')
 			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
 			expect(nativeFake.produceAttestation).not.toHaveBeenCalled()
@@ -634,7 +650,7 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 
 		it('no rotation: repeated lookups return the same key and never touch provisionDeviceKey', async () => {
 			platformState.OS = 'android'
-			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'stable-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'stable-b64', publicKeyCompressedHex: '03' + 'cc'.repeat(32), keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
 			const a = await producer.getCurrentDeviceKey()
 			const b = await producer.getCurrentDeviceKey()
@@ -645,7 +661,7 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 		it('negative control: provisionDeviceKey on a rotating native DOES call the creating method (the spy can fail)', async () => {
 			platformState.OS = 'android'
 			let n = 0
-			nativeFake.provisionDeviceKey.mockImplementation(async () => ({ publicKeyBase64: `rotated-${++n}`, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }))
+			nativeFake.provisionDeviceKey.mockImplementation(async () => ({ publicKeyBase64: `rotated-b64-${++n}`, publicKeyCompressedHex: `rotated-${n}`, keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' }))
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
 			const a = await producer.provisionDeviceKey()
 			const b = await producer.provisionDeviceKey()
@@ -665,17 +681,17 @@ describe('real-attestation-producer — D-11/D-06/D-16b (Phase 45-07 regression 
 			platformState.OS = 'android'
 			nativeFake.getCurrentDeviceKey.mockResolvedValue({ keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
-			await expect(producer.getCurrentDeviceKey()).rejects.toThrow(/native resolved no publicKeyBase64/)
+			await expect(producer.getCurrentDeviceKey()).rejects.toThrow(/native resolved no publicKeyCompressedHex/)
 		})
 
 		it('keeps the current-key cache consistent: signDeviceKeyDigest reports the looked-up key as signerKey', async () => {
 			platformState.OS = 'android'
-			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'looked-up-b64', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
+			nativeFake.getCurrentDeviceKey.mockResolvedValue({ publicKeyBase64: 'looked-up-b64', publicKeyCompressedHex: 'looked-up-hex', keyAlias: 'VOTETORRENT_DEVICE_KEY_V1' })
 			nativeFake.signWithDeviceKey.mockResolvedValue({ signatureHex: 'ab'.repeat(64) })
 			const producer = createRealAttestationProducer({ enablePlayIntegrity: false })
 			await producer.getCurrentDeviceKey()
 			const sig = await producer.signDeviceKeyDigest(Uint8Array.from({ length: 32 }, (_, i) => i))
-			expect(sig.signerKey).toBe('looked-up-b64')
+			expect(sig.signerKey).toBe('looked-up-hex')
 			expect(nativeFake.provisionDeviceKey).not.toHaveBeenCalled()
 		})
 	})

@@ -459,28 +459,25 @@ export function createRealAttestationProducer(opts: {
 			voteKeyProbe?: string
 		}
 
-		// The two platforms hand back DIFFERENT key encodings, and the caller (ConfirmationScreen)
-		// feeds this value straight into `issueAttestationChallenge` as `challenge.deviceKey` — so
-		// picking the wrong field poisons every digest downstream of it.
-		//
-		//   Android — `publicKeyBase64`, the X.509 SPKI DER. The Android verifier only ever
-		//             re-hashes this string, so its encoding is unconstrained; it is the shipped,
-		//             hardware-proven value and is deliberately left alone.
-		//   iOS     — `publicKeyCompressedHex`. NOT a free choice, constrained twice over:
-		//             `produceIos`'s §3.4 obligation compares it against native's
-		//             `publicKeyCompressedHex`, and the authority parses `challenge.deviceKey` as a
-		//             P-256 point (`hexToBytes(expect.deviceKey)` in `verifyCrossSign`) to check
-		//             proof-of-possession. Only the compressed hex satisfies both — and the iOS
-		//             native side does not RESOLVE `publicKeyBase64` at all.
-		const isIos = getPlatformOS() === 'ios'
-		const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+		// BOTH platforms hand back `publicKeyCompressedHex`, and it is the only form this returns
+		// (spike 103). The caller (ConfirmationScreen) feeds it straight into the association
+		// request, `issueAttestationChallenge` (as `challenge.deviceKey`) and the stored Association,
+		// so it must be the one form every consumer decodes:
+		//   - every `SignatureValidP256` CHECK decodes the key as HEX, so Android's other field,
+		//     `publicKeyBase64` (X.509 SPKI DER), was refused at the first self-signed row (B-13);
+		//   - `VoteBlockVoter.DeviceKey` must equal `Association.DeviceKey` exactly AND verify as hex;
+		//   - iOS: `produceIos`'s §3.4 obligation compares against native's `publicKeyCompressedHex`,
+		//     and `verifyCrossSign` parses `challenge.deviceKey` as a P-256 point;
+		//   - Android: `verifyKeyAttestation` compares the attested leaf's key to
+		//     `challenge.deviceKey` as POINTS, so the hex challenge binds the same key the SPKI did.
+		const publicKey = result.publicKeyCompressedHex
 		// Fail closed. Reading an absent field yields `undefined`, which flows on as a challenge
 		// bound to the string "undefined" and surfaces only as an opaque signature failure at the
 		// authority. That is precisely how the iOS field mismatch survived a clean typecheck, a
 		// green unit test and a successful bundle: nothing here ever asserted the field was there.
 		if (typeof publicKey !== 'string' || publicKey === '') {
 			throw new Error(
-				`provisionDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+				`provisionDeviceKey: native resolved no publicKeyCompressedHex ` +
 					`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to issue a challenge ` +
 					'against an undefined device key.',
 			)
@@ -489,18 +486,17 @@ export function createRealAttestationProducer(opts: {
 		return { publicKey, reprovisioned: result.reprovisioned, voteKeyProbe: result.voteKeyProbe }
 	}
 
-	// Shared field selection for provision + current-key reads (see the encoding notes above).
+	// Same field as provision: the compressed hex on both platforms (see the notes above).
 	async function doGetCurrentDeviceKey(): Promise<{ publicKey: string }> {
 		const native = getNative()
 		const result = (await native.getCurrentDeviceKey(KEY_ALIAS)) as {
 			publicKeyBase64?: string
 			publicKeyCompressedHex?: string
 		}
-		const isIos = getPlatformOS() === 'ios'
-		const publicKey = isIos ? result.publicKeyCompressedHex : result.publicKeyBase64
+		const publicKey = result.publicKeyCompressedHex
 		if (typeof publicKey !== 'string' || publicKey === '') {
 			throw new Error(
-				`getCurrentDeviceKey: native resolved no ${isIos ? 'publicKeyCompressedHex' : 'publicKeyBase64'} ` +
+				`getCurrentDeviceKey: native resolved no publicKeyCompressedHex ` +
 					`(got: ${Object.keys(result).join(', ') || 'no keys'}) — refusing to look up an undefined device key.`,
 			)
 		}

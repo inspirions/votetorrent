@@ -26,6 +26,7 @@ import { verifyKeyAttestation } from '../src/association/verifiers/key-attestati
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
 import { buildSyntheticKeyDescription, generateAndroidDeviceKeyPair } from './fixtures/attestation/synthetic-key-description.js'
 import { SYNTHETIC_EXPECTED_APP_IDENTITY } from './fixtures/attestation/synthetic-jwe.js'
+import { p256KeyToCompressedHex } from '../src/voting/vote-signing.js'
 
 const hasher = resolveHasher('sha256')
 const encode = resolveOutputEncoder('base64url')
@@ -340,7 +341,7 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
       expect(result.reason).to.not.match(/[A-Za-z0-9+/]{20,}/)
     })
 
-    it('REJECTS (fail-closed) when challenge.deviceKey cannot be decoded as SPKI DER base64 — never silently skips the check', async () => {
+    it('REJECTS (fail-closed) when challenge.deviceKey is not a P-256 public key in any form — never silently skips the check', async () => {
       const root = await generateTestRootCa()
       const challenge = makeChallenge({ deviceKey: 'not-valid-base64-spki!!!' })
       const { chainDer } = await buildSyntheticKeyDescription({
@@ -351,7 +352,41 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
 
       const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
       expect(result.ok).to.equal(false)
-      expect(result.reason).to.match(/could not be decoded|spki/i)
+      expect(result.reason).to.match(/not a P-256 public key/i)
+    })
+
+    // Spike 103: the Voter now issues Android challenges against the COMPRESSED HEX device key
+    // (the form every SignatureValidP256 CHECK decodes), so the binding compares P-256 points.
+    it('accepts a challenge naming the attested key as compressed hex (spike 103), as well as SPKI', async () => {
+      const root = await generateTestRootCa()
+      const { keyPair, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+      const challenge = makeChallenge({ deviceKey: p256KeyToCompressedHex(deviceKeySpkiBase64) })
+      const { chainDer } = await buildSyntheticKeyDescription({
+        root,
+        securityLevel: SecurityLevel.trustedEnvironment,
+        attestationChallenge: boundChallengeBytes(challenge),
+        leafKeyPair: keyPair
+      })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(result.ok, result.ok ? '' : result.reason).to.equal(true)
+    })
+
+    it('REJECTS a compressed-hex challenge naming a DIFFERENT key than the attested leaf', async () => {
+      const root = await generateTestRootCa()
+      const { keyPair } = await generateAndroidDeviceKeyPair()
+      const { deviceKeySpkiBase64: otherSpki } = await generateAndroidDeviceKeyPair()
+      const challenge = makeChallenge({ deviceKey: p256KeyToCompressedHex(otherSpki) })
+      const { chainDer } = await buildSyntheticKeyDescription({
+        root,
+        securityLevel: SecurityLevel.trustedEnvironment,
+        attestationChallenge: boundChallengeBytes(challenge),
+        leafKeyPair: keyPair
+      })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/not the challenge deviceKey/i)
     })
   })
 })
