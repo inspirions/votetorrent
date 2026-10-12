@@ -9,7 +9,8 @@ import type { PropsWithChildren } from "react";
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
 import { createScopedRnStorageProvider } from '../engines/storage-guard';
-import { CadreNode } from '@serfab/cadre-core';
+import { isUnrestorableControlSchemaError } from '../engines/control-schema-recovery';
+import { CadreNode, controlStorageScope } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
@@ -274,7 +275,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // from another's is the LevelDBRawStorage instance (the underlying LevelDB
         // directory). cadre-core is built for exactly this: it calls
         // `provider(strandId)` per strand (strand-instance-manager.js:21) and
-        // `provider('control')` for the control DB (cadre-node.js:180).
+        // `provider(controlStorageScope(partyId))` — 'control-<hex(partyId)>' — for the control DB.
         //
         // The previous `() => new LevelDBRawStorage(db)` IGNORED that argument and
         // returned one shared LevelDB, so EVERY network's Authority/Officer/Admin
@@ -298,7 +299,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // In memory it dies with the process, and on a phone every launch is a restart.
         const strandNetworkStateStore = await openStrandNetworkState(PARTY_ID, 'votetorrent-cadre-node');
 
-        localNode = new CadreNode({
+        const makeNode = () => new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
           strandNetworkState: { store: strandNetworkStateStore },
@@ -390,7 +391,23 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         });
 
         // node.start() is inside useEffect — never blocks initial render (D-06 / T-22-03).
-        await localNode.start();
+        localNode = makeNode();
+        try {
+          await localNode.start();
+        } catch (startError) {
+          // Spike 105: a control store an older cadre-core wrote (1.13 -> 1.14: Revocation.RowIsGone
+          // still references the dropped PendingJoin) can be neither migrated nor restored, so every
+          // launch fails. cadre-core's policy is to recreate it. Recreate ONLY the control scope —
+          // the peer key and every network's strand store stay — and start once more. See
+          // engines/control-schema-recovery.ts for why the Authority's networks survive this.
+          if (!isUnrestorableControlSchemaError(startError)) throw startError;
+          const controlScope = controlStorageScope(PARTY_ID);
+          console.warn(`[CadreNodeProvider] control store '${controlScope}' was written by an older cadre-core and cannot be migrated; recreating it`);
+          await localNode.stop().catch(() => undefined);
+          await scopedStorageProvider.destroyScope(controlScope);
+          localNode = makeNode();
+          await localNode.start();
+        }
 
         if (isMounted) {
           nodeRef.current = localNode;
