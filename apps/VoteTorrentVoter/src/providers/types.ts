@@ -31,6 +31,7 @@
  * fine — that is a pure type-only re-export, not a runtime dependency on vote-core).
  */
 import type {NetworkReference} from '@votetorrent/vote-core';
+import type {NetworkJoinCode, NetworkJoinResult, NetworkJoinStep} from '@votetorrent/vote-engine/rn';
 
 /**
  * The 7-state election lifecycle, in canonical order (D-03). Phase 40's `__DEV__` cycler steps
@@ -235,6 +236,12 @@ export interface VoterAppContextType {
 	 * Mirrors the authority app's `AppProvider.selectNetwork` (D-02/D-04).
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
+	/**
+	 * Spike 100: join an authority-created network from a decoded join code — redeem its cadre
+	 * invitation, open and verify the network's strand, then make it current (selectNetwork).
+	 * Resolves a typed result for every join problem; only an identity failure rejects.
+	 */
+	joinNetwork: (code: NetworkJoinCode, onStep?: (step: NetworkJoinStep) => void) => Promise<NetworkJoinResult>;
 	/**
 	 * The D-07 dev-seeded election's id, captured from `seedDevNetwork`'s return — pass as
 	 * `RegisterInit.electionId` (44-08) so `validateFieldPolicy` enforces the seeded policy.

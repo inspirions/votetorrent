@@ -1,0 +1,234 @@
+/**
+ * VoterInviteCard.tsx — "Invite voters" for one network (spike 100).
+ *
+ * Produces a JOIN CODE (`engines/voter-invite.ts`): an untargeted, multi-use cadre invitation plus
+ * the network's founding anchor. The officer copies or shares the code, and publishes the network
+ * fingerprint shown here through an official channel; a voter's phone shows the same fingerprint
+ * before it joins (Voter app, Settings → Join a network).
+ *
+ * A phone that founded its cadre without an owner key must first become the cadre's owner. That
+ * changes who can admit machines to this network, so it waits for an explicit confirm. A phone that
+ * joined a cadre someone else owns cannot invite voters at all, and says so.
+ *
+ * Translated copy only; logs carry closed tokens, never the code (it holds the invitation's private
+ * key).
+ */
+import { ExtendedTheme, useTheme } from "@react-navigation/native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Share, View } from "react-native";
+import type { NetworkReference } from "@votetorrent/vote-core";
+import { ThemedText } from "../../../components/ThemedText";
+import { CustomButton } from "../../../components/CustomButton";
+import { useApp } from "../../../providers/AppProvider";
+import { useCadreNode } from "../../../providers/CadreNodeProvider";
+import { getDeviceUser } from "../../../engines/device-user";
+import { copyToClipboard } from "../../../utils/copyToClipboard";
+import {
+	createVoterJoinCode,
+	inviteExpiryMs,
+	voterInviteCapability,
+	type VoterInviteNode,
+	type VoterJoinCodeResult,
+} from "../../../engines/voter-invite";
+
+export interface VoterInviteCardProps {
+	networkRef: NetworkReference;
+	onClose: () => void;
+}
+
+// Mirrors FoundingBundleExportCard's EXPORT_OPEN_TIMEOUT_MS: open() can stall on a first-sync wait.
+const INVITE_OPEN_TIMEOUT_MS = 45000;
+
+type CardState =
+	| { kind: "checking" }
+	| { kind: "confirm-owner" }
+	| { kind: "not-owner" }
+	| { kind: "generating" }
+	| { kind: "ready"; result: VoterJoinCodeResult }
+	| { kind: "error" };
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("voter-invite: open() timed out")), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
+
+function logInviteFailure(stage: string): void {
+	// eslint-disable-next-line no-console -- closed token only, never a code, key or hash.
+	console.info(`[voter-invite] ${stage}: failed`);
+}
+
+export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
+	const { t } = useTranslation();
+	const { colors } = useTheme() as ExtendedTheme;
+	const { networksEngine } = useApp();
+	const { node } = useCadreNode();
+	const [state, setState] = useState<CardState>({ kind: "checking" });
+	const [copyNotice, setCopyNotice] = useState<"copied" | "failed" | undefined>(undefined);
+	const mountedRef = useRef(true);
+	const inFlightRef = useRef(false);
+
+	useEffect(
+		() => () => {
+			mountedRef.current = false;
+		},
+		[],
+	);
+
+	const generate = useCallback(async () => {
+		if (inFlightRef.current) return;
+		inFlightRef.current = true;
+		setState({ kind: "generating" });
+		try {
+			const user = await getDeviceUser();
+			const signerKey = user?.activeKeys[0]?.key;
+			if (!user || !signerKey || !networksEngine || !node) throw new Error("voter-invite: not ready");
+			// storeAsRecent=false: inviting never reorders recent networks.
+			await withTimeout(networksEngine.open(networkRef, user, false), INVITE_OPEN_TIMEOUT_MS);
+			if (!mountedRef.current) return;
+			const result = await createVoterJoinCode({
+				node: node as unknown as VoterInviteNode,
+				networksEngine,
+				networkHash: networkRef.hash,
+				founder: { userId: user.id, signerKey },
+			});
+			if (mountedRef.current) setState({ kind: "ready", result });
+		} catch {
+			logInviteFailure("generate");
+			if (mountedRef.current) setState({ kind: "error" });
+		} finally {
+			inFlightRef.current = false;
+		}
+	}, [networkRef, networksEngine, node]);
+
+	// Decide what the card can do on this phone, then generate straight away when nothing needs
+	// confirming.
+	useEffect(() => {
+		let cancelled = false;
+		(async () => {
+			const capability = await voterInviteCapability(node as unknown as VoterInviteNode | null);
+			if (cancelled || !mountedRef.current) return;
+			if (capability === "ready") void generate();
+			else if (capability === "needs-owner-setup") setState({ kind: "confirm-owner" });
+			else if (capability === "not-owner") setState({ kind: "not-owner" });
+			else {
+				logInviteFailure("capability");
+				setState({ kind: "error" });
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+		// Re-check only when the node changes; `generate` is stable for a given network/node.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [node]);
+
+	const copyCode = useCallback(async (code: string) => {
+		const ok = await copyToClipboard(code);
+		if (mountedRef.current) setCopyNotice(ok ? "copied" : "failed");
+	}, []);
+
+	const shareCode = useCallback(
+		async (result: VoterJoinCodeResult) => {
+			try {
+				await Share.share({
+					message: t("voterInviteShareMessage", { name: result.networkName, fingerprint: result.fingerprint, code: result.code }),
+				});
+			} catch {
+				logInviteFailure("share");
+			}
+		},
+		[t],
+	);
+
+	switch (state.kind) {
+		case "checking":
+		case "generating":
+			return (
+				<View testID="voter-invite-body-generating">
+					<ThemedText type="default" style={{ color: colors.textSecondary }}>
+						{t("voterInviteGenerating")}
+					</ThemedText>
+				</View>
+			);
+		case "confirm-owner":
+			return (
+				<View testID="voter-invite-body-confirm-owner" style={{ gap: 8 }}>
+					<ThemedText type="defaultSemiBold">{t("voterInviteOwnerTitle")}</ThemedText>
+					<ThemedText type="default" style={{ color: colors.textSecondary }}>
+						{t("voterInviteOwnerBody")}
+					</ThemedText>
+					<CustomButton testID="voter-invite-owner-confirm" title={t("voterInviteOwnerConfirm")} onPress={generate} />
+					<CustomButton testID="voter-invite-cancel" title={t("voterInviteCancel")} onPress={onClose} />
+				</View>
+			);
+		case "not-owner":
+			return (
+				<View testID="voter-invite-body-not-owner" style={{ gap: 8 }}>
+					<ThemedText type="default" style={{ color: colors.textSecondary }}>
+						{t("voterInviteNotOwner")}
+					</ThemedText>
+					<CustomButton testID="voter-invite-done" title={t("voterInviteDone")} onPress={onClose} />
+				</View>
+			);
+		case "error":
+			return (
+				<View testID="voter-invite-body-error" style={{ gap: 8 }}>
+					<ThemedText type="default" style={{ color: colors.error }}>
+						{t("voterInviteFailed")}
+					</ThemedText>
+					<CustomButton testID="voter-invite-retry" title={t("voterInviteRetry")} onPress={generate} />
+					<CustomButton testID="voter-invite-cancel" title={t("voterInviteCancel")} onPress={onClose} />
+				</View>
+			);
+		case "ready": {
+			const { result } = state;
+			const expiry = inviteExpiryMs(result.expiresAt);
+			return (
+				<View testID="voter-invite-body-ready" style={{ gap: 8 }}>
+					<ThemedText type="default" style={{ color: colors.textSecondary }}>
+						{t("voterInviteReadyBody")}
+					</ThemedText>
+					<ThemedText type="defaultSemiBold">{t("networkFoundingExportFingerprintLabel")}</ThemedText>
+					<ThemedText type="default" testID="voter-invite-fingerprint" selectable>
+						{result.fingerprint}
+					</ThemedText>
+					<ThemedText type="small" style={{ color: colors.textSecondary }}>
+						{t("voterInviteFingerprintHelp")}
+					</ThemedText>
+					{expiry !== null && (
+						<ThemedText type="small" testID="voter-invite-expiry" style={{ color: colors.textSecondary }}>
+							{t("voterInviteExpires", { when: new Date(expiry).toLocaleDateString() })}
+						</ThemedText>
+					)}
+					<ThemedText type="small" testID="voter-invite-code" selectable numberOfLines={3} style={{ color: colors.textSecondary }}>
+						{result.code}
+					</ThemedText>
+					<CustomButton testID="voter-invite-copy" title={t("voterInviteCopy")} onPress={() => void copyCode(result.code)} />
+					<CustomButton testID="voter-invite-share" title={t("voterInviteShare")} onPress={() => void shareCode(result)} />
+					{copyNotice !== undefined && (
+						<ThemedText
+							type="small"
+							testID="voter-invite-copy-notice"
+							style={{ color: copyNotice === "copied" ? colors.textSecondary : colors.error }}
+						>
+							{copyNotice === "copied" ? t("voterInviteCopied") : t("voterInviteCopyFailed")}
+						</ThemedText>
+					)}
+					<CustomButton testID="voter-invite-done" title={t("voterInviteDone")} onPress={onClose} />
+				</View>
+			);
+		}
+	}
+}

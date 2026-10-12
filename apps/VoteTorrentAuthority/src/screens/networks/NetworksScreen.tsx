@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { usePreserveScrollOnResize } from "../../hooks/usePreserveScrollOnResize";
 import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
+import { VoterInviteCard } from "./components/VoterInviteCard";
 import { reprobeAfterConnect } from "./reprobeAfterConnect";
 
 export default function NetworksScreen() {
@@ -32,6 +33,8 @@ export default function NetworksScreen() {
 	const [joinError, setJoinError] = useState("");
 	// D-35/D-36: which recent network's export card is open (one at a time), keyed on networkHash.
 	const [exportTargetHash, setExportTargetHash] = useState<string | null>(null);
+	// Spike 100: which recent network's "Invite voters" card is open (one at a time).
+	const [inviteTargetHash, setInviteTargetHash] = useState<string | null>(null);
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
 	const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
@@ -192,6 +195,15 @@ export default function NetworksScreen() {
 									<FontAwesome6 name="share-nodes" size={20} color={colors.text} />
 								</TouchableOpacity>
 								<TouchableOpacity
+									accessibilityRole="button"
+									accessibilityLabel={t("voterInviteButton")}
+									testID={`voter-invite-entry-${networkRef.hash}`}
+									style={styles.exportIconButton}
+									onPress={() => setInviteTargetHash(networkRef.hash)}
+								>
+									<FontAwesome6 name="user-plus" size={20} color={colors.text} />
+								</TouchableOpacity>
+								<TouchableOpacity
 									style={styles.iconButton}
 									onPress={() => navigation.navigate("Hosting", { networkRef })}
 								>
@@ -204,6 +216,9 @@ export default function NetworksScreen() {
 								networkRef={networkRef}
 								onClose={() => setExportTargetHash(null)}
 							/>
+						)}
+						{inviteTargetHash === networkRef.hash && (
+							<VoterInviteCard networkRef={networkRef} onClose={() => setInviteTargetHash(null)} />
 						)}
 					</React.Fragment>
 				))}

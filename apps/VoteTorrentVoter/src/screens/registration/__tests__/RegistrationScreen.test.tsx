@@ -87,10 +87,12 @@ const mockGetEngine = jest.fn(async () => {
 	throw new Error('getEngine is not available in this test — mock resolveRegistrationCodeAvailability instead');
 });
 
-function setProviderState(overrides: {draft?: RegistrationDraft} = {}) {
+function setProviderState(overrides: {draft?: RegistrationDraft; hasNetwork?: boolean} = {}) {
 	mockUseVotingApp.mockReturnValue({
 		isInitialized: true,
 		getEngine: mockGetEngine,
+		// Spike 100: a network is open unless a test says otherwise (the join link then hides).
+		hasNetwork: overrides.hasNetwork ?? true,
 	});
 	mockUseRegistrationDraft.mockReturnValue({
 		draft: overrides.draft ?? EMPTY_DRAFT,
@@ -389,5 +391,26 @@ describe('RegistrationScreen failed code read (gap6/WR-07, S-1)', () => {
 		const tr = await mountWith({kind: 'unavailable'});
 		expect(ids(tr, 'registration-code-not-available')).toBeGreaterThan(0);
 		expect(ids(tr, 'registration-code-retry')).toBe(0);
+	});
+});
+
+describe('RegistrationScreen — join entry link (spike 100)', () => {
+	const hasJoinLink = (tr: renderer.ReactTestRenderer) =>
+		tr.root.findAll(node => node.props.testID === 'join-network-entry-link').length > 0;
+
+	it('with no network open, offers the join link and opens JoinNetwork', () => {
+		setProviderState({hasNetwork: false});
+		mockNavigate.mockClear();
+		const tr = renderScreen();
+		const link = tr.root.find(node => node.props.testID === 'join-network-entry-link');
+		renderer.act(() => {
+			link.props.onPress();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith('JoinNetwork');
+	});
+
+	it('hides the join link once a network is open', () => {
+		setProviderState({hasNetwork: true});
+		expect(hasJoinLink(renderScreen())).toBe(false);
 	});
 });

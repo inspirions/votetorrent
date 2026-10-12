@@ -270,3 +270,24 @@ describe('createStrandDbFactory — first-sync gate (StrandAwaitingFirstSyncErro
     expect(node.whenStrandWritable).not.toHaveBeenCalled();
   });
 });
+
+describe('createStrandDbFactory — a joined network is never opened as founder (spike 100)', () => {
+  it('with no peer connected, a network this phone did NOT join opens as founder (the solo create path)', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    await createStrandDbFactory(node, { isJoinedNetwork: () => false })('created-here');
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(true);
+  });
+
+  it('with no peer connected (a cold restart), a JOINED network still opens as a joiner, never as founder', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    await createStrandDbFactory(node, { isJoinedNetwork: async (id: string) => id === 'joined-hash' })('joined-hash');
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
+  });
+
+  it('an unreadable joined-network list refuses to open rather than risk founding', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    await expect(createStrandDbFactory(node, { isJoinedNetwork: async () => { throw new Error('storage'); } })('h'))
+      .rejects.toThrow('not opening the network as its founder');
+    expect(node.addStrand).not.toHaveBeenCalled();
+  });
+});

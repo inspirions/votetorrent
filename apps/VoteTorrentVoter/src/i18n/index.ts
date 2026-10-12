@@ -335,6 +335,38 @@ const resources = {
 			// read the current UI language can still recognize their own language's name.
 			languageEnglish: 'English',
 			languageSpanish: 'Español',
+			joinNetworkRow: 'Join a network',
+		},
+		// Spike 100 — joining an election authority's network from a join code (Settings → Join a
+		// network, and the Registration tab's entry link while no network is open). Flat dotted keys.
+		join: {
+			headerTitle: 'Join a network',
+			entryLink: "Join your election authority's network",
+			intro: "Paste the join code your election authority gave you. It connects this phone to the authority's voting network.",
+			codeLabel: 'Join code',
+			codePlaceholder: 'vtjoin1.…',
+			pasteButton: 'Paste',
+			invalidCode: "This isn't a valid join code. Check that you copied all of it, or ask your election authority for a new one.",
+			newerCode: 'This join code needs a newer version of the app. Update the app and try again.',
+			previewNetwork: 'Network',
+			previewFingerprint: 'Network fingerprint',
+			previewCheck: 'Before you join, check that this fingerprint matches the one your election authority published.',
+			joinButton: 'Join network',
+			'step.admitting': "Joining the election authority's network…",
+			'step.syncing': 'Downloading the network…',
+			'step.verifying': 'Checking the network matches the code…',
+			'step.done': 'Joined',
+			joinedTitle: 'You joined {{name}}',
+			doneButton: 'Done',
+			'error.invitationExpired': 'This join code has expired. Ask your election authority for a new one.',
+			'error.notAdmitted':
+				"The election authority's network did not accept this code. It may have been used up or withdrawn. Ask your election authority for a new one.",
+			'error.noPeers': "We couldn't reach the election authority's network. Check your connection and try again.",
+			'error.notSynced': 'The network is taking too long to download. Check your connection and try again.',
+			'error.digestMismatch':
+				"This network doesn't match the join code, so this phone did not join it. Ask your election authority for a new code.",
+			'error.openFailed': "We couldn't open the network on this phone. Try again.",
+			'error.generic': 'Something went wrong while joining. Try again.',
 		},
 		// Phase 59 (D-13/D-21) — the voter's Timeline tab. A NEW namespace (not reuse of `home`):
 		// `home.states.releasingKeys.summary` already exists and speaks a different sentence for a
@@ -732,6 +764,37 @@ const resources = {
 			// Endonyms in both locales (mobile-locale-picker convention).
 			languageEnglish: 'English',
 			languageSpanish: 'Español',
+			joinNetworkRow: 'Unirse a una red',
+		},
+		// Spike 100 — see the `en.join` block's comment.
+		join: {
+			headerTitle: 'Unirse a una red',
+			entryLink: 'Unirte a la red de tu autoridad electoral',
+			intro: 'Pega el código de acceso que te dio tu autoridad electoral. Conecta este teléfono a la red de votación de la autoridad.',
+			codeLabel: 'Código de acceso',
+			codePlaceholder: 'vtjoin1.…',
+			pasteButton: 'Pegar',
+			invalidCode: 'Este no es un código de acceso válido. Comprueba que lo copiaste completo o pide uno nuevo a tu autoridad electoral.',
+			newerCode: 'Este código de acceso necesita una versión más reciente de la aplicación. Actualiza la aplicación e inténtalo de nuevo.',
+			previewNetwork: 'Red',
+			previewFingerprint: 'Huella de la red',
+			previewCheck: 'Antes de unirte, comprueba que esta huella coincide con la que publicó tu autoridad electoral.',
+			joinButton: 'Unirse a la red',
+			'step.admitting': 'Uniéndote a la red de la autoridad electoral…',
+			'step.syncing': 'Descargando la red…',
+			'step.verifying': 'Comprobando que la red coincide con el código…',
+			'step.done': 'Unido',
+			joinedTitle: 'Te uniste a {{name}}',
+			doneButton: 'Listo',
+			'error.invitationExpired': 'Este código de acceso ha caducado. Pide uno nuevo a tu autoridad electoral.',
+			'error.notAdmitted':
+				'La red de la autoridad electoral no aceptó este código. Puede que se haya agotado o retirado. Pide uno nuevo a tu autoridad electoral.',
+			'error.noPeers': 'No pudimos conectar con la red de la autoridad electoral. Revisa tu conexión e inténtalo de nuevo.',
+			'error.notSynced': 'La red está tardando demasiado en descargarse. Revisa tu conexión e inténtalo de nuevo.',
+			'error.digestMismatch':
+				'Esta red no coincide con el código de acceso, así que este teléfono no se unió. Pide un código nuevo a tu autoridad electoral.',
+			'error.openFailed': 'No pudimos abrir la red en este teléfono. Inténtalo de nuevo.',
+			'error.generic': 'Algo salió mal al unirse. Inténtalo de nuevo.',
 		},
 		// Phase 59 (D-13/D-21) — see the `en.timeline` block's comment.
 		timeline: {

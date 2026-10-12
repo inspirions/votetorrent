@@ -43,6 +43,7 @@ import ContinueOnAnotherDeviceScreen from '../screens/registration/ContinueOnAno
 import {DeviceRetiredNotice, useDeviceRetired} from '../screens/registration/DeviceRetiredNotice';
 import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
+import JoinNetworkScreen from '../screens/settings/JoinNetworkScreen';
 import TimelineScreen from '../screens/timeline/TimelineScreen';
 import KeyholdersScreen from '../screens/timeline/KeyholdersScreen';
 import RegistrationInfoScreen from '../screens/registration/RegistrationInfoScreen';
@@ -136,6 +137,7 @@ function TimelineStackNavigator() {
 	const {t: tKeyholders} = useTranslation('timeline');
 	const {t: tBallot} = useTranslation('ballot');
 	const {t: tRegistration} = useTranslation('registration');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<TimelineStack.Navigator>
@@ -227,6 +229,12 @@ function TimelineStackNavigator() {
 				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Spike 100 (D-14 route closure) — RegistrationScreen's join entry link. */}
+			<TimelineStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
+			/>
 			{/* D-15: plain push (default header, back chevron) — mirrors ValidationDetails on the
 			    Vote stack, never presentation:'modal'. */}
 			<TimelineStack.Screen
@@ -245,6 +253,7 @@ const RegistrationStack = createNativeStackNavigator<RegistrationStackParamList>
 
 function RegistrationStackNavigator() {
 	const {t} = useTranslation('registration');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<RegistrationStack.Navigator>
@@ -291,6 +300,12 @@ function RegistrationStackNavigator() {
 				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Spike 100: RegistrationHome's join entry link, shown while no network is open. */}
+			<RegistrationStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
+			/>
 			<RegistrationStack.Screen
 				name="RegistrationInfo"
 				component={RegistrationInfoScreen}
@@ -327,6 +342,7 @@ const SettingsStack = createNativeStackNavigator<SettingsStackParamList>();
 
 function SettingsStackNavigator() {
 	const {t} = useTranslation('settings');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<SettingsStack.Navigator>
@@ -334,6 +350,11 @@ function SettingsStackNavigator() {
 				name="SettingsHome"
 				component={SettingsScreen}
 				options={{title: t('headerTitle')}}
+			/>
+			<SettingsStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
 			/>
 		</SettingsStack.Navigator>
 	);

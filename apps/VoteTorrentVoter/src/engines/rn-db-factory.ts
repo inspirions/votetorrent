@@ -105,6 +105,13 @@ export interface StrandHost {
 export interface StrandDbFactoryOptions {
 	signal?: AbortSignal;
 	onAwaitingFirstSync?: (strandId: string) => void;
+	/**
+	 * Spike 100: true for a network this phone JOINED (an authority founded it). Such a strand is
+	 * never opened as founder, even with no peer connected yet (a cold restart opens it before the
+	 * control connection is up): a founder would write membership rows of its own and fork the
+	 * network. It waits for its first sync instead, through the gate below.
+	 */
+	isJoinedNetwork?: (strandId: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -159,7 +166,15 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 		const strandId = networkHash;
 
 		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
+		// Spike 100: unless this phone joined the network, in which case it never is.
 		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
+		let joined = false;
+		try {
+			joined = (await options?.isJoinedNetwork?.(strandId)) === true;
+		} catch {
+			// An unreadable joined-list must not make a joiner a founder: refuse to open instead.
+			throw new Error('could not read the joined-network list; not opening the network as its founder');
+		}
 
 		let strand: StrandInstance;
 		try {
@@ -176,7 +191,7 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 					schema: VOTETORRENT_INNER_DDL,
 					latencyHint: 'interactive',
 				},
-				founder: !hasPeers,
+				founder: !joined && !hasPeers,
 			});
 		} catch (error) {
 			// Only the first-sync gate error, FOR THIS strand, is retryable — every other

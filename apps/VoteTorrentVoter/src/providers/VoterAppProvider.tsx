@@ -46,6 +46,9 @@ import {isIdentityNotReplaceable, isReplaceableIdentityError} from '../engines/i
 import {errorClassName} from '../utils/errorClassName';
 import {IdentityRecoveryView} from '../components/IdentityRecoveryView';
 import {seedDevNetwork} from '../engines/dev-seed';
+import {readJoinedNetworkHashes, rememberJoinedNetwork} from '../engines/join-bootstrap';
+import type {VoterJoinNode} from '../engines/voter-network-join';
+import type {NetworkJoinCode, NetworkJoinResult, NetworkJoinStep} from '@votetorrent/vote-engine/rn';
 import {useCadreNode} from './CadreNodeProvider';
 import {readVoterBallot, readVoterElection} from '../engines/election-read';
 import type {LifecycleState, VoterBallot, VoterElection, VoterAppContextType} from './types';
@@ -142,11 +145,46 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// mirroring the authority app's AppProvider. connectedPeers is keyed by strandId
 	// (== networkHash); node is null until CadreNode boots (rnDbFactory stays active until then,
 	// solo-safe — P2P-11 stays paused this phase).
-	const {connectedPeers, node, syncState} = useCadreNode();
+	const {connectedPeers, node, syncState, refreshJoinBootstrap} = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
 	}, [connectedPeers, node]);
+
+	// Spike 100: join an authority's network from a decoded join code, then make it current.
+	// Never throws for a join problem (see NetworkJoinResult); an identity failure while
+	// resolving the device user does throw, exactly as selectNetwork's does.
+	const joinNetwork = useCallback(
+		async (code: NetworkJoinCode, onStep?: (step: NetworkJoinStep) => void): Promise<NetworkJoinResult> => {
+			if (!node) {
+				return {ok: false, reason: 'no-peers', detail: 'join: the network node has not started'};
+			}
+			const factory = engineFactoryRef.current!;
+			// The DbFactory picks strand vs solo at call time; the join must open the strand.
+			factory.setNode(node);
+			const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
+			const defaultUser = await defaultUserEng.get();
+			const user = await getOrCreateDeviceUser(defaultUser?.name ?? 'Device User');
+			factory.setCurrentUser(user);
+			// Required lazily: voter-network-join pulls cadre-core's runtime, which CadreNodeProvider
+			// has already loaded on a device, and which the provider's own jest suites never need.
+			const {runVoterNetworkJoin} = require('../engines/voter-network-join') as typeof import('../engines/voter-network-join');
+			const result = await runVoterNetworkJoin({
+				node: node as unknown as VoterJoinNode,
+				networksEngine: factory.getNetworksEngine(),
+				user,
+				code,
+				onStep,
+			});
+			if (result.ok) {
+				await rememberJoinedNetwork(result.networkRef.hash);
+				await selectNetwork(result.networkRef);
+				await refreshJoinBootstrap?.();
+			}
+			return result;
+		},
+		[node, selectNetwork, refreshJoinBootstrap],
+	);
 
 	// Quick task 260928-kkf: register the "first wait budget elapsed" listener for the
 	// lifetime of this provider (not just the current init run) — mirrors the authority
@@ -216,7 +254,38 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 
 				const networksEng = factory.getNetworksEngine();
 
-				if (__DEV__) {
+				// Spike 100: reopen the most recent network when this phone JOINED it from a join
+				// code (recorded at join time), mirroring the Authority's recentNetworks[0]
+				// re-attach; otherwise the __DEV__ dev seed runs as before. Only once the CadreNode
+				// is up: a joined network is strand-backed, and opening it before the node exists
+				// would bind the solo store instead. This effect re-runs when the node boots.
+				const recentRef = (await networksEng.getRecentNetworks())[0];
+				const joinedHashes = recentRef ? await readJoinedNetworkHashes() : [];
+				const joinedRef = recentRef && joinedHashes.includes(recentRef.hash) ? recentRef : undefined;
+
+				if (joinedRef) {
+					if (node) {
+						try {
+							const defaultUserEng = await factory.getEngine<IDefaultUserEngine>('defaultUser');
+							const defaultUser = await defaultUserEng.get();
+							const user = await getOrCreateDeviceUser(defaultUser?.name ?? 'Device User');
+							if (cancelled) return;
+							factory.setCurrentUser(user);
+							await networksEng.open(joinedRef, user);
+							await factory.getEngine('network', joinedRef);
+							if (cancelled) return;
+							setHasNetwork(true);
+							setInitError(null);
+							console.log('[voter-boot] VoterAppProvider isInitialized (joined network)');
+						} catch (openError) {
+							if (cancelled) return;
+							// D-15 parity: surface the recoverable error; never a silent empty network.
+							console.error('joined network re-attach failed:', errorClassName(openError));
+							bootFailed = true;
+							setInitError({error: openError});
+						}
+					}
+				} else if (__DEV__) {
 					// D-07: AWAIT seedDevNetwork BEFORE opening the network (never
 					// fire-and-forget) — creates (or re-attaches to) the dev-seeded network +
 					// founding-officer authority + election + field-registration policy, and
@@ -261,9 +330,9 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						// hangs.
 					}
 				}
-				// Non-__DEV__ (production) boot: no join flow exists yet (P2P-11 paused, no
-				// production seed source) — hasNetwork stays false; screens that need a real
-				// network gate on it, mirroring the authority app's cold-start-no-network state.
+				// No joined network and not __DEV__: hasNetwork stays false until the voter joins one
+				// (Settings → Join a network); screens that need a real network gate on it,
+				// mirroring the authority app's cold-start-no-network state.
 
 				if (cancelled) return;
 				// 62-REVIEW WR-03: a successful boot ends the retry window of a replacement made
@@ -456,6 +525,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				getEngine,
 				hasEngine,
 				selectNetwork,
+				joinNetwork,
 				seededElectionId,
 				createNewIdentity,
 			}}>

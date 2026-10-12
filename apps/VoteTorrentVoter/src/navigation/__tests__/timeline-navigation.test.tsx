@@ -170,6 +170,8 @@ const TIMELINE_ROUTE_NAMES = new Set([
 	// Phase 62 Plan 28 (D-14 route-closure gate) — RegistrationScreen's newDevice.entryLink
 	// navigates here; registered on both stacks in navigation/index.tsx.
 	'ContinueOnAnotherDevice',
+	// Spike 100 — RegistrationScreen's join entry link; registered on both stacks.
+	'JoinNetwork',
 	'Keyholders',
 ]);
 
@@ -189,6 +191,7 @@ const TIMELINE_STACK_COMPONENT_FILES = [
 	'../../screens/registration/RegisterConfirmScreen.tsx',
 	'../../screens/registration/ConfirmationScreen.tsx',
 	'../../screens/timeline/KeyholdersScreen.tsx',
+	'../../screens/settings/JoinNetworkScreen.tsx',
 ];
 
 const NAVIGATE_CALL_RE = /navigation\.(?:navigate|replace)\(\s*['"]([\w]+)['"]/g;

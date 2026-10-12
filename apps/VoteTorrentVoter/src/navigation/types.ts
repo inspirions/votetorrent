@@ -51,6 +51,9 @@ export type RegistrationStackParamList = {
 	// Phase 62 Plan 28 (D-40/D-43/D-45) — Surfaces 8/9. Registered a SECOND time on
 	// TimelineStackParamList below, mirroring D-14's existing route-closure requirement.
 	ContinueOnAnotherDevice: undefined;
+	// Spike 100: RegistrationHome's join entry link (shown while no network is open). Also on the
+	// Settings and Timeline stacks (route closure, D-14).
+	JoinNetwork: undefined;
 };
 
 // Scan tab: single root screen, no modals.
@@ -58,9 +61,10 @@ export type ScanStackParamList = {
 	ScanHome: undefined;
 };
 
-// Settings tab: single root screen, no modals.
+// Settings tab: root + the Join a network screen (spike 100).
 export type SettingsStackParamList = {
 	SettingsHome: undefined;
+	JoinNetwork: undefined;
 };
 
 // Timeline tab (Phase 59, D-14/D-13/D-20/D-22). 59-05 landed the outline's five routes as TYPES
@@ -100,6 +104,8 @@ export type TimelineStackParamList = {
 	// Phase 62 Plan 28 (D-14 route-closure gate) — the Timeline duplicate of
 	// RegistrationStackParamList's entry above.
 	ContinueOnAnotherDevice: undefined;
+	// Spike 100 (D-14 route closure) — RegistrationScreen's join entry link.
+	JoinNetwork: undefined;
 };
 
 // The 5 tabs, in D-13 locked order: Vote · Timeline · Registration · Scan · Settings.

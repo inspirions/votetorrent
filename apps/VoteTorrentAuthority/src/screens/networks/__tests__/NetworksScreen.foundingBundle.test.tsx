@@ -535,3 +535,22 @@ describe("E-6: Import Network button renders with zero and with recent networks,
 		expect(mockNavigate).toHaveBeenCalledWith("ImportFoundingBundle");
 	});
 });
+
+describe("V-1 (spike 100): each row's Invite voters entry opens that row's invite card", () => {
+	it("is a labelled button, and opens the card (here: no CadreNode yet, so the card's error body)", async () => {
+		const tr = await renderScreen();
+		const entry = findByProps(tr, (p) => p.testID === `voter-invite-entry-${NETWORK_A.hash}`)[0];
+		expect(entry.props.accessibilityRole).toBe("button");
+		expect(entry.props.accessibilityLabel).toBe("Invite voters");
+		await act(async () => {
+			entry.props.onPress();
+		});
+		for (let i = 0; i < 6; i++) {
+			// eslint-disable-next-line no-await-in-loop
+			await act(async () => {
+				await Promise.resolve();
+			});
+		}
+		expect(findJsonByTestID(tr.toJSON(), "voter-invite-body-error")).toBeTruthy();
+	});
+});

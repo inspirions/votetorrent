@@ -15,6 +15,11 @@ import type {
 	FoundingBundleImportResult,
 	FoundingBundleInspection,
 	FoundingBundleRows,
+	FoundingAnchor,
+	FoundingAnchorFounder,
+	JoinFromStrandOptions,
+	JoinFromStrandResult,
+	NetworkJoinAnchor,
 } from '@votetorrent/vote-core';
 import type {
 	INetworksEngine,
@@ -36,6 +41,7 @@ import {
 	FOUNDING_BUNDLE_TABLE_ORDER,
 	readGenesisRows,
 	replayGenesisRows,
+	type GenesisRowKeys,
 } from './genesis-rows.js';
 import {
 	FOUNDING_BUNDLE_FORMAT,
@@ -311,10 +317,15 @@ export class NetworksEngine implements INetworksEngine {
 	 * returns it. Rejects with a `FoundingBundleExportError` (never a partial
 	 * bundle) — see the named codes on `FoundingBundleExportErrorCode`.
 	 */
-	async exportFoundingBundle(
+	/**
+	 * The six founding rows of an open network, selected by the founding
+	 * officer's user id and key — the one read `exportFoundingBundle` and
+	 * `getFoundingAnchor` share, with the same refusals.
+	 */
+	private async readFoundingRows(
 		networkHash: string,
-		exporter: FoundingBundleExporter,
-	): Promise<FoundingBundleExport> {
+		founder: { readonly userId: string; readonly signerKey: string },
+	): Promise<{ rows: FoundingBundleRows; genesis: GenesisRowKeys }> {
 		const ctx = this.contexts.get(networkHash);
 		if (!ctx) throw new FoundingBundleExportError('network-not-open');
 
@@ -349,8 +360,8 @@ export class NetworksEngine implements INetworksEngine {
 		let rows: FoundingBundleRows;
 		try {
 			rows = await readGenesisRows(ctx.db, {
-				userId: exporter.userId,
-				signerKey: exporter.signerKey,
+				userId: founder.userId,
+				signerKey: founder.signerKey,
 				authorityId: primaryAuthorityId,
 				adminEffectiveAt,
 			});
@@ -367,6 +378,35 @@ export class NetworksEngine implements INetworksEngine {
 		if (rows.UserKey.length === 0) {
 			throw new FoundingBundleExportError('signer-key-invalid');
 		}
+		return {
+			rows,
+			genesis: { userId: founder.userId, signerKey: founder.signerKey, authorityId: primaryAuthorityId, adminEffectiveAt },
+		};
+	}
+
+	/**
+	 * Spike 100: the founding anchor a network join code carries — the same
+	 * rows and digest `exportFoundingBundle` would bundle, but unsigned and
+	 * without the rows themselves (the voter reads its own replicated copy).
+	 */
+	async getFoundingAnchor(networkHash: string, founder: FoundingAnchorFounder): Promise<FoundingAnchor> {
+		const { rows, genesis } = await this.readFoundingRows(networkHash, founder);
+		const digest = computeContentDigest(rows as unknown as SnapshotTables);
+		const descriptor = deriveFoundingDescriptor(rows);
+		return {
+			networkHash: descriptor.networkHash,
+			name: descriptor.name,
+			genesis,
+			digest,
+			fingerprint: foundingBundleFingerprint(digest),
+		};
+	}
+
+	async exportFoundingBundle(
+		networkHash: string,
+		exporter: FoundingBundleExporter,
+	): Promise<FoundingBundleExport> {
+		const { rows } = await this.readFoundingRows(networkHash, exporter);
 		const expiration = String(rows.UserKey[0]!.Expiration);
 		if (!(expiration > nowCanonicalDatetime())) {
 			throw new FoundingBundleExportError('signer-key-invalid');
@@ -660,6 +700,128 @@ export class NetworksEngine implements INetworksEngine {
 			network,
 			fingerprint: foundingBundleFingerprint(bundle.digest),
 		};
+	}
+
+	/**
+	 * Spike 100: a voter, already admitted to the authority's cadre, joins the
+	 * network by opening its strand and accepting it only when the REPLICATED
+	 * founding rows hash to the join code's digest. Unlike importFoundingBundle
+	 * it never replays genesis rows: a voter writing founding rows into a shared
+	 * strand would race the authority's own (and a peerless voter would found a
+	 * second copy). Never throws; `no-peers` and `not-synced` are retryable.
+	 */
+	async joinFromStrand(
+		anchor: NetworkJoinAnchor,
+		user: User | undefined,
+		options: JoinFromStrandOptions,
+	): Promise<JoinFromStrandResult> {
+		const hash = anchor.networkHash;
+		let fingerprint: string;
+		try {
+			fingerprint = foundingBundleFingerprint(anchor.digest);
+		} catch {
+			return { ok: false, reason: 'digest-mismatch', retryable: false, detail: 'join: the code\'s digest is not a founding digest' };
+		}
+
+		// Already joined (or created/imported here): recentNetworks is written only by a
+		// successful open(), so an entry means there is nothing left to do.
+		const recent: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
+		const existingRef = recent.find((r) => r.hash === hash);
+		if (existingRef) {
+			return { ok: true, outcome: 'already-joined', networkRef: existingRef, fingerprint };
+		}
+
+		// Before ANY DbFactory call: the strand factory founds the strand when no peer is
+		// connected, which would give this phone a second, empty copy of the network.
+		if (!(options.getPeerCount() > 0)) {
+			return { ok: false, reason: 'no-peers', retryable: true, detail: 'join: no peer of the authority\'s network is connected yet' };
+		}
+
+		let ctx: EngineContext;
+		try {
+			ctx = await this.createContext(user, hash);
+		} catch {
+			return { ok: false, reason: 'target-open-failed', retryable: true, detail: 'join: the network\'s database could not be opened' };
+		}
+		// Same release rule as importFoundingBundle's failClosed: a strand-backed handle
+		// belongs to the strand host (which keeps syncing into it for the retry), so only
+		// a handle this engine owns is closed.
+		const borrowedFromStrandHost = ((): boolean => {
+			try {
+				return ctx.db.declaredSchemaManager.hasDeclaredSchema('App');
+			} catch {
+				return false;
+			}
+		})();
+		const decline = async (
+			reason: 'not-synced' | 'digest-mismatch' | 'target-open-failed',
+			retryable: boolean,
+			detail: string,
+		): Promise<JoinFromStrandResult> => {
+			this.contexts.delete(hash);
+			const closable = ctx.db as unknown as { close?: () => Promise<void> };
+			if (!borrowedFromStrandHost && typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the handle is discarded either way.
+				}
+			}
+			return { ok: false, reason, retryable, detail };
+		};
+
+		// Wait for all six founding rows to replicate. Point lookups only (readGenesisRows),
+		// so polling a strand that is still syncing never scans.
+		const deadline = Date.now() + (options.timeoutMs ?? 60_000);
+		const pollMs = options.pollMs ?? 500;
+		let rows: FoundingBundleRows | undefined;
+		for (;;) {
+			try {
+				const read = await readGenesisRows(ctx.db, anchor.genesis);
+				if (FOUNDING_BUNDLE_TABLE_ORDER.every((table) => read[table].length > 0)) {
+					rows = read;
+					break;
+				}
+			} catch {
+				// A strand still applying its schema can refuse a read; keep waiting.
+			}
+			if (Date.now() >= deadline) {
+				return decline('not-synced', true, 'join: the network\'s founding rows have not arrived yet');
+			}
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+
+		// The anchor: the replicated founding rows must be exactly the ones the code names.
+		options.onVerifying?.();
+		if (computeContentDigest(rows as unknown as SnapshotTables) !== anchor.digest) {
+			return decline('digest-mismatch', false, 'join: this network\'s founding rows do not match the join code');
+		}
+		let descriptor: ReturnType<typeof deriveFoundingDescriptor>;
+		try {
+			descriptor = deriveFoundingDescriptor(rows);
+		} catch {
+			return decline('digest-mismatch', false, 'join: this network\'s founding rows are not readable');
+		}
+		if (descriptor.networkHash !== hash) {
+			return decline('digest-mismatch', false, 'join: the founding rows name a different network');
+		}
+
+		const networkRef: NetworkReference = {
+			hash,
+			imageUrl: descriptor.imageUrl,
+			relays: [...descriptor.relays],
+			name: descriptor.name,
+			primaryAuthorityDomainName: descriptor.primaryAuthorityDomainName,
+		};
+		// open() finds the context cached and, with storeAsRecent, is the single writer of
+		// recentNetworks — nothing durable is written before it resolves.
+		this.contexts.set(hash, ctx);
+		try {
+			await this.open(networkRef, user, true, options.getStrandPeerCount);
+		} catch {
+			return decline('target-open-failed', true, 'join: the network could not be opened');
+		}
+		return { ok: true, outcome: 'joined', networkRef, fingerprint };
 	}
 
 	/**

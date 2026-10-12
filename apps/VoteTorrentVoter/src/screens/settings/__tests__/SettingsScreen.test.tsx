@@ -22,6 +22,12 @@ import {ThemeProvider} from '@react-navigation/native';
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 jest.mock('../../../providers/VoterAppProvider');
+// Spike 100: the screen's "Join a network" row navigates; there is no navigator in this mount.
+const mockNavigate = jest.fn();
+jest.mock('@react-navigation/native', () => ({
+	...jest.requireActual('@react-navigation/native'),
+	useNavigation: () => ({navigate: mockNavigate}),
+}));
 import {VoterAppProvider} from '../../../providers/VoterAppProvider';
 import {lightTheme} from '../../../theme/themes';
 import SettingsScreen from '../SettingsScreen';
@@ -100,5 +106,18 @@ describe('SettingsScreen — scroll container regression guard (57-17/57-18)', (
 			],
 		};
 		expect(findHostNodeByType(syntheticTree, 'RCTScrollView')).toBeNull();
+	});
+});
+
+describe('SettingsScreen — Join a network row (spike 100)', () => {
+	it('shows the row and opens the JoinNetwork route', () => {
+		mockNavigate.mockClear();
+		const tr = renderScreen();
+		expect(allText(tr)).toContain('Join a network');
+		const row = tr.root.find(node => node.props.testID === 'settings-join-network-row');
+		renderer.act(() => {
+			row.props.onPress();
+		});
+		expect(mockNavigate).toHaveBeenCalledWith('JoinNetwork');
 	});
 });

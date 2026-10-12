@@ -90,6 +90,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		throw new Error('selectNetwork is not available in the test mock VoterAppProvider');
 	}, []);
 
+	const joinNetwork = useCallback(async () => {
+		throw new Error('joinNetwork is not available in the test mock VoterAppProvider');
+	}, []);
+
 	return (
 		<VoterAppContext.Provider
 			value={{
@@ -105,6 +109,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				getEngine,
 				hasEngine,
 				selectNetwork,
+				joinNetwork,
 				seededElectionId: undefined,
 				createNewIdentity: __mockCreateNewIdentity,
 			}}>

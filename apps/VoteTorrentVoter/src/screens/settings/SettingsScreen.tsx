@@ -15,13 +15,15 @@
  */
 import React from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useTheme} from '@react-navigation/native';
+import {useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
+import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {globalStyles} from '../../theme/styles';
 import i18n from '../../i18n';
+import type {SettingsStackParamList} from '../../navigation/types';
 
 type LanguageCode = 'en' | 'es';
 
@@ -40,6 +42,7 @@ export default function SettingsScreen() {
 	useVoterApp();
 	const {colors, fonts, type: typeScale, radii} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('settings');
+	const navigation = useNavigation<NativeStackNavigationProp<SettingsStackParamList, 'SettingsHome'>>();
 
 	// react-i18next's useTranslation() re-renders this component on i18n's 'languageChanged'
 	// event by default, so reading i18n.language directly here (no local state) stays in sync.
@@ -104,6 +107,23 @@ export default function SettingsScreen() {
 					);
 				})}
 			</View>
+			{/* Spike 100: join an election authority's network from its join code. */}
+			<Pressable
+				testID="settings-join-network-row"
+				accessibilityRole="button"
+				onPress={() => navigation.navigate('JoinNetwork')}
+				style={styles.row}>
+				<Text
+					style={{
+						color: colors.link,
+						fontFamily: fonts.regular.fontFamily,
+						fontWeight: fonts.regular.fontWeight,
+						fontSize: typeScale.body.fontSize,
+						lineHeight: typeScale.body.lineHeight,
+					}}>
+					{t('joinNetworkRow')}
+				</Text>
+			</Pressable>
 		</ScrollView>
 	);
 }
@@ -119,6 +139,11 @@ const styles = StyleSheet.create({
 		flexDirection: 'row',
 		alignSelf: 'flex-start',
 		gap: 8, // separate the two segment pills so they don't read as one merged control
+	},
+	row: {
+		marginTop: 24,
+		minHeight: 44,
+		justifyContent: 'center',
 	},
 	segment: {
 		minHeight: 44,

@@ -100,6 +100,12 @@ jest.mock('../../engines/election-read', () => {
 	};
 });
 
+// Spike 100: the provider requires the join wiring lazily; this stands in for it.
+const mockRunVoterNetworkJoin = jest.fn();
+jest.mock('../../engines/voter-network-join', () => ({
+	runVoterNetworkJoin: (...args: unknown[]) => mockRunVoterNetworkJoin(...args),
+}));
+
 import {VoterAppProvider, useVoterApp} from '../VoterAppProvider';
 import type {VoterAppContextType} from '../types';
 import {hideSplash} from 'react-native-splash-view';
@@ -868,5 +874,92 @@ describe("VoterAppProvider boot 'still syncing' surface + escape — quick task 
 		}
 		errorSpy.mockRestore();
 		cancelPendingStrandWaitsSpy.mockRestore();
+	});
+});
+
+describe('VoterAppProvider — joined networks (spike 100)', () => {
+	const JOIN_CODE = {
+		v: 1 as const,
+		invitation: 'encoded-invitation',
+		networkHash: 'unused',
+		name: 'Joined Network',
+		genesis: {userId: 'u', signerKey: 'k', authorityId: 'a', adminEffectiveAt: '2026-10-12T10:00:00'},
+		digest: 'F7BlCC_VqrIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+	};
+
+	beforeEach(() => {
+		mockRunVoterNetworkJoin.mockReset();
+	});
+
+	it('a joined most-recent network is not opened before the CadreNode exists, and the dev seed does not run', async () => {
+		const ref = {hash: 'a1b2c3d4e5f60718', relays: [], name: 'Joined Network', primaryAuthorityDomainName: 'example.org'};
+		await AsyncStorage.setItem('recentNetworks', JSON.stringify([ref]));
+		await AsyncStorage.setItem('@votetorrent/voterJoinedNetworks', JSON.stringify([ref.hash]));
+		const {captured} = renderProvider();
+		await flushBoot(15, () => captured.value !== null);
+
+		expect(captured.value!.isInitialized).toBe(true);
+		expect(captured.value!.hasNetwork).toBe(false);
+		expect(mockSeedDevNetwork).not.toHaveBeenCalled();
+	});
+
+	it('joinNetwork answers no-peers without touching the engine while the CadreNode has not started', async () => {
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		const {captured} = renderProvider();
+		await flushBoot(15, () => captured.value !== null);
+
+		let result: unknown;
+		await renderer.act(async () => {
+			result = await captured.value!.joinNetwork(JOIN_CODE);
+		});
+		expect(result).toMatchObject({ok: false, reason: 'no-peers'});
+		expect(mockRunVoterNetworkJoin).not.toHaveBeenCalled();
+	});
+
+	it('a successful join records the network as joined and makes it current', async () => {
+		// The seed creates (and caches) a real network once; later boots reuse its result, so the
+		// network the join "returns" is one the engine can open from its cache.
+		let seeded: DevSeedResult | undefined;
+		mockSeedDevNetwork.mockImplementation(async (engine: NetworksEngine) => (seeded ??= await seedRealNetwork(engine)));
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const deviceUser = require('../../engines/device-user');
+		const userSpy = jest.spyOn(deviceUser, 'getOrCreateDeviceUser').mockResolvedValue(FAKE_USER);
+		const {tr, captured} = renderProvider();
+		await flushBoot(15, () => captured.value?.hasNetwork === true);
+
+		const fakeNode = {getControlNode: () => ({getConnections: () => [{}]})};
+		mockCadreNodeValue.node = fakeNode;
+		function Probe() {
+			captured.value = useVoterApp();
+			return null;
+		}
+		renderer.act(() => {
+			tr.update(
+				<VoterAppProvider>
+					<Probe />
+				</VoterAppProvider>,
+			);
+		});
+		await flushBoot(15, () => captured.value?.hasNetwork === true);
+
+		mockRunVoterNetworkJoin.mockImplementation(async () => ({
+			ok: true,
+			outcome: 'joined',
+			admittedVia: 'redeemed',
+			networkRef: seeded!.networkReference,
+			fingerprint: '17b0 6508 2fd5 aab2',
+		}));
+		let result: unknown;
+		await renderer.act(async () => {
+			result = await captured.value!.joinNetwork(JOIN_CODE);
+		});
+
+		expect(result).toMatchObject({ok: true, outcome: 'joined'});
+		expect(mockRunVoterNetworkJoin).toHaveBeenCalledWith(
+			expect.objectContaining({node: fakeNode, user: FAKE_USER, code: JOIN_CODE}),
+		);
+		expect(JSON.parse((await AsyncStorage.getItem('@votetorrent/voterJoinedNetworks'))!)).toEqual([seeded!.networkReference.hash]);
+		expect(captured.value!.hasNetwork).toBe(true);
+		userSpy.mockRestore();
 	});
 });

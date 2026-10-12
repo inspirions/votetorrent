@@ -11,7 +11,12 @@ import type {
   FoundingBundleExport,
   FoundingBundleImportOptions,
   FoundingBundleImportResult,
-  FoundingBundleInspection
+  FoundingBundleInspection,
+  FoundingAnchor,
+  FoundingAnchorFounder,
+  JoinFromStrandOptions,
+  JoinFromStrandResult,
+  NetworkJoinAnchor
 } from '@votetorrent/vote-core'
 import { NetworksCreateBuilder } from './builders/index.js'
 
@@ -108,5 +113,18 @@ export class MockNetworksEngine implements INetworksEngine {
       category: 'invalid-bundle',
       detail: 'MockNetworksEngine does not inspect founding bundles'
     }
+  }
+
+  // Spike 100: the mock has no strand to join and no founding rows to anchor.
+  async getFoundingAnchor (_networkHash: string, _founder: FoundingAnchorFounder): Promise<FoundingAnchor> {
+    throw new Error('MockNetworksEngine does not produce founding anchors')
+  }
+
+  async joinFromStrand (
+    _anchor: NetworkJoinAnchor,
+    _user: User | undefined,
+    _options: JoinFromStrandOptions
+  ): Promise<JoinFromStrandResult> {
+    return { ok: false, reason: 'target-open-failed', retryable: false, detail: 'MockNetworksEngine does not join networks' }
   }
 }

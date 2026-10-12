@@ -49,7 +49,7 @@ type RegistrationNavigationProp = NativeStackNavigationProp<
 
 export default function RegistrationScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, getEngine} = useVoterApp();
+	const {isInitialized, getEngine, hasNetwork} = useVoterApp();
 	const {draft} = useRegistrationDraft();
 	// Phase 44-07 (D-02): local session-only state — see file header comment.
 	const [isRegistered, setIsRegisteredState] = useState(false);
@@ -63,6 +63,7 @@ export default function RegistrationScreen() {
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<RegistrationNavigationProp>();
 	const {t} = useTranslation('continuity');
+	const {t: tJoin} = useTranslation('join');
 
 	const [codeAvailability, setCodeAvailability] = useState<RegistrationCodeAvailability | null>(null);
 	// Explicit, voter-initiated reveal (D-23/D-45) — set only by the showAgainLink tap below, and
@@ -115,6 +116,17 @@ export default function RegistrationScreen() {
 			<NetworkHeader onPressNetwork={() => navigation.navigate('RegistrationInfo')} />
 
 			<ScrollView contentContainerStyle={styles.content}>
+				{/* Spike 100: no network open yet — the way in is the authority's join code. */}
+				{isInitialized && !hasNetwork ? (
+					<Pressable
+						testID="join-network-entry-link"
+						onPress={() => navigation.navigate('JoinNetwork')}
+						style={styles.link}>
+						<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+							{tJoin('entryLink')}
+						</Text>
+					</Pressable>
+				) : null}
 				{isInitialized ? (
 					<RegistrationCard
 						isRegistered={isRegistered}

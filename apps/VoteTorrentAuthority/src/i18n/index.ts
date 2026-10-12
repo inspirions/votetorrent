@@ -554,6 +554,29 @@ const resources = {
 			networkFoundingImportAnchorRequired: 'This file was not checked against a fingerprint, so it was not imported.',
 			networkFoundingExportShareFailed: 'Could not share the file. It is still ready; try again.',
 			networkFoundingExportSaveFailed: 'Could not save the file. It is still ready; try again.',
+			// Spike 100 — "Invite voters": a join code for the Voter app.
+			voterInviteButton: 'Invite voters',
+			voterInviteGenerating: 'Preparing a join code…',
+			voterInviteOwnerTitle: 'Manage who can join this network',
+			voterInviteOwnerBody:
+				'This phone will manage who can join this network: it will sign the join codes voters use. Keep this phone safe. Continue?',
+			voterInviteOwnerConfirm: 'Continue',
+			voterInviteCancel: 'Cancel',
+			voterInviteNotOwner:
+				'This phone cannot invite voters to this network. Ask the officer whose device manages this network to create the join code.',
+			voterInviteFailed: 'Could not create a join code. Try again.',
+			voterInviteRetry: 'Try again',
+			voterInviteReadyBody:
+				'Give voters this join code. They paste it in the Voter app under Settings, Join a network. Publish the network fingerprint below through an official channel so voters can check it.',
+			voterInviteFingerprintHelp: "Voters see this fingerprint before they join. If it doesn't match the one you published, they should not join.",
+			voterInviteExpires: 'Valid until {{when}}',
+			voterInviteCopy: 'Copy join code',
+			voterInviteShare: 'Share join code',
+			voterInviteCopied: 'Join code copied',
+			voterInviteCopyFailed: 'Could not copy the join code. Try Share instead.',
+			voterInviteDone: 'Done',
+			voterInviteShareMessage:
+				'Join {{name}} in the VoteTorrent Voter app: Settings, Join a network, then paste this code. Network fingerprint: {{fingerprint}}\n\n{{code}}',
 			keyholderAcceptSelfInvite: 'You sent this keyholder invitation, so you cannot accept it. Each keyholder must be a different person on their own device.',
 			keyholderAcceptSeatHeld: 'This device already holds a keyholder seat for this election. Each keyholder needs their own device.',
 			keyholderInviteExpiryLabel: 'Invitation valid for',
@@ -1749,6 +1772,29 @@ const resources = {
 			networkFoundingImportAnchorRequired: 'Este archivo no se comprobó con una huella, así que no se importó.',
 			networkFoundingExportShareFailed: 'No se pudo compartir el archivo. Sigue listo; inténtalo de nuevo.',
 			networkFoundingExportSaveFailed: 'No se pudo guardar el archivo. Sigue listo; inténtalo de nuevo.',
+			// Spike 100 — ver el bloque `en`.
+			voterInviteButton: 'Invitar a votantes',
+			voterInviteGenerating: 'Preparando un código de acceso…',
+			voterInviteOwnerTitle: 'Gestionar quién puede unirse a esta red',
+			voterInviteOwnerBody:
+				'Este teléfono gestionará quién puede unirse a esta red: firmará los códigos de acceso que usan los votantes. Mantén este teléfono seguro. ¿Continuar?',
+			voterInviteOwnerConfirm: 'Continuar',
+			voterInviteCancel: 'Cancelar',
+			voterInviteNotOwner:
+				'Este teléfono no puede invitar a votantes a esta red. Pide al funcionario cuyo dispositivo gestiona esta red que cree el código de acceso.',
+			voterInviteFailed: 'No se pudo crear un código de acceso. Inténtalo de nuevo.',
+			voterInviteRetry: 'Intentar de nuevo',
+			voterInviteReadyBody:
+				'Da este código de acceso a los votantes. Lo pegan en la aplicación Voter en Ajustes, Unirse a una red. Publica la huella de la red de abajo por un canal oficial para que los votantes puedan comprobarla.',
+			voterInviteFingerprintHelp: 'Los votantes ven esta huella antes de unirse. Si no coincide con la que publicaste, no deben unirse.',
+			voterInviteExpires: 'Válido hasta {{when}}',
+			voterInviteCopy: 'Copiar código de acceso',
+			voterInviteShare: 'Compartir código de acceso',
+			voterInviteCopied: 'Código de acceso copiado',
+			voterInviteCopyFailed: 'No se pudo copiar el código de acceso. Prueba a compartirlo.',
+			voterInviteDone: 'Listo',
+			voterInviteShareMessage:
+				'Únete a {{name}} en la aplicación VoteTorrent Voter: Ajustes, Unirse a una red, y pega este código. Huella de la red: {{fingerprint}}\n\n{{code}}',
 			keyholderAcceptSelfInvite: 'Tú enviaste esta invitación de custodio, así que no puedes aceptarla. Cada custodio debe ser una persona distinta en su propio dispositivo.',
 			keyholderAcceptSeatHeld: 'Este dispositivo ya tiene un puesto de custodio en esta elección. Cada custodio necesita su propio dispositivo.',
 			keyholderInviteExpiryLabel: 'Invitación válida durante',

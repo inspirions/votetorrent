@@ -19,6 +19,11 @@ export { verifySigP256 } from './database/initialize.js'
 // run it too — without it, the first signed insert fails `Function not found: SignatureValidP256/3`.
 export { registerDbPlugins } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
+// Spike 100: a voter joins an authority's network from a join code.
+export { NETWORK_JOIN_CODE_PREFIX, encodeNetworkJoinCode, decodeNetworkJoinCode } from './networks/join-code.js'
+export type { NetworkJoinCode, NetworkJoinCodeDecodeResult } from './networks/join-code.js'
+export { joinNetwork } from './networks/network-join.js'
+export type { NetworkJoinNode, NetworkJoinOptions, NetworkJoinResult, NetworkJoinFailureReason, NetworkJoinStep } from './networks/network-join.js'
 export { NetworkEngine } from './network/network-engine.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'
 export { ElectionEngine } from './election/election-engine.js'

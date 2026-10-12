@@ -54,6 +54,7 @@ import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-fla
 import { selectAttestationVerifier } from './attestation-verifier'
 import { createVoterStrandPort } from './strand-port-adapter'
 import { createVoterRequestTransportSource, VOTER_REQUEST_TRANSPORTS_ENGINE } from './voter-request-transports'
+import { readJoinedNetworkHashes } from './join-bootstrap'
 
 export class EngineFactory {
 	private readonly networksEngine: NetworksEngine
@@ -167,6 +168,7 @@ export class EngineFactory {
 				const db = await createStrandDbFactory(this.node, {
 					signal: this.firstSyncAbort.signal,
 					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
+					isJoinedNetwork: async (id) => (await readJoinedNetworkHashes()).includes(id),
 				})(networkHash)
 				// D-32: mark this hash peer-backed only AFTER the strand factory resolved —
 				// never speculatively before the call.
