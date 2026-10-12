@@ -10,7 +10,7 @@ import { timingSafeEqual } from 'node:crypto'
 // global. Without this, the leaf-key binding check throws `ReferenceError` on device and the
 // outer fail-closed catch rejects every genuine Android attestation.
 import { Buffer } from 'buffer'
-import type { AttestationChallenge, AttestationVerification } from '@votetorrent/vote-core'
+import { ANDROID_DEVICE_KEY_ATTESTATION_TAG, type AttestationChallenge, type AttestationVerification } from '@votetorrent/vote-core'
 import { recomputeChallengeDigest } from './digest-binding.js'
 import { certDigestBytesToHex, type ExpectedAppIdentity } from './app-identity.js'
 import { p256KeyToCompressedHex } from '../../voting/vote-signing.js'
@@ -100,6 +100,22 @@ function asBytes (value: unknown): Uint8Array {
 }
 
 /**
+ * Which binding a chain must carry (spike 104, R1d). Android binds an attestation challenge only at
+ * key generation, and the voting key signs the association request before the authority's nonce
+ * exists — so a real Android ceremony presents TWO chains:
+ *   - `'device-key'`: the voting key's own chain, generated with `ANDROID_DEVICE_KEY_ATTESTATION_TAG`.
+ *     Its leaf must be `challenge.deviceKey` (T-51-02-01).
+ *   - `'fresh'`: a throwaway key generated after the nonce, attested with `Digest(nonce, deviceKey)`
+ *     (D-06 anti-relay). Its leaf is NOT the voting key — `'device-key'` carries that binding, and
+ *     the requester key's signature over the answer ties the two chains together.
+ *   - `'single'` (default): one chain carrying both bindings — the digest challenge AND a leaf that is
+ *     `challenge.deviceKey`.
+ * Every other check (pinned root, CA flags, expiry, TEE/StrongBox, app identity, generated origin,
+ * SIGN purpose, revocation) applies in every role.
+ */
+export type KeyAttestationRole = 'single' | 'device-key' | 'fresh'
+
+/**
  * Validate an Android Keystore hardware Key Attestation cert chain and
  * bind it to an issued `AttestationChallenge`.
  *
@@ -119,7 +135,8 @@ export async function verifyKeyAttestation (
   challenge: AttestationChallenge,
   pinnedRootsDer: Uint8Array[],
   revokedSerials: Set<string>,
-  expectedAppIdentity: ExpectedAppIdentity
+  expectedAppIdentity: ExpectedAppIdentity,
+  role: KeyAttestationRole = 'single'
 ): Promise<AttestationVerification> {
   try {
     if (certChainDer.length === 0) {
@@ -198,11 +215,20 @@ export async function verifyKeyAttestation (
     // association-engine.ts's own Phase-42 device-uniqueness "D-06").
     // This function does NOT recompute Digest itself beyond calling the
     // shared digest-binding.ts helper — composable per RESEARCH.md Pattern 2.
-    const expectedChallenge = new TextEncoder().encode(recomputeChallengeDigest(challenge.nonce, challenge.deviceKey))
+    // A 'device-key' chain predates the nonce, so it carries the fixed provisioning tag instead; the
+    // 'fresh' chain beside it is what answers the nonce.
+    const expectedChallenge = new TextEncoder().encode(role === 'device-key'
+      ? ANDROID_DEVICE_KEY_ATTESTATION_TAG
+      : recomputeChallengeDigest(challenge.nonce, challenge.deviceKey))
     const challengeBound = expectedChallenge.length === attestationChallengeBytes.length &&
       timingSafeEqual(expectedChallenge, attestationChallengeBytes)
     if (!challengeBound) {
-      return { ok: false, reason: 'attestationChallenge does not match Digest(nonce, deviceKey) — D-06 anti-relay binding failed' }
+      return {
+        ok: false,
+        reason: role === 'device-key'
+          ? 'device-key attestationChallenge is not the Android device-key provisioning tag'
+          : 'attestationChallenge does not match Digest(nonce, deviceKey) — D-06 anti-relay binding failed'
+      }
     }
 
     // 4b. WR-03 app-identity binding: verify the software-enforced
@@ -242,13 +268,16 @@ export async function verifyKeyAttestation (
     // shareable. Compare the leaf's own public key (`leaf.publicKey.rawData`, already-parsed SPKI
     // DER — do NOT re-parse DER by hand) against `challenge.deviceKey` as P-256 POINTS: the
     // challenge carries compressed hex since spike 103, SPKI base64 before it.
-    const deviceKeyPoint = deviceKeyAsCompressedHex(challenge.deviceKey)
-    if (deviceKeyPoint === undefined) {
-      return { ok: false, reason: 'challenge deviceKey is not a P-256 public key — rejecting rather than treating the leaf-key binding check as inapplicable' }
-    }
-    const leafPoint = deviceKeyAsCompressedHex(Buffer.from(new Uint8Array(leaf.publicKey.rawData)).toString('base64'))
-    if (leafPoint === undefined || leafPoint !== deviceKeyPoint) {
-      return { ok: false, reason: 'attested leaf certificate public key is not the challenge deviceKey — the attestation proves a hardware key exists, but not that it is the registered voting key' }
+    // A 'fresh' chain's leaf is a throwaway key by design; its 'device-key' sibling carries this check.
+    if (role !== 'fresh') {
+      const deviceKeyPoint = deviceKeyAsCompressedHex(challenge.deviceKey)
+      if (deviceKeyPoint === undefined) {
+        return { ok: false, reason: 'challenge deviceKey is not a P-256 public key — rejecting rather than treating the leaf-key binding check as inapplicable' }
+      }
+      const leafPoint = deviceKeyAsCompressedHex(Buffer.from(new Uint8Array(leaf.publicKey.rawData)).toString('base64'))
+      if (leafPoint === undefined || leafPoint !== deviceKeyPoint) {
+        return { ok: false, reason: 'attested leaf certificate public key is not the challenge deviceKey — the attestation proves a hardware key exists, but not that it is the registered voting key' }
+      }
     }
 
     // 4c. WR-04: assert the attested key was hardware-GENERATED (not imported)

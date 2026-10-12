@@ -36,6 +36,7 @@ import type { IIntegrityKeyProvider } from '../src/association/key-provider.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
 import { buildSyntheticDeviceAttestation } from './fixtures/attestation/synthetic-device-attestation.js'
 import { generateAndroidDeviceKeyPair } from './fixtures/attestation/synthetic-key-description.js'
+import { p256KeyToCompressedHex } from '../src/voting/vote-signing.js'
 import {
   buildDefaultSyntheticPayload,
   buildForgedHs256Jwe,
@@ -364,3 +365,55 @@ describe('PlayIntegrityVerifier class — D-09 keysProvisioned fail-closed reloc
     expect(result.reason).to.equal(undefined)
   })
 })
+
+// Spike 104 (R1d): the real Android ceremony presents the voting key's own chain (provisioning tag)
+// beside a throwaway key's nonce-bound chain. Both must pass; either failing rejects, and the reason
+// names which one.
+describe('PlayIntegrityVerifier — two-chain Android form (spike 104, R1d)', () => {
+  async function twoChain (mutate?: { deviceLeaf?: CryptoKeyPair, deviceChallenge?: Uint8Array, freshChallenge?: Uint8Array }) {
+    const { keyPair: votingKey, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+    const { keyPair: throwaway } = await generateAndroidDeviceKeyPair()
+    const challenge = makeChallenge({ deviceKey: p256KeyToCompressedHex(deviceKeySpkiBase64) })
+    const { verifier, jweKeys, testRoot } = await buildClassVerifier(true)
+    const attestation = await buildSyntheticDeviceAttestation({
+      challenge,
+      jweKeys,
+      testRoot,
+      overrides: {
+        leafKeyPair: throwaway,
+        ...(mutate?.freshChallenge !== undefined ? { attestationChallengeBytes: mutate.freshChallenge } : {}),
+        deviceKeyChain: { leafKeyPair: mutate?.deviceLeaf ?? votingKey, ...(mutate?.deviceChallenge !== undefined ? { attestationChallengeBytes: mutate.deviceChallenge } : {}) }
+      }
+    })
+    return { verifier, challenge, attestation }
+  }
+
+  it('accepts the honest two-chain attestation (voting key tagged, throwaway key nonce-bound)', async () => {
+    const { verifier, challenge, attestation } = await twoChain()
+    const result = await verifier.verify(challenge, attestation)
+    expect(result.ok, result.ok ? '' : result.reason).to.equal(true)
+  })
+
+  it("REJECTS when the device-key chain's leaf is another key (T-51-02-01)", async () => {
+    const { keyPair: other } = await generateAndroidDeviceKeyPair()
+    const { verifier, challenge, attestation } = await twoChain({ deviceLeaf: other })
+    const result = await verifier.verify(challenge, attestation)
+    expect(result.ok).to.equal(false)
+    expect(result.reason).to.match(/^device-key chain: .*not the challenge deviceKey/)
+  })
+
+  it('REJECTS when the device-key chain lacks the provisioning tag', async () => {
+    const { verifier, challenge, attestation } = await twoChain({ deviceChallenge: new TextEncoder().encode('some-other-tag') })
+    const result = await verifier.verify(challenge, attestation)
+    expect(result.ok).to.equal(false)
+    expect(result.reason).to.match(/^device-key chain: .*provisioning tag/)
+  })
+
+  it('REJECTS when the nonce-bound chain answers a different nonce (anti-relay)', async () => {
+    const { verifier, challenge, attestation } = await twoChain({ freshChallenge: new TextEncoder().encode(boundNonce({ nonce: 'an-earlier-nonce', deviceKey: 'x' })) })
+    const result = await verifier.verify(challenge, attestation)
+    expect(result.ok).to.equal(false)
+    expect(result.reason).to.match(/^nonce-bound chain: /)
+  })
+})
+

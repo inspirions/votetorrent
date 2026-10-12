@@ -144,7 +144,25 @@ export interface AndroidAttestationDetails {
   keystorePublicKey: string
   /** Nonce used in the attestation request */
   nonce: string
+  /**
+   * The voting key's OWN attestation chain (leaf-first, base64 DER, root dropped), attested when the
+   * key was provisioned with `ANDROID_DEVICE_KEY_ATTESTATION_TAG` as its challenge.
+   *
+   * Android binds an attestation challenge only at key generation, and the nonce arrives after the
+   * key has already signed the association request — so the nonce-bound chain
+   * (`DeviceAttestation.certificateChain`) belongs to a THROWAWAY key, and this chain is what proves
+   * the voting key itself is hardware-backed (spike 104, R1d). Absent = the single-chain form, where
+   * `certificateChain`'s leaf must be the voting key.
+   */
+  deviceKeyCertificateChain?: string[]
 }
+
+/**
+ * The attestation challenge an Android voting key is generated with (UTF-8 bytes), before any
+ * authority nonce exists. Part of the wire contract: the producer passes it to
+ * `setAttestationChallenge`, and the verifier requires it on `deviceKeyCertificateChain`'s leaf.
+ */
+export const ANDROID_DEVICE_KEY_ATTESTATION_TAG = 'votetorrent/android-device-key/v1'
 
 /**
  * Device-produced platform attestation answering an AttestationChallenge

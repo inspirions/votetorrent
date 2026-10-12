@@ -427,6 +427,30 @@ class AttestationNativeModule: NSObject {
     }
   }
 
+  // MARK: - (2b) Android-only R1d methods (spike 104)
+
+  /// Android binds an attestation challenge only at key generation, so its voting key is provisioned
+  /// with a fixed tag and the nonce is answered by a throwaway key. iOS has no such constraint (App
+  /// Attest attests a separate key and cross-signs the vote key), and the iOS producer never calls
+  /// these two. They exist so the four ABI layers agree.
+  @objc(provisionAttestedDeviceKey:attestationChallengeBase64:resolver:rejecter:)
+  func provisionAttestedDeviceKey(_ keyAlias: String,
+                                  attestationChallengeBase64: String,
+                                  resolver resolve: @escaping RCTPromiseResolveBlock,
+                                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED_PLATFORM", "provisionAttestedDeviceKey is Android-only; iOS uses provisionDeviceKey", nil)
+  }
+
+  @objc(produceFreshAttestation:boundDigest:boundDigestUtf8Base64:enablePlayIntegrity:resolver:rejecter:)
+  func produceFreshAttestation(_ keyAlias: String,
+                               boundDigest: String,
+                               boundDigestUtf8Base64: String,
+                               enablePlayIntegrity: Bool,
+                               resolver resolve: @escaping RCTPromiseResolveBlock,
+                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED_PLATFORM", "produceFreshAttestation is Android-only; iOS uses produceAttestation", nil)
+  }
+
   // MARK: - (3) signWithDeviceKey
 
   /// Biometric-gated P-256 signature over `digestBase64`.

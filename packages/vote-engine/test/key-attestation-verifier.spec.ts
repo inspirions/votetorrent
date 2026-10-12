@@ -20,7 +20,7 @@ import { expect } from 'chai'
 import 'reflect-metadata'
 import { SecurityLevel } from '@peculiar/asn1-android'
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
-import type { AttestationChallenge } from '@votetorrent/vote-core'
+import { ANDROID_DEVICE_KEY_ATTESTATION_TAG, type AttestationChallenge } from '@votetorrent/vote-core'
 // Wave-4 target — does not exist yet. This import failing IS the RED gate.
 import { verifyKeyAttestation } from '../src/association/verifiers/key-attestation.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
@@ -387,6 +387,93 @@ describe('verifyKeyAttestation (D-01/D-02/D-06/D-09)', () => {
       const result = await verifyKeyAttestation(chainDer, challenge, [new Uint8Array(root.cert.rawData)], new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
       expect(result.ok).to.equal(false)
       expect(result.reason).to.match(/not the challenge deviceKey/i)
+    })
+  })
+
+  // Spike 104 (R1d): Android binds a challenge only at keygen and the voting key signs the request
+  // before the nonce exists, so a real ceremony presents the voting key's own chain (provisioning tag)
+  // and a throwaway key's chain (nonce digest). Each role keeps every check except the one its
+  // sibling carries.
+  describe('roles: device-key and fresh chains (spike 104, R1d)', () => {
+    const TAG = new TextEncoder().encode(ANDROID_DEVICE_KEY_ATTESTATION_TAG)
+    const pinned = (root: Awaited<ReturnType<typeof generateTestRootCa>>) => [new Uint8Array(root.cert.rawData)]
+
+    async function votingKeyChallenge () {
+      const { keyPair, deviceKeySpkiBase64 } = await generateAndroidDeviceKeyPair()
+      return { challenge: makeChallenge({ deviceKey: p256KeyToCompressedHex(deviceKeySpkiBase64) }), votingKeyPair: keyPair }
+    }
+
+    it("'device-key' accepts the voting key's own chain generated with the provisioning tag", async () => {
+      const root = await generateTestRootCa()
+      const { challenge, votingKeyPair } = await votingKeyChallenge()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: TAG, leafKeyPair: votingKeyPair })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'device-key')
+      expect(result.ok, result.ok ? '' : result.reason).to.equal(true)
+    })
+
+    it("'device-key' REJECTS a tagged chain whose leaf is not the voting key (T-51-02-01 kept)", async () => {
+      const root = await generateTestRootCa()
+      const { challenge } = await votingKeyChallenge()
+      const { keyPair: otherKeyPair } = await generateAndroidDeviceKeyPair()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: TAG, leafKeyPair: otherKeyPair })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'device-key')
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/not the challenge deviceKey/i)
+    })
+
+    it("'device-key' REJECTS the voting key's chain when it carries the nonce digest instead of the tag", async () => {
+      const root = await generateTestRootCa()
+      const { challenge, votingKeyPair } = await votingKeyChallenge()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: boundChallengeBytes(challenge), leafKeyPair: votingKeyPair })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'device-key')
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/provisioning tag/i)
+    })
+
+    it("'device-key' still enforces the hardware bar (a Software-level tagged chain is refused)", async () => {
+      const root = await generateTestRootCa()
+      const { challenge, votingKeyPair } = await votingKeyChallenge()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.software, attestationChallenge: TAG, leafKeyPair: votingKeyPair })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'device-key')
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/Software/)
+    })
+
+    it("'fresh' accepts a throwaway key's chain bound to Digest(nonce, deviceKey) — its leaf is not the voting key", async () => {
+      const root = await generateTestRootCa()
+      const { challenge } = await votingKeyChallenge()
+      const { keyPair: throwaway } = await generateAndroidDeviceKeyPair()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: boundChallengeBytes(challenge), leafKeyPair: throwaway })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'fresh')
+      expect(result.ok, result.ok ? '' : result.reason).to.equal(true)
+      // The same chain in the default role is refused — 'single' needs the leaf to be the voting key.
+      const single = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY)
+      expect(single.ok).to.equal(false)
+    })
+
+    it("'fresh' REJECTS a chain bound to a different nonce (D-06 anti-relay kept)", async () => {
+      const root = await generateTestRootCa()
+      const { challenge } = await votingKeyChallenge()
+      const { keyPair: throwaway } = await generateAndroidDeviceKeyPair()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: boundChallengeBytes({ ...challenge, nonce: 'an-earlier-nonce' }), leafKeyPair: throwaway })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'fresh')
+      expect(result.ok).to.equal(false)
+      expect(result.reason).to.match(/Digest\(nonce, deviceKey\)/)
+    })
+
+    it("'fresh' REJECTS the provisioning-tag chain (a tagged chain never answers a nonce)", async () => {
+      const root = await generateTestRootCa()
+      const { challenge, votingKeyPair } = await votingKeyChallenge()
+      const { chainDer } = await buildSyntheticKeyDescription({ root, securityLevel: SecurityLevel.trustedEnvironment, attestationChallenge: TAG, leafKeyPair: votingKeyPair })
+
+      const result = await verifyKeyAttestation(chainDer, challenge, pinned(root), new Set<string>(), SYNTHETIC_EXPECTED_APP_IDENTITY, 'fresh')
+      expect(result.ok).to.equal(false)
     })
   })
 })

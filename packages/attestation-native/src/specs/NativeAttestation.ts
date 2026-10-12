@@ -93,6 +93,34 @@ export interface Spec extends TurboModule {
 	): Promise<Object>
 
 	/**
+	 * Spike 104 (R1d), ANDROID ONLY — `provisionDeviceKey` with an attestation chain. The voting key
+	 * is generated with `attestationChallengeBase64` (base64 of utf8(`ANDROID_DEVICE_KEY_ATTESTATION_TAG`))
+	 * as its attestation challenge, so its own chain can later prove the VOTING key is
+	 * hardware-backed — the nonce does not exist yet at this point. Regenerates the alias like
+	 * `provisionDeviceKey` and resolves the same shape. iOS rejects `UNSUPPORTED_PLATFORM`.
+	 */
+	provisionAttestedDeviceKey(keyAlias: string, attestationChallengeBase64: string): Promise<Object>
+
+	/**
+	 * Spike 104 (R1d), ANDROID ONLY — answers the challenge WITHOUT replacing the voting key. A
+	 * throwaway key is generated with `boundDigestUtf8Base64` as its attestation challenge, its chain
+	 * exported and the key deleted; the key under `keyAlias` is never touched (unlike
+	 * `produceAttestation`, which deletes and regenerates it). Same arguments and Play Integrity leg
+	 * as `produceAttestation`; no biometric prompt. Resolves `{ certificateChainBase64` (the
+	 * throwaway, nonce-bound chain), `deviceKeyCertificateChainBase64` (the voting key's own chain),
+	 * `integrityToken, androidId, attestationTimeMillis, publicKeyCompressedHex` (the voting key,
+	 * unchanged) `}`. Rejects `NO_KEY_PROVISIONED`, `KEY_INVALIDATED_REASSOCIATE`,
+	 * `DEVICE_KEY_NOT_ATTESTED`, `NO_STRONGBOX_OR_TEE`, `KEY_ATTESTATION_FAILED`,
+	 * `INVALID_CHALLENGE_ENCODING`, `PLAY_INTEGRITY_ERROR`. iOS rejects `UNSUPPORTED_PLATFORM`.
+	 */
+	produceFreshAttestation(
+		keyAlias: string,
+		boundDigest: string,
+		boundDigestUtf8Base64: string,
+		enablePlayIntegrity: boolean,
+	): Promise<Object>
+
+	/**
 	 * Phase 49 (D-06/D-04): produces a biometric-gated, hardware-backed P-256 signature
 	 * over `digestBase64` using the key under `keyAlias`. Resolves
 	 * `{ signatureHex: string }` — a 64-byte compact, low-S, hex-encoded signature

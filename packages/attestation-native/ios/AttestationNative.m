@@ -31,6 +31,21 @@ RCT_EXTERN_METHOD(produceAttestation:(NSString *)keyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Spike 104 (R1d) — Android-only; the Swift implementations reject UNSUPPORTED_PLATFORM. Selectors
+// must match `@objc(provisionAttestedDeviceKey:attestationChallengeBase64:resolver:rejecter:)` and
+// `@objc(produceFreshAttestation:boundDigest:boundDigestUtf8Base64:enablePlayIntegrity:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(provisionAttestedDeviceKey:(NSString *)keyAlias
+                  attestationChallengeBase64:(NSString *)attestationChallengeBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(produceFreshAttestation:(NSString *)keyAlias
+                  boundDigest:(NSString *)boundDigest
+                  boundDigestUtf8Base64:(NSString *)boundDigestUtf8Base64
+                  enablePlayIntegrity:(BOOL)enablePlayIntegrity
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(signWithDeviceKey:(NSString *)keyAlias
                   digestBase64:(NSString *)digestBase64
                   promptTitle:(NSString *)promptTitle

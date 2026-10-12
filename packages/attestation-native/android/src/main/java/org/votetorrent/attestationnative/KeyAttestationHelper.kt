@@ -290,6 +290,22 @@ class DeviceKeyAbsentException(keyAlias: String) : Exception(
  * [KeyAttestationHelper.readCurrentKey]: the key under the alias is permanently invalidated
  * (KeyPermanentlyInvalidatedException from initSign). Surfaced, never deleted or regenerated.
  */
+/**
+ * Spike 104 (R1d) — the voting key exists but carries no attestation chain (it was provisioned
+ * without a challenge, before R1d). Its hardware backing cannot be proven, so a ceremony must
+ * re-provision rather than answer with it.
+ */
+class DeviceKeyNotAttestedException(keyAlias: String) : Exception(
+	"the key under $keyAlias carries no attestation chain — provision it with provisionAttestedDeviceKey",
+)
+
+/** [KeyAttestationHelper.attestFresh]'s result: both chains (leaf-first, root dropped) and the voting key. */
+data class FreshAttestation(
+	val deviceKeyCertificateChain: List<String>,
+	val freshCertificateChain: List<String>,
+	val deviceKeyCompressedHex: String,
+)
+
 class DeviceKeyInvalidatedException(cause: Throwable) : Exception(
 	"device key at this alias has been permanently invalidated (KeyPermanentlyInvalidatedException)",
 	cause,
@@ -335,6 +351,77 @@ class KeyAttestationHelper(private val reactContext: ReactApplicationContext) {
 	fun generateProvisionKey(keyAlias: String): ProvisionResult {
 		return generateKey(keyAlias, attestationChallenge = null, authenticator = KeyAuthenticator.BIOMETRIC_STRONG)
 	}
+
+	/**
+	 * Spike 104 (R1d) — the Voter's voting key, generated WITH an attestation chain. Same key spec
+	 * as [generateProvisionKey] (regenerates the alias, no prompt), but [attestationChallenge] is a
+	 * fixed provisioning tag: no authority nonce exists yet, because this key signs the association
+	 * request that the nonce answers. Its chain is what proves the VOTING key itself is
+	 * hardware-backed; the nonce is answered later by [attestFresh]'s throwaway key, so this key is
+	 * never deleted or replaced by the ceremony.
+	 *
+	 * [attestationChallenge] must be non-empty: an empty challenge is a request for attestation with
+	 * an INVALID challenge, which StrongBox refuses (see [generateKey]).
+	 */
+	fun generateAttestedProvisionKey(keyAlias: String, attestationChallenge: ByteArray): ProvisionResult {
+		require(attestationChallenge.isNotEmpty()) { "attestation challenge must be non-empty" }
+		return generateKey(keyAlias, attestationChallenge = attestationChallenge, authenticator = KeyAuthenticator.BIOMETRIC_STRONG)
+	}
+
+	/**
+	 * Spike 104 (R1d) — answer an authority nonce WITHOUT touching the voting key under [keyAlias].
+	 *
+	 * `setAttestationChallenge` is keygen-time, so the nonce can only be bound into a NEW key. The
+	 * old design ([regenerateAttested]) made that new key the voting key by deleting the one that
+	 * had signed the request — leaving the challenge naming a key the phone no longer held. Here the
+	 * new key is a throwaway under [freshAliasFor]: it is generated with [attestationChallengeBytes]
+	 * (utf8(BOUND_DIGEST)), its chain exported, and it is deleted before returning. The voting key
+	 * stays, and later signs the answer that carries both chains.
+	 *
+	 * No biometric prompt: the throwaway key never signs, and nothing here uses the voting key's
+	 * private half. [Signature.initSign] is only the same validity probe [readCurrentKey] uses.
+	 *
+	 * Throws [DeviceKeyAbsentException] (no voting key), [DeviceKeyInvalidatedException] (it can no
+	 * longer sign the answer), [DeviceKeyNotAttestedException] (provisioned without a chain, e.g. by
+	 * [generateProvisionKey] before R1d), or [NoStrongBoxOrTeeException] from the throwaway keygen.
+	 */
+	fun attestFresh(keyAlias: String, attestationChallengeBytes: ByteArray): FreshAttestation {
+		if (!keyStore.containsAlias(keyAlias)) {
+			throw DeviceKeyAbsentException(keyAlias)
+		}
+		try {
+			val privateKey = keyStore.getKey(keyAlias, null) as? PrivateKey
+				?: throw DeviceKeyAbsentException(keyAlias)
+			Signature.getInstance("SHA256withECDSA").initSign(privateKey)
+		} catch (e: KeyPermanentlyInvalidatedException) {
+			throw DeviceKeyInvalidatedException(e)
+		}
+		// A key generated without attestation has a one-certificate, self-signed "chain".
+		val deviceChain = keyStore.getCertificateChain(keyAlias)
+		if (deviceChain == null || deviceChain.size < 2) {
+			throw DeviceKeyNotAttestedException(keyAlias)
+		}
+
+		val freshAlias = freshAliasFor(keyAlias)
+		try {
+			generateKey(freshAlias, attestationChallenge = attestationChallengeBytes)
+			return FreshAttestation(
+				// D-15b — leaf+intermediates only, as exportCertificateChain does.
+				deviceKeyCertificateChain = deviceChain.dropLast(1).map { Base64.encodeToString(it.encoded, Base64.NO_WRAP) },
+				freshCertificateChain = exportCertificateChain(freshAlias),
+				deviceKeyCompressedHex = spkiToCompressedPointHex(deviceChain[0].publicKey.encoded),
+			)
+		} finally {
+			try {
+				keyStore.deleteEntry(freshAlias)
+			} catch (e: Exception) {
+				// Best effort: a leftover throwaway key is harmless, and the next call regenerates it.
+			}
+		}
+	}
+
+	/** The throwaway alias [attestFresh] attests under — never a voting, recovery or wrap alias. */
+	private fun freshAliasFor(keyAlias: String): String = "${keyAlias}_FRESH_ATTESTATION"
 
 	/**
 	 * READ-ONLY current-key accessor. Resolves the public key presently stored under [keyAlias]

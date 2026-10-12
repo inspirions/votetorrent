@@ -16,7 +16,7 @@
  */
 
 import { digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
-import { cborDecode, type CborValue } from '@votetorrent/vote-core'
+import { ANDROID_DEVICE_KEY_ATTESTATION_TAG, cborDecode, type CborValue } from '@votetorrent/vote-core'
 import type { AttestationChallenge, DeviceAttestation, IOSAttestationDetails, Signature } from '@votetorrent/vote-core'
 // Type-only import — erased at compile time (isolatedModules requires this to be explicit), so
 // it produces NO runtime require of './specs/NativeAttestation' and therefore does not trigger
@@ -70,22 +70,16 @@ if (probeResult !== PROBE_EXPECTED) {
  * Stable module-level Keystore alias.
  *
  * CORRECTED 2026-08-24 — the previous rationale here ("D-13 requires a STABLE alias so
- * enrollment-change invalidation is detectable") was a non-sequitur and is removed. The ALIAS is
- * stable; the KEY UNDER IT IS NOT. `produce()` below calls native `produceAttestation`, which
- * routes to `KeyAttestationHelper.regenerateAttested` — and that function `deleteEntry`s this
- * alias and generates a brand-new key pair BEFORE it ever calls `initSign`. So the key that gets
- * signed with is always microseconds old, no biometric enrolment can invalidate it, and the
- * `KeyPermanentlyInvalidatedException` catch on that path is unreachable. Alias stability buys
- * nothing for invalidation detection.
+ * enrollment-change invalidation is detectable") was a non-sequitur and is removed.
  *
- * What the stable alias actually buys: one well-known slot, so a ceremony never strands an
- * orphaned key under a generated name, and so `exportPublicKeyCompressedHex` has a fixed address
- * to read the post-regeneration key back from.
- *
- * The security property this path actually provides is KEY NON-REUSE — no attested key survives
- * across ceremonies — which is stronger than detect-then-recover. Do not re-introduce an
- * invalidation-detection claim here. Full analysis:
- * `.planning/todos/pending/2026-08-03-attestation-d13-key-invalidation-leg.md`.
+ * UPDATED (spike 104, R1d): on Android the key under this alias is now stable for a whole
+ * ceremony. `provisionDeviceKey()` regenerates it (attested under `ANDROID_DEVICE_KEY_ATTESTATION_TAG`)
+ * once at the ceremony's start; `produce()` answers the nonce with a THROWAWAY key
+ * (`produceFreshAttestation`) and never touches this one. It used to call `produceAttestation`,
+ * which deleted the key that had signed the association request and attested a new one, so the
+ * challenge named a key the phone no longer held and the honest Android ceremony could never pass
+ * the verifier's leaf binding. KEY NON-REUSE across ceremonies still holds: every ceremony
+ * provisions a fresh voting key. Full analysis: `.planning/spikes/104-android-ceremony-key-rotation/`.
  *
  * (`setInvalidatedByBiometricEnrollment(true)` remains load-bearing for the AUTHORITY app's
  * persistent signing key, reached via `signWithDeviceKey`, which does NOT regenerate first — that
@@ -413,7 +407,7 @@ function readAttestationObject(attestationObjectBase64: string): {
 
 /**
  * Injectable factory driving the D-11 two-step TurboModule seam. Takes a plain
- * `{ enablePlayIntegrity: boolean }` and passes it STRAIGHT into native `produceAttestation` —
+ * `{ enablePlayIntegrity: boolean }` and passes it STRAIGHT into native `produceFreshAttestation` —
  * this package holds NO app-level flag constant; the boolean is the ONLY injection point (D-12),
  * wired by the app call site (45-08's `resolvePlayIntegrityEnabled()`).
  */
@@ -427,31 +421,26 @@ export function createRealAttestationProducer(opts: {
 	 */
 	enableDeviceCheck?: boolean
 }): RealAttestationProducer {
-	// Cache of the CURRENT device public key, set by `provisionDeviceKey()` and refreshed by
-	// `produce()` when the key under `KEY_ALIAS` changes (Android's `produceAttestation` always
-	// rotates it — D-13 key non-reuse; iOS's does not, in the ordinary path). `signDeviceKeyDigest`
-	// (plan 51-14) reads this to report an honest `Signature.signerKey` without an extra native
-	// round trip on its hot path. Scoped to ONE producer instance/ceremony — `resolveAttestationProducer()`
-	// is called fresh per `ConfirmationScreen.onConfirm()` attempt, so this never leaks across ceremonies.
+	// Cache of the CURRENT device public key, set by `provisionDeviceKey()`/`getCurrentDeviceKey()`.
+	// `signDeviceKeyDigest` (plan 51-14) reads it to report an honest `Signature.signerKey` without
+	// an extra native round trip on its hot path. Scoped to ONE producer instance/ceremony.
 	//
-	// IMPORTANT — this field is cosmetic for cryptographic PURPOSES on the association path:
-	// `association-engine.ts`'s `submitAssociationRequest`/`validateStagedAttestationAnswer` verify
-	// the raw signature bytes against the caller-supplied `requesterKey` argument
-	// (`ConfirmationScreen`'s `p256DeviceKey`, captured once at ceremony start), never against this
-	// `signerKey` field. On ANDROID specifically, because `produceAttestation` unconditionally
-	// deletes-and-regenerates the key, a `signDeviceKeyDigest` call made AFTER `produce()` (the
-	// second association call site, `submitAttestation`) signs with the POST-rotation key while
-	// `requesterKey` still names the PRE-rotation one — the authority-side verification then fails
-	// closed. This is a real, load-bearing latent gap, NOT fixed by this cache (see plan 51-14
-	// SUMMARY's "Known Gaps" — it needs either an architectural change to Android's key non-reuse
-	// design or `ConfirmationScreen` re-deriving `p256DeviceKey` post-`produce()`, both out of this
-	// plan's scope). It does NOT affect iOS/D-17: `produceIos` throws before ever reaching this cache
-	// update if the vote key was reprovisioned out from under it (§3.4 CALLER OBLIGATION below).
+	// `produce()` no longer changes it on either platform (spike 104, R1d): Android answers the nonce
+	// with a throwaway key, so the key that signed the association request also signs the
+	// attestation answer — the `requesterKey` the authority checks both against. Before R1d,
+	// Android's `produce()` replaced the key under `KEY_ALIAS` and the answer was signed by a key the
+	// request never named, which failed closed at the authority.
 	let currentDeviceKey: string | undefined
 
 	async function doProvisionDeviceKey(): Promise<{ publicKey: string; reprovisioned?: boolean; voteKeyProbe?: string }> {
 		const native = getNative()
-		const result = (await native.provisionDeviceKey(KEY_ALIAS)) as {
+		// Android: the voting key carries its own attestation chain (spike 104, R1d) — generated
+		// under a fixed tag, because the nonce it will answer does not exist yet. iOS attests a
+		// separate App Attest key and is unchanged.
+		const provisioned = getPlatformOS() === 'ios'
+			? native.provisionDeviceKey(KEY_ALIAS)
+			: native.provisionAttestedDeviceKey(KEY_ALIAS, base64FromUtf8(ANDROID_DEVICE_KEY_ATTESTATION_TAG))
+		const result = (await provisioned) as {
 			publicKeyBase64?: string
 			publicKeyCompressedHex?: string
 			keyAlias: string
@@ -531,30 +520,37 @@ export function createRealAttestationProducer(opts: {
 			// Do not symmetrize (2) and (3) — this asymmetry is intentional and matches the shipped verifier exactly.
 			const boundDigestUtf8Base64 = base64FromUtf8(boundDigest)
 
-			const result = (await native.produceAttestation(KEY_ALIAS, boundDigest, boundDigestUtf8Base64, opts.enablePlayIntegrity)) as {
+			// Spike 104 (R1d): a throwaway key answers the nonce; the voting key under KEY_ALIAS stays
+			// and later signs the answer. No biometric prompt here — the throwaway key never signs.
+			const result = (await native.produceFreshAttestation(KEY_ALIAS, boundDigest, boundDigestUtf8Base64, opts.enablePlayIntegrity)) as {
 				certificateChainBase64: string[]
+				deviceKeyCertificateChainBase64?: string[]
 				integrityToken: string
 				androidId: string
 				attestationTimeMillis: number
-				// 49-15/D-04/D-08 — the POST-regeneration key ACTUALLY under KEY_ALIAS after this call's
-				// delete-and-regenerate cycle (NativeAttestation.ts's produceAttestation doc comment).
-				// Optional here only because pre-49-15 fakes/fixtures may omit it; when present it is the
-				// only trustworthy source for "what key is under the alias right now."
 				publicKeyCompressedHex?: string
 			}
 
-			// Keep the cache honest even though it does NOT fix the requesterKey mismatch this
-			// rotation causes for a POST-produce() signDeviceKeyDigest call on Android — see this
-			// factory's `currentDeviceKey` doc comment above.
-			if (typeof result.publicKeyCompressedHex === 'string' && result.publicKeyCompressedHex !== '') {
-				currentDeviceKey = result.publicKeyCompressedHex
+			// CALLER OBLIGATION, the Android twin of iOS §3.4: the voting key's chain must be the key the
+			// challenge names. They differ if the key was re-provisioned after the request was signed;
+			// say so here rather than let the authority refuse with an opaque leaf-binding reason.
+			if (result.publicKeyCompressedHex !== challenge.deviceKey) {
+				throw new Error(
+					'Android attestation aborted: the voting key under the alias no longer matches the key this ' +
+						'challenge was issued against (it was re-provisioned after the request was signed). ' +
+						'Start a new request for the current key.',
+				)
+			}
+			const deviceKeyCertificateChain = result.deviceKeyCertificateChainBase64
+			if (!Array.isArray(deviceKeyCertificateChain) || deviceKeyCertificateChain.length === 0) {
+				throw new Error('produceFreshAttestation: native resolved no deviceKeyCertificateChainBase64 — refusing to answer without the voting key\'s own chain.')
 			}
 
 			return {
 				publicKey: challenge.deviceKey,
 				deviceId: result.androidId,
 				attestationTime: result.attestationTimeMillis,
-				// Native side already drops the trailing root (D-15b) — forward verbatim.
+				// The THROWAWAY key's nonce-bound chain; native already drops the trailing root (D-15b).
 				certificateChain: result.certificateChainBase64,
 				platformDetails: {
 					type: 'Android',
@@ -563,6 +559,9 @@ export function createRealAttestationProducer(opts: {
 					// RAW challenge.nonce — NOT BOUND_DIGEST (Pitfall 5; AssociationAssociateBuilder's
 					// validateNonceCrossField rejects BOUND_DIGEST here with NONCE_MISMATCH).
 					nonce: challenge.nonce,
+					// The voting key's own chain (provisioning tag) — what proves the key that votes is
+					// hardware-backed (T-51-02-01); the verifier checks both chains.
+					deviceKeyCertificateChain,
 				},
 			}
 		},
@@ -588,12 +587,11 @@ export function createRealAttestationProducer(opts: {
 			const native = getNative()
 			let signerKey = currentDeviceKey
 			if (signerKey === undefined) {
-				// Defensive fallback only — the real ceremony (ConfirmationScreen) always calls
-				// provisionDeviceKey() first. But the device key is a PERSISTENT hardware key that can
-				// already exist under KEY_ALIAS from a prior app session even when THIS producer
-				// instance never provisioned it; resolve it honestly rather than sign under an alias we
-				// cannot name the public key for.
-				;({ publicKey: signerKey } = await doProvisionDeviceKey())
+				// Defensive fallback only — every real caller provisions or looks the key up first. The
+				// device key is a PERSISTENT hardware key that can already exist under KEY_ALIAS from a
+				// prior app session; name it with the READ-ONLY lookup. Never provision here: on Android
+				// that would replace the voting key with a new one just to sign with it.
+				;({ publicKey: signerKey } = await doGetCurrentDeviceKey())
 			}
 
 			// See this method's platform-asymmetry doc comment above — iOS must pre-hash, Android must not.

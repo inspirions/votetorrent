@@ -136,6 +136,110 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		}
 	}
 
+	/**
+	 * Spike 104 (R1d) — [provisionDeviceKey] with an attestation chain: the voting key is generated
+	 * with `attestationChallengeBase64` (the fixed provisioning tag) so its own chain can prove it is
+	 * hardware-backed. Same resolve map and reject codes as [provisionDeviceKey], plus
+	 * `INVALID_CHALLENGE_ENCODING` for an undecodable or empty challenge.
+	 */
+	override fun provisionAttestedDeviceKey(keyAlias: String, attestationChallengeBase64: String, promise: Promise) {
+		val challengeBytes: ByteArray = try {
+			Base64.decode(attestationChallengeBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", e)
+			return
+		}
+		if (challengeBytes.isEmpty()) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", "attestation challenge is empty")
+			return
+		}
+		try {
+			val result = keyAttestationHelper.generateAttestedProvisionKey(keyAlias, challengeBytes)
+			promise.resolve(Arguments.createMap().apply {
+				putString("publicKeyBase64", result.publicKeyBase64)
+				putString("keyAlias", result.keyAlias)
+				putString("securityLevel", result.securityLevel)
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
+			})
+		} catch (e: NoStrongBoxOrTeeException) {
+			promise.reject("NO_STRONGBOX_OR_TEE", e)
+		} catch (e: Exception) {
+			if (noBiometricEnrolled()) {
+				promise.reject("NO_BIOMETRICS_ENROLLED", e)
+			} else {
+				promise.reject("PROVISION_FAILED", e)
+			}
+		}
+	}
+
+	/**
+	 * Spike 104 (R1d) — answer the challenge with a THROWAWAY key, leaving the voting key under
+	 * `keyAlias` untouched (see [KeyAttestationHelper.attestFresh]). Same arguments and Play Integrity
+	 * leg as [produceAttestation]; no biometric prompt. Resolves `{ certificateChainBase64` (the
+	 * throwaway key's nonce-bound chain), `deviceKeyCertificateChainBase64` (the voting key's own
+	 * chain), `integrityToken, androidId, attestationTimeMillis, publicKeyCompressedHex` (the voting
+	 * key, unchanged) `}`. Rejects `NO_KEY_PROVISIONED`, `KEY_INVALIDATED_REASSOCIATE`,
+	 * `DEVICE_KEY_NOT_ATTESTED`, `NO_STRONGBOX_OR_TEE`, `KEY_ATTESTATION_FAILED`,
+	 * `INVALID_CHALLENGE_ENCODING`, `PLAY_INTEGRITY_ERROR`.
+	 */
+	override fun produceFreshAttestation(
+		keyAlias: String,
+		boundDigest: String,
+		boundDigestUtf8Base64: String,
+		enablePlayIntegrity: Boolean,
+		promise: Promise,
+	) {
+		// ATTESTATION-CONTRACT.md §3 — the exact setAttestationChallenge bytes, computed JS-side.
+		val challengeBytes: ByteArray = try {
+			Base64.decode(boundDigestUtf8Base64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", e)
+			return
+		}
+
+		val fresh: FreshAttestation = try {
+			keyAttestationHelper.attestFresh(keyAlias, challengeBytes)
+		} catch (e: DeviceKeyAbsentException) {
+			promise.reject("NO_KEY_PROVISIONED", e)
+			return
+		} catch (e: DeviceKeyInvalidatedException) {
+			promise.reject("KEY_INVALIDATED_REASSOCIATE", e)
+			return
+		} catch (e: DeviceKeyNotAttestedException) {
+			promise.reject("DEVICE_KEY_NOT_ATTESTED", e)
+			return
+		} catch (e: NoStrongBoxOrTeeException) {
+			promise.reject("NO_STRONGBOX_OR_TEE", e)
+			return
+		} catch (e: Exception) {
+			promise.reject("KEY_ATTESTATION_FAILED", e)
+			return
+		}
+
+		playIntegrityHelper.requestToken(
+			boundDigest = boundDigest,
+			enablePlayIntegrity = enablePlayIntegrity,
+			onResult = { integrityToken ->
+				promise.resolve(Arguments.createMap().apply {
+					putArray("certificateChainBase64", Arguments.createArray().apply {
+						fresh.freshCertificateChain.forEach { pushString(it) }
+					})
+					putArray("deviceKeyCertificateChainBase64", Arguments.createArray().apply {
+						fresh.deviceKeyCertificateChain.forEach { pushString(it) }
+					})
+					putString("integrityToken", integrityToken)
+					putString("androidId", playIntegrityHelper.getDeviceId())
+					putDouble("attestationTimeMillis", System.currentTimeMillis().toDouble())
+					putString("publicKeyCompressedHex", fresh.deviceKeyCompressedHex)
+				})
+			},
+			onError = { e ->
+				// recoverable-transient (D-09) — the key-attestation leg already succeeded.
+				promise.reject("PLAY_INTEGRITY_ERROR", e)
+			},
+		)
+	}
+
 	private fun noBiometricEnrolled(): Boolean =
 		BiometricManager.from(reactApplicationContext)
 			.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
