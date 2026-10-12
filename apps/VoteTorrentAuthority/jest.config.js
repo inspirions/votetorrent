@@ -86,6 +86,10 @@ module.exports = {
     // Spike 093: native Noise crypto. The real module needs react-native-quick-crypto (Nitro/JSI),
     // which cannot load under Jest; the mock keeps the mode contract.
     '^@serfab/cadre-rn/noise-crypto$': '<rootDir>/__mocks__/@serfab/cadre-rn-noise-crypto.js',
+    // The REAL module (pure JS, no native import): its exports map is import-only, which
+    // Jest's CJS resolver cannot follow. polyfills/__tests__/native-crypto.test.js needs the
+    // real tag check, not a stand-in.
+    '^@serfab/cadre-rn/native-digest$': '<rootDir>/node_modules/@serfab/cadre-rn/dist/native-digest.js',
     // Phase 39 plan 39-04 (DEBT-09 app-Jest gate) — native TurboModules pulled in
     // transitively by App.test.tsx's full navigation tree (every screen module is
     // eagerly required by src/navigation/index.tsx, not lazily).
