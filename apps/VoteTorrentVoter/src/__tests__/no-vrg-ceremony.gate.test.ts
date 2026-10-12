@@ -71,9 +71,17 @@ import { join } from 'node:path'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
 import type { RegisterInit, RegistrationRequestInit, Signature } from '@votetorrent/vote-core'
-import { NetworksEngine, RegistrationEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import { NetworksEngine, RegistrationEngine, IntakeEngine, LocalStorageReact } from '@votetorrent/vote-engine/rn'
+import type { EngineContext } from '@votetorrent/vote-engine/rn'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { seedDevNetwork } from '../engines/dev-seed'
+import { setDeviceKeyWrapProviderForTests } from '../engines/device-key-wrap'
+import { createInMemoryKeyWrapProviderForTests } from '../engines/__fixtures__/in-memory-key-wrap-provider'
+
+// D-42 (Phase 62 plan 08): seedDevNetwork -> getOrCreateDeviceUser now needs a DeviceKeyWrapProvider.
+const wrapProvider = createInMemoryKeyWrapProviderForTests()
+beforeAll(() => setDeviceKeyWrapProviderForTests(wrapProvider))
+afterAll(() => setDeviceKeyWrapProviderForTests(undefined))
 
 // ---------------------------------------------------------------------------
 // Comment stripping (mechanism analog: packages/vote-engine/test/browser-entry-purity.spec.ts)
@@ -298,6 +306,40 @@ function makeNonOfficerKeypairSigner (): { publicHex: string, sign: (digest: Uin
 	return { publicHex, sign }
 }
 
+/**
+ * D-49 (Phase 62 Plan 31): a file-local Map-backed `IKeyVault` (62-04's four-method contract),
+ * mirroring `dev-seed.test.ts`'s own helper of the same shape — this file resolves
+ * `@votetorrent/vote-engine` from `dist` and has no mapped fixture.
+ */
+class MapKeyVaultForTests {
+	private readonly store = new Map<string, Uint8Array>()
+	async putSecret (alias: string, secret: Uint8Array): Promise<void> {
+		if (this.store.has(alias)) throw new Error(`MapKeyVaultForTests.putSecret: alias '${alias}' already holds a secret`)
+		this.store.set(alias, Uint8Array.from(secret))
+	}
+	async getSecret (alias: string): Promise<Uint8Array | null> {
+		const found = this.store.get(alias)
+		return found ? Uint8Array.from(found) : null
+	}
+	async hasSecret (alias: string): Promise<boolean> {
+		return this.store.has(alias)
+	}
+	async deleteSecret (alias: string): Promise<boolean> {
+		return this.store.delete(alias)
+	}
+}
+
+/** D-49: registers the founding officer's intake encryption key BEFORE the first registration
+ * write, so the now-D-49-sealed `submitRegistrationRequest`/`register()` have a recipient. */
+async function ensureIntakeRecipient (
+	ctx: EngineContext,
+	authorityId: string,
+	sign: (digest: Uint8Array) => Promise<Signature>
+): Promise<void> {
+	const vault = new MapKeyVaultForTests()
+	await new IntakeEngine(ctx).registerOfficerEncryptionKey(authorityId, vault, sign)
+}
+
 describe('D-09 behavioral + structural halves', () => {
 	beforeEach(async () => {
 		// Mirrors dev-seed.test.ts's own isolation convention — the RN AsyncStorage jest mock is a
@@ -315,6 +357,7 @@ describe('D-09 behavioral + structural halves', () => {
 			.prepare('select AuthorityId from Election where Id = :electionId')
 			.get({ electionId: seeded.electionId })
 		const authorityId = authorityRow!.AuthorityId as string
+		await ensureIntakeRecipient(ctx, authorityId, seeded.sign)
 
 		const countAdminSigning = async (): Promise<number> => {
 			const row = await ctx.db.prepare('select count(*) as n from AdminSigning').get({})
@@ -345,7 +388,7 @@ describe('D-09 behavioral + structural halves', () => {
 		expect(after).toBe(before)
 	})
 
-	it('STRUCTURAL: register() signed by a genuinely non-officer identity FAILS at AdminSigning.UserIdValid, quoting the identifier', async () => {
+	it('STRUCTURAL: register() signed by a genuinely non-officer identity FAILS at an AdminSigning signer CHECK (UserIdValid or SignerKeyValid), quoting the identifier', async () => {
 		const networksEngine = new NetworksEngine(new LocalStorageReact())
 		const seeded = await seedDevNetwork(networksEngine)
 		const ctx = networksEngine.getEstablishedContext(seeded.networkReference.hash)
@@ -355,6 +398,7 @@ describe('D-09 behavioral + structural halves', () => {
 			.prepare('select AuthorityId from Election where Id = :electionId')
 			.get({ electionId: seeded.electionId })
 		const authorityId = authorityRow!.AuthorityId as string
+		await ensureIntakeRecipient(ctx, authorityId, seeded.sign)
 
 		const registrationEngine = new RegistrationEngine(ctx)
 		const { sign: nonOfficerSign } = makeNonOfficerKeypairSigner()
@@ -368,7 +412,20 @@ describe('D-09 behavioral + structural halves', () => {
 		}
 
 		// D-09: the failure must name the specific CHECK identifier, not merely "it threw".
-		await expect(registrationEngine.register(init, nonOfficerSign)).rejects.toThrow(/UserIdValid/)
+		let caught: unknown
+		try {
+			await registrationEngine.register(init, nonOfficerSign)
+		} catch (err) {
+			caught = err
+		}
+		// The non-officer is refused by AdminSigning's signer CHECKs: it is not an Officer
+		// (UserIdValid) and its key is not a registered UserKey (SignerKeyValid, engine-computed
+		// since the hardcoded `IsSignerKeyValid = true` stub was replaced). Either names the
+		// structural reason; which one Quereus reports first is evaluation order, not intent.
+		expect((caught as Error | undefined)?.message).toMatch(/UserIdValid|SignerKeyValid/)
+		// D-49 (62-31): a recipient is provisioned above, so this must be the ORIGINAL signer
+		// refusal, never IntakeError('no-recipients') firing first for the wrong reason.
+		expect((caught as { name?: string } | undefined)?.name).not.toBe('IntakeError')
 
 		const registrant = await registrationEngine.getRegistrant(registrantId)
 		expect(registrant).toBeUndefined()

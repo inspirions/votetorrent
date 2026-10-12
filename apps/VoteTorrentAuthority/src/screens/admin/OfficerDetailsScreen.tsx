@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { errorCopy } from "../../utils/errorCopy";
 import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigation/native";
@@ -40,7 +41,7 @@ export default function OfficerDetailsScreen() {
 			}
 		} catch (error) {
 			console.warn("Error opening user from officer detail:", error);
-			setErrorMessage(error instanceof Error ? error.message : String(error));
+			setErrorMessage(errorCopy(error, t, "read"));
 		}
 	};
 

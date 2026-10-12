@@ -184,7 +184,7 @@ export async function buildGateway({
     const controlDb = node.getControlDatabase();
     if (!controlDb) throw new Error('gateway has no control database after start()');
     await controlDb.ensureOwnerKey(owner.publicKeyB64);
-    node.initializeSeedBootstrap(owner.privateKeyB64);
+    await node.initializeSeedBootstrap(owner.privateKeyB64);
 
     // A throwaway member, never connected — a row is all listAuthorizedMembers needs.
     // Deliberately NOT node.createInvite() — see the header comment above.

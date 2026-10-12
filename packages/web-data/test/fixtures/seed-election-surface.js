@@ -36,8 +36,6 @@
  * correct shape), never by fabricating a signature.
  */
 
-import { seedFoundingAuthority } from './seed-founding-authority.js';
-
 // `seed-founding-authority.js` does not export its Authority/User ids, nor
 // its Officer's `AdminEffectiveAt` -- they are internal literals in that
 // (frozen, unowned-by-this-plan) file. These three constants MUST match

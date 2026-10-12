@@ -17,7 +17,7 @@
 
 /** @type {Readonly<Record<CapabilityId, ReadonlyArray<string>>>} */
 export const CAPABILITY_TABLES = Object.freeze({
-	registrations: Object.freeze(['Association', 'AssociationPrivate', 'AssociationRequest', 'AttestationChallenge', 'ElectionRegistrant', 'PollingDevice', 'Registrant', 'RegistrantPrivate', 'RegistrantPublic', 'RegistrantSelective', 'RegistrantSignatureTaskExtension', 'RegistrationBridgeKey', 'RegistrationRequest']),
+	registrations: Object.freeze(['Association', 'AssociationPrivate', 'AssociationRequest', 'AttestationChallenge', 'AuthorityIntakePolicy', 'ElectionRegistrant', 'PollingDevice', 'Registrant', 'RegistrantPrivate', 'RegistrantPublic', 'RegistrantSelective', 'RegistrantSignatureTaskExtension', 'RegistrationBridgeKey', 'RegistrationRequest']),
 	elections: Object.freeze(['Election', 'ElectionAttestationPolicy', 'ElectionDisclosurePolicy', 'ElectionRecordValidityPolicy', 'ElectionRegistrationField', 'ElectionRevision', 'ElectionRevisionSignatureTaskExtension', 'ElectionSignatureTaskExtension']),
 	ballotsQuestions: Object.freeze(['Ballot', 'BallotSignatureTaskExtension', 'Option', 'Question']),
 	networkSettings: Object.freeze(['Network', 'NetworkSignatureTaskExtension', 'ProposedNetwork']),

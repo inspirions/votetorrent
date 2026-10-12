@@ -52,6 +52,17 @@ export interface Spec extends TurboModule {
 	provisionDeviceKey(keyAlias: string): Promise<Object>
 
 	/**
+	 * 63-18 fix: READ-ONLY lookup of the CURRENT device key under `keyAlias`. Never generates,
+	 * deletes, prompts or mutates the Keystore/Keychain — unlike `provisionDeviceKey`, which on
+	 * Android regenerates the alias on every call. Resolves the same public-key shape
+	 * `provisionDeviceKey` does (`publicKeyBase64` + `publicKeyCompressedHex` on Android;
+	 * `publicKeyCompressedHex` on iOS). Rejects `DEVICE_KEY_ABSENT` (no key under the alias),
+	 * `DEVICE_KEY_INVALIDATED` (permanently invalidated; never deleted), or
+	 * `DEVICE_KEY_READ_FAILED`.
+	 */
+	getCurrentDeviceKey(keyAlias: string): Promise<Object>
+
+	/**
 	 * Answers an already-issued challenge bound to the key from `provisionDeviceKey`.
 	 * `boundDigest` is the base64url `Digest(nonce, deviceKey)` string (Play Integrity
 	 * Classic nonce, AS-IS); `boundDigestUtf8Base64` is the base64 encoding of the
@@ -85,9 +96,13 @@ export interface Spec extends TurboModule {
 	 * Phase 49 (D-06/D-04): produces a biometric-gated, hardware-backed P-256 signature
 	 * over `digestBase64` using the key under `keyAlias`. Resolves
 	 * `{ signatureHex: string }` — a 64-byte compact, low-S, hex-encoded signature
-	 * (`r||s`, `s` normalized into the lower half of the P-256 order, matching
-	 * `@noble/curves` v2's `verify()` defaults: `prehash: true`, `lowS: true`,
+	 * (`r||s`, `s` normalized into the lower half of the P-256 order; `lowS: true`,
 	 * `format: 'compact'`). Callers must NOT re-normalize the returned signature.
+	 *
+	 * Signing DOMAIN differs by platform: Android output verifies with `prehash: true` over the
+	 * digest; iOS output verifies with `prehash: false` over the bytes given. Callers whose
+	 * signature is checked by `verifySigP256` must pass `nativeSignInputBase64(digest, Platform.OS)`.
+	 * Applies to `signWithDeviceKey` and `signWithRecoveryKey`.
 	 *
 	 * Byte-format contract for `digestBase64` — a silent-failure trap if violated:
 	 * this is **plain base64 (`Base64.NO_WRAP`) of the RAW digest bytes**, never
@@ -177,6 +192,145 @@ export interface Spec extends TurboModule {
 		promptSubtitle: string,
 		promptNegativeButton: string,
 	): Promise<Object>
+
+	/**
+	 * D-42: wraps an arbitrary `plaintextBase64` secret (1..4096 bytes) under a generic,
+	 * alias-keyed, non-exportable AES-256-GCM key. This is a SEPARATE capability from the P-256
+	 * signing keys above — it protects a secret AT REST (encrypt/decrypt), not a signing operation.
+	 * One alias = one auth policy, forever: `requireAuth` AND `authWindowSeconds` are fixed when the
+	 * alias's wrap key is first created, and a later call with a different `requireAuth` for the
+	 * SAME alias rejects `WRAP_KEY_POLICY_MISMATCH` rather than silently downgrading or upgrading it.
+	 *
+	 * `authWindowSeconds` (D-14, Phase 63 plan 16) is an integer 0..60; 0 means per-use. A value
+	 * above 0 means one successful biometric authentication keeps the key usable for that many
+	 * seconds with no `CryptoObject`. It is only valid with `requireAuth` true. Android honours a
+	 * window above 0 with a time-bound key (try-init, then one prompt without a CryptoObject); iOS
+	 * accepts and ignores it, so it stays per-use (D-14 accept-two).
+	 *
+	 * Byte contract, identical on both platforms: `plaintextBase64`/`ciphertextBase64` are PLAIN
+	 * standard-alphabet base64 (NEVER base64url). The native side generates a fresh 12-byte IV per
+	 * call (`ivBase64`, also plain base64) — callers never supply one. `ciphertextBase64` decodes to
+	 * `GCM ciphertext || 16-byte tag`. `aadBase64` decodes to the AAD bytes bound into the GCM tag
+	 * (may be empty, but is still authenticated).
+	 *
+	 * The prompt strings (`promptTitle`/`promptSubtitle`/`promptNegativeButton`) are used ONLY when
+	 * `requireAuth` is true — JS resolves them via `t()` and passes `''` for all three when
+	 * `requireAuth` is false.
+	 *
+	 * Resolves `{ ciphertextBase64, ivBase64, keyAlias, securityLevel }`, where `securityLevel` is
+	 * one of `'strongbox' | 'tee' | 'software' | 'keychain' | 'unknown'` — reported, never asserted;
+	 * this module makes no hardware-backing guarantee beyond what the OS actually reports.
+	 *
+	 * Platform implementation: Android — AndroidKeyStore AES-256-GCM, non-exportable. iOS — a
+	 * Keychain-stored AES-256 key (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), used through
+	 * CryptoKit; this is explicitly NOT a Secure Enclave key — the Secure Enclave holds only EC
+	 * P-256 keys (there is no `kSecAttrKeyTypeAES`).
+	 *
+	 * Rejects with one of the closed set of typed codes: `INVALID_ARGUMENT`, `INVALID_ENCODING`,
+	 * `NO_WRAP_KEY`, `WRAP_KEY_POLICY_MISMATCH`, `UNWRAP_TAG_MISMATCH`, `KEY_INVALIDATED`,
+	 * `DEVICE_LOCKED`, `CANCELED`, `NO_BIOMETRICS_ENROLLED`, `LOCKOUT`, `LOCKOUT_PERMANENT`,
+	 * `BIOMETRIC_ERROR`, `NO_ACTIVITY`, `WRAP_FAILED`, `UNWRAP_FAILED`.
+	 *
+	 * Unproven on device: D-23 proof debt. Compilation/jest-against-a-faked-TurboModule is not
+	 * evidence of real Keystore/Keychain behaviour.
+	 */
+	wrapSecret(
+		keyAlias: string,
+		plaintextBase64: string,
+		aadBase64: string,
+		requireAuth: boolean,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+		authWindowSeconds: number,
+	): Promise<Object>
+
+	/**
+	 * D-42: the inverse of `wrapSecret` — decrypts a `WrappedSecret` previously produced by
+	 * `wrapSecret` under the SAME `keyAlias`, `ivBase64`, `aadBase64`, `requireAuth` and `authWindowSeconds`. Resolves
+	 * `{ plaintextBase64 }` (plain standard-alphabet base64 of the decrypted bytes).
+	 *
+	 * `aadBase64` MUST equal the AAD used at wrap time, or the GCM tag check fails and this rejects
+	 * `UNWRAP_TAG_MISMATCH` — this is how a caller binds ciphertext to a specific record (for
+	 * example `userId|pubKeyHex`) so a ciphertext cannot be silently transplanted onto a different
+	 * record. A missing wrap key (alias never created, or the device was restored from a backup
+	 * that carries no Keystore/Keychain state) rejects `NO_WRAP_KEY`, decided before any auth prompt.
+	 *
+	 * Same closed reject-code set, byte contract, auth-prompt gating and platform implementation as
+	 * `wrapSecret` (see that method's doc comment). Unproven on device: D-23 proof debt.
+	 */
+	unwrapSecret(
+		keyAlias: string,
+		ciphertextBase64: string,
+		ivBase64: string,
+		aadBase64: string,
+		requireAuth: boolean,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+		authWindowSeconds: number,
+	): Promise<Object>
+
+	/**
+	 * Phase 63 review CR-02: deletes the wrap key under `keyAlias` so the next `wrapSecret` creates a
+	 * fresh one. Used ONLY to replace a vote-record wrap key that a biometric enrollment change
+	 * invalidated. Every ciphertext wrapped under the deleted key becomes permanently unreadable, which
+	 * is already true of an invalidated key.
+	 *
+	 * Restricted, natively and in JS, to the vote-record alias family
+	 * `^VOTETORRENT_VOTE_RECORD_WRAP_KEY_V[0-9]+$`. Any other alias (the identity wrap key, the
+	 * device signing key, the recovery key) rejects `INVALID_ARGUMENT` before the Keystore/Keychain is
+	 * touched. Resolves `{ deleted: boolean }` (`false` when no key existed). Rejects
+	 * `INVALID_ARGUMENT`, `WRAP_KEY_POLICY_MISMATCH` (the alias holds something other than an AES wrap
+	 * key; never deleted) or `WRAP_FAILED`.
+	 */
+	deleteWrapKey(keyAlias: string): Promise<Object>
+
+	/**
+	 * Phase 63 review CR-01: Android adds (`enabled` true) or clears (`false`) `FLAG_SECURE` on the
+	 * current Activity's window, on the UI thread, so the task-switcher snapshot and screenshots of a
+	 * screen showing decrypted choices are blank. Resolves `{ applied: boolean }`. Rejects
+	 * `NO_ACTIVITY` or `SECURE_SCREEN_FAILED`. iOS has no equivalent flag: it resolves
+	 * `{ applied: false }` and the screen renders its own privacy cover on `inactive` instead.
+	 */
+	setSecureScreen(enabled: boolean): Promise<Object>
+
+	/**
+	 * Phase 63 review WR-03: SYNCHRONOUS. Copies `text` to the system clipboard marked sensitive.
+	 * Android: a plain-text `ClipData` whose description extras carry
+	 * `ClipDescription.EXTRA_IS_SENSITIVE` (API 33+; the same `android.content.extra.IS_SENSITIVE` key
+	 * by literal below 33), so the Android 13+ clipboard overlay hides the preview and keyboards do not
+	 * keep it in clipboard history; a best-effort clear runs 60 s later if the clip is still ours.
+	 * iOS: `UIPasteboard` items with `localOnly` (no Universal Clipboard) and a 60 s expiration.
+	 * Returns `true` when the copy was issued, `false` when it failed. Never throws.
+	 */
+	copySensitiveText(text: string): boolean
+
+	/**
+	 * Writes UTF-8 `contents` to a per-app cache file named `fileName` inside a private `vt-share`
+	 * directory (Android `cacheDir/vt-share`, iOS `NSTemporaryDirectory()/vt-share`), emptying that
+	 * directory first so only the newest export lingers. Resolves `{ uri }` (a `file://` URI).
+	 *
+	 * `fileName` must match `^[A-Za-z0-9._-]{1,100}$` and must not contain `..`. Reject codes:
+	 * `INVALID_NAME`, `WRITE_FAILED`.
+	 */
+	writeShareFile(fileName: string, contents: string): Promise<Object>
+
+	/**
+	 * Android only: shares the cache file at `uri` (a `file://` URI inside `vt-share`) AS A FILE via
+	 * `ACTION_SEND` + `EXTRA_STREAM` (a `content://` URI from a private FileProvider, read grant
+	 * only). Resolves `{ launched: true }`. Reject codes: `SHARE_FAILED`, `UNSUPPORTED` (always on
+	 * iOS, which shares through RN `Share.share({ url })` instead).
+	 */
+	shareFile(uri: string, mimeType: string, subject: string, dialogTitle: string): Promise<Object>
+
+	/**
+	 * Deletes the regular file at the `file://` `uri` when it lies strictly inside the app cache
+	 * directory (Android `context.cacheDir`, iOS `NSCachesDirectory`); resolves `{ deleted: boolean }`.
+	 * Reject codes: `OUTSIDE_CACHE` (anything else: another directory, the cache root itself, a
+	 * non-file), `DELETE_FAILED`.
+	 */
+	deleteCachedFile(uri: string): Promise<Object>
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('AttestationNative')

@@ -443,6 +443,9 @@ describe('VTEST-01: Surfaced read-model compliance (D-06)', () => {
 
 describe('MOCK-PARITY-01: mock confirm-path parity (D-10)', () => {
   const BALLOT_ID = 'mock-ballot-id'
+  // 62-55: the mock now refuses a never-proposed id (real-engine parity), so each
+  // submit test proposes first.
+  const mockBallot = (id: string) => ({ id, electionId: 'e1', authorityId: 'a1', description: '', districts: [], questions: [] })
 
   it('MOCK-PARITY-01 MockElectionEngine exposes submitBallotForConfirmation, withdrawBallotConfirmation, getBallotConfirmationState', () => {
     const electionEngine = new MockElectionEngine()
@@ -462,6 +465,7 @@ describe('MOCK-PARITY-01: mock confirm-path parity (D-10)', () => {
     const confirmState = new MockBallotConfirmationState()
     const electionEngine = new MockElectionEngine(confirmState)
 
+    await electionEngine.proposeBallot(mockBallot(BALLOT_ID))
     await electionEngine.submitBallotForConfirmation(BALLOT_ID)
     const state = await electionEngine.getBallotConfirmationState(BALLOT_ID)
 
@@ -473,6 +477,7 @@ describe('MOCK-PARITY-01: mock confirm-path parity (D-10)', () => {
     const confirmState = new MockBallotConfirmationState()
     const electionEngine = new MockElectionEngine(confirmState)
 
+    await electionEngine.proposeBallot(mockBallot(BALLOT_ID))
     await electionEngine.submitBallotForConfirmation(BALLOT_ID)
     await electionEngine.withdrawBallotConfirmation(BALLOT_ID)
     const state = await electionEngine.getBallotConfirmationState(BALLOT_ID)
@@ -488,6 +493,7 @@ describe('MOCK-PARITY-01: mock confirm-path parity (D-10)', () => {
     const tasksEngine = new MockSignatureTasksEngine(electionEngine)
 
     // Submit the ballot (sets state to 'submitted').
+    await electionEngine.proposeBallot(mockBallot(BALLOT_ID))
     await electionEngine.submitBallotForConfirmation(BALLOT_ID)
 
     // Verify locked before confirm.

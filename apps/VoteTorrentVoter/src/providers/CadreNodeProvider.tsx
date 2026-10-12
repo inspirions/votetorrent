@@ -335,17 +335,33 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   // Event-driven sync state effect. Re-runs when node is set (after boot).
   // Registers CadreNode event listeners; returns cleanup that removes them.
   // NO polling (D-10 hard requirement — no setInterval anywhere).
+  //
+  // First-sync gate (quick task 260928-kkf, mirrors the authority app's provider):
+  // cadre-core emits `strand:started` (payload `{strandId}` only) for a GATED joiner
+  // whose `database` is still unset — `onStrandStarted` used to map that
+  // unconditionally to 'connected', which is wrong for exactly the joiner this gate
+  // exists for. Fix: read `node.getStrand(strandId)` — `database` unset means the
+  // strand is still gated (not yet writable) ⇒ 'syncing'; `database` present, OR no
+  // strandId / no instance at all, means the prior 'connected' behaviour is still
+  // correct. Checked via `database` PRESENCE, not `status`, because a gated instance
+  // can also read 'idle' — status is not the signal here. `strand:writable` is the
+  // gate's OWN resolution event; nothing listened for it before this fix.
   useEffect(() => {
     if (!node) return;
 
     const onConnected = () => setSyncState('connected');
-    const onStrandStarted = () => setSyncState('connected');
+    const onStrandStarted = (e?: { strandId?: string }) => {
+      const instance = e?.strandId ? node.getStrand(e.strandId) : undefined;
+      setSyncState(instance && !instance.database ? 'syncing' : 'connected');
+    };
+    const onStrandWritable = () => setSyncState('connected');
     const onStrandIdle = () => setSyncState('syncing');
     const onStrandError = () => setSyncState('offline');
     const onDisconnected = () => setSyncState('offline');
 
     node.on('control:connected', onConnected);
     node.on('strand:started', onStrandStarted);
+    node.on('strand:writable', onStrandWritable);
     node.on('strand:idle', onStrandIdle);
     node.on('strand:error', onStrandError);
     node.on('control:disconnected', onDisconnected);
@@ -353,6 +369,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     return () => {
       node.off('control:connected', onConnected);
       node.off('strand:started', onStrandStarted);
+      node.off('strand:writable', onStrandWritable);
       node.off('strand:idle', onStrandIdle);
       node.off('strand:error', onStrandError);
       node.off('control:disconnected', onDisconnected);

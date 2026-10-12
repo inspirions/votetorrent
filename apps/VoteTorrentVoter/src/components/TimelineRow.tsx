@@ -8,8 +8,10 @@
  * navigation.
  *
  * **D-20 convention:** an action renders only when its callback prop is supplied. This lets the
- * screen express state (e.g. "the voter has already submitted") by choosing which callback to
- * pass, without this file learning anything about the domain reason behind that choice.
+ * screen express state (e.g. "a vote is already saved on this phone") by choosing which callback to
+ * pass, without this file learning anything about the domain reason behind that choice. The
+ * `view-submission` action id and the `onViewSubmission` prop are internal names for the
+ * saved-vote link, which is labelled 'View saved vote'.
  *
  * **Resolving the UI-SPEC's future-row de-emphasis note, explicitly recorded so a later reader
  * does not "fix" it back:** the de-emphasis paragraph says future rows show "only title +
@@ -123,6 +125,10 @@ function buildActions(stageId: TimelineStageId, status: TimelineRowStatus, callb
 		} else if (status === 'current') {
 			if (callbacks.onVoteNow) {
 				actions.push({id: 'vote-now', labelKey: 'voting.voteNowCta', onPress: callbacks.onVoteNow, variant: 'primary'});
+			}
+			// A saved vote is linked from the current row too, not only once voting has closed.
+			if (callbacks.onViewSubmission) {
+				actions.push({id: 'view-submission', labelKey: 'voting.viewSubmissionCta', onPress: callbacks.onViewSubmission, variant: 'link'});
 			}
 		} else if (status === 'past' && callbacks.onViewSubmission) {
 			actions.push({id: 'view-submission', labelKey: 'voting.viewSubmissionCta', onPress: callbacks.onViewSubmission, variant: 'link'});

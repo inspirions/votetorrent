@@ -48,7 +48,7 @@ interface FakeCadreNode {
   offCalls: Array<[string, Listener]>;
   /** The options object the constructor was called with (D-14 wiring proof). */
   receivedOptions: unknown;
-  emit(event: string): void;
+  emit(event: string, payload?: unknown): void;
   hasListener(event: string): boolean;
 }
 
@@ -79,15 +79,30 @@ jest.mock(
         this.listeners[event] = (this.listeners[event] ?? []).filter((l) => l !== cb);
       }
 
-      emit(event: string) {
-        (this.listeners[event] ?? []).forEach((l) => l());
+      // Optional payload forwarded to every listener (quick task 260928-kkf: the
+      // first-sync gate's onStrandStarted reads `e?.strandId` off it). A call with
+      // no payload (the ORIGINAL contract every pre-existing test in this file
+      // relies on) still forwards `undefined`, exercising the same "no strandId"
+      // branch as a real payload-less event.
+      emit(event: string, payload?: unknown) {
+        (this.listeners[event] ?? []).forEach((l) => l(payload));
       }
 
       hasListener(event: string) {
         return (this.listeners[event] ?? []).length > 0;
       }
     }
-    return { CadreNode: FakeCadreNode };
+    // cadre-core 1.9.0: the provider opens a durable strand network state before constructing
+    // the node. The fake records the slot it was opened over.
+    const PersistentStrandNetworkStateStore = {
+      open: jest.fn(async (slot: unknown, partyId: string) => ({
+        partyId,
+        slot,
+        load: () => undefined,
+        forget: async () => undefined,
+      })),
+    };
+    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore };
   },
   { virtual: true },
 );
@@ -192,6 +207,16 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
     expect(node.start).toHaveBeenCalledTimes(1);
   });
 
+  it('configures network.controlCohort.strandAddrRefreshMs = 30000 and leaves other network fields', async () => {
+    renderProvider();
+    await flushBoot();
+    const opts = mockConstructedNodes[0].receivedOptions as {
+      network: Record<string, unknown>;
+    };
+    expect(opts.network.controlCohort).toEqual({ strandAddrRefreshMs: 30000 });
+    expect(Array.isArray(opts.network.transports)).toBe(true);
+  });
+
   it('does NOT call setInterval anywhere (no polling — D-10)', async () => {
     const setIntervalSpy = jest.spyOn(globalThis, 'setInterval');
     renderProvider();
@@ -257,6 +282,89 @@ describe('CadreNodeProvider — P2P-02 boot invariants', () => {
         renderer.create(<Orphan />);
       });
     }).toThrow('useCadreNode must be used within a CadreNodeProvider');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// First-sync gate syncState mapping — quick task 260928-kkf.
+//
+// A gated joiner's `strand:started` event carries `{strandId}` but its
+// `StrandInstance.database` is still unset — the OLD unconditional 'connected'
+// mapping was wrong for exactly that case. `getStrand(strandId)` is now consulted:
+// `database` unset -> 'syncing'; `database` present, or no strandId / no instance at
+// all (the pre-existing payload-less-emit test above), -> 'connected' as before.
+// `strand:writable` is the gate's own resolution signal, newly listened for.
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — first-sync gate syncState mapping (quick task 260928-kkf)', () => {
+  it("strand:started for a strandId whose getStrand() instance has no database maps to 'syncing'", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: undefined });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+
+    expect(captured.value!.syncState).toBe('syncing');
+  });
+
+  it("strand:writable transitions a gated 'syncing' strand to 'connected'", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: undefined });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+    expect(captured.value!.syncState).toBe('syncing');
+
+    expect(node.hasListener('strand:writable')).toBe(true);
+    renderer.act(() => {
+      node.emit('strand:writable', { strandId: 'net1' });
+    });
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it("strand:started for a strandId whose getStrand() instance ALREADY has a database maps to 'connected' (founder / already-synced case, unchanged)", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue({ strandId: 'net1', database: {} });
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'net1' });
+    });
+
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it("strand:started with a strandId getStrand() cannot resolve (undefined instance) maps to 'connected', unchanged", async () => {
+    const { captured } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    node.getStrand.mockReturnValue(undefined);
+
+    renderer.act(() => {
+      node.emit('strand:started', { strandId: 'unknown-strand' });
+    });
+
+    expect(captured.value!.syncState).toBe('connected');
+  });
+
+  it('removes the strand:writable listener on unmount (cleanup via off())', async () => {
+    const { tr } = renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    expect(node.hasListener('strand:writable')).toBe(true);
+
+    renderer.act(() => {
+      tr.unmount();
+    });
+
+    const writableOffCalls = node.offCalls.filter(([event]) => event === 'strand:writable');
+    expect(writableOffCalls.length).toBeGreaterThan(0);
   });
 });
 
@@ -500,5 +608,65 @@ describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
     }
 
     errorSpy.mockRestore();
+  });
+});
+
+describe('CadreNodeProvider — native Noise crypto (spike 093)', () => {
+  it('builds the node with network.noiseCrypto from the shared switch (symmetric by default)', async () => {
+    renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    const network = (node.receivedOptions as { network?: { noiseCrypto?: unknown } }).network;
+    // The jest mock of @serfab/cadre-rn/noise-crypto tags its result with the mode, so this
+    // proves the provider forwards the switch rather than silently running stock pure-JS noise.
+    expect(network?.noiseCrypto).toEqual({ __mockNoiseCrypto: 'symmetric' });
+  });
+});
+
+describe('CadreNodeProvider — durable strand network state (cadre-core 1.9.0)', () => {
+  it('builds the node with strandNetworkState.store: a persistent store for its own party and store scope', async () => {
+    renderProvider();
+    await flushBoot();
+    const node = mockConstructedNodes[0];
+    const opts = node.receivedOptions as { strandNetworkState?: { store?: { partyId?: string; slot?: { key?: string } } } };
+    expect(opts.strandNetworkState?.store?.partyId).toBe('votetorrent');
+    // Namespaced by scope AND party, so the proof runner's node on the same device never shares it.
+    expect(opts.strandNetworkState?.store?.slot?.key).toBe('@votetorrent/strandNetworkState/votetorrent-cadre-node/votetorrent');
+  });
+});
+
+describe('CadreNodeProvider — yields the device to the replication proof (spike 093)', () => {
+  it('constructs NO node and settles failed when REPLICATION_PROOF_ENABLED is on', async () => {
+    // React, the renderer and the provider must all come from ONE isolated registry, or the
+    // provider's hooks run against a different React than the renderer's dispatcher.
+    let mod!: typeof import('../CadreNodeProvider');
+    let R!: typeof import('react-test-renderer');
+    let ReactIso!: typeof import('react');
+    jest.isolateModules(() => {
+      jest.doMock('../../engines/proof-flags.generated', () => ({
+        ...jest.requireActual('../../engines/proof-flags.generated'),
+        REPLICATION_PROOF_ENABLED: true,
+      }));
+      ReactIso = require('react');
+      R = require('react-test-renderer');
+      mod = require('../CadreNodeProvider');
+    });
+    const infoSpy = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+    await R.act(async () => {
+      R.create(ReactIso.createElement(mod.CadreNodeProvider, null, ReactIso.createElement(Probe)));
+      for (let i = 0; i < 10; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+    expect(mockConstructedNodes).toHaveLength(0);
+    await expect(captured.value!.nodeSettled).resolves.toEqual({ status: 'failed', node: null });
+    expect(infoSpy.mock.calls.some(c => String(c[0]).includes('replication proof owns'))).toBe(true);
+    infoSpy.mockRestore();
   });
 });

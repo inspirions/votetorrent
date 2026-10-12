@@ -19,14 +19,15 @@ export const SAPP_ID = 'org.sereus.multipeer-gate';
 
 /**
  * A single-table schema. StrandDatabase.executeSchema() supplies the
- * `declare schema App { ... } apply schema App;` wrapper itself, so this is raw DDL.
+ * `declare schema App { ... } apply schema App;` wrapper itself, so this is raw DDL in
+ * declarative form: `table`, not `create table` (plugin-sereus >= 1.9 rejects the latter).
  *
  * `Value` and `Writer` are what the distributed-database legs assert on: a row that
  * merely EXISTS on the reader proves propagation, but only its contents prove WHICH
  * write won when two peers wrote concurrently.
  */
 export const SCHEMA = `
-create table GateRow (
+table GateRow (
   Id text primary key,
   Value text,
   Writer text

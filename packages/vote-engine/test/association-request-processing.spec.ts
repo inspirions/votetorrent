@@ -657,7 +657,7 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     expect(miss, 'an unknown id resolves to undefined').to.be.undefined
   })
 
-  it('the officer-key-absent case fails STRUCTURALLY at AdminSigning.UserIdValid, not merely at a lint gate', async () => {
+  it('the officer-key-absent case fails STRUCTURALLY at an AdminSigning signer CHECK, not merely at a lint gate', async () => {
     const s = await setup()
     const deviceKeyPair = randomTestKeyPair()
     const requestId = await submitDeviceRequest(s, deviceKeyPair)
@@ -674,7 +674,11 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
       caught = err
     }
     expect(caught, 'a non-officer signer must be structurally refused').to.be.instanceOf(Error)
-    expect((caught as Error).message, 'the failure must name the structural CHECK, not an opaque error').to.include('UserIdValid')
+    // The outsider is neither an Officer (UserIdValid) nor a registered UserKey holder (SignerKeyValid,
+    // engine-computed since the hardcoded `IsSignerKeyValid = true` stub was replaced); whichever
+    // Quereus reports first, the refusal is structural. A registered non-officer is refused by
+    // OfficerValid in threshold-fanout.spec.ts T2.
+    expect((caught as Error).message, 'the failure must name the structural CHECK, not an opaque error').to.match(/UserIdValid|SignerKeyValid/)
 
     const row = await s.auth.ctx.db.prepare('select Status from AssociationRequest where Id = :id').get({ id: requestId })
     expect(row?.Status, 'the row must remain pending — no partial transition on a refused ceremony').to.equal('p')

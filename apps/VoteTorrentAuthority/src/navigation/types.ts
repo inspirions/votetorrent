@@ -19,6 +19,12 @@ export type RootStackParamList = {
 	AddNetwork: undefined;
 	NetworkDetails: { network: NetworkReference };
 	Hosting: undefined;
+	// Phase 62 plan 62-23 — D-35/D-36 founding-bundle import (Surface 2)
+	ImportFoundingBundle: undefined;
+	// Phase 62 plan 62-27 — D-41/D-45 device-change review (Surface 4)
+	AssociationRequestApproval: { requestId: string; authorityId: string };
+	// Phase 62 plan 62-29 — D-17/D-20 key release ceremony (Surface 6), reached from a release-key task; the param is the public task object (ids and election metadata), never key material
+	KeyRelease: { task: ReleaseKeyTask };
 	// Phase 8 plan 08-06 — Networks routes (NETUI-05, NETUI-06; D-12 / D-13)
 	NetworkStatistics: { networkId: string };
 	NetworkRevision: { networkId: string };
@@ -27,8 +33,14 @@ export type RootStackParamList = {
 	ProposedAdministration: { authorityId: string };
 	OfficerDetails: { officer: Officer; userName?: string; authority: Authority };
 	// Phase 8 plan 08-03 — Administrator + Authority invitation routes (D-08, D-09)
-	AdministratorInvitation: { mode: "send" | "accept"; invitationId?: string; authority?: Authority };
-	AuthorityInvitation: { mode: "send" | "accept"; invitationId?: string };
+	AcceptInvitation: undefined;
+	AdministratorInvitation: {
+		mode: "send" | "accept";
+		shareToken?: string;
+		authority?: Authority;
+		officerInit?: { name: string; title: string };
+	};
+	AuthorityInvitation: { mode: "send" | "accept"; shareToken?: string };
 	EditOfficer: {
 		authority: Authority;
 		officerId?: string;
@@ -41,12 +53,10 @@ export type RootStackParamList = {
 	AddDevice: undefined;
 	// Phase 10 plan 10-01 (USRUI-05, USRUI-09; D-01, D-04) — display-only confirmation routes
 	AddedKey: { user: User; keyValue: string; keyType: string; expiration: number };
-	AddedDevice: { multiaddress: string; token: string };
 	// Phase 10 plan 10-02 (KHUI-01/02; D-05, D-06) — keyholder detail + invitation routes
 	Keyholder: { keyholder: InviteStatus<SentKeyholderInvite>; electionEngine: IElectionEngine };
 	// 21-11 (INV-03): extended with electionEngine + keyholder so send mode can call inviteKeyholder
-	KeyholderInvitation: { mode: "send" | "accept"; invitationId?: string; electionEngine?: IElectionEngine; keyholder?: InviteStatus<SentKeyholderInvite> };
-	KeyTask: { task: ReleaseKeyTask };
+	KeyholderInvitation: { mode: "send" | "accept"; shareToken?: string; electionEngine?: IElectionEngine; keyholder?: InviteStatus<SentKeyholderInvite> };
 	SignatureTask: { task: SignatureTask };
 	// Phase 7 scaffold routes (07-05; renamed by 07-08) — standalone screens per D-09; real impls land in Phases 8–10
 	EditElection: { taskId?: string };
@@ -66,7 +76,7 @@ export type RootStackParamList = {
 	ProposedRevision: { name: string; revision: number; taskId?: string };
 	// Dev-entry route per D-12 — temporary; replaced by real callers in phases 8–10 (renamed by 07-08)
 	ScreenScaffoldsDebug: undefined;
-	ElectionDetails: { electionEngine: IElectionEngine };
+	ElectionDetails: { electionEngine: IElectionEngine; authorityName?: string };
 	// Phase 46 (D-01) — the single RegistrationPolicy route; all three params are
 	// required (not optional) since the screen destructures them unconditionally, and
 	// electionId/authorityId are passed to avoid a redundant getElectionDetails()

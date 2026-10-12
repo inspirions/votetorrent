@@ -73,11 +73,25 @@ const resources = {
 			newAuthority: 'New Authority',
 			invitationName: 'Invitation Name',
 			invitationKey: 'Invitation Key',
+			invitationAcceptTitle: 'Accept an Invitation',
+			invitationAcceptBody: "Paste the invitation someone shared with you. You'll see who it's from before you accept.",
+			invitationAcceptContinue: 'Continue',
+			invitationAcceptPasteHint: 'Paste the invitation text you received.',
+			invitationAcceptPastePlaceholder: 'Paste the invitation here',
+			invitationAcceptMalformed: "This doesn't look like a complete invitation. Copy it again and paste all of it.",
+			invitationAcceptWrongType: 'This invitation is for a different role. Open it from Accept an Invitation in Settings.',
+			invitationAcceptNotFound: "This invitation hasn't reached this device yet, or it is no longer valid.",
+			invitationAcceptAlreadyAnswered: 'This invitation has already been answered. It cannot be accepted or declined again.',
+			invitationAcceptNoLongerValid: 'This invitation was withdrawn or has expired. Ask the sender for a new one.',
+			invitationAcceptExpired: 'This invitation expired on {{when}}. Ask the sender for a new one.',
+			invitationAcceptFailed: 'Could not respond to the invitation. Try again.',
 			soleInitialAdministratorNote:
 				'Please create a user on this network. Your user will be the sole initial administrator.',
 			userIsSoleAdministratorNote:
 				'Your following user profile will be the sole initial administrator for the new authority.',
 			expires: 'Expires',
+			// UAT 62: an administration's EffectiveAt is when it STARTS — labelled Expires before.
+			effective: 'Effective',
 			position: 'Position',
 			switchingNetworks: 'Switching networks...',
 			officer: 'Officer',
@@ -105,6 +119,8 @@ const resources = {
 			creating: 'Creating…',
 			networkCreateTimeout:
 				'The network did not finish the {{step}} step in time. It may still complete — check your networks list before creating it again.',
+			networkCreateStillFinishing:
+				'Still creating the network on this phone. Keep this screen open; on some phones this takes a few minutes.',
 			networkCreateUnconfirmed:
 				'Could not confirm whether the network was created. It may still be finishing — check your networks list before creating it again, so you do not create it twice.',
 			errRelayRequired:
@@ -131,6 +147,14 @@ const resources = {
 			initialAdministrator: 'Initial Administrator',
 			imageUrl: 'Image URL',
 			makePermanent: 'Make Permanent',
+			// Media pinning ("Make Permanent" on image/video URL fields): the status line under the field.
+			mediaPinning: 'Making permanent…',
+			mediaPinned: 'Permanent · {{cid}}',
+			mediaPinInvalidUrl: 'Enter a full http(s) link first',
+			mediaPinNetwork: "Couldn't download this file — check the link and your connection",
+			mediaPinHttp: 'The server refused the download (HTTP error)',
+			mediaPinTooLarge: 'This file is too large to make permanent (25 MB limit)',
+			mediaPinEmpty: 'The link returned an empty file',
 			optionalImageAddress: 'Optional image address',
 			primaryAuthority: 'Primary Authority',
 			authorityName: 'Authority name',
@@ -140,6 +164,7 @@ const resources = {
 			yourNameOnPermanentRecord: 'Your name (on permanent record)',
 			yourTitleOnPermanentRecord: 'Your title (on permanent record)',
 			sign: 'SIGN',
+			applyRevisionNeedsCoSigners: 'This network needs more than one officer to approve a revision, which is not supported yet.',
 			createNetwork: 'Create Network',
 			relays: 'Relays',
 			relaysRequiredHint: 'At least one relay is required so other devices can reach this network.',
@@ -175,11 +200,19 @@ const resources = {
 			noNetwork:
 				'Tap “Select Network” at the top to join an existing network — or create your own.',
 			selectNetwork: 'Select Network',
+			networkSelectFailed: "Couldn't open this network. Try again.",
+			networkDetailsLoadFailed: "Could not load this network's details. Try again.",
+			applyRevisionFailed: "Couldn't apply this revision. Try again.",
 			remove: 'Remove',
 			permissions: 'Permissions',
 			publicKey: 'Public Key',
 			proposedAdministration: 'Proposed Administration',
 			share: 'Share',
+			// Invitation send screens: the after-send share block (InviteShareBlock).
+			invitationShareCopy: 'Copy',
+			invitationShareCopied: 'Copied to clipboard',
+			invitationShareCopyFailed: "Couldn't copy to the clipboard. Use Share instead.",
+			invitationShareSheetFailed: "Couldn't open the share options. Try Copy instead.",
 			reviseAdministration: 'Revise Administration',
 			authorization: 'Authorization',
 			adjustProposal: 'Adjust Proposal',
@@ -256,9 +289,12 @@ const resources = {
 			// device's account on it did not (see ProvisionSigningKeyScreen.tsx's
 			// tryResolveNetworkUserEngine doc comment).
 			signingKeyProvisioningNetworkUserUnresolvedHeading: "We couldn't find your account on this network",
+			// Two causes look identical from this device (getCurrentUser finds no User row either way):
+			// the officer account has not synced here yet, or this device has no account on the network.
 			signingKeyProvisioningNetworkUserUnresolvedBody:
-				"This device is connected, but your officer account hasn't finished syncing to this network yet. Wait a moment and try again.",
+				"This device is connected to the network, but your officer account isn't on it here. If it is still syncing, wait a moment and try again. If waiting doesn't help, this device has no officer account on this network: ask an officer to send it an administrator invitation, then accept it in Settings > Accept an Invitation.",
 			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Try Again',
+			signingKeyProvisioningNetworkUserUnresolvedInviteButton: 'Accept an Invitation',
 			signingKeyProvisioningRecoveryHeading: 'Your signing key needs to be replaced',
 			signingKeyProvisioningRecoveryBody:
 				"Your device's biometrics changed, which invalidated your previous signing key for security. Verify with your device PIN, pattern, or password to sign in a replacement key.",
@@ -280,6 +316,14 @@ const resources = {
 			token: 'Token',
 			fromOtherDevice:
 				'From the other device, select the user, press Add Key, the Scan, using the following QR code:',
+			// AddDeviceScreen: IUserEngine.connectDevice() is phase-gated (same-user device pairing).
+			connectDeviceUnavailable:
+				"Connecting another device to this user isn't available yet. This version of the app can't pair devices.",
+			connectDeviceFailed:
+				"Couldn't prepare the connection details. Make sure a network is selected, then try again.",
+			// AddDeviceScreen: getEngine("user") resolved no engine — no user is bound on this network.
+			connectDeviceNoUser:
+				"Your user isn't set up on this network yet, so this device can't share connection details.",
 			select: 'Select',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Required Timestamp Authorities',
@@ -314,6 +358,36 @@ const resources = {
 			dateTime: 'Date/time',
 			sent: 'Sent',
 			unsent: 'Unsent',
+			// Keyholder card / KeyholderScreen: the invite-status line (accepted / declined / pending).
+			keyholderStatusLabel: 'Status',
+			keyholderStatusDeclined: 'Declined',
+			keyholderStatusSent: 'Sent',
+			keyholderStatusNoLongerValid: 'No longer valid - send again',
+			keyholderStatusUnknown: 'Status unavailable',
+			keyholderStatusNotSent: 'Not sent',
+			// A read that could not reach the other devices (Authority / Election details): shown instead
+			// of rendering the failure as missing data.
+			peerReadUnavailableTitle: "Can't reach other devices right now",
+			peerReadUnavailableBody: "This device couldn't read this information from the network. Nothing has been deleted. Try again in a moment.",
+			peerReadUnavailableStaleBody: "Showing what this device last read. It couldn't refresh from the network just now.",
+			peerReadUnavailableRetry: 'Try Again',
+			bootNetworkLoadFailed: "We couldn't open this network on this device.",
+			bootTryAgain: "Try Again",
+			bootStartFresh: "Start Fresh",
+			authorityNotOnNetworkTitle: "This authority isn't on this network",
+			authorityNotOnNetworkBody: "This device couldn't find it in the network that's open now. Go back and choose it from the Authorities list.",
+			authorityDetailsLoadFailed: "Couldn't open this authority. Try again.",
+			authoritiesLoadFailed: "Couldn't load authorities. Try again.",
+			authorityPinFailed: "Couldn't update pinned authorities. Try again.",
+			officersLoadFailed: "Couldn't load this administration's officers. Try again.",
+			invitedAuthoritiesLoadFailed: "Couldn't load invited authorities. Try again.",
+			peerWriteUnavailable: "Couldn't reach other devices to save this. Try again in a moment.",
+			electionsLoadFailed: "Couldn't load elections. Try again.",
+			tasksLoadFailed: "Couldn't load tasks. Try again.",
+			settingsLoadFailed: "Couldn't load some settings. Try again.",
+			keyholderPolicyTooFewKeyholders: 'Add at least two keyholders, so no single person can unlock the results early.',
+			keyholderPolicyThresholdTooLow: 'At least two keyholders must be needed to unlock the results.',
+			keyholderPolicyThresholdAboveCount: 'The number of keyholders needed cannot be more than the number of keyholders.',
 			accepted: 'Accepted',
 			invite: 'Invite',
 			administrators: 'Administrators',
@@ -420,6 +494,8 @@ const resources = {
 				'You can resend the invitation or cancel it if no longer needed.',
 			authorityDetailResend: 'Resend Invitation',
 			authorityDetailCancelInvitation: 'Cancel Invitation',
+			authorityDetailAlreadyAnswered: "This invitation has already been answered, so it can't be withdrawn or sent again.",
+			authorityDetailActionFailed: "Couldn't update this invitation. Try again.",
 			// Frame 18 — Sent confirmation
 			editElectionWithFilterTitle: 'Request Sent',
 			editElectionWithFilterBodyPrimary: 'Your request has been submitted successfully.',
@@ -450,6 +526,46 @@ const resources = {
 			loading: 'Loading...',
 			invitationNeedsNetwork: 'Select a network first, then open this invitation again.',
 			invitationLoadFailed: "This invitation couldn't be loaded. Go back and try again.",
+			keyholderDkgLoadError: 'Could not check key generation. Leave this screen and open it again to retry.',
+			keyholderDkgError: 'Key generation could not continue on this device. Open this screen again to retry.',
+			keyholderUnnamed: '(no name)',
+			officerIntakeKeyContestedWarning: 'Another officer has published the same encryption key as you. Requests are still sealed to you, but tell your administrators: someone may have copied your key.',
+			pendingInvitationsHeading: 'Pending invitations',
+			pendingInvitationsEmpty: 'No pending invitations.',
+			pendingInvitationsLoadError: 'Could not load pending invitations.',
+			pendingInvitationsRetry: 'Try again',
+			authorityDetailInviteeLabel: 'Invited',
+			authorityDetailNotAuthorized: 'Only the officer who sent this invitation, or an administrator of this authority, can withdraw or re-send it.',
+			authorityDetailMissingInvitation: 'This invitation could not be opened. Go back and choose it from the list.',
+			invitationPastedSummary: 'Invitation pasted ({{role}})',
+			invitationPastedClear: 'Clear',
+			invitationRoleAdministrator: 'administrator',
+			invitationRoleAuthority: 'authority',
+			invitationRoleKeyholder: 'keyholder',
+			invitationAcceptSuperseded: 'A newer copy of this invitation was sent. Ask the sender for the latest one.',
+			networkFoundingExportFingerprintLabel: 'Network fingerprint',
+			networkFoundingExportFingerprintHelp: 'Read this fingerprint to the person importing the file, by phone or in person. They must see the same value before they join.',
+			networkFoundingImportFingerprintHeading: 'Check the network fingerprint',
+			networkFoundingImportFingerprintBody: 'Ask the officer who sent this file to read the network fingerprint shown on their screen, then type it below.',
+			networkFoundingImportFingerprintConfirmed: 'Fingerprint confirmed',
+			networkFoundingImportFingerprintInputLabel: 'Fingerprint read by the sender',
+			networkFoundingImportFingerprintMismatch: 'That fingerprint does not match this file. Check it again with the officer who sent it; if it still does not match, do not join and ask for the file again.',
+			networkFoundingImportJoinButton: 'Join network',
+			networkFoundingImportAnchorRequired: 'This file was not checked against a fingerprint, so it was not imported.',
+			networkFoundingExportShareFailed: 'Could not share the file. It is still ready; try again.',
+			networkFoundingExportSaveFailed: 'Could not save the file. It is still ready; try again.',
+			keyholderAcceptSelfInvite: 'You sent this keyholder invitation, so you cannot accept it. Each keyholder must be a different person on their own device.',
+			keyholderAcceptSeatHeld: 'This device already holds a keyholder seat for this election. Each keyholder needs their own device.',
+			keyholderInviteExpiryLabel: 'Invitation valid for',
+			keyholderInviteExpiryHour: '{{n}} hour',
+			keyholderInviteExpiryHours: '{{n}} hours',
+			keyholderInviteExpiryDays: '{{n}} days',
+			keyholderInviteExpiresAt: 'Expires {{when}}',
+			keyholderInviteExpiryOutOfRange: 'Choose one of the offered validity periods and send again.',
+			keyholderInviteSendFailed: 'Could not send the invitation. Try again.',
+			keyholderPolicyDuplicateName: 'Two keyholders have the same name. Give each keyholder a different name.',
+			keyholderInvitePickInvitee: 'Choose who to invite',
+			keyholderInviteNoPendingInvitees: 'Every keyholder on this election has already accepted.',
 			a11yChooseNetwork: 'Choose network',
 			a11yOpenSettings: 'Open settings',
 			// Phase 8 plan 08-03 — OfficerDetails + Invitation screens (AUTHUI-04, 05, 06)
@@ -523,8 +639,6 @@ const resources = {
 			// Phase 10 plan 10-01 (USRUI-05/09; USRUI-01 polish) — D-17: en-only; Spanish deferred to Phase 11
 			addedKey: 'Added Key',
 			noActiveKeysFound: 'No active keys found.',
-			addedDevice: 'Added Device',
-			deviceAdded: 'Device Added',
 			done: 'Done',
 			// Phase 10 plan 10-02 (KHUI-01/02) — D-17: en-only; Spanish deferred to Phase 11
 			keyholder: 'Keyholder',
@@ -539,6 +653,41 @@ const resources = {
 			withdrawConfirmation: 'Withdraw',
 			statusProposed: 'Proposed',
 			statusConfirmed: 'Confirmed',
+			statusAwaitingConfirmation: 'Awaiting Confirmation',
+			ballotSubmitFailed: 'Could not submit the ballot for confirmation. Try again.',
+			ballotWithdrawFailed: 'Could not withdraw the ballot from confirmation. Try again.',
+			ballotProposeFailed: 'Could not save the ballot. Try again.',
+			ballotStateLoadFailed: "Couldn't check whether this ballot is out for confirmation, so editing is paused.",
+			ballotStateRetry: 'Try Again',
+			// Review round 2 (chunk B): ballot confirmation, request approval, invitation send, network/election load copy
+			ballotProposeRefusedLocked: 'Another officer submitted this ballot for confirmation, so your changes were not saved. The submitted version is shown.',
+			ballotProposeRefusedConfirmed: 'This ballot is already confirmed, so your changes were not saved. The confirmed version is shown.',
+			ballotSubmitRefusedLocked: 'This ballot is already out for confirmation.',
+			ballotSubmitRefusedConfirmed: 'This ballot is already confirmed.',
+			ballotSubmitNeedsPropose: 'You have unsaved changes. Tap Propose to save them before you submit.',
+			ballotSubmittedOwnTaskHint: 'Submitted. Confirm it from your Tasks.',
+			ballotSubmittedOthersHint: 'Submitted. The other officers confirm it from their Tasks.',
+			ballotOpenTasksLink: 'Open Tasks',
+			ballotOutForConfirmationNote: 'Out for confirmation. Only the officer who submitted it can withdraw it.',
+			ballotLoadFailed: 'Could not load this ballot. Try again.',
+			registrationRequestNotFound: "This request isn't on this device yet. It may still be syncing.",
+			registrationRequestLoadFailed: 'Could not load this request. Try again.',
+			priorRejectionsUnavailable: "Could not check this requester's earlier rejections, so approval is paused. You can still reject.",
+			registrationRequestChecklistIncomplete: 'Complete the verification checklist before approving.',
+			registrationRequestNoTask: 'There is no approval task for this request on this device yet. Sync, then open the request again.',
+			registrationRequestApproveFailed: 'Could not record the approval. Try again.',
+			registrationRequestVoteFailed: 'Could not record your vote on this request. Try again.',
+			invitationSendFailed: 'Could not create the invitation. Try again.',
+			invitationNeedsAuthority: 'Open this screen from an authority to send an invitation.',
+			invitationNeedsElection: 'Open this screen from an election to invite a keyholder.',
+			invitationNetworkStarting: 'The network is still starting. Wait a moment and try again.',
+			invitationNoNetwork: 'Create or select a network first.',
+			invitationAuthorityUnresolved: "Could not find this network's authority, so no invitation was created.",
+			networkCreateFailed: 'Could not create the network. Try again.',
+			electionDetailsLoadFailed: 'Could not load this election. Try again.',
+			electionBallotsLoadFailed: "Could not load this election's ballots. Try again.",
+			electionShareFailed: 'Could not open the share options.',
+			loadRetryButton: 'Try Again',
 			// Debug seed keys — debug-only affordance; never appears in release UI
 			debugSeedTasksTitle: 'Seed Pending Tasks (Debug)',
 			debugSeedTasksSuccess: 'Pending tasks seeded — check Tasks tab',
@@ -692,6 +841,8 @@ const resources = {
 			dashboardSignInCodeUsed: 'This code has been used.',
 			dashboardSignInCodeExpired: 'This code has expired. Generate a new one.',
 			dashboardSignInCodeCopyButton: 'Copy Code',
+			dashboardSignInCodeCopied: 'Code copied',
+			dashboardSignInCodeCopyFailed: "Couldn't copy the code. Select it and copy it instead.",
 			dashboardSignInCodeCountdown: 'Expires in {{remaining}}',
 			dashboardSignInCodeIdle: 'Generate a code to sign an officer in to the web dashboard.',
 			dashboardSignInCodeDiscardButton: 'Discard Staged Code',
@@ -851,12 +1002,24 @@ const resources = {
 			registrationRequestStatusPending: 'Pending',
 			registrationRequestStatusApproved: 'Approved',
 			registrationRequestStatusRejected: 'Rejected',
+			registrationRequestStatusClosedDuplicate: 'Closed',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Request Detail',
 			registrationRequestApprovalSummaryTitle: 'Request',
 			registrationRequestApprovalReceivedAtLabel: 'Received',
 			registrationRequestApprovalSubmittedAtLabel: 'Claimed sent',
 			registrationRequestApprovalRequesterKeyLabel: 'Requester Key',
+			// Labels for the payload fields the Voter app submits (public name tier, private details,
+			// selective party). Any other field name renders as a humanized form of its key.
+			registrationRequestFieldFirstName: 'First name',
+			registrationRequestFieldLastName: 'Last name',
+			registrationRequestFieldDob: 'Date of birth',
+			registrationRequestFieldEmail: 'Email',
+			registrationRequestFieldPhone: 'Phone number',
+			registrationRequestFieldAddressLine1: 'Address line 1',
+			registrationRequestFieldAddressLine2: 'Address line 2',
+			registrationRequestFieldAddressLine3: 'Address line 3',
+			registrationRequestFieldParty: 'Party',
 			registrationRequestApprovalApproveButton: 'Approve Registration',
 			registrationRequestApprovalRejectButton: 'Reject Request',
 			registrationRequestApprovalApprovedByLabel: 'Approved by {{officer}} on {{date}}',
@@ -868,6 +1031,9 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Reason for rejection',
 			registrationRequestRejectConfirmButton: 'Confirm Rejection',
 			registrationRequestRejectKeepReviewingButton: 'Keep Reviewing',
+			registrationRequestRejectChecklistRequired: 'Complete the verification checklist before rejecting.',
+			registrationRequestRejectFailed: 'Could not record the rejection. Try again.',
+			registrationRequestUnverifiable: "This request's signature can't be verified, so it can't be approved or rejected here. No signature of yours was used.",
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Bridge Import',
 			bridgeSourceCalloutHeading: 'Submitted by an import bridge',
@@ -897,9 +1063,6 @@ const resources = {
 			bulkImportSyncScreenTitle: 'Bulk Import / Sync',
 			bulkImportSyncFilesystemHeading: 'Filesystem',
 			bulkImportSyncRestHeading: 'Webhook / REST',
-			bulkImportSyncP2pHeading: 'Peer-to-Peer (Experimental)',
-			bulkImportSyncP2pBody:
-				'This sync method is still under development and has not been verified to work reliably. Use Filesystem or REST sync for dependable results.',
 			bulkImportSyncNeverSyncedBody: 'Not synced yet',
 			bulkImportSyncSyncedBody: 'Sync completed.',
 			bulkImportSyncErrorBody:
@@ -911,8 +1074,172 @@ const resources = {
 			bulkImportSyncPendingCountLabel: '{{count}} pending review',
 			bulkImportSyncErrorCountLabel: '{{count}} errors',
 			bulkImportSyncNowButton: 'Sync Now',
-			bulkImportSyncP2pTryButton: 'Try Peer Sync (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Sync Errors',
+			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
+			peerSyncCardHeading: 'Peer-to-Peer (Unverified on Devices)',
+			peerSyncCardCaveat:
+				'This sync method is code-complete but peer delivery not yet proven on devices. Use Filesystem or REST sync for dependable results.',
+			peerSyncCardPendingLabel: '{{count}} pending',
+			peerSyncCardSyncedLabel: '{{count}} synced',
+			peerSyncCardFailedLabel: '{{count}} failed',
+			peerSyncCardTryButton: 'Try Peer Sync (Unverified)',
+			// 62-UI-SPEC Surface 1 — registrationBridgeConfig* group (D-29). Consumer: 62-25.
+			registrationBridgeConfigHeading: 'Registration Bridge (REST)',
+			registrationBridgeConfigUrlLabel: 'Bridge URL',
+			registrationBridgeConfigUrlPlaceholder: 'https://your-bridge.example.org',
+			registrationBridgeConfigSaveButton: 'Save Bridge URL',
+			registrationBridgeConfigInvalidUrl: 'Enter a valid https URL',
+			registrationBridgeConfigSavedConfirm: 'Bridge URL saved',
+			registrationBridgeConfigUnsetHint: 'Save a bridge URL above to turn on REST sync.',
+			registrationBridgeConfigSaveError: 'Could not save the bridge URL. Try again.',
+			registrationBridgeConfigCoSignRequired:
+				'This authority requires more than one officer to approve this change. Saving the bridge URL is not supported at that setting, so nothing was saved.',
+			// 62-UI-SPEC Surface 2 — networkFounding* group (D-36). Consumer: 62-23.
+			networkFoundingExportButton: 'Share Network',
+			networkFoundingExportConfirmHeading: 'Share this network with another device?',
+			networkFoundingExportConfirmBody:
+				"This creates a file containing this network's founding records, signed by its original officers. Anyone who imports it joins the exact same network.",
+			networkFoundingExportShareButton: 'Share File',
+			networkFoundingExportError: 'Could not create the network file. Try again.',
+			networkFoundingImportButton: 'Import Network',
+			networkFoundingImportScreenTitle: 'Import Founding Bundle',
+			networkFoundingImportChooseFileButton: 'Choose File',
+			networkFoundingImportValidating: 'Checking signatures…',
+			networkFoundingImportInvalidSignature:
+				"This file's signatures don't check out. It may be corrupted or tampered with.",
+			networkFoundingImportAlreadyJoined: 'You already have this network.',
+			networkFoundingImportSuccess: 'Network joined',
+			networkFoundingImportGenericError: 'Could not import this file.',
+			networkFoundingExportCancelButton: "Don't Share",
+			networkFoundingExportGenerating: 'Preparing the network file…',
+			networkFoundingExportSaveButton: 'Save to this phone',
+			networkFoundingExportDoneButton: 'Done',
+			networkFoundingExportReadyBody:
+				'The network file is ready. Share it, or save it to this phone and send it later.',
+			networkFoundingExportSaved: 'Saved. You can now send the file from Files.',
+			networkFoundingExportTextFallback:
+				'This version of the app could not attach a file, so the network was shared as text. Save it as a .json file before importing.',
+			networkFoundingImportViewNetworkButton: 'View Network',
+			networkFoundingImportChooseAnotherFileButton: 'Choose a Different File',
+			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.
+			possibleDuplicateHeading: 'This may be a duplicate request',
+			possibleDuplicateBody:
+				'Another pending request from {{name}} looks similar. Deciding this one will close the other as a duplicate.',
+			possibleDuplicateViewOtherButton: 'View Other Request',
+			possibleDuplicateClosedLabel: 'Closed as a duplicate of another request',
+			possibleDuplicateCheckFailed:
+				'Could not check for duplicate requests. Approval is paused until this check works.',
+			// 62-UI-SPEC Surface 4 — associationApproval* group (D-41, D-45). Consumer: 62-27.
+			associationApprovalScreenTitle: 'Device Change Request',
+			associationApprovalNewDeviceLabel: 'New device',
+			associationApprovalExistingDeviceLabel: 'Current device (will be retired)',
+			associationApprovalCodeMatchedBadge: 'Matched by registration code',
+			associationApprovalIdentityMatchedBanner:
+				"This voter entered their identity details instead of a code. Compare them against the registrant's record below before approving.",
+			associationApprovalApproveButton: 'Approve New Device',
+			associationApprovalApproveConfirmHeading: 'Retire the current device?',
+			// Deliberate deviation from the 62-UI-SPEC row (62-18: retirement follows the new
+			// device's attestation, not the approve action, so "immediately" would be false).
+			associationApprovalApproveConfirmBody:
+				"Approving this request retires {{registrantName}}'s current device as soon as the new device finishes setting up. That device will no longer be able to vote. This cannot be undone.",
+			associationApprovalRejectButton: 'Reject Request',
+			associationApprovalApproveConfirmButton: 'Approve and Retire Device',
+			associationApprovalKeepReviewingButton: 'Keep Reviewing',
+			associationApprovalLoadError: 'Could not load this device change request. Try again.',
+			associationApprovalDecisionError: 'Could not record your decision. Try again.',
+			associationApprovalQueueRowTitle: 'Device change: {{registrantName}}',
+			associationApprovalCodeUnmatchedBanner:
+				'The registration code this voter entered does not match any registrant. You can only reject this request.',
+			associationApprovalCodeUnverifiableBanner:
+				"The registration code could not be checked against the registrant's record. You can only reject this request.",
+			associationApprovalNoEvidenceBanner:
+				'This voter sent neither a registration code nor identity details. You can only reject this request.',
+			associationApprovalCandidatesHeading: 'Possible registrants',
+			associationApprovalEnteredFieldsHeading: 'Entered by the voter',
+			associationApprovalRegistrantRecordHeading: "Registrant's record",
+			associationApprovalCoSignRequired:
+				'This authority needs more than one officer to approve device changes, and co-signing is not available for them yet.',
+			// 62-UI-SPEC Surface 4 settings toggle — registrationPolicyReassociation* group (D-46). Consumer: 62-27.
+			registrationPolicyReassociationHeading: 'Device Change Requests',
+			registrationPolicyReassociationManual: 'Review each one manually',
+			registrationPolicyReassociationAutomatic: 'Process automatically, like a first device',
+			registrationPolicyReassociationDefaultNote: 'Manual review is recommended and is the default.',
+			registrationPolicyReassociationSaveError: 'Could not save this setting. Try again.',
+			registrationPolicyReassociationCoSignRequired:
+				'This authority needs more than one officer to change this setting, and co-signing is not available for it yet.',
+			registrationPolicyReassociationLoadError: 'Could not read this setting. Try again later.',
+			// 62-UI-SPEC Surface 5 — signatureTaskThreshold* group. Consumers: 62-12, 62-27.
+			signatureTaskThresholdProgress: '{{signed}} of {{threshold}} signatures',
+			signatureTaskThresholdReached: 'Threshold reached — more signatures can still be added',
+			signatureTaskThresholdVoteRecorded: 'Your decision is recorded. Waiting for other officers.',
+			signatureTaskThresholdUnreachable:
+				'Too few officers can still approve this request, so it is refused.',
+			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
+			keyholderDkgStatusPending: 'Waiting for other keyholders to join',
+			// A threshold below 2 (e.g. a 1-of-1 policy) can never run key generation (the DKG needs
+			// 2 <= threshold <= participants), so "waiting" would never end.
+			keyholderDkgStatusThresholdTooLow:
+				'Key generation needs a keyholder threshold of at least 2. Revise the election to require 2 or more keyholders.',
+			keyholderDkgStatusInProgress: 'Generating key material…',
+			keyholderDkgStatusComplete: 'Key generation complete',
+			keyholderDkgStatusComplaint:
+				"A problem was found with another keyholder's data. Generation will restart.",
+			keyholderDkgStatusHeading: 'Key Generation',
+			// 62-UI-SPEC Surface 6 — keyholderRelease[A-Z]* group (bare `keyholderRelease` above is
+			// pre-existing and NOT part of this group). Consumer: 62-29.
+			keyholderReleaseScreenTitle: 'Release Your Key Share',
+			keyholderReleaseBody:
+				'This election has entered the key release period. Releasing your share helps reconstruct the decryption key once enough keyholders have released theirs.',
+			keyholderReleaseButton: 'Release My Share',
+			keyholderReleaseSuccess: 'Your share has been released',
+			keyholderReleaseError: 'Could not release your share. Try again.',
+			keyholderReleaseInProgress: 'Releasing your share…',
+			// officerIntakeKey* group — gap-fill, not in 62-UI-SPEC (D-04 recipient key). Consumer: 62-21.
+			officerIntakeKeyHeading: 'Encrypted Intake',
+			officerIntakeKeyBody:
+				"Register an encryption key so voters' registration details are encrypted to you. The private key stays on this device.",
+			officerIntakeKeyEnableButton: 'Enable Encrypted Intake',
+			officerIntakeKeyEnabledConfirm: 'Encrypted intake enabled',
+			officerIntakeKeyError: 'Could not enable encrypted intake. Try again.',
+			// registrationContent* group — gap-fill (D-49 sealed registration content, 62-31). Consumer: 62-27.
+			registrationContentNotRecipient:
+				'This request was sealed before this device could read it. Another officer can review it.',
+			registrationContentNoKey: 'Turn on encrypted intake on this device to read requests.',
+			registrationContentUnreadable: 'This request could not be read on this device.',
+			registrationContentTampered:
+				"This request's contents do not match what the applicant signed. It cannot be approved.",
+			// registrantPrivate* group — gap-fill (D-51 late-officer residual). Consumer: 62-32.
+			registrantPrivateNotRecipient:
+				'These private details were sealed before you became an officer, so they cannot be shown on this device.',
+			registrantPrivateUnreadable: 'These private details could not be read on this device.',
+			registrantSelectiveNotRecipient:
+				'These selective-disclosure details were sealed before you became an officer, so they cannot be shown on this device.',
+			registrantSelectiveUnreadable: 'These selective-disclosure details could not be read on this device.',
+			registrantSelectiveTampered:
+				"These selective-disclosure details do not match the registrant's signed record. Do not rely on them.",
+			keyholderDkgStatusFailed: 'Needs attention. An officer should review this key generation.',
+			officerIntakeKeySupersededBody:
+				'Encrypted intake is turned on for your account on another of your devices. New registrations are sealed to that device.',
+			officerIntakeRenewalFailedBody:
+				'Your new signing key is ready, but encrypted intake was not renewed. Turn it on again in Bulk Import / Sync.',
+			errorLoadFailedGeneric: "This couldn't be loaded. Please try again.",
+			errorActionFailedGeneric: "That didn't work. Please try again.",
+			validationRequired: 'A required field is empty. Fill it in and try again.',
+			validationInvalid: "One of the values isn't valid. Check the form and try again.",
+			dkgOverdueNotice: 'No response in about {{hours}} hours from: {{names}}.',
+			dkgOverdueHelp:
+				"Key generation continues only when every keyholder takes part, and nothing happens automatically. Ask them to open this election's keyholder screen in the app on their own device.",
+			dkgOverdueUnnamed: "a keyholder who is not on this election's list",
+			keyholderStatusAcceptAgain: 'Must accept again',
+			keyholderReacceptOfficerNote:
+				'This keyholder accepted an earlier version of this election. The election has changed since then, and keyholders accept each version separately, so the election key is made only by keyholders who agreed to the current version. Send a new invitation and ask them to accept it.',
+			keyholderReacceptAcceptNote:
+				'Keyholders accept one version of an election. If the election changes after you accept, an officer sends you a new invitation and you accept again, so the election key always matches the version you agreed to.',
+			reassociationReviewAuthorityWide: 'This setting applies to every election of this authority.',
+			reassociationReviewNoteCurrent: 'Current setting: {{value}}',
+			reassociationReviewNoteWhere: 'To change it, open {{screen}} for this authority.',
+			sealedBeforeOfficerExplanation:
+				"Sealed details can be read only by the officers who could read them when they were sealed. Officers added later, or who turned on encrypted intake later, never get access to them. This is on purpose: no one can widen who reads a voter's details after the fact. An officer who could read them at the time handles this record.",
 		},
 	},
 	es: {
@@ -985,14 +1312,27 @@ const resources = {
 			newAuthority: 'Nueva Autoridad',
 			invitationName: 'Nombre de Invitación',
 			invitationKey: 'Clave de Invitación',
+			invitationAcceptTitle: 'Aceptar una Invitación',
+			invitationAcceptBody: 'Pega la invitación que alguien compartió contigo. Verás de quién es antes de aceptarla.',
+			invitationAcceptContinue: 'Continuar',
+			invitationAcceptPasteHint: 'Pega el texto de la invitación que recibiste.',
+			invitationAcceptPastePlaceholder: 'Pega la invitación aquí',
+			invitationAcceptMalformed: 'Esto no parece una invitación completa. Cópiala de nuevo y pégala entera.',
+			invitationAcceptWrongType: 'Esta invitación es para otra función. Ábrela desde Aceptar una Invitación en Ajustes.',
+			invitationAcceptNotFound: 'Esta invitación aún no ha llegado a este dispositivo o ya no es válida.',
+			invitationAcceptAlreadyAnswered: 'Esta invitación ya fue respondida. No se puede aceptar ni rechazar de nuevo.',
+			invitationAcceptNoLongerValid: 'Esta invitación fue retirada o ha caducado. Pide una nueva a quien te la envió.',
+			invitationAcceptExpired: 'Esta invitación caducó el {{when}}. Pide una nueva a quien te la envió.',
+			invitationAcceptFailed: 'No se pudo responder a la invitación. Inténtalo de nuevo.',
 			soleInitialAdministratorNote:
 				'Cree un usuario en esta red. Su usuario será el único administrador inicial.',
 			userIsSoleAdministratorNote:
 				'El siguiente perfil de usuario será el único administrador inicial de la nueva autoridad.',
 			expires: 'Expira',
+			effective: 'Vigente desde',
 			position: 'Cargo',
 			switchingNetworks: 'Cambiando redes...',
-			officer: 'Oficial',
+			officer: 'Funcionario',
 			nameOnInvitation: 'Nombre en la invitación (reemplazado con el nombre del usuario)',
 			officialTitle: 'Título oficial',
 			key: 'Clave',
@@ -1017,6 +1357,8 @@ const resources = {
 			creating: 'Creando…',
 			networkCreateTimeout:
 				'La red no completó el paso {{step}} a tiempo. Puede que aún se complete: revise su lista de redes antes de volver a crearla.',
+			networkCreateStillFinishing:
+				'Todavía se está creando la red en este teléfono. Mantenga esta pantalla abierta; en algunos teléfonos tarda unos minutos.',
 			networkCreateUnconfirmed:
 				'No se pudo confirmar si la red fue creada. Puede que aún se esté completando: revise su lista de redes antes de volver a crearla, para no crearla dos veces.',
 			errRelayRequired:
@@ -1044,15 +1386,23 @@ const resources = {
 			initialAdministrator: 'Administrador Inicial',
 			imageUrl: 'URL de Imagen',
 			makePermanent: 'Hacer Permanente',
+			mediaPinning: 'Haciendo permanente…',
+			mediaPinned: 'Permanente · {{cid}}',
+			mediaPinInvalidUrl: 'Primero ingresa un enlace http(s) completo',
+			mediaPinNetwork: 'No se pudo descargar el archivo — revisa el enlace y tu conexión',
+			mediaPinHttp: 'El servidor rechazó la descarga (error HTTP)',
+			mediaPinTooLarge: 'El archivo es demasiado grande para hacerlo permanente (límite de 25 MB)',
+			mediaPinEmpty: 'El enlace devolvió un archivo vacío',
 			optionalImageAddress: 'Dirección de imagen opcional',
 			primaryAuthority: 'Autoridad Primaria',
 			authorityName: 'Nombre de la autoridad',
 			authorityImageUrl: 'URL de la imagen de la autoridad',
 			domainNameOptional: 'Nombre de Dominio (opcional)',
-			initialOfficer: 'Oficial Inicial',
+			initialOfficer: 'Funcionario Inicial',
 			yourNameOnPermanentRecord: 'Tu nombre (en registro permanente)',
 			yourTitleOnPermanentRecord: 'Tu título (en registro permanente)',
 			sign: 'FIRMAR',
+			applyRevisionNeedsCoSigners: 'Esta red requiere la aprobación de más de un funcionario para una revisión, lo cual aún no es compatible.',
 			createNetwork: 'Crear Red',
 			relays: 'Relays',
 			relaysRequiredHint: 'Se requiere al menos un relay para que otros dispositivos puedan llegar a esta red.',
@@ -1082,17 +1432,24 @@ const resources = {
 			addServers: 'Agregar Servidores',
 			addServersToThisNetwork: 'Agregar servidores a esta red:',
 			createProposedReplacement: 'Crear una propuesta de reemplazo de administración:',
-			addOfficer: 'Agregar Oficial',
+			addOfficer: 'Agregar Funcionario',
 			createProposal: 'Crear Propuesta',
 			noNetworkTitle: 'Elige una red para comenzar',
 			noNetwork:
 				'Toca «Seleccionar Red» en la parte superior para unirte a una red existente, o crea la tuya propia.',
 			selectNetwork: 'Seleccionar Red',
+			networkSelectFailed: 'No se pudo abrir esta red. Inténtalo de nuevo.',
+			networkDetailsLoadFailed: 'No se pudieron cargar los detalles de esta red. Inténtalo de nuevo.',
+			applyRevisionFailed: 'No se pudo aplicar esta revisión. Inténtalo de nuevo.',
 			remove: 'Eliminar',
 			permissions: 'Permisos',
 			publicKey: 'Clave Pública',
 			proposedAdministration: 'Administración Propuesta',
 			share: 'Compartir',
+			invitationShareCopy: 'Copiar',
+			invitationShareCopied: 'Copiado al portapapeles',
+			invitationShareCopyFailed: 'No se pudo copiar al portapapeles. Usa Compartir.',
+			invitationShareSheetFailed: 'No se pudieron abrir las opciones para compartir. Prueba Copiar.',
 			reviseAdministration: 'Revisar Administración',
 			authorization: 'Autorización',
 			adjustProposal: 'Ajustar Propuesta',
@@ -1165,8 +1522,9 @@ const resources = {
 			signingKeyProvisioningContinueButton: 'Continuar',
 			signingKeyProvisioningNetworkUserUnresolvedHeading: 'No pudimos encontrar tu cuenta en esta red',
 			signingKeyProvisioningNetworkUserUnresolvedBody:
-				'Este dispositivo está conectado, pero tu cuenta de funcionario aún no ha terminado de sincronizarse con esta red. Espera un momento e inténtalo de nuevo.',
+				'Este dispositivo está conectado a la red, pero tu cuenta de funcionario no aparece aquí. Si aún se está sincronizando, espera un momento e inténtalo de nuevo. Si esperar no ayuda, este dispositivo no tiene una cuenta de funcionario en esta red: pide a un funcionario que le envíe una invitación de administrador y acéptala en Ajustes > Aceptar una Invitación.',
 			signingKeyProvisioningNetworkUserUnresolvedRetryButton: 'Intentar de Nuevo',
+			signingKeyProvisioningNetworkUserUnresolvedInviteButton: 'Aceptar una Invitación',
 			signingKeyProvisioningRecoveryHeading: 'Tu clave de firma debe reemplazarse',
 			signingKeyProvisioningRecoveryBody:
 				'La biometría de tu dispositivo cambió, lo que invalidó tu clave de firma anterior por seguridad. Verifica con el PIN, patrón o contraseña de tu dispositivo para firmar una clave de reemplazo.',
@@ -1189,6 +1547,12 @@ const resources = {
 			token: 'Token',
 			fromOtherDevice:
 				'Desde el otro dispositivo, selecciona el usuario, presiona Agregar Clave, escanea, usando el siguiente código QR:',
+			connectDeviceUnavailable:
+				'Conectar otro dispositivo a este usuario aún no está disponible. Esta versión de la aplicación no puede vincular dispositivos.',
+			connectDeviceFailed:
+				'No se pudieron preparar los datos de conexión. Asegúrate de haber seleccionado una red e inténtalo de nuevo.',
+			connectDeviceNoUser:
+				'Tu usuario aún no está configurado en esta red, así que este dispositivo no puede compartir los datos de conexión.',
 			select: 'Seleccionar',
 			hash: 'Hash',
 			requiredTimestampAuthorities: 'Autoridades de Temporizador Requeridas',
@@ -1223,6 +1587,33 @@ const resources = {
 			dateTime: 'Fecha/hora',
 			sent: 'Enviada',
 			unsent: 'No enviada',
+			keyholderStatusLabel: 'Estado',
+			keyholderStatusDeclined: 'Rechazado',
+			keyholderStatusSent: 'Enviada',
+			keyholderStatusNoLongerValid: 'Ya no es válida - enviar de nuevo',
+			keyholderStatusUnknown: 'Estado no disponible',
+			keyholderStatusNotSent: 'No enviada',
+			peerReadUnavailableTitle: 'No se puede conectar con otros dispositivos ahora',
+			peerReadUnavailableBody: 'Este dispositivo no pudo leer esta información de la red. No se ha borrado nada. Inténtalo de nuevo en un momento.',
+			peerReadUnavailableStaleBody: 'Mostrando lo último que leyó este dispositivo. No pudo actualizarse desde la red hace un momento.',
+			peerReadUnavailableRetry: 'Intentar de Nuevo',
+			bootNetworkLoadFailed: "No pudimos abrir esta red en este dispositivo.",
+			bootTryAgain: "Intentar de Nuevo",
+			bootStartFresh: "Empezar de Cero",
+			authorityNotOnNetworkTitle: "Esta autoridad no está en esta red",
+			authorityNotOnNetworkBody: "Este dispositivo no la encontró en la red abierta ahora. Vuelve atrás y elígela en la lista de autoridades.",
+			authorityDetailsLoadFailed: "No se pudo abrir esta autoridad. Inténtalo de nuevo.",
+			authoritiesLoadFailed: "No se pudieron cargar las autoridades. Inténtalo de nuevo.",
+			authorityPinFailed: "No se pudieron actualizar las autoridades marcadas. Inténtalo de nuevo.",
+			officersLoadFailed: "No se pudieron cargar los funcionarios de esta administración. Inténtalo de nuevo.",
+			invitedAuthoritiesLoadFailed: "No se pudieron cargar las autoridades invitadas. Inténtalo de nuevo.",
+			peerWriteUnavailable: "No se pudo conectar con otros dispositivos para guardar esto. Inténtalo de nuevo en un momento.",
+			electionsLoadFailed: "No se pudieron cargar las elecciones. Inténtalo de nuevo.",
+			tasksLoadFailed: "No se pudieron cargar las tareas. Inténtalo de nuevo.",
+			settingsLoadFailed: "No se pudieron cargar algunos ajustes. Inténtalo de nuevo.",
+			keyholderPolicyTooFewKeyholders: 'Agregue al menos dos custodios de clave, para que ninguna persona pueda abrir los resultados antes de tiempo.',
+			keyholderPolicyThresholdTooLow: 'Se deben necesitar al menos dos custodios de clave para abrir los resultados.',
+			keyholderPolicyThresholdAboveCount: 'La cantidad de custodios necesarios no puede ser mayor que la cantidad de custodios.',
 			accepted: 'Aceptado',
 			invite: 'Invitar',
 			administrators: 'Administradores',
@@ -1300,6 +1691,8 @@ const resources = {
 				'Puedes reenviar la invitación o cancelarla si ya no es necesaria.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailResend: 'Reenviar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			authorityDetailCancelInvitation: 'Cancelar Invitación', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			authorityDetailAlreadyAnswered: 'Esta invitación ya fue respondida, así que no se puede retirar ni volver a enviar.',
+			authorityDetailActionFailed: 'No se pudo actualizar esta invitación. Inténtalo de nuevo.',
 			editElectionWithFilterTitle: 'Solicitud Enviada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterBodyPrimary: 'Tu solicitud ha sido enviada exitosamente.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			editElectionWithFilterGotIt: 'Entendido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1328,6 +1721,46 @@ const resources = {
 			loading: 'Cargando...', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			invitationNeedsNetwork: 'Seleccione primero una red y luego vuelva a abrir esta invitación.',
 			invitationLoadFailed: 'No se pudo cargar esta invitación. Vuelva atrás e inténtelo de nuevo.',
+			keyholderDkgLoadError: 'No se pudo comprobar la generación de claves. Sal de esta pantalla y vuelve a abrirla para reintentar.',
+			keyholderDkgError: 'La generación de claves no pudo continuar en este dispositivo. Vuelve a abrir esta pantalla para reintentar.',
+			keyholderUnnamed: '(sin nombre)',
+			officerIntakeKeyContestedWarning: 'Otro funcionario publicó la misma clave de cifrado que tú. Las solicitudes se siguen cifrando para ti, pero avisa a tus administradores: alguien podría haber copiado tu clave.',
+			pendingInvitationsHeading: 'Invitaciones pendientes',
+			pendingInvitationsEmpty: 'No hay invitaciones pendientes.',
+			pendingInvitationsLoadError: 'No se pudieron cargar las invitaciones pendientes.',
+			pendingInvitationsRetry: 'Intentar de nuevo',
+			authorityDetailInviteeLabel: 'Persona invitada',
+			authorityDetailNotAuthorized: 'Solo el funcionario que envió esta invitación, o un administrador de esta autoridad, puede retirarla o reenviarla.',
+			authorityDetailMissingInvitation: 'No se pudo abrir esta invitación. Vuelve atrás y elígela de la lista.',
+			invitationPastedSummary: 'Invitación pegada ({{role}})',
+			invitationPastedClear: 'Borrar',
+			invitationRoleAdministrator: 'administrador',
+			invitationRoleAuthority: 'autoridad',
+			invitationRoleKeyholder: 'custodio de clave',
+			invitationAcceptSuperseded: 'Se envió una copia más reciente de esta invitación. Pide la más reciente a quien te la envió.',
+			networkFoundingExportFingerprintLabel: 'Huella de la red',
+			networkFoundingExportFingerprintHelp: 'Lee esta huella a quien importe el archivo, por teléfono o en persona. Debe ver el mismo valor antes de unirse.',
+			networkFoundingImportFingerprintHeading: 'Comprueba la huella de la red',
+			networkFoundingImportFingerprintBody: 'Pide al funcionario que envió este archivo que lea la huella de la red que aparece en su pantalla y escríbela abajo.',
+			networkFoundingImportFingerprintConfirmed: 'Huella confirmada',
+			networkFoundingImportFingerprintInputLabel: 'Huella leída por el remitente',
+			networkFoundingImportFingerprintMismatch: 'Esa huella no coincide con este archivo. Compruébala de nuevo con el funcionario que lo envió; si sigue sin coincidir, no te unas y pide el archivo otra vez.',
+			networkFoundingImportJoinButton: 'Unirse a la red',
+			networkFoundingImportAnchorRequired: 'Este archivo no se comprobó con una huella, así que no se importó.',
+			networkFoundingExportShareFailed: 'No se pudo compartir el archivo. Sigue listo; inténtalo de nuevo.',
+			networkFoundingExportSaveFailed: 'No se pudo guardar el archivo. Sigue listo; inténtalo de nuevo.',
+			keyholderAcceptSelfInvite: 'Tú enviaste esta invitación de custodio, así que no puedes aceptarla. Cada custodio debe ser una persona distinta en su propio dispositivo.',
+			keyholderAcceptSeatHeld: 'Este dispositivo ya tiene un puesto de custodio en esta elección. Cada custodio necesita su propio dispositivo.',
+			keyholderInviteExpiryLabel: 'Invitación válida durante',
+			keyholderInviteExpiryHour: '{{n}} hora',
+			keyholderInviteExpiryHours: '{{n}} horas',
+			keyholderInviteExpiryDays: '{{n}} días',
+			keyholderInviteExpiresAt: 'Caduca {{when}}',
+			keyholderInviteExpiryOutOfRange: 'Elige uno de los periodos de validez ofrecidos y vuelve a enviar.',
+			keyholderInviteSendFailed: 'No se pudo enviar la invitación. Inténtalo de nuevo.',
+			keyholderPolicyDuplicateName: 'Dos custodios tienen el mismo nombre. Da a cada custodio un nombre distinto.',
+			keyholderInvitePickInvitee: 'Elige a quién invitar',
+			keyholderInviteNoPendingInvitees: 'Todos los custodios de esta elección ya aceptaron.',
 			a11yChooseNetwork: 'Elegir red',
 			a11yOpenSettings: 'Abrir ajustes',
 			// Phase 8 plan 08-03 — Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1423,8 +1856,6 @@ const resources = {
 			// Phase 10 plan 10-01 (USRUI-05/09) — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			addedKey: 'Clave Agregada', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			noActiveKeysFound: 'No se encontraron claves activas.', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			addedDevice: 'Dispositivo Agregado', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			deviceAdded: 'Dispositivo Añadido', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			done: 'Listo', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 10 plan 10-02 (KHUI-01/02) — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			keyholder: 'Custodio de Clave', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
@@ -1436,6 +1867,41 @@ const resources = {
 			withdrawConfirmation: 'Retirar',
 			statusProposed: 'Propuesto',
 			statusConfirmed: 'Confirmado',
+			statusAwaitingConfirmation: 'Esperando Confirmación',
+			ballotSubmitFailed: 'No se pudo enviar la boleta para confirmación. Inténtalo de nuevo.',
+			ballotWithdrawFailed: 'No se pudo retirar la boleta de la confirmación. Inténtalo de nuevo.',
+			ballotProposeFailed: 'No se pudo guardar la boleta. Inténtalo de nuevo.',
+			ballotStateLoadFailed: 'No se pudo comprobar si esta boleta está en confirmación, así que la edición está en pausa.',
+			ballotStateRetry: 'Intentar de Nuevo',
+			// Review round 2 (chunk B): ballot confirmation, request approval, invitation send, network/election load copy
+			ballotProposeRefusedLocked: 'Otro funcionario envió esta boleta para confirmación, así que tus cambios no se guardaron. Se muestra la versión enviada.',
+			ballotProposeRefusedConfirmed: 'Esta boleta ya está confirmada, así que tus cambios no se guardaron. Se muestra la versión confirmada.',
+			ballotSubmitRefusedLocked: 'Esta boleta ya está en confirmación.',
+			ballotSubmitRefusedConfirmed: 'Esta boleta ya está confirmada.',
+			ballotSubmitNeedsPropose: 'Tienes cambios sin guardar. Toca Proponer para guardarlos antes de enviar.',
+			ballotSubmittedOwnTaskHint: 'Enviada. Confírmala desde tus Tareas.',
+			ballotSubmittedOthersHint: 'Enviada. Los demás funcionarios la confirman desde sus Tareas.',
+			ballotOpenTasksLink: 'Abrir Tareas',
+			ballotOutForConfirmationNote: 'En confirmación. Solo el funcionario que la envió puede retirarla.',
+			ballotLoadFailed: 'No se pudo cargar esta boleta. Inténtalo de nuevo.',
+			registrationRequestNotFound: 'Esta solicitud aún no está en este dispositivo. Puede que todavía se esté sincronizando.',
+			registrationRequestLoadFailed: 'No se pudo cargar esta solicitud. Inténtalo de nuevo.',
+			priorRejectionsUnavailable: 'No se pudieron comprobar los rechazos anteriores de este solicitante, así que la aprobación está en pausa. Aún puedes rechazar.',
+			registrationRequestChecklistIncomplete: 'Completa la lista de verificación antes de aprobar.',
+			registrationRequestNoTask: 'Todavía no hay una tarea de aprobación para esta solicitud en este dispositivo. Sincroniza y vuelve a abrir la solicitud.',
+			registrationRequestApproveFailed: 'No se pudo registrar la aprobación. Inténtalo de nuevo.',
+			registrationRequestVoteFailed: 'No se pudo registrar tu voto sobre esta solicitud. Inténtalo de nuevo.',
+			invitationSendFailed: 'No se pudo crear la invitación. Inténtalo de nuevo.',
+			invitationNeedsAuthority: 'Abre esta pantalla desde una autoridad para enviar una invitación.',
+			invitationNeedsElection: 'Abre esta pantalla desde una elección para invitar a un custodio de claves.',
+			invitationNetworkStarting: 'La red todavía se está iniciando. Espera un momento e inténtalo de nuevo.',
+			invitationNoNetwork: 'Primero crea o selecciona una red.',
+			invitationAuthorityUnresolved: 'No se encontró la autoridad de esta red, así que no se creó ninguna invitación.',
+			networkCreateFailed: 'No se pudo crear la red. Inténtalo de nuevo.',
+			electionDetailsLoadFailed: 'No se pudo cargar esta elección. Inténtalo de nuevo.',
+			electionBallotsLoadFailed: 'No se pudieron cargar las boletas de esta elección. Inténtalo de nuevo.',
+			electionShareFailed: 'No se pudieron abrir las opciones para compartir.',
+			loadRetryButton: 'Intentar de Nuevo',
 			// Debug seed keys — Spanish mirrors
 			debugSeedTasksTitle: 'Sembrar Tareas Pendientes (Debug)',
 			debugSeedTasksSuccess: 'Tareas pendientes sembradas — ver pestaña Tareas',
@@ -1592,6 +2058,8 @@ const resources = {
 			dashboardSignInCodeUsed: 'Este código ya ha sido usado.',
 			dashboardSignInCodeExpired: 'Este código ha vencido. Genere uno nuevo.',
 			dashboardSignInCodeCopyButton: 'Copiar Código',
+			dashboardSignInCodeCopied: 'Código copiado',
+			dashboardSignInCodeCopyFailed: 'No se pudo copiar el código. Selecciónalo y cópialo.',
 			dashboardSignInCodeCountdown: 'Vence en {{remaining}}',
 			dashboardSignInCodeIdle: 'Genere un código para iniciar sesión a un funcionario en el panel web.',
 			dashboardSignInCodeDiscardButton: 'Descartar Código Preparado',
@@ -1748,12 +2216,22 @@ const resources = {
 			registrationRequestStatusPending: 'Pendiente',
 			registrationRequestStatusApproved: 'Aprobada',
 			registrationRequestStatusRejected: 'Rechazada',
+			registrationRequestStatusClosedDuplicate: 'Cerrada',
 			// Phase 48 (D-06/D-07) — registrationRequestApproval* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			registrationRequestApprovalScreenTitle: 'Detalle de la Solicitud',
 			registrationRequestApprovalSummaryTitle: 'Solicitud',
 			registrationRequestApprovalReceivedAtLabel: 'Recibida',
 			registrationRequestApprovalSubmittedAtLabel: 'Envío declarado',
 			registrationRequestApprovalRequesterKeyLabel: 'Clave del Solicitante',
+			registrationRequestFieldFirstName: 'Nombre',
+			registrationRequestFieldLastName: 'Apellido',
+			registrationRequestFieldDob: 'Fecha de nacimiento',
+			registrationRequestFieldEmail: 'Correo electrónico',
+			registrationRequestFieldPhone: 'Número de teléfono',
+			registrationRequestFieldAddressLine1: 'Dirección, línea 1',
+			registrationRequestFieldAddressLine2: 'Dirección, línea 2',
+			registrationRequestFieldAddressLine3: 'Dirección, línea 3',
+			registrationRequestFieldParty: 'Partido',
 			registrationRequestApprovalApproveButton: 'Aprobar Registro',
 			registrationRequestApprovalRejectButton: 'Rechazar Solicitud',
 			registrationRequestApprovalApprovedByLabel: 'Aprobada por {{officer}} el {{date}}',
@@ -1765,6 +2243,9 @@ const resources = {
 			registrationRequestRejectReasonPlaceholder: 'Motivo del rechazo',
 			registrationRequestRejectConfirmButton: 'Confirmar Rechazo',
 			registrationRequestRejectKeepReviewingButton: 'Seguir Revisando',
+			registrationRequestRejectChecklistRequired: 'Completa la lista de verificación antes de rechazar.',
+			registrationRequestRejectFailed: 'No se pudo registrar el rechazo. Inténtalo de nuevo.',
+			registrationRequestUnverifiable: 'La firma de esta solicitud no se puede verificar, así que no se puede aprobar ni rechazar aquí. No se usó ninguna firma tuya.',
 			// Phase 48 (D-03) — bridgeSource* group; copy verbatim from 48-UI-SPEC.md § Copywriting Contract.
 			bridgeSourceBadgeLabel: 'Importación por Puente',
 			bridgeSourceCalloutHeading: 'Enviada por un puente de importación',
@@ -1794,9 +2275,6 @@ const resources = {
 			bulkImportSyncScreenTitle: 'Importación Masiva / Sincronizar',
 			bulkImportSyncFilesystemHeading: 'Sistema de Archivos',
 			bulkImportSyncRestHeading: 'Webhook / REST',
-			bulkImportSyncP2pHeading: 'Entre Pares (Experimental)',
-			bulkImportSyncP2pBody:
-				'Este método de sincronización aún está en desarrollo y no se ha verificado que funcione de forma confiable. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
 			bulkImportSyncNeverSyncedBody: 'Aún no sincronizado',
 			bulkImportSyncSyncedBody: 'Sincronización completada.',
 			bulkImportSyncErrorBody:
@@ -1806,15 +2284,180 @@ const resources = {
 			bulkImportSyncPendingCountLabel: '{{count}} pendientes de revisión',
 			bulkImportSyncErrorCountLabel: '{{count}} errores',
 			bulkImportSyncNowButton: 'Sincronizar Ahora',
-			bulkImportSyncP2pTryButton: 'Probar Sincronización P2P (Experimental)',
 			bulkImportSyncErrorsSectionTitle: 'Errores de Sincronización',
+			// 62-UI-SPEC Surface 1 — peerSyncCard* group (D-31). Consumer: 62-21.
+			peerSyncCardHeading: 'Entre Pares (No Verificado en Dispositivos)',
+			peerSyncCardCaveat:
+				'Este método de sincronización está completo en código, pero la entrega entre pares aún no se ha comprobado en dispositivos. Usa la sincronización por Sistema de Archivos o REST para resultados confiables.',
+			peerSyncCardPendingLabel: '{{count}} pendientes',
+			peerSyncCardSyncedLabel: '{{count}} sincronizadas',
+			peerSyncCardFailedLabel: '{{count}} fallidas',
+			peerSyncCardTryButton: 'Probar Sincronización P2P (No Verificado)',
+			// 62-UI-SPEC Surface 1 — registrationBridgeConfig* group (D-29). Consumer: 62-25.
+			registrationBridgeConfigHeading: 'Puente de Registro (REST)',
+			registrationBridgeConfigUrlLabel: 'URL del Puente',
+			registrationBridgeConfigUrlPlaceholder: 'https://tu-puente.ejemplo.org',
+			registrationBridgeConfigSaveButton: 'Guardar URL del Puente',
+			registrationBridgeConfigInvalidUrl: 'Introduce una URL https válida',
+			registrationBridgeConfigSavedConfirm: 'URL del puente guardada',
+			registrationBridgeConfigUnsetHint: 'Guarda una URL del puente arriba para activar la sincronización REST.',
+			registrationBridgeConfigSaveError: 'No se pudo guardar la URL del puente. Inténtalo de nuevo.',
+			registrationBridgeConfigCoSignRequired:
+				'Esta autoridad requiere que más de un funcionario apruebe este cambio. Guardar la URL del puente no es compatible con esa configuración, así que no se guardó nada.',
+			// 62-UI-SPEC Surface 2 — networkFounding* group (D-36). Consumer: 62-23.
+			networkFoundingExportButton: 'Compartir Red',
+			networkFoundingExportConfirmHeading: '¿Compartir esta red con otro dispositivo?',
+			networkFoundingExportConfirmBody:
+				'Esto crea un archivo con los registros fundacionales de esta red, firmados por sus funcionarios originales. Quien lo importe se unirá exactamente a la misma red.',
+			networkFoundingExportShareButton: 'Compartir Archivo',
+			networkFoundingExportError: 'No se pudo crear el archivo de la red. Inténtalo de nuevo.',
+			networkFoundingImportButton: 'Importar Red',
+			networkFoundingImportScreenTitle: 'Importar Paquete Fundacional',
+			networkFoundingImportChooseFileButton: 'Elegir Archivo',
+			networkFoundingImportValidating: 'Verificando firmas…',
+			networkFoundingImportInvalidSignature:
+				'Las firmas de este archivo no son válidas. Puede estar dañado o alterado.',
+			networkFoundingImportAlreadyJoined: 'Ya tienes esta red.',
+			networkFoundingImportSuccess: 'Red unida',
+			networkFoundingImportGenericError: 'No se pudo importar este archivo.',
+			networkFoundingExportCancelButton: 'No Compartir',
+			networkFoundingExportGenerating: 'Preparando el archivo de la red…',
+			networkFoundingExportSaveButton: 'Guardar en este teléfono',
+			networkFoundingExportDoneButton: 'Listo',
+			networkFoundingExportReadyBody:
+				'El archivo de la red está listo. Compártelo, o guárdalo en este teléfono y envíalo después.',
+			networkFoundingExportSaved: 'Guardado. Ahora puedes enviar el archivo desde Archivos.',
+			networkFoundingExportTextFallback:
+				'Esta versión de la app no pudo adjuntar un archivo, así que la red se compartió como texto. Guárdalo como archivo .json antes de importar.',
+			networkFoundingImportViewNetworkButton: 'Ver Red',
+			networkFoundingImportChooseAnotherFileButton: 'Elegir Otro Archivo',
+			// 62-UI-SPEC Surface 3 — possibleDuplicate* group (D-44). Consumer: 62-27.
+			possibleDuplicateHeading: 'Esto podría ser una solicitud duplicada',
+			possibleDuplicateBody:
+				'Otra solicitud pendiente de {{name}} parece similar. Decidir esta cerrará la otra como duplicada.',
+			possibleDuplicateViewOtherButton: 'Ver Otra Solicitud',
+			possibleDuplicateClosedLabel: 'Cerrada como duplicada de otra solicitud',
+			possibleDuplicateCheckFailed:
+				'No se pudo comprobar si hay solicitudes duplicadas. La aprobación queda en pausa hasta que esta comprobación funcione.',
+			// 62-UI-SPEC Surface 4 — associationApproval* group (D-41, D-45). Consumer: 62-27.
+			associationApprovalScreenTitle: 'Solicitud de Cambio de Dispositivo',
+			associationApprovalNewDeviceLabel: 'Dispositivo nuevo',
+			associationApprovalExistingDeviceLabel: 'Dispositivo actual (se retirará)',
+			associationApprovalCodeMatchedBadge: 'Coincide por código de registro',
+			associationApprovalIdentityMatchedBanner:
+				'Este votante introdujo sus datos de identidad en lugar de un código. Compáralos con el registro del registrante antes de aprobar.',
+			associationApprovalApproveButton: 'Aprobar Dispositivo Nuevo',
+			associationApprovalApproveConfirmHeading: '¿Retirar el dispositivo actual?',
+			// Deliberate deviation from the 62-UI-SPEC row (62-18: retirement follows the new
+			// device's attestation, not the approve action, so "de inmediato" would be false).
+			associationApprovalApproveConfirmBody:
+				'Aprobar esta solicitud retira el dispositivo actual de {{registrantName}} en cuanto el nuevo dispositivo termine de configurarse. Ese dispositivo ya no podrá votar. Esta acción no se puede deshacer.',
+			associationApprovalRejectButton: 'Rechazar Solicitud',
+			associationApprovalApproveConfirmButton: 'Aprobar y Retirar Dispositivo',
+			associationApprovalKeepReviewingButton: 'Seguir Revisando',
+			associationApprovalLoadError: 'No se pudo cargar esta solicitud de cambio de dispositivo. Inténtalo de nuevo.',
+			associationApprovalDecisionError: 'No se pudo registrar tu decisión. Inténtalo de nuevo.',
+			associationApprovalQueueRowTitle: 'Cambio de dispositivo: {{registrantName}}',
+			associationApprovalCodeUnmatchedBanner:
+				'El código de registro que introdujo este votante no coincide con ningún registrante. Solo puedes rechazar esta solicitud.',
+			associationApprovalCodeUnverifiableBanner:
+				'No se pudo comprobar el código de registro con el registro del registrante. Solo puedes rechazar esta solicitud.',
+			associationApprovalNoEvidenceBanner:
+				'Este votante no envió ni un código de registro ni datos de identidad. Solo puedes rechazar esta solicitud.',
+			associationApprovalCandidatesHeading: 'Posibles registrantes',
+			associationApprovalEnteredFieldsHeading: 'Introducido por el votante',
+			associationApprovalRegistrantRecordHeading: 'Registro del registrante',
+			associationApprovalCoSignRequired:
+				'Esta autoridad necesita a más de un funcionario para aprobar cambios de dispositivo, y la firma conjunta aún no está disponible para ellos.',
+			// 62-UI-SPEC Surface 4 settings toggle — registrationPolicyReassociation* group (D-46). Consumer: 62-27.
+			registrationPolicyReassociationHeading: 'Solicitudes de Cambio de Dispositivo',
+			registrationPolicyReassociationManual: 'Revisar cada una manualmente',
+			registrationPolicyReassociationAutomatic: 'Procesar automáticamente, como un primer dispositivo',
+			registrationPolicyReassociationDefaultNote: 'Se recomienda la revisión manual y es la opción predeterminada.',
+			registrationPolicyReassociationSaveError: 'No se pudo guardar esta configuración. Inténtalo de nuevo.',
+			registrationPolicyReassociationCoSignRequired:
+				'Esta autoridad necesita a más de un funcionario para cambiar esta configuración, y la firma conjunta aún no está disponible para ella.',
+			registrationPolicyReassociationLoadError: 'No se pudo leer esta configuración. Inténtalo más tarde.',
+			// 62-UI-SPEC Surface 5 — signatureTaskThreshold* group. Consumers: 62-12, 62-27.
+			signatureTaskThresholdProgress: '{{signed}} de {{threshold}} firmas',
+			signatureTaskThresholdReached: 'Umbral alcanzado — aún se pueden añadir más firmas',
+			signatureTaskThresholdVoteRecorded: 'Tu decisión quedó registrada. Esperando a otros funcionarios.',
+			signatureTaskThresholdUnreachable:
+				'Ya no quedan suficientes funcionarios que puedan aprobar esta solicitud, así que queda rechazada.',
+			// 62-UI-SPEC Surface 6 — keyholderDkg* group. Consumer: 62-26.
+			keyholderDkgStatusPending: 'Esperando a que otros custodios se unan',
+			keyholderDkgStatusThresholdTooLow:
+				'La generación de clave necesita un umbral de al menos 2 custodios. Revisa la elección para requerir 2 o más custodios.',
+			keyholderDkgStatusInProgress: 'Generando material de clave…',
+			keyholderDkgStatusComplete: 'Generación de clave completa',
+			keyholderDkgStatusComplaint:
+				'Se encontró un problema con los datos de otro custodio. La generación se reiniciará.',
+			keyholderDkgStatusHeading: 'Generación de Clave',
+			// 62-UI-SPEC Surface 6 — keyholderRelease[A-Z]* group (bare `keyholderRelease` above is
+			// pre-existing and NOT part of this group). Consumer: 62-29.
+			keyholderReleaseScreenTitle: 'Liberar tu Parte de la Clave',
+			keyholderReleaseBody:
+				'Esta elección ha entrado en el período de liberación de claves. Liberar tu parte ayuda a reconstruir la clave de descifrado una vez que suficientes custodios hayan liberado la suya.',
+			keyholderReleaseButton: 'Liberar mi Parte',
+			keyholderReleaseSuccess: 'Tu parte ha sido liberada',
+			keyholderReleaseError: 'No se pudo liberar tu parte. Inténtalo de nuevo.',
+			keyholderReleaseInProgress: 'Liberando tu parte…',
+			// officerIntakeKey* group — gap-fill, not in 62-UI-SPEC (D-04 recipient key). Consumer: 62-21.
+			officerIntakeKeyHeading: 'Recepción Cifrada',
+			officerIntakeKeyBody:
+				'Registra una clave de cifrado para que los datos de registro de los votantes se cifren para ti. La clave privada permanece en este dispositivo.',
+			officerIntakeKeyEnableButton: 'Activar Recepción Cifrada',
+			officerIntakeKeyEnabledConfirm: 'Recepción cifrada activada',
+			officerIntakeKeyError: 'No se pudo activar la recepción cifrada. Inténtalo de nuevo.',
+			// registrationContent* group — gap-fill (D-49 sealed registration content, 62-31). Consumer: 62-27.
+			registrationContentNotRecipient:
+				'Esta solicitud se selló antes de que este dispositivo pudiera leerla. Otro funcionario puede revisarla.',
+			registrationContentNoKey: 'Activa la recepción cifrada en este dispositivo para leer las solicitudes.',
+			registrationContentUnreadable: 'No se pudo leer esta solicitud en este dispositivo.',
+			registrationContentTampered:
+				'El contenido de esta solicitud no coincide con lo que firmó el solicitante. No se puede aprobar.',
+			// registrantPrivate* group — gap-fill (D-51 late-officer residual). Consumer: 62-32.
+			registrantPrivateNotRecipient:
+				'Estos datos privados se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
+			registrantPrivateUnreadable: 'No se pudieron leer estos datos privados en este dispositivo.',
+			registrantSelectiveNotRecipient:
+				'Estos datos de divulgación selectiva se sellaron antes de que fueras funcionario, así que no se pueden mostrar en este dispositivo.',
+			registrantSelectiveUnreadable: 'No se pudieron leer estos datos de divulgación selectiva en este dispositivo.',
+			registrantSelectiveTampered:
+				'Estos datos de divulgación selectiva no coinciden con el registro firmado del registrante. No confíes en ellos.',
+			keyholderDkgStatusFailed: 'Requiere atención. Un funcionario debe revisar esta generación de clave.',
+			officerIntakeKeySupersededBody:
+				'La recepción cifrada está activada para tu cuenta en otro de tus dispositivos. Las nuevas solicitudes se sellan para ese dispositivo.',
+			officerIntakeRenewalFailedBody:
+				'Tu nueva clave de firma está lista, pero la recepción cifrada no se renovó. Vuelve a activarla en Importación Masiva / Sincronizar.',
+			errorLoadFailedGeneric: 'No se pudo cargar. Inténtalo de nuevo.',
+			errorActionFailedGeneric: 'No se pudo completar. Inténtalo de nuevo.',
+			validationRequired: 'Falta un campo obligatorio. Complétalo e inténtalo de nuevo.',
+			validationInvalid: 'Uno de los valores no es válido. Revisa el formulario e inténtalo de nuevo.',
+			dkgOverdueNotice: 'Sin respuesta en unas {{hours}} horas de: {{names}}.',
+			dkgOverdueHelp:
+				'La generación de clave solo continúa cuando todos los custodios participan, y no ocurre nada automáticamente. Pídeles que abran la pantalla de custodio de esta elección en la aplicación de su propio dispositivo.',
+			dkgOverdueUnnamed: 'un custodio que no está en la lista de esta elección',
+			keyholderStatusAcceptAgain: 'Debe aceptar de nuevo',
+			keyholderReacceptOfficerNote:
+				'Este custodio aceptó una versión anterior de esta elección. La elección cambió desde entonces y los custodios aceptan cada versión por separado, para que la clave de la elección la generen solo custodios que aceptaron la versión actual. Envía una nueva invitación y pídele que la acepte.',
+			keyholderReacceptAcceptNote:
+				'Los custodios aceptan una versión de una elección. Si la elección cambia después de que aceptes, un funcionario te envía una nueva invitación y vuelves a aceptar, para que la clave de la elección siempre corresponda a la versión que aceptaste.',
+			reassociationReviewAuthorityWide: 'Esta configuración se aplica a todas las elecciones de esta autoridad.',
+			reassociationReviewNoteCurrent: 'Configuración actual: {{value}}',
+			reassociationReviewNoteWhere: 'Para cambiarla, abre {{screen}} de esta autoridad.',
+			sealedBeforeOfficerExplanation:
+				'Los datos sellados solo pueden leerlos los funcionarios que podían leerlos cuando se sellaron. Los funcionarios añadidos después, o que activaron la recepción cifrada después, nunca obtienen acceso. Es intencional: nadie puede ampliar después quién lee los datos de un votante. Un funcionario que podía leerlos en ese momento se encarga de este registro.',
 		},
 	},
 };
 
 const deviceLanguage = getLocales()[0]?.languageCode ?? 'en';
 
-i18n.use(initReactI18next).init({
+// Guard: a re-evaluation of this module (Fast Refresh) must not re-run init() and reset the
+// language the user chose back to the device locale.
+if (!i18n.isInitialized)
+	i18n.use(initReactI18next).init({
 	resources: resources,
 	lng: deviceLanguage,
 	fallbackLng: 'en',

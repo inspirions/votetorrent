@@ -44,7 +44,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { bytesToB64url, CohortBackoffError } from '@optimystic/db-core';
 import { ReactivitySubscriberRegistry, reactivityTailBytes } from '@optimystic/db-p2p';
-import { reactivityTopicId } from '@optimystic/db-core';
+import { reactivityCollectionTopicId } from '@optimystic/db-core';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
 import { publicSrc, moduleUrl } from '../../../../scripts/lib/source-paths.mjs';
 import { attachConnectionLifecycleTap, CONNECTION_LIFECYCLE_PROBE_PREFIX } from '../../src/peer/connection-lifecycle-probe.js';
@@ -145,7 +145,8 @@ const COLLECTION_ID_B64 = bytesToB64url(COLLECTION_ID);
 const TAIL_ID = 'vt-fixture-tail-block-id-0123456789abcdef';
 const TAIL_BYTES = reactivityTailBytes(TAIL_ID);
 const TAIL_ID_B64 = bytesToB64url(TAIL_BYTES);
-const TOPIC_ID = reactivityTopicId(TAIL_BYTES);
+// @optimystic 1.10: the reactivity topic is anchored on the collection id, not the tail.
+const TOPIC_ID = reactivityCollectionTopicId(COLLECTION_ID);
 
 /** A sentinel that must never reach a `notifyPeerWrite` argument or a
  * delivered notice -- planted inside an applied row's image. @type {string} */

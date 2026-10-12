@@ -15,7 +15,7 @@ import 'reflect-metadata'
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/curves/utils.js'
-import { createTestNetwork, addTestAuthority, addTestElection, addSiblingAuthority, makeTestSignCallback, makeElectionInit, seedElectionSigning } from './fixtures/test-context.js'
+import { createTestNetwork, addTestAuthority, addTestElection, addSiblingAuthority, makeTestSignCallback, makeElectionInit, seedElectionSigning, provisionTestIntakeRecipient } from './fixtures/test-context.js'
 import { ElectionsEngine, peekNextElectionTid } from '../src/elections/elections-engine.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
@@ -52,7 +52,11 @@ function makeNetworkRef () {
 
 async function setup (): Promise<TestAuthority> {
   const net = await createTestNetwork()
-  return addTestAuthority(net)
+  const auth = await addTestAuthority(net)
+  // D-49 (62-31): submitPendingRequest below drives the real (now-sealed) submitRegistrationRequest
+  // — a single provisioning call here covers every call site in this file.
+  await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
+  return auth
 }
 
 /**
@@ -744,6 +748,7 @@ describe('registrant approval ceremony', () => {
   it('WR-20: an authority that declares registration field policy refuses a payload that omits electionId, and one that names a policy-free election of the same authority', async () => {
     const net = await createTestNetwork()
     const auth = await addTestAuthority(net)
+    await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
     // Two elections at the SAME authority. Only the first declares a field policy — that asymmetry
     // is the whole point: a requester who may name any election of the authority can otherwise
     // steer at the policy-free one and evade enforcement entirely.

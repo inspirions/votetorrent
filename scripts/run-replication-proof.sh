@@ -3,7 +3,7 @@
 # run-replication-proof.sh
 #
 # Purpose  : P2P-06 symmetric replication proof.
-#            Step 1 — Peer A (emulator-5554) boots FIRST solo in bootstrap mode
+#            Step 1 — Peer A (${PEER_A_SERIAL}) boots FIRST solo in bootstrap mode
 #            (no drone, no peer). Its replication-proof-runner creates the proof
 #            strand and logs [replication-proof] strandId=<hash>.
 #            Step 2 — The script captures the hash and launches the drone (Node 22)
@@ -42,7 +42,7 @@
 #
 # Prerequisites:
 #   - adb must be in PATH (Android SDK Platform Tools)
-#   - Both emulators (emulator-5554 and emulator-5556) must be running and the
+#   - Both emulators (${PEER_A_SERIAL} and ${PEER_B_SERIAL}) must be running and the
 #     app (org.votetorrent.authority) must be installed on each.
 #   - nvm must be available with Node 22 (drone.mjs requires Promise.withResolvers).
 #   - The drone and CONTROL_ADDR injection are now automated — no manual steps needed.
@@ -74,21 +74,46 @@ PACKAGE="org.votetorrent.authority"
 # instead of aborting, then retries the whole cycle once more (2 attempts total)
 # before giving up.
 #
-# Usage: relaunch_and_wait SERIAL PATTERN TIMEOUT_S WHAT [SECOND_SERIAL]
-#   SERIAL         — the adb serial whose marker is waited on (e.g. emulator-5554)
+# wipe_proof_strand_store SERIAL
+#
+# D-03 fresh-state wipe of the proof STRAND store only, done from the host while the app is
+# force-stopped. It used to run inside the app on EVERY boot, including the D-05 relaunch. By
+# then Peer A had already joined networked in Step 4 and, at strandClusterSize 2, was one of the
+# two holders of blocks it wrote. Wiping it there left the drones holding headers that point at
+# blocks nobody serves any more, so the next read was a CONFIRMED absence: `Missing block` on
+# `Strand.Header` / `App.InviteSlot`, on the Peer-A role only (checkpoint 4, item 3). The wipe
+# now happens ONLY before Step 1 and before the Step-4 relaunch, never before D-05. It targets
+# the exact store name; the `...-control-...` store and `votetorrent-cadre-node` (peerId) must
+# survive.
+PROOF_STRAND_STORE="votetorrent-replication-strand-replication-proof-strand"
+wipe_proof_strand_store() {
+  local serial="$1"
+  adb -s "${serial}" shell run-as "${PACKAGE}" rm -rf "files/${PROOF_STRAND_STORE}" >&2 || true
+  if adb -s "${serial}" shell run-as "${PACKAGE}" ls "files/${PROOF_STRAND_STORE}" > /dev/null 2>&1; then
+    echo "[run-replication-proof] WARN: proof strand store still present on ${serial} after wipe" >&2
+  else
+    echo "[run-replication-proof] wiped proof strand store on ${serial}" >&2
+  fi
+}
+
+# Usage: relaunch_and_wait SERIAL PATTERN TIMEOUT_S WHAT [SECOND_SERIAL] [WIPE_STRAND]
+#   SERIAL         — the adb serial whose marker is waited on (e.g. ${PEER_A_SERIAL})
 #   PATTERN        — logcat pattern passed to wait_for_logcat_line
 #   TIMEOUT_S      — seconds to wait per attempt
 #   WHAT           — human label for wait_for_logcat_line's own error messages
 #   SECOND_SERIAL  — optional: also force-stop/clear/relaunch this serial on every
 #                    attempt (the networked both-peer relaunch needs both devices up
 #                    together before either's marker is meaningful), but only SERIAL's
-#                    marker is waited on.
+#                    marker is waited on. Pass "" to skip it.
+#   WIPE_STRAND    — optional: "1" wipes the proof strand store on every relaunched serial
+#                    between force-stop and launch. Only the Step-4 relaunch passes it; the
+#                    D-05 relaunch must NOT (see wipe_proof_strand_store).
 #
 # Echoes the matched logcat line to stdout (same contract as wait_for_logcat_line);
 # prints nothing (empty) if both attempts miss — callers must check for an empty
 # result exactly as they already do for a bare wait_for_logcat_line call.
 relaunch_and_wait() {
-  local serial="$1" pattern="$2" timeout_s="$3" what="$4" second_serial="${5:-}"
+  local serial="$1" pattern="$2" timeout_s="$3" what="$4" second_serial="${5:-}" wipe_strand="${6:-0}"
   local attempt line status
   for attempt in 1 2; do
     echo "[run-replication-proof] relaunch_and_wait: attempt ${attempt}/2 for '${what}' on ${serial}$([ -n "${second_serial}" ] && echo " (+ ${second_serial})") ..." >&2
@@ -97,6 +122,12 @@ relaunch_and_wait() {
       adb -s "${second_serial}" shell am force-stop "${PACKAGE}" >&2
     fi
     sleep 2
+    if [ "${wipe_strand}" = "1" ]; then
+      wipe_proof_strand_store "${serial}"
+      if [ -n "${second_serial}" ]; then
+        wipe_proof_strand_store "${second_serial}"
+      fi
+    fi
     adb -s "${serial}" logcat -c >&2
     if [ -n "${second_serial}" ]; then
       adb -s "${second_serial}" logcat -c >&2
@@ -317,10 +348,17 @@ trap restore_flags EXIT
 # leaves residue; per-network isolation memory: a shared/stale LevelDB handle
 # contaminates state across runs). Gated behind FRESH_EMULATOR so a caller can
 # skip it (e.g. re-running immediately after a clean pass).
+# PEER_A_SERIAL / PEER_B_SERIAL — (default ${PEER_A_SERIAL} / ${PEER_B_SERIAL}) which adb serial
+# plays "Peer A" (the D-05 force-stop+relaunch role, D-06/D-09/REPL-01 sampling target) vs
+# "Peer B". Added for the P2P-11 debug session's leg-5 role-swap test (does Missing block
+# follow the emulator/on-device store, or the Peer-A script role?) — override both to swap
+# which physical AVD plays which role without editing this script.
+PEER_A_SERIAL="${PEER_A_SERIAL:-emulator-5554}"
+PEER_B_SERIAL="${PEER_B_SERIAL:-emulator-5556}"
 FRESH_EMULATOR="${FRESH_EMULATOR:-1}"
 if [ "${FRESH_EMULATOR}" = "1" ]; then
   echo "[run-replication-proof] Fresh-emulator precondition: pm clear + votetorrent-* LevelDB wipe on both emulators (FRESH_EMULATOR=1) ..."
-  for serial in emulator-5554 emulator-5556; do
+  for serial in ${PEER_A_SERIAL} ${PEER_B_SERIAL}; do
     adb -s "${serial}" shell pm clear "${PACKAGE}" > /dev/null 2>&1 || true
     adb -s "${serial}" shell run-as "${PACKAGE}" \
       find /data/data/"${PACKAGE}"/files -name "votetorrent-*" -exec rm -rf {} + 2>/dev/null || true
@@ -353,16 +391,17 @@ echo "[run-replication-proof] Flag file updated: REPLICATION_PROOF_ENABLED=true"
 # selects CF-02 bootstrap mode automatically (no peers reachable). It creates the
 # proof strand and logs [replication-proof] strandId=<hash>.
 echo "[run-replication-proof] Step 1: bootstrap-mode first boot — Peer A solo (no drone) ..."
-adb -s emulator-5554 shell am force-stop "${PACKAGE}"
+adb -s ${PEER_A_SERIAL} shell am force-stop "${PACKAGE}"
 sleep 2
+wipe_proof_strand_store "${PEER_A_SERIAL}"
 # Pitfall 4: clear stale logcat ring buffer BEFORE the bootstrap-mode relaunch.
-adb -s emulator-5554 logcat -c
-echo "[run-replication-proof] Relaunching ${PACKAGE} on emulator-5554 (bootstrap mode, solo) ..."
-adb -s emulator-5554 shell monkey -p "${PACKAGE}" -c android.intent.category.LAUNCHER 1
+adb -s ${PEER_A_SERIAL} logcat -c
+echo "[run-replication-proof] Relaunching ${PACKAGE} on ${PEER_A_SERIAL} (bootstrap mode, solo) ..."
+adb -s ${PEER_A_SERIAL} shell monkey -p "${PACKAGE}" -c android.intent.category.LAUNCHER 1
 
 # Wait for the proof-start marker on Peer A (proves metro served the enabled bundle).
-echo "[run-replication-proof] Waiting up to ${MARKER_TIMEOUT}s for [replication-proof] starting marker on emulator-5554 ..."
-BOOTSTRAP_MARKER_LINE=$(wait_for_logcat_line "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "bootstrap-marker" "-s emulator-5554")
+echo "[run-replication-proof] Waiting up to ${MARKER_TIMEOUT}s for [replication-proof] starting marker on ${PEER_A_SERIAL} ..."
+BOOTSTRAP_MARKER_LINE=$(wait_for_logcat_line "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "bootstrap-marker" "-s ${PEER_A_SERIAL}")
 if [ -z "${BOOTSTRAP_MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] never started on Peer A (bootstrap mode) — Metro rebundle likely in flight or flags-disabled bundle served; re-run" >&2
   exit 1
@@ -373,8 +412,8 @@ PROBE_STARTED=1
 
 # ── STEP 2: CAPTURE the strand hash from Peer A's bootstrap-mode logcat ──────
 # The runner logs [replication-proof] strandId=<hash> after createStrandDbFactory.
-echo "[run-replication-proof] Waiting up to ${STRAND_TIMEOUT}s for strandId= marker on emulator-5554 ..."
-STRAND_LINE=$(wait_for_logcat_line "${STRAND_ID_MARKER}" "${STRAND_TIMEOUT}" "[run-replication-proof]" "strandId" "-s emulator-5554")
+echo "[run-replication-proof] Waiting up to ${STRAND_TIMEOUT}s for strandId= marker on ${PEER_A_SERIAL} ..."
+STRAND_LINE=$(wait_for_logcat_line "${STRAND_ID_MARKER}" "${STRAND_TIMEOUT}" "[run-replication-proof]" "strandId" "-s ${PEER_A_SERIAL}")
 if [ -z "${STRAND_LINE}" ]; then
   echo "[run-replication-proof] ERROR: strandId= marker never appeared — runner may have crashed; check logcat" >&2
   exit 1
@@ -390,7 +429,17 @@ echo "[run-replication-proof] STRAND_ID captured: ${STRAND_ID}"
 # ── STEP 3: LAUNCH THE DRONE with STRAND_ID (D-07 automated injection) ───────
 # Source nvm, run drone under Node 22. Capture READY line and inject ws multiaddr
 # into the runner's generated config so it connects automatically.
-echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} under Node 22 ..."
+# Drone-A FOUNDS the proof strand by default (DRONE_STRAND_ROLE=found). STRAND_ID here is the fixed
+# proof-strand id, and the only device-side history under it is Peer A's Step-1 solo boot, which
+# wipe_proof_strand_store deletes before the Step-4 networked relaunch. With drone-A joining instead
+# (the 62-85 default), no node in the networked run holds the strand's founding Header: every node
+# logs `founder: false`, cadre-core's first-sync gate withholds the strand DB from all of them, and
+# acquireProofDb neither resolves nor throws, so REPL-01 times out at 420 s (2026-10-08 runs 2 and 4).
+# The round-3 UAT fork (test 15) needs a device-founded strand that SURVIVES into the drone's run;
+# this proof never has one. Pass DRONE_STRAND_ROLE=join to reproduce that variant. Drone-B reads its
+# OWN variable, DRONE_B_STRAND_ROLE (default join), and never inherits DRONE_STRAND_ROLE: drone-B
+# was never a founder, and inheriting `found` would make it found a second history (WR-05).
+echo "[run-replication-proof] Step 3: launching drone with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_STRAND_ROLE:-found} under Node 22 ..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "${NVM_DIR}/nvm.sh" ]; then
   # shellcheck source=/dev/null
@@ -424,7 +473,7 @@ fi
 # which says whether the cold-start carve-out is still open.
 # DRONE_LOG is retained through the FULL run (no rm -f below) — only the EXIT trap removes it.
 DRONE_LOG=$(mktemp /tmp/drone-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" STRAND_ID="${STRAND_ID}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission,sereus:cadre:invite-proto,sereus:cadre:control-protocol-guard}" STRAND_ID="${STRAND_ID}" DRONE_STRAND_ROLE="${DRONE_STRAND_ROLE:-found}" "${NODE22}" packages/p2p-probe-host/drone.mjs > "${DRONE_LOG}" 2>&1 &
 DRONE_PID=$!
 echo "[run-replication-proof] Drone launched (PID ${DRONE_PID}, DEBUG= cluster-error logging armed), waiting for READY line ..."
 
@@ -516,10 +565,14 @@ echo "[run-replication-proof] Drone invite captured (${#DRONE_INVITE} chars)"
 # device-rewritten 10.0.2.2 addrs below — drone-A and drone-B are both host-side
 # Node processes talking to each other directly over loopback (Pitfall 2: distinct
 # host-loopback vs emulator-alias address spaces).
-echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} under Node 22 ..."
+# Drone-B's role comes from DRONE_B_STRAND_ROLE only (default join), never from DRONE_STRAND_ROLE
+# (WR-05; see Step 3). With STRAND_ID set, drone.mjs refuses an unset role, so historical drone-B's
+# derived founder-ness ({}) is not reproducible here; join (founder: false) is the closest match.
+echo "[run-replication-proof] Step 3b: launching drone-B (cross-bootstrapped to drone-A) with STRAND_ID=${STRAND_ID} DRONE_STRAND_ROLE=${DRONE_B_STRAND_ROLE:-join} (from DRONE_B_STRAND_ROLE) under Node 22 ..."
 DRONE_B_LOG=$(mktemp /tmp/drone-b-full-run-XXXXXX.log)
-DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission}" \
+DEBUG="${DRONE_DEBUG:-optimystic:db-p2p:*:error,db-p2p:*:error,libp2p:*:error,sereus:cadre:*:error,sereus:cadre:node,optimystic:db-p2p:libp2p-key-network:*,sereus:cadre:strand-addr,sereus:cadre:delegate-admission,sereus:cadre:invite-proto,sereus:cadre:control-protocol-guard}" \
   STRAND_ID="${STRAND_ID}" \
+  DRONE_STRAND_ROLE="${DRONE_B_STRAND_ROLE:-join}" \
   DRONE_BOOTSTRAP_CONTROL_ADDR="${DRONE_ADDR}" \
   DRONE_BOOTSTRAP_STRAND_ADDR="${STRAND_ADDR}" \
   DRONE_INVITE="${DRONE_INVITE}" \
@@ -579,28 +632,76 @@ echo "[run-replication-proof] Drone-B strand addr: ${STRAND_B_ADDR}"
 
 # Inject the drone's ws multiaddr into the runner (D-07). The runner reads CONTROL_ADDR
 # at the top of replication-proof-runner.ts; we rewrite just that constant line.
-# The EXIT trap calls restore_flags which git-checkouts the FLAG_FILE; for CONFIG_FILE
-# we rely on git checkout too (it is tracked). Add CONFIG_FILE to the EXIT restore.
-# Capture the original runner for git-restore (it is tracked, git checkout -- restores it).
+# The EXIT trap restores CONFIG_FILE from a byte copy taken HERE, before injection. It used to
+# `git checkout --` it, which also silently discarded any UNCOMMITTED edit to the runner at the
+# end of the first run (2026-10-08: the fixes under test would have vanished after one run).
+CONFIG_BACKUP=$(mktemp "/tmp/replication-proof-runner-backup-XXXXXX")
+cp "${CONFIG_FILE}" "${CONFIG_BACKUP}"
+
+# Invite-share channel (62-102). NetworkEngine.respondToInvite needs the invite's one-time
+# PRIVATE key, which only the founder phone holds. The founder logs PROOF_INVITE_SHARE=
+# <inviteKey>.<invitePrivate>; a watcher copies every one it sees on either phone into
+# SHARE_DIR/invite-share.txt, and a loopback HTTP server serves it to the joiner, which the
+# emulator reaches at 10.0.2.2. Throwaway keys of a throwaway proof network, dev harness only.
+SHARE_PORT="${PROOF_SHARE_PORT:-8790}"
+SHARE_DIR=$(mktemp -d "/tmp/replication-proof-share-XXXXXX")
+: > "${SHARE_DIR}/invite-share.txt"
+python3 -m http.server "${SHARE_PORT}" --bind 127.0.0.1 --directory "${SHARE_DIR}" > /dev/null 2>&1 &
+SHARE_SERVER_PID=$!
+sleep 1
+if ! kill -0 "${SHARE_SERVER_PID}" 2>/dev/null; then
+  echo "[run-replication-proof] ERROR: invite-share server could not bind 127.0.0.1:${SHARE_PORT} (set PROOF_SHARE_PORT)" >&2
+  exit 1
+fi
+(
+  # The script runs under `set -euo pipefail`, which this subshell inherits: a pass with no share
+  # yet (grep matches nothing, exit 1) would fail the pipeline and kill the watcher on its first
+  # iteration, before the founder has logged anything (2026-10-08 run 7: 0 shares relayed).
+  set +e +o pipefail
+  while true; do
+    for serial in "${PEER_A_SERIAL}" "${PEER_B_SERIAL}"; do
+      adb -s "${serial}" logcat -d -s ReactNativeJS:I 2>/dev/null \
+        | grep -oE 'PROOF_INVITE_SHARE=[0-9a-fA-F]+\.[0-9a-fA-F]{64}' | cut -d= -f2
+    done | cat "${SHARE_DIR}/invite-share.txt" - | sort -u > "${SHARE_DIR}/invite-share.next"
+    mv "${SHARE_DIR}/invite-share.next" "${SHARE_DIR}/invite-share.txt"
+    sleep 3
+  done
+) &
+SHARE_WATCH_PID=$!
+SHARE_URL_FOR_DEVICE="http://10.0.2.2:${SHARE_PORT}/invite-share.txt"
+cleanup_share() {
+  kill "${SHARE_WATCH_PID}" "${SHARE_SERVER_PID}" 2>/dev/null || true
+  local n
+  n=$(grep -c . "${SHARE_DIR}/invite-share.txt" 2>/dev/null || echo 0)
+  echo "[run-replication-proof] invite-share channel: ${n} share(s) relayed" >&2
+  rm -rf "${SHARE_DIR}" 2>/dev/null || true
+}
 # shellcheck disable=SC2064
-trap 'restore_flags; git checkout -- '"${CONFIG_FILE}"' 2>/dev/null || true' EXIT
+trap 'restore_flags; cleanup_share; cp "'"${CONFIG_BACKUP}"'" "'"${CONFIG_FILE}"'" && rm -f "'"${CONFIG_BACKUP}"'"' EXIT
 
 # Replace the CONTROL_ADDR placeholder line in the runner with the real drone control address.
 # The device emulator reaches the host at 10.0.2.2; replace the host IP in the addr.
 # The drone emits its loopback (127.0.0.1) ws multiaddr; the Android emulator reaches the
 # host loopback at 10.0.2.2. Rewrite either loopback/wildcard host to the emulator alias.
-# Only drone-A's control addr is injected (CONTROL_ADDR) — the control network is
-# unaffected by the n=4 strand-cohort growth (D-04); only the strand cohort (below)
-# needs both drones' addresses.
+# Both drones' control addrs are injected: CONTROL_ADDR (drone-A) and CONTROL_ADDR_B (drone-B).
+# With drone-A alone, drone-B held no connection to either phone and every dial-back to a phone
+# ended in NO_RESERVATION (2026-10-08). The runner uses both as control bootstraps and relays.
 DRONE_ADDR_FOR_DEVICE=$(echo "${DRONE_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
+DRONE_B_ADDR_FOR_DEVICE=$(echo "${DRONE_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Apply the same host-IP rewrite for the strand addresses (Pitfall 2: separate addresses, separate nodes).
 STRAND_ADDR_FOR_DEVICE=$(echo "${STRAND_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 STRAND_B_ADDR_FOR_DEVICE=$(echo "${STRAND_B_ADDR}" | sed -e 's|/ip4/127\.0\.0\.1/|/ip4/10.0.2.2/|' -e 's|/ip4/0\.0\.0\.0/|/ip4/10.0.2.2/|')
 # Use a temp marker that is not a regex special char.
-python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_INVITE}" << 'PYEOF'
+# Device-sized poll budgets (ticks of the runner's 1 s POLL_INTERVAL_MS; each tick is a real
+# distributed read, so wall time is longer). The source keeps its short defaults for jest.
+INVITE_SLOT_POLL_FOR_DEVICE="${PROOF_INVITE_SLOT_POLL_MAX:-420}"
+READ_POLL_FOR_DEVICE="${PROOF_READ_POLL_MAX:-480}"
+python3 - "${CONFIG_FILE}" "${DRONE_ADDR_FOR_DEVICE}" "${STRAND_ADDR_FOR_DEVICE}" "${STRAND_B_ADDR_FOR_DEVICE}" "${DRONE_INVITE}" "${DRONE_B_ADDR_FOR_DEVICE}" "${SHARE_URL_FOR_DEVICE}" "${INVITE_SLOT_POLL_FOR_DEVICE}" "${READ_POLL_FOR_DEVICE}" << 'PYEOF'
 import sys
 path, control_addr, strand_addr, strand_addr_b = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 invite = sys.argv[5]
+control_addr_b, share_url = sys.argv[6], sys.argv[7]
+invite_slot_poll, read_poll = sys.argv[8], sys.argv[9]
 content = open(path).read()
 import re
 # Inject CONTROL_ADDR (control-network bootstrap — drone-A's control node).
@@ -627,10 +728,12 @@ new_content = re.sub(
     count=1,
 )
 
-# Inject PROOF_INVITE (cadre membership). The invite is base64url-encoded JSON carrying the
-# owner's dialable multiaddrs, and dialInvite DIALS them — so the drone's own 127.0.0.1
-# addresses have to get the same emulator-alias rewrite the constants above get, or the
-# device redeems an invite it can never reach. Decode, rewrite, re-encode.
+# Inject PROOF_INVITE (cadre membership). The invitation is base64url-encoded JSON whose
+# `members` are the dialable multiaddrs of the machines it can be redeemed at, and
+# redeemCadreInvitation DIALS them — so the drone's own 127.0.0.1 addresses have to get the same
+# emulator-alias rewrite the constants above get, or the device holds an invitation it can never
+# redeem. `members` is outside the owner-signed row, so rewriting it does not break the
+# invitation's proof. Decode, rewrite, re-encode.
 import base64, json
 
 def _b64url_decode(s):
@@ -640,9 +743,12 @@ def _b64url_encode(b):
     return base64.urlsafe_b64encode(b).decode().rstrip('=')
 
 decoded = json.loads(_b64url_decode(invite))
-decoded['ownerAddrs'] = [
+if not decoded.get('members'):
+    print('[run-replication-proof] ERROR: PROOF_INVITE has no `members` - not a cadre-core 1.14 CadreInvitation', file=sys.stderr)
+    sys.exit(1)
+decoded['members'] = [
     a.replace('/ip4/127.0.0.1/', '/ip4/10.0.2.2/').replace('/ip4/0.0.0.0/', '/ip4/10.0.2.2/')
-    for a in decoded.get('ownerAddrs', [])
+    for a in decoded['members']
 ]
 invite_for_device = _b64url_encode(json.dumps(decoded).encode())
 new_content, n_invite = re.subn(
@@ -651,6 +757,29 @@ new_content, n_invite = re.subn(
     new_content,
     count=1,
 )
+for const_name, value in (('CONTROL_ADDR_B', control_addr_b), ('PROOF_INVITE_SHARE_URL', share_url)):
+    new_content, n_const = re.subn(
+        r"(const " + const_name + r" = ')[^']*(')",
+        r"\g<1>" + value + r"\g<2>",
+        new_content,
+        count=1,
+    )
+    if n_const != 1:
+        print(f'[run-replication-proof] ERROR: {const_name} constant not found in the runner', file=sys.stderr)
+        sys.exit(1)
+
+for const_name, value in (('INVITE_SLOT_POLL_MAX', invite_slot_poll), ('REPL_POLL_MAX', read_poll)):
+    new_content, n_const = re.subn(
+        r"(const " + const_name + r" = )\d+(;)",
+        r"\g<1>" + str(int(value)) + r"\g<2>",
+        new_content,
+        count=1,
+    )
+    if n_const != 1:
+        print(f'[run-replication-proof] ERROR: {const_name} constant not found in the runner', file=sys.stderr)
+        sys.exit(1)
+    print(f"[run-replication-proof] {const_name} in runner injected: {value}")
+
 if n_invite != 1:
     # Fail loudly: a silently-unwritten invite boots every device unenrolled, which fails
     # later as an unexplained empty strand cohort — the exact misdiagnosis this closes.
@@ -659,10 +788,12 @@ if n_invite != 1:
 
 open(path, 'w').write(new_content)
 print(f"[run-replication-proof] PROOF_INVITE in runner injected ({len(invite_for_device)} chars, "
-      f"ownerAddrs={decoded['ownerAddrs']})")
+      f"members={decoded['members']})")
 print(f"[run-replication-proof] CONTROL_ADDR in runner injected: {control_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR in runner injected: {strand_addr}")
 print(f"[run-replication-proof] STRAND_BOOTSTRAP_ADDR_B in runner injected: {strand_addr_b}")
+print(f"[run-replication-proof] CONTROL_ADDR_B in runner injected: {control_addr_b}")
+print(f"[run-replication-proof] PROOF_INVITE_SHARE_URL in runner injected: {share_url}")
 PYEOF
 
 # ── STEP 4: RELAUNCH BOTH PEERS NETWORKED for the symmetric proof run ─────────
@@ -676,7 +807,7 @@ PROBE_STARTED=0  # reset sentinel before the real networked run
 # is one of the exact checkpoints where prior 38-05 runs died on a transient
 # Metro-rebundle/emulator-slowness marker timeout.
 echo "[run-replication-proof] Step 4: relaunching BOTH peers networked (via relaunch_and_wait, bounded retry) ..."
-MARKER_LINE=$(relaunch_and_wait "emulator-5554" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "emulator-5556")
+MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker" "${PEER_B_SERIAL}" 1)
 if [ -z "${MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] never started on Peer A (networked run) after 2 relaunch_and_wait attempts — Metro rebundle likely in flight; re-run" >&2
   exit 1
@@ -693,39 +824,39 @@ PROBE_STARTED=1
 # relayReservation=false, i.e. with the very precondition this gate exists to establish
 # already broken, which makes every reservation-sensitive result downstream
 # uninterpretable. See the strand-addr-throttle todo's "Rig caveat on runs 27-29".
-echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5554 (networked run) ..."
-RELAY_LINE_A=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-A" "-s emulator-5554")
+echo "[run-replication-proof] D-09: waiting for relayReservation= marker on ${PEER_A_SERIAL} (networked run) ..."
+RELAY_LINE_A=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-A" "-s ${PEER_A_SERIAL}")
 if [ -z "${RELAY_LINE_A}" ]; then
-  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5554 (networked run) — relay reservation not established (P2P-08)" >&2
+  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on ${PEER_A_SERIAL} (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
 case "${RELAY_LINE_A}" in
   *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
   *)
-    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5554 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_A}" >&2
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on ${PEER_A_SERIAL} — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_A}" >&2
     exit 1
     ;;
 esac
-echo "[run-replication-proof] D-09: relay-READY on emulator-5554: ${RELAY_LINE_A}"
-echo "[run-replication-proof] D-09: waiting for relayReservation= marker on emulator-5556 (networked run) ..."
-RELAY_LINE_B=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-B" "-s emulator-5556")
+echo "[run-replication-proof] D-09: relay-READY on ${PEER_A_SERIAL}: ${RELAY_LINE_A}"
+echo "[run-replication-proof] D-09: waiting for relayReservation= marker on ${PEER_B_SERIAL} (networked run) ..."
+RELAY_LINE_B=$(wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-B" "-s ${PEER_B_SERIAL}")
 if [ -z "${RELAY_LINE_B}" ]; then
-  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on emulator-5556 (networked run) — relay reservation not established (P2P-08)" >&2
+  echo "[run-replication-proof] ERROR: relayReservation= marker never appeared on ${PEER_B_SERIAL} (networked run) — relay reservation not established (P2P-08)" >&2
   exit 1
 fi
 case "${RELAY_LINE_B}" in
   *"relayReservation=', true"*|*"relayReservation= true"*|*"relayReservation=true"*) : ;;
   *)
-    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on emulator-5556 — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_B}" >&2
+    echo "[run-replication-proof] ERROR: D-09 relayReservation is NOT true on ${PEER_B_SERIAL} — the relay precondition this gate exists to establish is broken, so every reservation-sensitive result downstream would be uninterpretable. Line: ${RELAY_LINE_B}" >&2
     exit 1
     ;;
 esac
-echo "[run-replication-proof] D-09: relay-READY on emulator-5556: ${RELAY_LINE_B}"
+echo "[run-replication-proof] D-09: relay-READY on ${PEER_B_SERIAL}: ${RELAY_LINE_B}"
 
 # ── D-05: peerId stability — capture before/after a Peer-A force-stop relaunch ─
 # Peer A must emit the same peerId before and after a force-stop (P2P-04 / Test 4).
 echo "[run-replication-proof] D-05: capturing peerId on Peer A before force-stop ..."
-PEER_ID_LINE_BEFORE=$(wait_for_logcat_line "${PEER_ID_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "peerId-before" "-s emulator-5554")
+PEER_ID_LINE_BEFORE=$(wait_for_logcat_line "${PEER_ID_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "peerId-before" "-s ${PEER_A_SERIAL}")
 if [ -z "${PEER_ID_LINE_BEFORE}" ]; then
   echo "[run-replication-proof] ERROR: peerId= marker not seen on Peer A before force-stop" >&2
   exit 1
@@ -738,7 +869,7 @@ echo "[run-replication-proof] peerId before: ${ID_BEFORE}"
 # checkpoint is where the best 38-05 run died (relaunched Peer A's starting/relay
 # markers never re-emitted within the old 90s window; see 38-05-SUMMARY.md
 # "Where it stopped").
-D05_MARKER_LINE=$(relaunch_and_wait "emulator-5554" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker-d05-relaunch")
+D05_MARKER_LINE=$(relaunch_and_wait "${PEER_A_SERIAL}" "${PROBE_MARKER}" "${MARKER_TIMEOUT}" "marker-d05-relaunch")
 if [ -z "${D05_MARKER_LINE}" ]; then
   echo "[run-replication-proof] ERROR: [replication-proof] starting marker never appeared on Peer A after the D-05 relaunch (both relaunch_and_wait attempts missed)" >&2
   exit 1
@@ -761,11 +892,11 @@ echo "[run-replication-proof] D-05 relaunch start marker seen: ${D05_MARKER_LINE
 # Read the buffer directly (`logcat -d`), bounded-retry for the case where the relaunched app has
 # not reached the line yet. Same extraction, same comparison, no window to outlive.
 echo "[run-replication-proof] D-05: capturing peerId on Peer A after force-stop relaunch ..."
-PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "emulator-5554")
+PEER_ID_LINE_AFTER=$(read_logcat_line_now "${PEER_ID_MARKER}" "${PEER_A_SERIAL}")
 if [ -z "${PEER_ID_LINE_AFTER}" ]; then
   echo "[run-replication-proof] ERROR: peerId= marker not seen on Peer A after force-stop relaunch" >&2
   echo "[run-replication-proof] --- last 20 [replication-proof] lines on Peer A (diagnostic) ---" >&2
-  adb -s emulator-5554 logcat -d 2>/dev/null | grep 'replication-proof' | tail -20 >&2
+  adb -s ${PEER_A_SERIAL} logcat -d 2>/dev/null | grep 'replication-proof' | tail -20 >&2
   exit 1
 fi
 ID_AFTER=$(extract_marker_value "${PEER_ID_LINE_AFTER}" "peerId")
@@ -781,13 +912,13 @@ echo "[run-replication-proof] D-05 PASS: peerId stable across restart (${ID_AFTE
 # reservation; the relaunched runner must re-establish it before we trust any dial
 # that follows. Re-gate on the SAME RELAY_READY_MARKER, same idiom as the D-09 gate.
 echo "[run-replication-proof] D-10: waiting for relayReservation= marker on Peer A after D-05 relaunch ..."
-wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s emulator-5554" > /dev/null
+wait_for_logcat_line "${RELAY_READY_MARKER}" "${MARKER_TIMEOUT}" "[run-replication-proof]" "relay-ready-d05-relaunch" "-s ${PEER_A_SERIAL}" > /dev/null
 echo "[run-replication-proof] D-10: relay reservation re-established on Peer A after D-05 relaunch"
 
 
 # ── D-06: peers >= 1 ───────────────────────────────────────────────────────────
 echo "[run-replication-proof] D-06: waiting for peers= marker on Peer A ..."
-PEERS_LINE=$(wait_for_logcat_line "${PEERS_MARKER}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "peers" "-s emulator-5554")
+PEERS_LINE=$(wait_for_logcat_line "${PEERS_MARKER}" "${LOGCAT_TIMEOUT}" "[run-replication-proof]" "peers" "-s ${PEER_A_SERIAL}")
 N=$(extract_marker_value "${PEERS_LINE}" "peers")
 if [ -z "${N}" ] || [ "${N}" -lt 1 ]; then
   echo "[run-replication-proof] FAIL: peer count < 1 (peers=${N}) (D-06 / ENG-05)" >&2
@@ -807,7 +938,7 @@ STRAND_PEERS_MARKER='\[replication-proof\].*strandPeers='
 # enrolment and the auth gate, none of which is strand work; charging their cost to the strand
 # budget is what made run 25 unreadable.
 echo "[run-replication-proof] REPL-01: waiting for the acquire-start marker (controlRelayAddrs=) on Peer A (timeout ${ACQUIRE_START_TIMEOUT}s) ..."
-ACQUIRE_START_LINE=$(read_logcat_line_now "${ACQUIRE_START_MARKER}" "emulator-5554" $((ACQUIRE_START_TIMEOUT / 5)))
+ACQUIRE_START_LINE=$(read_logcat_line_now "${ACQUIRE_START_MARKER}" "${PEER_A_SERIAL}" $((ACQUIRE_START_TIMEOUT / 5)))
 if [ -z "${ACQUIRE_START_LINE}" ]; then
   echo "[run-replication-proof] FAIL: controlRelayAddrs= marker never emitted on Peer A within ${ACQUIRE_START_TIMEOUT}s — the runner never reached the strand acquire (REPL-01 phase 1); the failure is upstream of strand wiring, read the auth gate markers" >&2
   exit 1
@@ -819,11 +950,11 @@ echo "[run-replication-proof] REPL-01: acquire started on Peer A: ${ACQUIRE_STAR
 # see read_logcat_line_now). The runner heartbeats `acquire pending <n> s` throughout, so a run
 # that spends this budget can be read afterwards as slow-but-alive or genuinely stuck.
 echo "[run-replication-proof] REPL-01: waiting for strandPeers= marker on Peer A (timeout ${STRAND_PEERS_TIMEOUT}s, measured from acquire start) ..."
-STRAND_PEERS_LINE=$(read_logcat_line_now "${STRAND_PEERS_MARKER}" "emulator-5554" $((STRAND_PEERS_TIMEOUT / 5)))
+STRAND_PEERS_LINE=$(read_logcat_line_now "${STRAND_PEERS_MARKER}" "${PEER_A_SERIAL}" $((STRAND_PEERS_TIMEOUT / 5)))
 if [ -z "${STRAND_PEERS_LINE}" ]; then
   echo "[run-replication-proof] FAIL: strandPeers= marker never emitted on Peer A within ${STRAND_PEERS_TIMEOUT}s of the acquire starting (REPL-01 phase 2)" >&2
   echo "[run-replication-proof] --- acquire heartbeat on Peer A (was it alive?) ---" >&2
-  adb -s emulator-5554 logcat -d 2>/dev/null | grep -E 'acquire pending|acquire settled|write phase' | tail -10 >&2
+  adb -s ${PEER_A_SERIAL} logcat -d 2>/dev/null | grep -E 'acquire pending|acquire settled|write phase' | tail -10 >&2
   exit 1
 fi
 SP=$(extract_marker_value "${STRAND_PEERS_LINE}" "strandPeers")
@@ -853,19 +984,19 @@ fi
 # run #1, without waiting for a costly FAIL verdict to investigate. Diagnostic only —
 # does NOT gate the run (warn-and-continue on a miss), since the both-peer REPLICATION
 # VERDICT below remains the authoritative PASS/FAIL signal.
-echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5554 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_A=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5554" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
+echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on ${PEER_A_SERIAL} (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
+RELAY_ADDRS_LINE_A=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "${PEER_A_SERIAL}" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_A}" ]; then
-  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5554: ${RELAY_ADDRS_LINE_A}"
+  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on ${PEER_A_SERIAL}: ${RELAY_ADDRS_LINE_A}"
 else
-  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on emulator-5554 (diagnostic only, not gating)" >&2
+  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on ${PEER_A_SERIAL} (diagnostic only, not gating)" >&2
 fi
-echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on emulator-5556 (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
-RELAY_ADDRS_LINE_B=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "emulator-5556" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
+echo "[run-replication-proof] D-04: waiting for relayAddrsPerDrone= marker on ${PEER_B_SERIAL} (timeout ${RELAY_ADDRS_PER_DRONE_TIMEOUT}s) ..."
+RELAY_ADDRS_LINE_B=$(read_logcat_line_now "${RELAY_ADDRS_PER_DRONE_MARKER}" "${PEER_B_SERIAL}" $((RELAY_ADDRS_PER_DRONE_TIMEOUT / 5)))
 if [ -n "${RELAY_ADDRS_LINE_B}" ]; then
-  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on emulator-5556: ${RELAY_ADDRS_LINE_B}"
+  echo "[run-replication-proof] D-04: relayAddrsPerDrone= on ${PEER_B_SERIAL}: ${RELAY_ADDRS_LINE_B}"
 else
-  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on emulator-5556 (diagnostic only, not gating)" >&2
+  echo "[run-replication-proof] D-04 WARNING: relayAddrsPerDrone= marker never appeared on ${PEER_B_SERIAL} (diagnostic only, not gating)" >&2
 fi
 
 # ── BOTH-PEER VERDICT (D-01) ──────────────────────────────────────────────────
@@ -881,11 +1012,23 @@ fi
 # verdict" — a statement about the instrument dressed as a statement about the peers. The
 # verdict was FAIL either way there, so nothing was misjudged; on a PASS it would have
 # discarded the pass.
-VERDICT_TIMEOUT=420
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5554 (${VERDICT_TIMEOUT}s) ..."
-VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5554" $((VERDICT_TIMEOUT / 5)))
-echo "[run-replication-proof] Polling REPLICATION VERDICT on emulator-5556 (${VERDICT_TIMEOUT}s) ..."
-VERDICT_B=$(read_logcat_line_now "${VERDICT_TAG}" "emulator-5556" $((VERDICT_TIMEOUT / 5)))
+#
+# Raised from 420 (commit 1920b696) — that value assumed the runner's own "REPL_POLL_MAX: 120
+# ticks x 1 s = 120 s" comment held on device. It does not: the 2026-09-28 device run captured
+# Peer A still at `read tick 105` of 120 when THIS poll gave up after burning its full 420 s
+# window — ~4 s per tick, not 1 s, because each tick's `SELECT Id FROM Authority` is a real
+# distributed-DB round trip, not a local read. At that measured rate a full 120-tick read phase
+# needs ~480 s; budget for the bad case (same margin pattern as STRAND_PEERS_TIMEOUT/
+# STRAND_TIMEOUT above, both raised past their own measured worst case for the same reason).
+# 2026-10-08 run 8: the founder's genesis + invite ceremony took ~4 min after its acquire, and
+# the joiner then needs minutes more to accept and create its authority, so both read phases run
+# far longer than the 120-tick default. The runner's device budgets are injected below
+# (PROOF_INVITE_SLOT_POLL_MAX / PROOF_READ_POLL_MAX); this poll must outlast them.
+VERDICT_TIMEOUT=1200
+echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_A_SERIAL} (${VERDICT_TIMEOUT}s) ..."
+VERDICT_A=$(read_logcat_line_now "${VERDICT_TAG}" "${PEER_A_SERIAL}" $((VERDICT_TIMEOUT / 5)))
+echo "[run-replication-proof] Polling REPLICATION VERDICT on ${PEER_B_SERIAL} (${VERDICT_TIMEOUT}s) ..."
+VERDICT_B=$(read_logcat_line_now "${VERDICT_TAG}" "${PEER_B_SERIAL}" $((VERDICT_TIMEOUT / 5)))
 
 # ── D-08: cluster-error capture (diagnose-first, P2P-09) ─────────────────────
 # MUST run BEFORE the verdict-empty guard below: a verdict TIMEOUT (empty
@@ -923,7 +1066,11 @@ else
 fi
 
 if [ -z "${VERDICT_A}" ] || [ -z "${VERDICT_B}" ]; then
-  echo "[run-replication-proof] ERROR: one or both peers did not emit a verdict within ${LOGCAT_TIMEOUT}s — FAIL" >&2
+  # Mislabel fix (2026-09-28): this used to read "${LOGCAT_TIMEOUT}s" (180s), a leftover from
+  # before commit 1920b696 raised the ACTUAL poll budget to VERDICT_TIMEOUT — the message never
+  # matched what the script actually waited, and reading it (rather than the real code) is what
+  # produced the "180s" mislabel in prior run write-ups. Report the timeout that was really used.
+  echo "[run-replication-proof] ERROR: one or both peers did not emit a verdict within ${VERDICT_TIMEOUT}s — FAIL" >&2
   exit 1
 fi
 

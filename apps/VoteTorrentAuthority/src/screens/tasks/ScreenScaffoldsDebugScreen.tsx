@@ -19,8 +19,9 @@ import type { NavigationProp } from "../../navigation/types";
 // MockInvitationEngine returns a seeded invite for any id. That is STALE:
 // engine-factory.ts `case 'invitations'` returns a real InvitationEngine with
 // no dev branch, so the send modes reach real signing (createDeviceSigner →
-// saveInviteWithSigning) and the `mock-*-invite-1` ids below are placeholders
-// against the real engine, not against a mock. This screen and its route are
+// saveInviteWithSigning). The accept entries below are paste-first since UAT 62
+// test 10 (no route id is passed), and accept is also reachable in production via
+// Settings -> Accept an Invitation. This screen and its route are
 // now dev-only: the Settings entry sits inside `__DEV__` and the route is
 // registered through a `__DEV__`-guarded require, so this module is absent
 // from release bundles (verified by bundle grep + negative control).
@@ -38,12 +39,12 @@ const FRAME_ROUTES: ReadonlyArray<FrameRoute> = [
 	{ key: "editRevisionForm",        route: "EditRevisionForm",        titleKey: "editRevisionFormTitle" },
 	{ key: "proposedElection",        route: "ProposedElection",        titleKey: "proposedElectionTitle" },
 	{ key: "proposedRevision",        route: "ProposedRevision",        titleKey: "proposedRevisionTitle" },
-	{ key: "administratorInvitationAccept", route: "AdministratorInvitation", titleKey: "debugAdministratorInvitationAccept", params: { mode: "accept", invitationId: "mock-officer-invite-1" } },
+	{ key: "administratorInvitationAccept", route: "AdministratorInvitation", titleKey: "debugAdministratorInvitationAccept", params: { mode: "accept" } },
 	{ key: "authorityInvitationSend",       route: "AuthorityInvitation",     titleKey: "debugAuthorityInvitationSend",       params: { mode: "send" } },
-	{ key: "authorityInvitationAccept",     route: "AuthorityInvitation",     titleKey: "debugAuthorityInvitationAccept",     params: { mode: "accept", invitationId: "mock-authority-invite-1" } },
+	{ key: "authorityInvitationAccept",     route: "AuthorityInvitation",     titleKey: "debugAuthorityInvitationAccept",     params: { mode: "accept" } },
 	// Phase 10 plan 10-02 — Keyholder invitation dev entries (D-07 accept reachability, D-10 keep wrench)
 	{ key: "keyholderInvitationSend",   route: "KeyholderInvitation", titleKey: "debugKeyholderInvitationSend",   params: { mode: "send" } },
-	{ key: "keyholderInvitationAccept", route: "KeyholderInvitation", titleKey: "debugKeyholderInvitationAccept", params: { mode: "accept", invitationId: "mock-keyholder-invite-1" } },
+	{ key: "keyholderInvitationAccept", route: "KeyholderInvitation", titleKey: "debugKeyholderInvitationAccept", params: { mode: "accept" } },
 ];
 
 export default function ScreenScaffoldsDebugScreen() {

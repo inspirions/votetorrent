@@ -7,25 +7,33 @@
  * plus a `RootTabParamList` for the tab navigator.
  *
  * All params are `undefined` this phase — no route params for placeholders (39-05 scope). Wired
- * together by 39-07's RootNavigator.
+ * together by 39-07's RootNavigator. The one exception is `VoteReceipt` (Phase 63, D-10): it takes
+ * `VoteReceiptParams`.
  *
  * The 5 tabs (Phase 59, D-13): Vote · Timeline · Registration · Scan · Settings.
  */
 
-// Vote tab: Home root + Ballot pushed + the 4 question/info modals (D-09 topology) +
+/**
+ * The one route with params (D-10). `electionId` is a non-secret identifier. `revealOnOpen` is set
+ * only by Review/Submit straight after a successful save (R-4). Params must never carry a choice,
+ * a nonce, an envelope or any record field: navigation state can be persisted and inspected.
+ */
+export type VoteReceiptParams = { electionId: string; revealOnOpen?: boolean };
+
+// Vote tab: Home root + Ballot pushed + the IndividualQuestion modal (D-09 topology; the
+// election/office/candidate "Learn about" info is an in-place InfoDialog, not a route) +
 // ValidationDetails (HOME-03/D-11 trust-story drill-in, plain push — not a modal).
 export type VoteStackParamList = {
 	Home: undefined;
 	Ballot: undefined;
 	IndividualQuestion: undefined;
-	ElectionInfo: undefined;
-	OfficeInfo: undefined;
-	CandidateInfo: undefined;
 	ValidationDetails: undefined;
 	// Phase 42 (VOTE-04, D-05) — per-office selection summary + final Submit. All `undefined`
 	// like every other entry above: selection state (selectionMap, currentQuestionIndex) lives
 	// on BallotSelectionProvider, never a navigation param.
 	ReviewSubmit: undefined;
+	// Phase 63 (D-10): registered on both stacks (route closure, D-14).
+	VoteReceipt: VoteReceiptParams;
 };
 
 // Registration tab: root + Device Attestation + Confirmation modals + the 3 form-step
@@ -40,6 +48,9 @@ export type RegistrationStackParamList = {
 	RegisterAddressParty: undefined;
 	RegisterConfirm: undefined;
 	RegistrationInfo: undefined;
+	// Phase 62 Plan 28 (D-40/D-43/D-45) — Surfaces 8/9. Registered a SECOND time on
+	// TimelineStackParamList below, mirroring D-14's existing route-closure requirement.
+	ContinueOnAnotherDevice: undefined;
 };
 
 // Scan tab: single root screen, no modals.
@@ -76,6 +87,8 @@ export type TimelineStackParamList = {
 	Ballot: undefined;
 	IndividualQuestion: undefined;
 	ReviewSubmit: undefined;
+	// Phase 63 (D-10): registered on both stacks (route closure, D-14).
+	VoteReceipt: VoteReceiptParams;
 	RegistrationHome: undefined;
 	RegistrationInfo: undefined;
 	DeviceAttestation: undefined;
@@ -84,6 +97,9 @@ export type TimelineStackParamList = {
 	RegisterConfirm: undefined;
 	Confirmation: undefined;
 	Keyholders: undefined;
+	// Phase 62 Plan 28 (D-14 route-closure gate) — the Timeline duplicate of
+	// RegistrationStackParamList's entry above.
+	ContinueOnAnotherDevice: undefined;
 };
 
 // The 5 tabs, in D-13 locked order: Vote · Timeline · Registration · Scan · Settings.

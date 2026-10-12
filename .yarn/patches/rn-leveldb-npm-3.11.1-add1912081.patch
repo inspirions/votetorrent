@@ -1,0 +1,45 @@
+diff --git a/ios/Leveldb.mm b/ios/Leveldb.mm
+index 6084dbfb3b98747d7c95c460c63e60e7474e8bbf..1a80b33b129a30888693ac2e55faf13a40a3fc46 100644
+--- a/ios/Leveldb.mm
++++ b/ios/Leveldb.mm
+@@ -1,10 +1,17 @@
+ #import "Leveldb.h"
+-#import <React/RCTBridge+Private.h>
++#import <React/RCTBridge.h>
+ #import <React/RCTUtils.h>
+ #import "react-native-leveldb.h"
+ 
+ using namespace facebook;
+ 
++// RN 0.82+ removed RCTCxxBridge (legacy architecture). In bridgeless mode the module's `bridge`
++// is an RCTBridgeProxy, which exposes the JSI runtime via `- (void *)runtime` (implemented, but
++// not declared in its public header — hence this protocol).
++@protocol LeveldbRuntimeProvider
++- (void *)runtime;
++@end
++
+ @implementation Leveldb
+ @synthesize bridge = _bridge;
+ @synthesize methodQueue = _methodQueue;
+@@ -14,16 +21,16 @@ @implementation Leveldb
+ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install)
+ {
+   NSLog(@"Installing Leveldb bindings...");
+-  RCTBridge *bridge = [RCTBridge currentBridge];
+-  RCTCxxBridge *cxxBridge = (RCTCxxBridge *) bridge;
+-  if (cxxBridge == nil) {
++  id bridge = self.bridge;
++  if (bridge == nil) {
+     return @false;
+   }
+-  if (cxxBridge.runtime == nil) {
++  void *runtime = [(id<LeveldbRuntimeProvider>)bridge runtime];
++  if (runtime == nil) {
+     return @false;
+   }
+   NSURL *docPath = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask][0];
+-  installLeveldb(*(jsi::Runtime *)cxxBridge.runtime, std::string([[docPath path] UTF8String]));
++  installLeveldb(*(jsi::Runtime *)runtime, std::string([[docPath path] UTF8String]));
+   return @true;
+ }
+ 

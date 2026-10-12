@@ -49,7 +49,9 @@ const DEVICE_USER_KEY_IDENTIFIER_RE = /\bdeviceUserKey\b/;
 // The P-256 provisioning accessor `registration-status.ts` MUST call — this proves the CORRECT
 // key IS used, not merely that the wrong one is absent (a file could satisfy the two negative
 // checks above by reading no device key at all).
-const PROVISION_DEVICE_KEY_CALL_RE = /\bprovisionDeviceKey\s*\(/;
+const PROVISION_DEVICE_KEY_CALL_RE = /\bgetCurrentDeviceKey\s*\(/;
+// 63-18: a status READ must never CREATE a key (on Android `provisionDeviceKey` mints a new one per call).
+const CREATING_DEVICE_KEY_CALL_RE = /\bprovisionDeviceKey\s*\(/;
 
 describe('no client-side identity persistence (D-23, 59-09)', () => {
 	test('the scoped file list resolves and is non-empty', () => {
@@ -80,11 +82,12 @@ describe('no client-side identity persistence (D-23, 59-09)', () => {
 		expect(offenders).toEqual([]);
 	});
 
-	test('registration-status.ts DOES call the P-256 provisioning accessor -- proving the correct key is used, not merely that the wrong one is absent', () => {
+	test('registration-status.ts DOES call the read-only P-256 current-key accessor -- proving the correct key is used, not merely that the wrong one is absent', () => {
 		const file = TARGET_FILES.find(f => f.endsWith('registration-status.ts'));
 		expect(file).toBeDefined();
 		const text = readStripped(file as string);
 		expect(PROVISION_DEVICE_KEY_CALL_RE.test(text)).toBe(true);
+		expect(CREATING_DEVICE_KEY_CALL_RE.test(text)).toBe(false);
 	});
 
 	describe('planted-fixture self-test (every matcher is proven able to fire, never vacuous)', () => {
@@ -122,9 +125,10 @@ describe('no client-side identity persistence (D-23, 59-09)', () => {
 			expect(DEVICE_USER_KEY_IDENTIFIER_RE.test(synthetic)).toBe(false);
 		});
 
-		test('a synthetic provisionDeviceKey() call IS reported by the positive matcher', () => {
-			const synthetic = stripComments('const {publicKey} = await producer.provisionDeviceKey();');
+		test('a synthetic getCurrentDeviceKey() call IS reported by the positive matcher (and a provisionDeviceKey() call by the creating matcher)', () => {
+			const synthetic = stripComments('const {publicKey} = await producer.getCurrentDeviceKey();');
 			expect(PROVISION_DEVICE_KEY_CALL_RE.test(synthetic)).toBe(true);
+			expect(CREATING_DEVICE_KEY_CALL_RE.test(stripComments('await producer.provisionDeviceKey();'))).toBe(true);
 		});
 	});
 });

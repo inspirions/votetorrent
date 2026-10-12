@@ -57,21 +57,18 @@ export async function enrol(ctx, owner, joiners) {
       // Re-run the ceremony only when the control database DEFINITELY says this peer is not
       // a member, or on the first pass. An `unknown` on a later attempt means the ceremony
       // has already run and its result merely cannot be read yet — waiting is the right move,
-      // and re-running would storm createInvite/acceptPhone through a read outage for no gain
+      // and re-running would storm createInvite/redeemInvite through a read outage for no gain
       // (measured: three joiners x five full ceremonies, minutes of work, no effect).
       if (before === false || attempt === 1) {
         try {
-          // Bounded like dialInvite below. createInvite is a control WRITE, and this call sits
+          // Bounded like redeemInvite below. createInvite is a control WRITE, and this call sits
           // on the same path whose reads are known to stall; an unbounded write here would
-          // hang the whole gate rather than fail it.
+          // hang the whole gate rather than fail it. cadre-core 1.14: the invitation is targeted
+          // at this joiner, and redeeming it is the whole ceremony — the answering member seats
+          // the row, so there is no owner-side accept.
           const { encodedInvite } = await withTimeout(
-            owner.createInvite(), ENROLL_TIMEOUT_MS, `${handle.name} createInvite`);
-          await withTimeout(handle.dialInvite(encodedInvite), ENROLL_TIMEOUT_MS, `${handle.name} dialInvite`);
-          try {
-            await owner.acceptPhone(peerId, encodedInvite);
-          } catch (e) {
-            ctx.V(`${handle.name} acceptPhone unavailable: ${e?.message ?? e}`);
-          }
+            owner.createInvite(peerId), ENROLL_TIMEOUT_MS, `${handle.name} createInvite`);
+          await withTimeout(handle.redeemInvite(encodedInvite), ENROLL_TIMEOUT_MS, `${handle.name} redeemInvite`);
           ctx.V(`${handle.name} ceremony ran (attempt ${attempt})`);
         } catch (e) {
           lastErr = e;

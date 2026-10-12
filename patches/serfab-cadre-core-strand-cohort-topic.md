@@ -1,5 +1,15 @@
 # Patch: @serfab/cadre-core strand-cohort-topic surface
 
+> **RETIRED 2026-10-09 (cadre-core 1.14.0).** cadre-core 1.12+ ships this surface itself as
+> `CadreNodeConfig.strandReactivity: { enabled, strandIds? }` (`dist/strand-reactivity.js`,
+> `strandCohortTopicOption`), building exactly `cohortTopic: { enabled: true }` for the selected
+> strands. The only thing this patch added beyond that was forwarding `minSigs` as
+> `cohortTopic.host.minSigs`; upstream states that `minSigs` does not govern the reactivity root
+> (it is verified at the consensus super-majority), and that hunk was dropped by decision. All
+> three hunks are gone from `.yarn/patches/@serfab-cadre-core-npm-1.14.0-votetorrent.patch`;
+> `gateway.mjs` passes its `strandCohortTopic.enabled` to `strandReactivity` and refuses a
+> `minSigs` key. The record below is kept as history.
+
 Status: hand-authored, verified against installed dist by `git apply --check`/`patch --dry-run`
 in both application orders, 2026-09-05. NOT yet landed upstream (filed as an issue only — see
 "Upstream" below).

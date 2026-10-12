@@ -45,7 +45,9 @@ import { CustomTextInput } from "../../components/CustomTextInput";
 import { Footer } from "../../components/Footer";
 import { InlineError } from "../../components/InlineError";
 import { NoNetwork } from "../../components/NoNetwork";
+import { useToast } from "../../components/Toast";
 import { globalStyles } from "../../theme/styles";
+import { copyToClipboard } from "../../utils/copyToClipboard";
 import { useApp } from "../../providers/AppProvider";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
 import { createDeviceSigner } from "../../engines/device-signer";
@@ -66,6 +68,7 @@ import {
 export default function DashboardSignInCodeScreen() {
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
+	const showToast = useToast();
 	const { exportDashboardSnapshot } = useApp();
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
 
@@ -346,9 +349,12 @@ export default function DashboardSignInCodeScreen() {
 							<CustomButton
 								title={t("dashboardSignInCodeCopyButton")}
 								icon="copy"
-								onPress={() => {
-									Clipboard.setString(record.code);
+								onPress={async () => {
+									// Marked before the write is confirmed: a clear that finds nothing to
+									// clear is harmless; a credential left on the clipboard is not.
 									copiedRef.current = true;
+									const ok = await copyToClipboard(record.code);
+									showToast(t(ok ? "dashboardSignInCodeCopied" : "dashboardSignInCodeCopyFailed"));
 								}}
 							/>
 						</>

@@ -45,10 +45,12 @@
  * a stale build artifact vouching for a control's reachability is exactly the
  * silent-green this file exists to prevent.
  *
- * Update / removal trigger: when a phase OTHER than 52 adds an `NN-SECURITY.md`,
- * pass `--phase-dir .planning/phases/NN-...` (or the positional argument). Do NOT
- * add a second hardcoded default -- the phase number, the plan glob and the threat
- * id prefix are all derived from the directory name. When the repo's module
+ * The phase directory is REQUIRED for controls/reconcile/explain/all: pass it as
+ * the positional argument or `--phase-dir .planning/phases/NN-...` (the npm
+ * script forwards it: `yarn verify:security-controls .planning/phases/NN-...`).
+ * Do NOT add a hardcoded default back -- the phase number, the plan glob and
+ * the threat id prefix are all derived from the directory name, and a default
+ * made every later phase silently re-check phase 52 instead. When the repo's module
  * resolution changes (a new workspace layout, a different source entry
  * convention), update `loadWorkspaceAliases` and `resolveRelativeSpecifier` in
  * the SAME commit, and re-run `selftest` before trusting the new resolver.
@@ -73,7 +75,10 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-const DEFAULT_PHASE_DIR = '.planning/phases/52-bootstrap-rendezvous-service';
+// The selftest's live corpus (case 27) only. It is NOT a default for the
+// phase subcommands: those require an explicit phase directory, because a
+// silent fall-back to phase 52 let every later phase "pass" without being checked.
+const LIVE_CORPUS_PHASE_DIR = '.planning/phases/52-bootstrap-rendezvous-service';
 
 // The live corpus floors. A floor, never an equality: adding a plan or a threat
 // must never make the gate red. Measured 2026-08-29 across 52-01..52-16.
@@ -1233,7 +1238,13 @@ function evaluateReconcile(docText, corpus, options) {
 // ---------------------------------------------------------------------------
 
 function phaseInfo(phaseDirArg) {
-  const phaseDirRel = phaseDirArg ?? DEFAULT_PHASE_DIR;
+  if (!phaseDirArg) {
+    fail(
+      'a phase directory is required, e.g. `yarn verify:security-controls .planning/phases/NN-name`\n' +
+        'usage: verify-security-controls.mjs <controls|reconcile|explain|all> <phase-dir> | selftest',
+    );
+  }
+  const phaseDirRel = phaseDirArg;
   const phaseDirAbs = path.resolve(REPO_ROOT, phaseDirRel);
   const base = path.basename(phaseDirAbs);
   const m = /^(\d{2})-/.exec(base);
@@ -2138,9 +2149,9 @@ function runSelftest() {
     //     with LIVE-FIXTURE-MISSING rather than skipping.
     {
       total++;
-      const liveDir = path.join(REPO_ROOT, DEFAULT_PHASE_DIR);
+      const liveDir = path.join(REPO_ROOT, LIVE_CORPUS_PHASE_DIR);
       if (!existsSync(liveDir)) {
-        failures.push(`27 live corpus: LIVE-FIXTURE-MISSING ${DEFAULT_PHASE_DIR}`);
+        failures.push(`27 live corpus: LIVE-FIXTURE-MISSING ${LIVE_CORPUS_PHASE_DIR}`);
       } else {
         const corpus = collectPlanThreats(liveDir, '52');
         const countable = corpus.threats.filter((t) => !t.isSupplyChain).length;

@@ -2,8 +2,8 @@
  * Unit test for ValidationDetailsScreen (HOME-03/D-11) — trust-story drill-in faithful to Figma
  * frame `276:868`. Mounts inside VoterAppProvider + ThemeProvider (this screen calls
  * useVoterApp()/getElection() and useTheme(), unlike the pure presentational components) and
- * drives lifecycleState to 'ValidationDetails' (the only LIFECYCLE_CONTENT entry carrying an
- * `evidence` array — providers/mockData.ts) before asserting the rendered evidence.
+ * drives lifecycleOverride to 'ValidationDetails' (the only DEV_LIFECYCLE_CONTENT entry carrying an
+ * `evidence` array — providers/devLifecycleFixtures.ts) before asserting the rendered evidence.
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
@@ -12,20 +12,20 @@ import {ThemeProvider} from '@react-navigation/native';
 import '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 // Phase 44-07 (D-02/D-04): VoterAppProvider is now a real composition root requiring a
 // CadreNodeProvider ancestor — this screen-level test has no need to exercise that boot, so it
-// uses the manual Jest mock at providers/__mocks__/VoterAppProvider.tsx (its lifecycleState/
-// setLifecycleState are real, stateful mock context — this Harness's setLifecycleState call
+// uses the manual Jest mock at providers/__mocks__/VoterAppProvider.tsx (its lifecycleOverride/
+// setLifecycleOverride are real, stateful mock context — this Harness's setLifecycleOverride call
 // still drives the rendered evidence).
 jest.mock('../../../providers/VoterAppProvider');
 import {VoterAppProvider, useVoterApp} from '../../../providers/VoterAppProvider';
 import {lightTheme} from '../../../theme/themes';
 import ValidationDetailsScreen from '../ValidationDetailsScreen';
 
-/** Drives lifecycleState to 'ValidationDetails' on mount, then renders the screen under test. */
+/** Drives lifecycleOverride to 'ValidationDetails' on mount, then renders the screen under test. */
 function Harness() {
-	const {setLifecycleState} = useVoterApp();
+	const {setLifecycleOverride} = useVoterApp();
 	React.useEffect(() => {
-		setLifecycleState('ValidationDetails');
-	}, [setLifecycleState]);
+		setLifecycleOverride('ValidationDetails');
+	}, [setLifecycleOverride]);
 	return <ValidationDetailsScreen />;
 }
 
@@ -43,7 +43,7 @@ function renderScreen() {
 	return tr;
 }
 
-/** Flush the provider's isInitialized boot effect, the Harness's setLifecycleState effect, and
+/** Flush the provider's isInitialized boot effect, the Harness's setLifecycleOverride effect, and
  * the screen's getElection() fetch-on-mount — several microtask ticks deep, so flush repeatedly. */
 async function flush(tr: renderer.ReactTestRenderer, ticks = 4) {
 	for (let i = 0; i < ticks; i++) {
@@ -104,7 +104,7 @@ describe('ValidationDetailsScreen (HOME-03/D-11, frame 276:868)', () => {
 
 		const text = allText(tr);
 
-		// Overall count (VALIDATION_EVIDENCE: 2 of 3 checks verified — providers/mockData.ts).
+		// Overall count (VALIDATION_EVIDENCE: 2 of 3 checks verified — providers/devLifecycleFixtures.ts).
 		expect(text).toContain('2/3 checks verified');
 
 		// 3 per-check rows (name + result), verbatim frame 276:868 / 52:290 copy.

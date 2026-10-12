@@ -345,6 +345,34 @@ export interface AssociationAttestationAnswer {
 }
 
 /**
+ * 62-01 (D-45) one officer-matched identity field — the fallback path when no registration-code
+ * match is available (an officer added after the original registration, or a registration that
+ * arrived with no staging row at all: REST bridge / filesystem import). Matching happens
+ * officer-side after decrypt, with a constant-time compare (62-18); the identity-fallback path is
+ * ALWAYS manual review regardless of `AuthorityIntakePolicy.ReassociationMode` (D-46).
+ */
+export interface AssociationIdentityField {
+  name: string
+  value: string
+}
+
+/**
+ * 62-01 (D-45): the plaintext a 62-04 `SealedEnvelope` seals into `AssociationRequestStaging.InitJson`
+ * — the association-leg counterpart to `RegistrationStagingPlaintext` (vote-core/registration/models.ts;
+ * see that type's doc comment for the full D-03/D-04/D-45 carrier design, not repeated here).
+ * `registrationCode` and `identityFields` exist ONLY inside this ciphertext and are never copied
+ * into `AssociationRequestInit`, any `AssociationRequest` column, or any other table. On a
+ * re-association, EXACTLY ONE of `registrationCode` / `identityFields` is set; on a first
+ * association, NEITHER is set.
+ */
+export interface AssociationStagingPlaintext {
+  version: 1
+  init: AssociationRequestInit
+  registrationCode?: string
+  identityFields?: AssociationIdentityField[]
+}
+
+/**
  * Backs the D-06 read-only association-request status screen.
  *
  * `receivedAt` is authority-observed at intake and inside no digest;

@@ -14,6 +14,9 @@ import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
+import { noiseCryptoForNode } from '../engines/noise-crypto-config';
+import { openStrandNetworkState } from '../engines/rn-durable-slot';
+import { REPLICATION_PROOF_ENABLED } from '../engines/proof-flags.generated';
 
 // ---------------------------------------------------------------------------
 // `Promise.withResolvers` ambient augmentation (D-08/D-09).
@@ -116,6 +119,9 @@ export function useCadreNode(): CadreNodeContextType {
 // / 56-10-SUMMARY.md for the full survivor list).
 // ---------------------------------------------------------------------------
 const PARTY_ID = 'votetorrent';
+
+/** Strand-address re-ask interval (ms); see the `controlCohort` comment in the CadreNode config. */
+const STRAND_ADDR_REFRESH_MS = 30_000;
 
 const bootstrapConfig = readBootstrapConfig(bootstrapConfigDoc);
 
@@ -222,6 +228,17 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     let localNode: InstanceType<typeof CadreNode> | null = null;
 
     async function bootNode() {
+      // Spike 093: the P2P-11 replication proof boots its OWN CadreNode. Booting this one too puts
+      // two cadre nodes on one Hermes JS thread for the whole run, and on React Native that cost
+      // compounds per node (sereus-chat measured control-DB bring-up at 761 ms -> 3 s -> 43 s as
+      // nodes were added to one device, and the extra nodes could not obtain a relay reservation
+      // at all). The proof owns the device; this node sits the run out. Dev-only by construction.
+      if (__DEV__ && REPLICATION_PROOF_ENABLED) {
+        console.info('[CadreNodeProvider] skipped: the replication proof owns this device\'s cadre node');
+        settleNode({ status: 'failed', node: null });
+        return;
+      }
+
       // D-14: a config fault does not block boot — the node still constructs
       // and starts (degraded, solo), it is just loud about why. Exactly one
       // console.error, naming only the closed kind/reason tokens — never the
@@ -277,9 +294,14 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // ISO-01 per-scope storage + release-build persistence guardrail — see engines/storage-guard.ts.
         const scopedStorageProvider = createScopedRnStorageProvider();
 
+        // cadre-core 1.9.0 strand network state (the saved FRET table), durable across launches.
+        // In memory it dies with the process, and on a phone every launch is a restart.
+        const strandNetworkStateStore = await openStrandNetworkState(PARTY_ID, 'votetorrent-cadre-node');
+
         localNode = new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
+          strandNetworkState: { store: strandNetworkStateStore },
           profile: 'transaction',
           // sApp-schema signing is DISABLED for VoteTorrent — a deliberate project
           // decision, not an oversight.
@@ -310,15 +332,12 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
           network: {
-            // Mirrors the drone's override (packages/p2p-probe-host/drone.mjs). cadre-core
-            // throttles the strand-addr fan-out per STRAND at `strandAddrRefreshMs`
-            // (default 10 min) and stamps that throttle on the pass HAPPENING rather than on
-            // its answer, with no invalidation when the connected-sibling set GROWS. A peer
-            // whose first pass lands before its cohort has formed then holds an empty strand
-            // address book — and never sends its delegate announcement either, since both ride
-            // the same collectStrandAddrs call. 15 s keeps re-asking while the cohort is still
-            // assembling, which is the only window in which it matters.
-            controlCohort: { strandAddrRefreshMs: 15_000 },
+            // cadre-core 1.13.0 stamps the strand-addr refresh per (sibling, strand) from the
+            // sibling's OUTCOME: an answer, even an empty one, waits the full default (10 min).
+            // A sibling that answered before it held the strand's addresses therefore blinds this
+            // phone (round-3 UAT test 15: no strand socket for >60 s after Connect). Re-ask every
+            // 30 s until the upstream fix lands; see the strand-addr-refresh-throttle todo.
+            controlCohort: { strandAddrRefreshMs: STRAND_ADDR_REFRESH_MS },
             transports: [
               webSockets(),
               // D-10: cast by the global transportSymbol, not structural type — the
@@ -343,6 +362,10 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
+            // Spike 093: native Noise crypto (react-native-quick-crypto) for the control node
+            // AND every strand node. Pure-JS Noise on Hermes saturated the JS thread during
+            // bring-up. See engines/noise-crypto-config.ts.
+            noiseCrypto: noiseCryptoForNode(),
           } as any,
           // SPIKE 062 — the `strandNetwork` override block is REMOVED on cadre-core 0.10.0.
           //
@@ -409,17 +432,34 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   // Event-driven sync state effect. Re-runs when node is set (after boot).
   // Registers CadreNode event listeners; returns cleanup that removes them.
   // NO polling (D-10 hard requirement — no setInterval anywhere).
+  //
+  // First-sync gate (quick task 260928-kkf): cadre-core emits `strand:started`
+  // (payload `{strandId}` only) for a GATED joiner whose `database` is still unset —
+  // `onStrandStarted` used to map that unconditionally to 'connected', which is wrong
+  // for exactly the joiner this gate exists for. Fix: read `node.getStrand(strandId)`
+  // — `database` unset means the strand is still gated (not yet writable) ⇒ 'syncing';
+  // `database` present, OR no strandId / no instance at all (the existing test emits
+  // a payload-less 'strand:started'), means the prior 'connected' behaviour is still
+  // correct. Checked via `database` PRESENCE, not `status`, because a gated instance
+  // can also read 'idle' (strand-instance-manager.js) — status is not the signal here.
+  // `strand:writable` is the gate's OWN resolution event; nothing listened for it
+  // before this fix.
   useEffect(() => {
     if (!node) return;
 
     const onConnected = () => setSyncState('connected');
-    const onStrandStarted = () => setSyncState('connected');
+    const onStrandStarted = (e?: { strandId?: string }) => {
+      const instance = e?.strandId ? node.getStrand(e.strandId) : undefined;
+      setSyncState(instance && !instance.database ? 'syncing' : 'connected');
+    };
+    const onStrandWritable = () => setSyncState('connected');
     const onStrandIdle = () => setSyncState('syncing');
     const onStrandError = () => setSyncState('offline');
     const onDisconnected = () => setSyncState('offline');
 
     node.on('control:connected', onConnected);
     node.on('strand:started', onStrandStarted);
+    node.on('strand:writable', onStrandWritable);
     node.on('strand:idle', onStrandIdle);
     node.on('strand:error', onStrandError);
     node.on('control:disconnected', onDisconnected);
@@ -427,6 +467,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     return () => {
       node.off('control:connected', onConnected);
       node.off('strand:started', onStrandStarted);
+      node.off('strand:writable', onStrandWritable);
       node.off('strand:idle', onStrandIdle);
       node.off('strand:error', onStrandError);
       node.off('control:disconnected', onDisconnected);

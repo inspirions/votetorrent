@@ -82,11 +82,14 @@ const mockNetworksEngine = {
 	open: jest.fn(),
 };
 const mockSelectNetwork = jest.fn();
+// undefined = a useApp lacking the accessor (the safe default: the screen treats it as "selected").
+let mockIsNetworkSelected: (() => boolean) | undefined;
 jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({
 		getEngine: mockGetEngine,
 		networksEngine: mockNetworksEngine,
 		selectNetwork: mockSelectNetwork,
+		isNetworkSelected: mockIsNetworkSelected,
 	}),
 }));
 
@@ -96,6 +99,7 @@ import AddNetworkScreen from "../AddNetworkScreen";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import {
 	RECONCILE_TIMEOUT_MS,
+	LATE_COMMIT_BUDGET_MS,
 	NETWORK_CREATE_STEP_TIMEOUT,
 	createStepTimeoutError,
 	timedOutStep,
@@ -222,7 +226,11 @@ const LANDED_REF: NetworkReference = {
 type CommitBehavior =
 	| { kind: "resolve"; ref: NetworkReference }
 	| { kind: "reject"; error: Error }
-	| { kind: "pending" };
+	| { kind: "pending" }
+	| { kind: "deferred" };
+
+/** Controls for the "deferred" commit: settles only when the spec says so. */
+let deferredCommit: { resolve: (v: unknown) => void; reject: (e: unknown) => void } | undefined;
 
 function armCreate(behavior: CommitBehavior) {
 	mockGetOrCreateDeviceUser.mockResolvedValue({
@@ -237,6 +245,11 @@ function armCreate(behavior: CommitBehavior) {
 			commit: () => {
 				if (behavior.kind === "resolve") return Promise.resolve({ init: behavior.ref });
 				if (behavior.kind === "reject") return Promise.reject(behavior.error);
+				if (behavior.kind === "deferred") {
+					return new Promise((resolve, reject) => {
+						deferredCommit = { resolve, reject };
+					});
+				}
 				return new Promise(() => {
 					/* never settles */
 				});
@@ -400,13 +413,21 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 	it("(3, D-01/D-03) deadline fires; the re-read returns the unchanged list -> reports networkCreateUnconfirmed, no select, no goBack", async () => {
 		jest.useFakeTimers();
 		armCreate({ kind: "pending" });
-		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE).mockResolvedValueOnce(BEFORE);
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE);
 
 		const tr = await renderScreen();
 		const { promise: createPromise } = await signAndPressCreateWithoutAwaiting(tr);
 
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		// Still inside the late-commit budget: neutral status, never the unconfirmed copy.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -438,6 +459,11 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 		// advanceTimersByTimeAsync resolves, so it needs a second, separate advance.
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 1);
+		});
+		// The reconcile miss no longer ends the create: the late-commit wait begins.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -447,13 +473,21 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 	it("(5, finally on every path) after the unconfirmed outcome, the CREATE button re-enables", async () => {
 		jest.useFakeTimers();
 		armCreate({ kind: "pending" });
-		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE).mockResolvedValueOnce(BEFORE);
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE);
 
 		const tr = await renderScreen();
 		const { promise: createPromise } = await signAndPressCreateWithoutAwaiting(tr);
 
 		await renderer.act(async () => {
 			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		// Still inside the late-commit budget: neutral status, never the unconfirmed copy.
+		expect(inlineErrorMessage(tr)).toBe("");
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
 			await createPromise;
 		});
 
@@ -481,14 +515,15 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 		expect(mockNetworksEngine.getRecentNetworks).toHaveBeenCalledTimes(1);
 	});
 
-	it("(7, non-timeout passthrough) a plain Error rejection reaches setErrorMessage with its own text; reconciliation never runs", async () => {
+	it("(7, non-timeout passthrough) a plain Error rejection shows the translated create-failure copy, never its text; reconciliation never runs", async () => {
 		armCreate({ kind: "reject", error: new Error("boom") });
 		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE);
 
 		const tr = await renderScreen();
 		await pressSignThenCreate(tr);
 
-		expect(inlineErrorMessage(tr)).toBe("boom");
+		expect(inlineErrorMessage(tr)).toBe("networkCreateFailed");
+		expect(JSON.stringify(tr.toJSON())).not.toContain("boom");
 		expect(mockNetworksEngine.getRecentNetworks).toHaveBeenCalledTimes(1);
 	});
 
@@ -580,5 +615,383 @@ describe("AddNetworkScreen — R1: reconcile before reporting a missed commit de
 
 		setSpy.mockRestore();
 		clearSpy.mockRestore();
+	});
+});
+
+describe("AddNetworkScreen — late commit (commit outlives its deadline)", () => {
+	beforeEach(() => {
+		jest.clearAllMocks();
+		mockIsNetworkSelected = undefined;
+		deferredCommit = undefined;
+		mockGetDefaultUser.mockResolvedValue({ name: "Device User" });
+		mockGetDeviceProvisioningRecord.mockResolvedValue(undefined);
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [] });
+	});
+
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	const LATE_REF: NetworkReference = {
+		hash: "late-hash",
+		name: "Test Net",
+		primaryAuthorityDomainName: "",
+		relays: [],
+	};
+
+	async function startAndMissDeadline() {
+		jest.useFakeTimers();
+		armCreate({ kind: "deferred" });
+		const tr = await renderScreen();
+		const { promise } = await signAndPressCreateWithoutAwaiting(tr);
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		return { tr, promise };
+	}
+
+	function stillFinishingShown(tr: renderer.ReactTestRenderer) {
+		return findByProps(tr, (p) => p.testID === "network-create-still-finishing").length > 0;
+	}
+
+	it("(A) shows the neutral status while waiting, then runs the tail exactly once when the commit lands", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const { tr, promise } = await startAndMissDeadline();
+
+		expect(stillFinishingShown(tr)).toBe(true);
+		expect(inlineErrorMessage(tr)).toBe("");
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+
+		await renderer.act(async () => {
+			deferredCommit!.resolve({ init: LATE_REF });
+			await promise;
+		});
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LATE_REF);
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+		expect(inlineErrorMessage(tr)).toBe("");
+		expect(stillFinishingShown(tr)).toBe(false);
+	});
+
+	it("(B) a late rejection goes through the normal error path: no select, translated copy shown (never the engine text), CREATE re-enabled", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			deferredCommit!.reject(new Error("late boom"));
+			await promise;
+		});
+
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(inlineErrorMessage(tr)).toBe("networkCreateFailed");
+		expect(JSON.stringify(tr.toJSON())).not.toContain("late boom");
+		expect(getCreateButton(tr).props.disabled).toBe(false);
+		expect(stillFinishingShown(tr)).toBe(false);
+	});
+
+	it("(C) budget exhausted and a second reconcile that lands -> the normal tail", async () => {
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce([...BEFORE, LANDED_REF]);
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
+			await promise;
+		});
+
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LANDED_REF);
+		expect(mockGoBack).toHaveBeenCalledTimes(1);
+		expect(inlineErrorMessage(tr)).toBe("");
+	});
+
+	// WR-01 (62-88) deliberately supersedes 62-71 truth 3 ("the late commit still selects"): a
+	// commit that lands up to LATE_COMMIT_BUDGET_MS after the officer left Add Network must NOT
+	// re-point the session behind their back. The network is in recents; they select it from
+	// Networks.
+	it("(D, WR-01) screen unmounted while waiting: the late commit lands -> NOT auto-selected, no gate, no navigation", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			deferredCommit!.resolve({ init: LATE_REF });
+			await promise;
+		});
+
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGetCurrentUser).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit landed after leave; not auto-selecting",
+		);
+		infoSpy.mockRestore();
+	});
+
+	it("(D2, WR-01) screen unmounted while waiting: the budget runs out and the second reconcile finds the network -> NOT auto-selected", async () => {
+		mockNetworksEngine.getRecentNetworks
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce(BEFORE)
+			.mockResolvedValueOnce([...BEFORE, LANDED_REF]);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(LATE_COMMIT_BUDGET_MS);
+			await promise;
+		});
+
+		// Precondition: the second reconcile actually ran (otherwise "not selected" is vacuous).
+		expect(mockNetworksEngine.getRecentNetworks).toHaveBeenCalledTimes(3);
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGetCurrentUser).not.toHaveBeenCalled();
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit landed after leave; not auto-selecting",
+		);
+		infoSpy.mockRestore();
+	});
+
+	it("(D3, WR-01) screen unmounted while waiting: the late commit FAILS -> no routing, no screen state, only the error class name is logged", async () => {
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+		const { tr, promise } = await startAndMissDeadline();
+
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		// A NO_KEY_PROVISIONED rejection is the one the device-signing handler routes (it would
+		// navigate to ProvisionSigningKey), so "not navigated" proves the handler was not called.
+		const rejection = Object.assign(new TypeError("secret late detail"), {
+			code: "NO_KEY_PROVISIONED",
+		});
+		await renderer.act(async () => {
+			deferredCommit!.reject(rejection);
+			await promise;
+		});
+
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		expect(mockGoBack).not.toHaveBeenCalled();
+		// No setErrorMessage on an unmounted screen (React would log an act/unmounted warning) and
+		// no full-error log line.
+		expect(errorSpy).not.toHaveBeenCalled();
+		const allLogged = [...infoSpy.mock.calls, ...errorSpy.mock.calls]
+			.flat()
+			.map((a) => (a instanceof Error ? a.message : String(a)))
+			.join("\n");
+		expect(allLogged).not.toContain("secret late detail");
+		expect(infoSpy).toHaveBeenCalledWith(
+			"[network-create] late commit failed after leave:",
+			"TypeError",
+		);
+		infoSpy.mockRestore();
+		errorSpy.mockRestore();
+	});
+});
+
+describe("AddNetworkScreen — late first network (62-116)", () => {
+	const LATE_REF: NetworkReference = {
+		hash: "late-hash",
+		name: "Test Net",
+		primaryAuthorityDomainName: "",
+		relays: [],
+	};
+
+	beforeEach(() => {
+		jest.clearAllMocks();
+		deferredCommit = undefined;
+		mockIsNetworkSelected = undefined;
+		mockGetDefaultUser.mockResolvedValue({ name: "Device User" });
+		mockGetDeviceProvisioningRecord.mockResolvedValue(undefined);
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [] });
+		mockNetworksEngine.getRecentNetworks.mockResolvedValue(BEFORE);
+	});
+
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	async function leaveThenLand() {
+		jest.useFakeTimers();
+		armCreate({ kind: "deferred" });
+		const tr = await renderScreen();
+		const { promise } = await signAndPressCreateWithoutAwaiting(tr);
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		await renderer.act(async () => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			deferredCommit!.resolve({ init: LATE_REF });
+			await promise;
+		});
+	}
+
+	it("(N-2) no network selected, officer left: the late network IS selected; no goBack", async () => {
+		mockIsNetworkSelected = () => false;
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockSelectNetwork).toHaveBeenCalledWith(LATE_REF);
+		expect(mockGoBack).not.toHaveBeenCalled();
+		infoSpy.mockRestore();
+	});
+
+	it("(N-2b) late selection with no recovery key registered: the gate navigates to ProvisionSigningKey exactly once", async () => {
+		mockIsNetworkSelected = () => false;
+		mockGetDeviceProvisioningRecord.mockResolvedValue({ recoveryPublicKeyCompressedHex: RECOVERY_KEY });
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockNavigate).toHaveBeenCalledTimes(1);
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+		infoSpy.mockRestore();
+	});
+
+	it("(N-2b) a User that already has the recovery key: the gate runs and does not navigate", async () => {
+		mockIsNetworkSelected = () => false;
+		mockGetDeviceProvisioningRecord.mockResolvedValue({ recoveryPublicKeyCompressedHex: RECOVERY_KEY });
+		mockGetSummary.mockResolvedValue({
+			id: "u1",
+			activeKeys: [{ key: SIGNING_KEY }, { key: RECOVERY_KEY }],
+		});
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		expect(mockSelectNetwork).toHaveBeenCalledTimes(1);
+		expect(mockGetCurrentUser).toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		infoSpy.mockRestore();
+	});
+
+	it("(N-2b) a gate that rejects is logged with a fixed tag and class name only", async () => {
+		mockIsNetworkSelected = () => false;
+		// The gate swallows its own read failures; what can still reject is the navigation it issues.
+		mockNavigate.mockImplementationOnce(() => {
+			throw new TypeError("secret gate detail");
+		});
+		mockGetDeviceProvisioningRecord.mockResolvedValue({ recoveryPublicKeyCompressedHex: RECOVERY_KEY });
+		mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		const logged = infoSpy.mock.calls.flat().map((a) => String(a)).join("\n");
+		expect(logged).not.toContain("secret gate detail");
+		expect(infoSpy).toHaveBeenCalledWith("[network-create] late recovery-key gate failed:", "TypeError");
+		infoSpy.mockRestore();
+	});
+
+	it("(N-3) another network is already selected: not selected, gate does not run", async () => {
+		mockIsNetworkSelected = () => true;
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		expect(mockGetCurrentUser).not.toHaveBeenCalled();
+		expect(mockNavigate).not.toHaveBeenCalled();
+		infoSpy.mockRestore();
+	});
+
+	it("(N-3) a useApp lacking isNetworkSelected is treated as selected: never selects", async () => {
+		mockIsNetworkSelected = undefined;
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => {});
+		await leaveThenLand();
+		expect(mockSelectNetwork).not.toHaveBeenCalled();
+		infoSpy.mockRestore();
+	});
+
+	it("(N-4) a device-signing error still routes through the hook on a late failure (mounted)", async () => {
+		jest.useFakeTimers();
+		armCreate({ kind: "deferred" });
+		const tr = await renderScreen();
+		const { promise } = await signAndPressCreateWithoutAwaiting(tr);
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(60_000);
+		});
+		await renderer.act(async () => {
+			deferredCommit!.reject(Object.assign(new Error("no key"), { code: "NO_KEY_PROVISIONED" }));
+			await promise;
+		});
+		expect(mockNavigate).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+		expect(inlineErrorMessage(tr)).toBe("");
+	});
+
+	/** Tags of AddNetworkScreen's own failure-path logs, read from the source so a renamed tag
+	 * cannot pass vacuously. */
+	function ownLogTags(): string[] {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const src: string = require("fs").readFileSync(require("path").join(__dirname, "..", "AddNetworkScreen.tsx"), "utf8");
+		const tags = new Set<string>(["[network-create] snapshot() failed"]);
+		for (const m of src.matchAll(/console\.(?:warn|error)\(\s*"([^"]+)"/g)) tags.add(m[1]);
+		return [...tags];
+	}
+
+	function matchedCalls(spies: jest.SpyInstance[]) {
+		const tags = ownLogTags();
+		return spies.flatMap((s) => s.mock.calls).filter((c) => typeof c[0] === "string" && tags.includes(c[0]));
+	}
+
+	/** Every text a logged value can carry, including an Error's message and stack (JSON.stringify of
+	 * an Error is "{}", so a bare `console.error(err)` would otherwise scan clean). */
+	function loggedText(arg: unknown, seen = new Set<unknown>()): string {
+		if (arg instanceof Error) return [arg.name, arg.message, arg.stack ?? "", loggedText((arg as { cause?: unknown }).cause, seen)].join(" ");
+		if (arg !== null && typeof arg === "object") {
+			if (seen.has(arg)) return "";
+			seen.add(arg);
+			return Object.entries(arg as Record<string, unknown>)
+				.map(([k, v]) => `${k} ${loggedText(v, seen)}`)
+				.join(" ");
+		}
+		return String(arg);
+	}
+
+	it("(N-5) snapshot failure and create failure log only tags and class names", async () => {
+		const info = jest.spyOn(console, "info").mockImplementation(() => {});
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+		const error = jest.spyOn(console, "error").mockImplementation(() => {});
+
+		// (a) snapshot() rejects, the create itself lands.
+		mockNetworksEngine.getRecentNetworks.mockRejectedValueOnce(new Error("secret snapshot detail"));
+		armCreate({ kind: "resolve", ref: LATE_REF });
+		let tr = await renderScreen();
+		await pressSignThenCreate(tr);
+		const snapshotCalls = matchedCalls([info, warn, error]).filter((c) => c[0] === "[network-create] snapshot() failed");
+		expect(snapshotCalls.length).toBeGreaterThan(0);
+
+		// (b) create fails with an engine message.
+		mockNetworksEngine.getRecentNetworks.mockResolvedValueOnce(BEFORE);
+		armCreate({ kind: "reject", error: new Error("secret create detail") });
+		tr = await renderScreen();
+		await pressSignThenCreate(tr);
+		const createCalls = matchedCalls([info, warn, error]).filter((c) => c[0] === "handleCreate error:");
+		expect(createCalls.length).toBeGreaterThan(0);
+
+		// The tag-anchored calls carry strings only.
+		for (const call of matchedCalls([info, warn, error])) {
+			for (const arg of call) expect(typeof arg).toBe("string");
+		}
+		// WR-R6-04: the leak scan covers EVERY captured call on all three channels — any tag, a
+		// template-literal first argument, or a bare error object — not only the tag-matched subset.
+		const allCalls = [info, warn, error].flatMap((s) => s.mock.calls);
+		expect(allCalls.length).toBeGreaterThan(0);
+		for (const call of allCalls) {
+			for (const arg of call) expect(loggedText(arg)).not.toContain("secret");
+		}
+		info.mockRestore();
+		warn.mockRestore();
+		error.mockRestore();
 	});
 });

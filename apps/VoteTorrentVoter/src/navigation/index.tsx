@@ -32,24 +32,27 @@ import ValidationDetailsScreen from '../screens/home/ValidationDetailsScreen';
 import BallotScreen from '../screens/ballot/BallotScreen';
 import IndividualQuestionScreen from '../screens/ballot/IndividualQuestionScreen';
 import ReviewSubmitScreen from '../screens/ballot/ReviewSubmitScreen';
+import VoteReceiptScreen from '../screens/ballot/VoteReceiptScreen';
 import RegistrationScreen from '../screens/registration/RegistrationScreen';
 import DeviceAttestationScreen from '../screens/registration/DeviceAttestationScreen';
 import RegisterPersonalScreen from '../screens/registration/RegisterPersonalScreen';
 import RegisterAddressPartyScreen from '../screens/registration/RegisterAddressPartyScreen';
 import RegisterConfirmScreen from '../screens/registration/RegisterConfirmScreen';
 import ConfirmationScreen from '../screens/registration/ConfirmationScreen';
+import ContinueOnAnotherDeviceScreen from '../screens/registration/ContinueOnAnotherDeviceScreen';
+import {DeviceRetiredNotice, useDeviceRetired} from '../screens/registration/DeviceRetiredNotice';
 import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
 import TimelineScreen from '../screens/timeline/TimelineScreen';
 import KeyholdersScreen from '../screens/timeline/KeyholdersScreen';
-import PlaceholderModal from '../components/PlaceholderModal';
+import RegistrationInfoScreen from '../screens/registration/RegistrationInfoScreen';
 import {RegistrationDraftProvider} from '../providers/RegistrationDraftProvider';
 import {BallotSelectionProvider} from '../providers/BallotSelectionProvider';
 
 // CloseButton (D-16) — byte-identical mechanics to Authority's `navigation/index.tsx` CloseButton
 // (lines 249-256): a Pressable with hitSlop=8 wrapping a FontAwesome6 "xmark" glyph, calling the
 // caller-supplied onPress (always `navigation.goBack()` at each modal's options callsite below).
-function CloseButton({onPress}: {onPress: () => void}) {
+export function CloseButton({onPress}: {onPress: () => void}) {
 	const {colors} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('common');
 	return (
@@ -57,6 +60,7 @@ function CloseButton({onPress}: {onPress: () => void}) {
 			onPress={onPress}
 			style={styles.headerButton}
 			hitSlop={8}
+			accessibilityRole="button"
 			accessibilityLabel={t('close')}>
 			<FontAwesome6 name="xmark" size={22} color={colors.text} />
 		</Pressable>
@@ -107,35 +111,11 @@ function VoteStackNavigator() {
 				component={ReviewSubmitScreen}
 				options={{title: tBallot('reviewSubmitTitle')}}
 			/>
+			{/* D-10: plain push. Params carry only electionId and revealOnOpen, never a record field. */}
 			<VoteStack.Screen
-				name="ElectionInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tHome('electionInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
-			/>
-			<VoteStack.Screen
-				name="OfficeInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tBallot('officeInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
-			/>
-			<VoteStack.Screen
-				name="CandidateInfo"
-				component={PlaceholderModal}
-				options={({navigation}) => ({
-					title: tBallot('candidateInfoTitle'),
-					presentation: 'modal',
-					headerBackVisible: false,
-					headerLeft: () => <CloseButton onPress={() => navigation.goBack()} />,
-				})}
+				name="VoteReceipt"
+				component={VoteReceiptScreen}
+				options={{title: tBallot('receipt.title')}}
 			/>
 		</VoteStack.Navigator>
 	);
@@ -187,6 +167,13 @@ function TimelineStackNavigator() {
 				component={ReviewSubmitScreen}
 				options={{title: tBallot('reviewSubmitTitle')}}
 			/>
+			{/* D-10: plain push; registered on both stacks so a Timeline-initiated Submit does not
+			    dead-end (route closure). Params carry only electionId and revealOnOpen. */}
+			<TimelineStack.Screen
+				name="VoteReceipt"
+				component={VoteReceiptScreen}
+				options={{title: tBallot('receipt.title')}}
+			/>
 			{/* headerShown:false — RegistrationScreen renders the branded blue NetworkHeader itself. */}
 			<TimelineStack.Screen
 				name="RegistrationHome"
@@ -195,7 +182,7 @@ function TimelineStackNavigator() {
 			/>
 			<TimelineStack.Screen
 				name="RegistrationInfo"
-				component={PlaceholderModal}
+				component={RegistrationInfoScreen}
 				options={({navigation}) => ({
 					title: tRegistration('headerTitle'),
 					presentation: 'modal',
@@ -231,6 +218,13 @@ function TimelineStackNavigator() {
 			<TimelineStack.Screen
 				name="Confirmation"
 				component={ConfirmationScreen}
+				options={{headerShown: false}}
+			/>
+			{/* Phase 62 Plan 28 (D-14 route-closure gate) — Surfaces 8/9, headerShown:false (the
+			    screen renders its own close control). */}
+			<TimelineStack.Screen
+				name="ContinueOnAnotherDevice"
+				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
 			{/* D-15: plain push (default header, back chevron) — mirrors ValidationDetails on the
@@ -290,9 +284,16 @@ function RegistrationStackNavigator() {
 				component={ConfirmationScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Phase 62 Plan 28 (D-40/D-43/D-45) — Surfaces 8/9, headerShown:false (the screen
+			    renders its own close control). */}
+			<RegistrationStack.Screen
+				name="ContinueOnAnotherDevice"
+				component={ContinueOnAnotherDeviceScreen}
+				options={{headerShown: false}}
+			/>
 			<RegistrationStack.Screen
 				name="RegistrationInfo"
-				component={PlaceholderModal}
+				component={RegistrationInfoScreen}
 				options={({navigation}) => ({
 					title: t('headerTitle'),
 					presentation: 'modal',
@@ -348,6 +349,8 @@ const REGISTRATION_FULLSCREEN_ROUTES = [
 	'RegisterAddressParty',
 	'RegisterConfirm',
 	'Confirmation',
+	// Phase 62 Plan 28 — Surfaces 8/9 are their own continuous, un-interruptible flow too.
+	'ContinueOnAnotherDevice',
 ];
 
 function registrationTabBarStyle(route: RouteProp<RootTabParamList, 'Registration'>) {
@@ -400,6 +403,14 @@ const Tab = createBottomTabNavigator<RootTabParamList>();
 export function RootNavigator() {
 	const {colors, fonts} = useTheme() as ExtendedTheme;
 	const {t} = useTranslation('common');
+	// Phase 62 Plan 28 (D-41): a retired device's whole tab navigator is replaced by
+	// DeviceRetiredNotice — see that hook's own header for the fail-open/latch contract. Called
+	// after the existing hooks so it never changes their order.
+	const isDeviceRetired = useDeviceRetired();
+
+	if (isDeviceRetired) {
+		return <DeviceRetiredNotice />;
+	}
 
 	return (
 		<AppStateProviders>
@@ -492,5 +503,9 @@ const styles = StyleSheet.create({
 		padding: 8,
 		marginHorizontal: 4,
 		marginVertical: -2,
+		minWidth: 44,
+		minHeight: 44,
+		alignItems: 'center',
+		justifyContent: 'center',
 	},
 });

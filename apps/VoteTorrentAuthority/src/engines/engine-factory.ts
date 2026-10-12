@@ -13,7 +13,8 @@
  *   - clearEngineCache() wipes ALL cached engines for a clean switch (D-14 uniform clear-all).
  *
  * Security: factory holds ctx internally; screens receive only IXxxEngine instances.
- * getEstablishedContext result never returned to AppProvider/screens (T-15-03-04).
+ * getEstablishedContext result never returned to AppProvider/screens (T-15-03-04); the factory also
+ * attaches the officer's intake opener (D-49) to that ctx, which is still never returned.
  * factory never calls rnDbFactory(hash) twice — only via networksEngine.open()/create()
  * which is cache-first (T-15-03-05 / Pitfall 2).
  */
@@ -40,11 +41,19 @@ import {
 	LocalConfigKeyProvider,
 	RegistrationEngine,
 	AuthorityConfigEngine,
+	IntakeEngine,
+	P2pRegistrationTransport,
+	P2pAssociationTransport,
+	KeyholderDkgEngine,
 } from '@votetorrent/vote-engine/rn';
-import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn';
+import type { DbFactory, EngineContext, ElectionSubject, StagingOpener, StagingDecisionSigner } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
 import type { StrandHost } from './rn-db-factory';
+import { createStrandPort } from './strand-port-adapter';
+import type { StrandSqlDatabase } from './strand-port-adapter';
+import { resolveKeyholderKeyVault } from './keyholder-vault';
+import { resolveAuthorityKeyVault } from './key-vault';
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated';
 import { PINNED_HARDWARE_ROOTS_DER } from './attestation-roots.generated';
 import { REVOKED_ATTESTATION_SERIALS } from './attestation-status.generated';
@@ -96,6 +105,43 @@ export function isNoNetworkEstablishedError(error: unknown): boolean {
 	);
 }
 
+/**
+ * Thrown by `createPeerStagingTransports` when the currently-established network cannot back a
+ * peer staging transport (D-32). `reason`:
+ *   - `'no-network'` — no network is established at all;
+ *   - `'not-strand-backed'` — the established network was opened through the solo (non-strand)
+ *     `rnDbFactory`, so no peer could ever reach its store; reporting "synced" against it would be
+ *     a false assurance (T-62-21-05);
+ *   - `'network-changed'` — `openStrand()` was called after the app switched to a different
+ *     network than the one `strandId` was captured for.
+ */
+export class PeerStrandUnavailableError extends Error {
+	readonly peerStrandUnavailable = true as const;
+	readonly reason: 'no-network' | 'not-strand-backed' | 'network-changed';
+
+	constructor(reason: 'no-network' | 'not-strand-backed' | 'network-changed', message: string) {
+		super(message);
+		this.name = 'PeerStrandUnavailableError';
+		this.reason = reason;
+	}
+}
+
+/** Structural check (not `instanceof`), mirroring `isNoNetworkEstablishedError` above. */
+export function isPeerStrandUnavailableError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		(error as { peerStrandUnavailable?: unknown }).peerStrandUnavailable === true
+	);
+}
+
+/** `EngineFactory.createPeerStagingTransports`'s return shape (D-32). */
+export interface PeerStagingTransports {
+	strandId: string;
+	registration: P2pRegistrationTransport;
+	association: P2pAssociationTransport;
+}
+
 export class EngineFactory {
 	private readonly networksEngine: NetworksEngine;
 	/** Cache keyed by engineName (+ ':' + JSON(initParams) for param-keyed engines). */
@@ -131,8 +177,57 @@ export class EngineFactory {
 	 */
 	private node: StrandHost | null = null;
 
-	/** Called by AppProvider when the CadreNode boots (mirrors setGetPeerCount / D-04). */
+	/**
+	 * D-32: the set of network hashes whose DbFactory call resolved through the strand-backed
+	 * path (`createStrandDbFactory`), as opposed to the solo `rnDbFactory`. `createPeerStagingTransports`
+	 * refuses `'not-strand-backed'` for any hash not in this set — a solo store can never be reached
+	 * by a peer, so reporting "synced" against it would be a false assurance (T-62-21-05).
+	 */
+	private strandBackedNetworkHashes = new Set<string>();
+
+	/**
+	 * First-sync gate wiring (quick task 260928-kkf — see strand-first-sync.ts /
+	 * rn-db-factory.ts's `createStrandDbFactory` doc comments for the full gate
+	 * semantics). One AbortController "owns" every `whenStrandWritable` wait a
+	 * strand-backed DbFactory call is currently running; replacing it cancels
+	 * whatever wait was pending, without touching future ones.
+	 */
+	private firstSyncAbort = new AbortController();
+	/**
+	 * Fires once per pending open, BEFORE the wait begins (never on retry), so a
+	 * caller (AppProvider) can flip a "still syncing" UI flag. Registered by the
+	 * provider via `setFirstSyncListener`; cleared on unmount.
+	 */
+	private firstSyncListener: ((strandId: string) => void) | undefined;
+
+	/** Registers (or, passed undefined, deregisters) the first-sync "still syncing" callback. */
+	setFirstSyncListener(listener: ((strandId: string) => void) | undefined): void {
+		this.firstSyncListener = listener;
+	}
+
+	/**
+	 * Cancels any `whenStrandWritable` wait currently in flight (via the shared
+	 * AbortController) and arms a fresh controller for the NEXT strand-backed open.
+	 * Called on a genuine node change (setNode below), on clearEngineCache()
+	 * (network switch / Start Fresh), and by AppProvider on unmount / a superseded
+	 * boot run — every place a pending wait must stop being the "active" one.
+	 */
+	cancelPendingStrandWaits(): void {
+		this.firstSyncAbort.abort();
+		this.firstSyncAbort = new AbortController();
+	}
+
+	/**
+	 * Called by AppProvider when the CadreNode boots (mirrors setGetPeerCount / D-04).
+	 *
+	 * Cancels any pending first-sync wait ONLY when `node` actually changes — the
+	 * provider's peer-count effect re-invokes `setNode` with the SAME node on every
+	 * `connectedPeers` change, and aborting then would kill a live wait for no reason.
+	 */
 	setNode(node: StrandHost | null): void {
+		if (node !== this.node) {
+			this.cancelPendingStrandWaits();
+		}
 		this.node = node;
 	}
 
@@ -201,8 +296,16 @@ export class EngineFactory {
 		// RESEARCH Pitfall 1: never call createStrandDbFactory(null) — guard on this.node truthy.
 		this.networksEngine = new NetworksEngine(localStorage, async (networkHash: string) => {
 			if (this.node && !(__DEV__ && USE_LOCAL_DB_FACTORY)) {
-				return createStrandDbFactory(this.node)(networkHash);
+				// The signal is read AT CALL TIME (not captured once) so a controller
+				// swapped in by a later cancelPendingStrandWaits() is the one this call
+				// actually waits on.
+				this.strandBackedNetworkHashes.add(networkHash);
+				return createStrandDbFactory(this.node, {
+					signal: this.firstSyncAbort.signal,
+					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
+				})(networkHash);
 			}
+			this.strandBackedNetworkHashes.delete(networkHash);
 			return this.rnDbFactory(networkHash);
 		});
 	}
@@ -220,6 +323,9 @@ export class EngineFactory {
 	clearEngineCache(): void {
 		this.engineCache.clear();
 		this.currentNetworkHash = undefined;
+		// A network switch / Start Fresh must not leave a stale first-sync wait
+		// running in the background against a network the user has just left.
+		this.cancelPendingStrandWaits();
 	}
 
 	/** True if the named engine (with optional initParams) is already cached. */
@@ -320,6 +426,77 @@ export class EngineFactory {
 		return exportDatabaseSnapshot(ctx.db, this.currentNetworkHash!);
 	}
 
+	/**
+	 * D-32: constructs the two staging-only P2P transports (`PeerStagingTransports`), bound to
+	 * `strandId = currentNetworkHash` (matching `rn-db-factory.ts`'s own `strandId = networkHash`
+	 * convention). The caller receives two transports, never a Database — the port is built AND
+	 * consumed entirely inside this method, preserving the same no-raw-accessor rule
+	 * `exportDashboardSnapshot`'s doc comment states above.
+	 *
+	 * Refuses `PeerStrandUnavailableError`:
+	 *   - `'no-network'` when no network is established;
+	 *   - `'not-strand-backed'` when the established network was opened solo (not via
+	 *     `createStrandDbFactory`) — a solo store can never be reached by a peer (T-62-21-05);
+	 *   - `'network-changed'` (thrown lazily, by `openStrand`, not here) if the app switches to a
+	 *     different network between construction and first use.
+	 *
+	 * Neither transport is given a `sealer` — the Authority app never submits staged requests, it
+	 * only intakes and decides them, so `computeDigest`/`computeAttestationDigest` are refusing
+	 * stubs that reject if ever called (submission is a REQUESTER-side-only operation). The strand
+	 * port is built and consumed entirely inside this method, the same no-raw-handle rule the
+	 * comment above this one already states for the dashboard snapshot seam.
+	 */
+	createPeerStagingTransports(deps: { opener: StagingOpener; decisionSigner: StagingDecisionSigner }): PeerStagingTransports {
+		if (this.currentNetworkHash === undefined) {
+			throw new PeerStrandUnavailableError('no-network', 'EngineFactory.createPeerStagingTransports: no network established');
+		}
+		if (!this.strandBackedNetworkHashes.has(this.currentNetworkHash)) {
+			throw new PeerStrandUnavailableError(
+				'not-strand-backed',
+				'EngineFactory.createPeerStagingTransports: the established network was opened solo, not strand-backed — no peer could ever reach it'
+			);
+		}
+		const strandId = this.currentNetworkHash;
+
+		const refuseSubmit = async (..._args: unknown[]): Promise<Uint8Array> => {
+			throw new Error('The authority app never submits staged requests');
+		};
+
+		const openStrand = async () => {
+			const ctx = this.requireEstablishedCtx();
+			if (this.currentNetworkHash !== strandId) {
+				throw new PeerStrandUnavailableError(
+					'network-changed',
+					'EngineFactory.createPeerStagingTransports: the app switched to a different network since this transport was constructed'
+				);
+			}
+			// The real Quereus `Database`'s `eval`/`exec` param types (`SqlParameters | SqlValue[]`)
+			// are narrower than `StrandSqlDatabase`'s engine-agnostic `Record<string, unknown>` —
+			// the same structural-fit cast `intake/query-port.ts`'s `intakeQueryPortFromDb` makes at
+			// its own call site. No behavior change: `createStrandPort` only ever forwards `params`
+			// through unchanged.
+			return createStrandPort(ctx.db as unknown as StrandSqlDatabase);
+		};
+
+		const registration = new P2pRegistrationTransport({
+			openStrand,
+			computeDigest: refuseSubmit,
+			strandId,
+			opener: deps.opener,
+			decisionSigner: deps.decisionSigner,
+		});
+		const association = new P2pAssociationTransport({
+			openStrand,
+			computeDigest: refuseSubmit,
+			computeAttestationDigest: refuseSubmit,
+			strandId,
+			opener: deps.opener,
+			decisionSigner: deps.decisionSigner,
+		});
+
+		return { strandId, registration, association };
+	}
+
 	// ---------- private helpers ----------
 
 	/**
@@ -353,10 +530,10 @@ export class EngineFactory {
 	/**
 	 * Build a fresh engine instance for the given name.
 	 *
-	 * Covers all 14 engine names this switch handles:
+	 * Covers all 16 engine names this switch handles:
 	 *   network, defaultUser, user, authority,
-	 *   elections, signing, registration, authorityConfig, election, keysTasksEngine,
-	 *   signatureTasksEngine, onboardingTasksEngine, invitations, association.
+	 *   elections, signing, registration, authorityConfig, intake, election, keysTasksEngine,
+	 *   keyholderDkg, signatureTasksEngine, onboardingTasksEngine, invitations, association.
 	 *
 	 * For sibling engines that require a live EngineContext, call
 	 * requireEstablishedCtx() which throws if no ctx is yet established
@@ -459,6 +636,14 @@ export class EngineFactory {
 				return new AuthorityConfigEngine(ctx);
 			}
 
+			case 'intake': {
+				// D-32/D-04: the IntakeEngine over the established ctx — same lifecycle guard as
+				// every other ctx-dependent sibling (requireEstablishedCtx rejects
+				// NoNetworkEstablishedError with no network open).
+				const ctx = this.requireEstablishedCtx();
+				return new IntakeEngine(ctx);
+			}
+
 			case 'election': {
 				// Real ElectionEngine requires ElectionSubject (id + authorityId).
 				// initParams must carry ElectionSubject — unlike the mock which ignored it.
@@ -467,9 +652,22 @@ export class EngineFactory {
 			}
 
 			case 'keysTasksEngine': {
+				// 62-26 (62-20 assignment): without the keyholder vault, 62-20's release-task
+				// seeding finds no local keyholder (its `vault.hasSecret` check on
+				// `keyholderDkgShareAlias` never matches) and no release task ever appears —
+				// fail-closed, not a bug. `resolveKeyholderKeyVault()` is the SAME auth-required
+				// vault `keyholderDkg` below uses; `hasSecret` itself never prompts.
 				const ctx = this.requireEstablishedCtx();
 				const ref = { hash: this.currentNetworkHash! } as NetworkReference;
-				return new KeysTasksEngine(ref, ctx);
+				return new KeysTasksEngine(ref, ctx, { vault: resolveKeyholderKeyVault() });
+			}
+
+			case 'keyholderDkg': {
+				// 62-26 (D-16/D-19): the keyholder DKG round driver, over the SAME auth-required
+				// keyholder vault as 'keysTasksEngine' above — every round secret and share this
+				// engine ever touches lives only in that vault.
+				const ctx = this.requireEstablishedCtx();
+				return new KeyholderDkgEngine(ctx, { vault: resolveKeyholderKeyVault() });
 			}
 
 			case 'signatureTasksEngine': {
@@ -577,6 +775,42 @@ export class EngineFactory {
 				`EngineFactory: Network context not established for hash ${this.currentNetworkHash} — call getEngine("network", ref) first`
 			);
 		}
+		this.bindIntakeOpener(ctx);
 		return ctx;
+	}
+
+	/**
+	 * D-49: 62-31 seals registration content to the officers current at write time. The engine reads
+	 * it only through `ctx.intakeOpener`, which this host sets on the SHARED established ctx, so every
+	 * engine built from that ctx sees it and no screen touches keys.
+	 *
+	 * D-04: the opener holds the vault reference and the user id, never a secret. It fetches the
+	 * officer secret on each open from the native-wrapped vault (no prompt: requireUserAuth false), so
+	 * an officer who enables encrypted intake after this bind reads 'opened' without a rebind.
+	 *
+	 * The user-id comparison exists because NetworksEngine.open() spreads the cached ctx on re-open.
+	 * Without it, an opener bound to the previous user would follow a user switch.
+	 *
+	 * The catch is fail-closed: an unbuildable opener makes sealed rows read as 'no-opener'. It never
+	 * blocks the engine, and it logs nothing (no plaintext or key-related detail may reach a log).
+	 *
+	 * D-51: officers who were not recipients read 'not-a-recipient'. No re-wrap exists.
+	 */
+	private bindIntakeOpener(ctx: EngineContext): void {
+		const userId = ctx.user?.id;
+		if (typeof userId !== 'string' || userId.length === 0) {
+			if (ctx.intakeOpener !== undefined) {
+				ctx.intakeOpener = undefined;
+			}
+			return;
+		}
+		if (ctx.intakeOpener?.userId === userId) {
+			return;
+		}
+		try {
+			ctx.intakeOpener = new IntakeEngine(ctx).createOpener(resolveAuthorityKeyVault());
+		} catch {
+			ctx.intakeOpener = undefined;
+		}
 	}
 }

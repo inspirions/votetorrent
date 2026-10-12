@@ -221,7 +221,7 @@ test('rung 9b: every name in `MUTATIONS` is wired into the public app\'s mutant 
 		}
 		for (const name of unhandled) {
 			assert.ok(
-				mod.MUTATIONS.includes(name),
+				/** @type {readonly string[]} */ (mod.MUTATIONS).includes(name),
 				`${label} lists "${name}" as deliberately unhandled, but it is not a member of MUTATIONS — a stale entry ` +
 					`here would silently excuse a real gap later.`,
 			);

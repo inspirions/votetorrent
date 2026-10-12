@@ -64,6 +64,14 @@ const mockNetworkEngine = {
   getDetails: jest.fn(async () => ({
     network: { primaryAuthorityId: "auth-1", name: "Test Network" },
   })),
+  getPinnedAuthorities: jest.fn(async (): Promise<any[]> => []),
+  getAuthoritiesByName: jest.fn(async (_name: string | undefined): Promise<any> => ({
+    buffer: [{ id: "auth-0", name: "Other Auth" }, { id: "auth-1", name: "Lab Auth" }],
+    offset: 0,
+    firstBOF: true,
+    lastEOF: true,
+  })),
+  nextAuthoritiesByName: jest.fn(async (): Promise<any> => ({ buffer: [], offset: 0, firstBOF: false, lastEOF: true })),
 };
 
 const mockGetEngine = jest.fn(async (name: string): Promise<any> => {
@@ -140,10 +148,6 @@ jest.mock("../../../engines/device-signer", () => ({
   })),
 }));
 
-jest.mock("../../../engines/local-keyholders", () => ({
-  saveLocalKeyholders: jest.fn(async () => undefined),
-}));
-
 jest.mock("../../../hooks/useDeviceSigningErrorHandler", () => ({
   useDeviceSigningErrorHandler: () => () => ({ handled: false }),
 }));
@@ -187,8 +191,8 @@ function orderedForm(): ElectionRevisionFormValue {
     validation: iso(15),
     certificationStarts: iso(16),
     closed: iso(17),
-    keyholders: ["Alice"],
-    threshold: 1,
+    keyholders: ["Alice", "Bob"],
+    threshold: 2,
     tags: [],
     instructions: "",
   };
@@ -279,5 +283,31 @@ describe("CreateElectionScreen — timeline ordering guard (WR-02)", () => {
       .timeline as Record<ElectionEvent, number>;
     expect(signedTimeline[ElectionEvent.validation]).toBe(NOW + 15 * DAY_MS);
     expect(signedTimeline[ElectionEvent.closed]).toBe(NOW + 17 * DAY_MS);
+  });
+});
+
+// UAT 62 N: the header read "Authority: <network name>". It names the AUTHORITY, falling back to
+// its id only when the authority row cannot be read.
+describe("CreateElectionScreen — authority header", () => {
+  function authorityText(tree: renderer.ReactTestRenderer): string {
+    return tree.root.findByProps({ testID: "create-election-authority" }).props.children;
+  }
+
+  it("shows the primary authority's name, not the network name", async () => {
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => {
+      tree = renderer.create(<CreateElectionScreen />);
+    });
+    expect(authorityText(tree)).toBe("Lab Auth");
+    expect(JSON.stringify(tree.toJSON())).not.toContain("Test Network");
+  });
+
+  it("falls back to the authority id when the authority lookup fails", async () => {
+    mockNetworkEngine.getAuthoritiesByName.mockRejectedValueOnce(new Error("offline"));
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => {
+      tree = renderer.create(<CreateElectionScreen />);
+    });
+    expect(authorityText(tree)).toBe("auth-1");
   });
 });

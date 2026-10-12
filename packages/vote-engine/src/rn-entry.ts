@@ -13,6 +13,11 @@
 // Verifying with a hand-rolled noble call instead would prove nothing about schema agreement —
 // which is the whole point of the encoding contract (base64url digest / hex sig / hex key).
 export { verifySigP256 } from './database/initialize.js'
+// The per-Database UDF lifecycle (`SignatureValid`/`SignatureValidP256`/`isISODatetime` + the
+// crypto plugin) that every schema CHECK calls. NetworksEngine runs it on every handle it opens;
+// the P2P-11 replication proof opens its strand handle directly through the DbFactory, so it must
+// run it too — without it, the first signed insert fails `Function not found: SignatureValidP256/3`.
+export { registerDbPlugins } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
 export { NetworkEngine } from './network/network-engine.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'
@@ -55,6 +60,17 @@ export { StubAttestationVerifier } from './association/stub-attestation-verifier
 export { AppAttestVerifier, NO_PRIOR_ASSERTIONS } from './association/app-attest-verifier.js'
 export type { IAssertionCounterStore } from './association/app-attest-verifier.js'
 export { PlatformDispatchingAttestationVerifier } from './association/platform-dispatching-verifier.js'
+// "Make permanent" on media URL fields: download once, record `{ url, cid }` so the reference is
+// tamper-evident. Pure (fetch is injectable); no storage, no network-side hosting.
+export {
+  fingerprintMedia,
+  verifyMediaFingerprint,
+  isFingerprintableUrl,
+  mediaCid,
+  MediaFingerprintError,
+  MAX_MEDIA_BYTES
+} from './media/media-fingerprint.js'
+export type { MediaFetch, MediaFingerprintFailure, MediaFingerprintOptions, MediaResponse } from './media/media-fingerprint.js'
 export { LocalConfigKeyProvider } from './association/key-provider.js'
 export type { IIntegrityKeyProvider } from './association/key-provider.js'
 export type { ExpectedAppIdentity } from './association/verifiers/app-identity.js'
@@ -70,3 +86,165 @@ export type { DigestVector } from './database/digest-vectors.js'
 // passes this into CadreNode.addStrand's sAppConfig.schema (P2P-03) so the
 // strand DB and the LevelDB path declare the SAME schema — no drift.
 export { VOTETORRENT_SCHEMA_SQL } from './database/schema-sql.js'
+// Phase 62 Plan 04 (D-03/D-04/D-13/D-18/D-25): the crypto module, re-exported
+// by name (never `export *`) for its RN consumers — 62-14 (intake
+// sealer/opener and officer key registration), 62-21 (the Authority native
+// vault adapter) and 62-22 (voter sealing). Mirrors the exact name list on
+// src/crypto/index.ts; the deterministic/test-only entry points stay off
+// this seam too.
+export {
+	ENCRYPTION_KEY_ALG,
+	ENVELOPE_ALG,
+	ENVELOPE_FORMAT_VERSION,
+	ENVELOPE_MAX_RECIPIENTS,
+	EnvelopeSealError,
+	encryptionPublicKeyFromSecret,
+	envelopeRecipientUserIds,
+	generateEncryptionKeyPair,
+	isValidEncryptionPublicKey,
+	openEnvelope,
+	sealToRecipients,
+	serializeEnvelope,
+	BLOCK_CIPHER_ALG,
+	BLOCK_CIPHER_FORMAT_VERSION,
+	BlockCipherError,
+	decryptBlockContent,
+	encryptBlockContent,
+	serializeBlockCiphertext,
+	KEY_VAULT_ALIAS_PATTERN,
+	KEYHOLDER_DKG_RECEIVING_KEY_POLICY,
+	KEYHOLDER_SHARE_POLICY,
+	KeyVaultError,
+	OFFICER_ENCRYPTION_KEY_POLICY,
+	assertKeyVaultAlias,
+	keyholderDkgReceivingKeyAlias,
+	keyholderDkgShareAlias,
+	officerEncryptionKeyAlias
+} from './crypto/index.js'
+export type {
+	EnvelopeBinding,
+	EnvelopeOpenFailureReason,
+	EnvelopeOpenResult,
+	EnvelopeRecipient,
+	EnvelopeRecipientSecret,
+	EnvelopeSealErrorCode,
+	SealedEnvelope,
+	SealedEnvelopeRecipientEntry,
+	BlockCipherBinding,
+	BlockCipherErrorCode,
+	BlockCiphertext,
+	BlockDecryptFailureReason,
+	BlockDecryptResult,
+	IKeyVault,
+	KeyVaultErrorCode,
+	KeyVaultPolicy
+} from './crypto/index.js'
+// Phase 62 Plan 17 (D-13/D-14/D-16/D-19/D-25/D-26): the keyholder DKG round
+// driver, re-exported by name for its RN consumer — 62-26 (the Authority
+// keyholder app, which stores the DKG receiving key at accept and drives
+// rounds on keyholder-screen focus). Mirrors 62-17's own instruction for
+// this exact name list.
+export {
+	KeyholderDkgEngine,
+	KeyholderDkgError,
+	keyholderDkgRoundSecretAlias,
+	KEYHOLDER_DKG_ROUND_SECRET_POLICY,
+	encodeDkgRoundVaultRecord,
+	decodeDkgRoundVaultRecord
+} from './keyholder/index.js'
+export type { KeyholderDkgErrorCode, DkgRoundVaultRecord } from './keyholder/index.js'
+// Phase 62 Plan 20 (D-13/D-14/D-17/D-18/D-20): the key-release engine and
+// its pure window/block-payload helpers, re-exported by name for its RN
+// consumers — 62-26 (KeyTaskScreen's signer wiring) and 62-29
+// (KeyReleaseScreen, Voter releasedCount).
+export {
+	KeyReleaseEngine,
+	KeyReleaseError,
+	releaseKeyTaskId,
+	hasEnteredReleasingKeys,
+	releasingKeysAt,
+	encryptElectionBlock,
+	openElectionBlock
+} from './key-release/index.js'
+export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release/index.js'
+export type { KeysTasksEngineDeps } from './tasks/keys-tasks-engine.js'
+// Phase 62 Plan 20: a curated DKG surface, named from `./crypto/index.js` —
+// 62-26 mints the receiving key at accept (`generateDkgReceivingKey`) and
+// reads the same identifier/validation/reconstruction primitives the
+// key-release engine uses.
+export { DkgError, dkgIdentifierForUser, generateDkgReceivingKey, validateReleasedShare, reconstructGroupSecret } from './crypto/index.js'
+export type { DkgErrorCode, ReleasedShare, ReconstructionResult } from './crypto/index.js'
+// Phase 62 Plan 14 (D-03/D-04/D-29/D-32/D-46): the intake module, re-exported
+// by name (never `export *`) for its RN consumers — the Authority's officer
+// key step and peer intake (62-21), the bridge URL card (62-25) and the
+// re-association toggle (62-27), and the Voter's sealing (62-22). Mirrors
+// the exact name list on src/intake/index.ts.
+export {
+	IntakeError,
+	REASSOCIATION_MODES,
+	DEFAULT_REASSOCIATION_MODE,
+	REST_BRIDGE_URL_MAX_LENGTH,
+	intakeQueryPortFromDb,
+	intakeQueryPortFromStrandPort,
+	resolveIntakeRecipients,
+	createIntakeSealer,
+	createIntakeOpener,
+	isValidRestBridgeUrl,
+	normalizeIntakePolicyRow,
+	readIntakePolicyFrom,
+	reassociationRouteFor,
+	IntakeEngine
+} from './intake/index.js'
+export type {
+	IntakeErrorCode,
+	IntakeSignCallback,
+	ReassociationMode,
+	ReassociationMatchMethod,
+	ReassociationRoute,
+	IntakeRecipientDroppedKey,
+	IntakeRecipientSet,
+	OfficerEncryptionKeyRegistration,
+	OfficerEncryptionKeyStatus,
+	IntakeSealer,
+	IntakeOpenFailureReason,
+	IntakeOpenResult,
+	IntakeOpener,
+	AuthorityIntakePolicyView,
+	AuthorityIntakePolicyInput,
+	IntakeQueryPort
+} from './intake/index.js'
+// Phase 62 Plan 14: these two `export *` lines are a DELIBERATE exception to
+// this file's named-export convention — each transport's whole exported
+// surface (class + options/strand-port types, and registration's re-exported
+// staging-seam names) IS its consumers' contract. Consumers: 62-21 (Authority
+// strand-port adapter, peer intake) and 62-22 (Voter sealing) import
+// `P2pRegistrationTransport`/`P2pAssociationTransport` from
+// `@votetorrent/vote-engine/rn` in wave 5. NEVER copy either line into
+// `src/index.ts` — src/registration/index.ts and src/association/transport/index.ts already reach it (62-15 Task 3).
+export * from './registration/transport/p2p-registration-transport.js'
+export * from './association/transport/p2p-association-transport.js'
+// Phase 63 Plan 03 (D-23/D-26/D-28/D-07): the voting module, re-exported by name (never `export *`)
+// for its RN consumers. Those are 63-10/63-11 (Voter eligibility and castVote) and 63-15 (the
+// device-proof probe). Mirrors the exact name list on src/voting/index.ts. Deliberately NOT on
+// browser-entry.ts (owner resolution R-6): its purity allowlist does not carry
+// @noble/curves/nist.js, and the dashboard has no consumer.
+export {
+	VOTE_ENTRY_KEYS,
+	VOTER_ENTRY_KEYS,
+	ballotTemplateDigest,
+	makeVoteNonce,
+	buildVoteEntry,
+	voterEntryDigest,
+	canonicalJson,
+	sortByCanonicalBytes,
+	p256KeyToCompressedHex,
+	checkVotingKey
+} from './voting/index.js'
+export type {
+	VoteAnswer,
+	VoteEntry,
+	VoterEntryUnsigned,
+	VoterEntry,
+	TemplateBallot,
+	VotingKeyCheck
+} from './voting/index.js'

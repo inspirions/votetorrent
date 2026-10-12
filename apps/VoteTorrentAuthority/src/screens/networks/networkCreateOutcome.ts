@@ -72,3 +72,45 @@ export function findLandedNetwork(
 	}
 	return match;
 }
+
+/**
+ * How long the create screen keeps waiting on the ORIGINAL commit promise after its 45 s
+ * deadline was missed and a recents reconcile could not confirm the network.
+ *
+ * Assumption: the Redmi 8 round-3 block was ~2.5 min (62-HUMAN-UAT.md test 9) and 58-08 measured
+ * whole-create wall clocks of 350-410 s on the same phone, so 10 min covers both with headroom
+ * while still ending.
+ */
+export const LATE_COMMIT_BUDGET_MS = 10 * 60_000;
+
+export type LateCommitOutcome<T> =
+	| { status: "landed"; value: T }
+	| { status: "failed"; error: unknown }
+	| { status: "budget-exhausted" };
+
+/**
+ * Bounded wait on a commit that outlived its UI deadline. Total: never throws.
+ *
+ * It must be given the ORIGINAL `builder.commit()` promise (the one that keeps running after
+ * `withTimeout`'s deadline), never a re-raced copy and never `NetworksEngine.open()` (see this
+ * file's header: `open()` is never an existence probe).
+ */
+export async function awaitLateCommit<T>(
+	commit: Promise<T>,
+	budgetMs: number,
+): Promise<LateCommitOutcome<T>> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race<LateCommitOutcome<T>>([
+			commit.then(
+				(value): LateCommitOutcome<T> => ({ status: "landed", value }),
+				(error): LateCommitOutcome<T> => ({ status: "failed", error }),
+			),
+			new Promise<LateCommitOutcome<T>>((resolve) => {
+				timer = setTimeout(() => resolve({ status: "budget-exhausted" }), budgetMs);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}

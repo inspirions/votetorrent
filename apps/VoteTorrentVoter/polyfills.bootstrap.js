@@ -146,6 +146,12 @@ if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.prototype.throwIfAb
   };
 }
 
+// 7a. AbortController `reason` + AbortSignal.any. RN's abort-controller@3.0.0 drops every abort
+//     reason, so libp2p's raceSignal rejects with `undefined` and the upgrader's
+//     `err.message` masks the real failure (spike 092, explaining spike 069). A `require`,
+//     not an `import`, so it runs HERE, after the DOMException arm, and not hoisted above it.
+require('./polyfills/hermes-abort-reason');
+
 // 7b. AbortSignal.timeout — bare RN 0.78 Hermes lacks this static (Expo's Hermes has it, so the
 //     reference app didn't need it). libp2p's dial path calls AbortSignal.timeout(ms); without it a
 //     dial throws "AbortSignal.timeout is not a function". Confirmed needed on-device by spike 009.

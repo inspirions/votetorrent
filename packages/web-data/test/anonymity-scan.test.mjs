@@ -114,10 +114,36 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * classes, D-15 moves two tables out of NEVER into AGGREGATE and D-18 moves one
  * out of POLICY_GATED into PUBLIC, giving 28 forbidden and 33 public-safe of 61.
  * 54-06's landed `classification.js` produces exactly those numbers.
+ *
+ * 2026-10-01 (62-01 Task 2): +5 tables, deliberately classified. NEVER (+3): the three new
+ * registration/association staging tables (sealed P2P-transport envelopes in transit; D-47
+ * accepts the clear Digest as an equality/guessing-oracle exposure, not a publication decision —
+ * table names intentionally NOT repeated here, see the self-trip guard below). AGGREGATE (+2):
+ * the two new decision tables (decision throughput by status is public; individual rows name the
+ * deciding officer and are not). 28 -> 31 forbidden, 33 -> 35 public-safe, 61 -> 66 total.
+ *
+ * 2026-10-01 (62-01 Task 3): +2 more tables, both PUBLIC_SAFE (forbidden stays 31). An
+ * envelope-encryption-key table is AGGREGATE (mirrors UserKey: public keys are not secret, a full
+ * listing is an identity graph). A per-authority intake-policy table is PUBLIC (mirrors
+ * ElectionAttestationPolicy: a signed policy voters must read to act on, no person-level column).
+ * 35 -> 37 public-safe, 66 -> 68 total.
+ *
+ * 2026-10-01 (62-02 Task 2): +4 keyholder DKG/key-loop tables, deliberately classified. NEVER
+ * (+2): the two new DKG-transport tables (protocol plumbing — per-keyholder receiving keys,
+ * encrypted share bundles, user ids; nothing a public reader needs — table names intentionally
+ * NOT repeated here, see the self-trip guard below). PUBLIC_SAFE (+2): the published joint key
+ * table (the whole point of publishing it is that voters encrypt to it) and the released-share
+ * table (public by design once released, D-17 — anyone with k shares may reconstruct).
+ * 31 -> 33 forbidden, 37 -> 39 public-safe, 68 -> 72 total.
+ *
+ * 2026-10-09 (vote-block schema): +2 vote-block tables, both AGGREGATE (counts only). Their
+ * counts are turnout; their rows name registrants (the block's frozen voter list, and who voted
+ * in which block), so no row is ever published. Forbidden stays 33, 39 -> 41 public-safe,
+ * 72 -> 74 total.
  */
-const EXPECTED_FORBIDDEN_COUNT = 28;
-const EXPECTED_PUBLIC_SAFE_COUNT = 33;
-const EXPECTED_TABLE_COUNT = 61;
+const EXPECTED_FORBIDDEN_COUNT = 33;
+const EXPECTED_PUBLIC_SAFE_COUNT = 41;
+const EXPECTED_TABLE_COUNT = 74;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above

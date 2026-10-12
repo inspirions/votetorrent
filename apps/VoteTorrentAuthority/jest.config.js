@@ -1,5 +1,26 @@
+// uint8arrays v6 (ESM, dist/src layout) is mapped by physical path below. WHICH workspace
+// holds a nested v6 copy is a node-modules-linker layout artefact that moves on any install
+// (2026-10-01: a vote-engine devDependency add re-nested 3.1.1 — cjs/ layout, no dist/ —
+// under packages/vote-engine and broke 21 suites), so locate the first v6 copy at load time.
+const path = require('path');
+const fs = require('fs');
+const UINT8ARRAYS_DIST = (() => {
+  const candidates = [
+    'packages/vote-engine',
+    'packages/web-data',
+    'packages/attestation-native',
+    'apps/VoteTorrentDashboard',
+    '.',
+  ].map(d => path.resolve(__dirname, '../..', d, 'node_modules/uint8arrays/dist/src'));
+  const found = candidates.find(d => fs.existsSync(path.join(d, 'index.js')));
+  if (!found) {
+    throw new Error('jest.config: no uint8arrays v6 (dist/src) copy found in ' + candidates.join(', '));
+  }
+  return found;
+})();
+
 module.exports = {
-  preset: 'react-native',
+  preset: '@react-native/jest-preset',
   // 2026-08-29 (Phase 51 Nyquist audit). Jest's implicit per-test budget is 5000ms, which this
   // app's render-heavy screen/navigation suites cannot hold on a COLD cache: a clean
   // `yarn jest --clearCache && yarn jest` runs ~98 suites whose Babel transforms all miss at
@@ -25,6 +46,8 @@ module.exports = {
   testPathIgnorePatterns: [
     '<rootDir>/node_modules/',
     '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
+    // Guards jest.node.config.js's own ESM mappers; runs only under that config.
+    '<rootDir>/src/engines/__tests__/node-config-esm-mappers.spec.ts',
     // replication-proof-runner.test.ts was excluded here by Phase 39 plan 39-04 because
     // "Phase 41 is PAUSED (P2P-11 open at 41-11)". It stayed excluded for months and rotted:
     // its CadreNode mock lost getMultiaddrs(), so the runner threw at the relay-reservation
@@ -60,6 +83,9 @@ module.exports = {
     '^react-native$': '<rootDir>/node_modules/react-native/index.js',
     '^react-native-localize$': '<rootDir>/__mocks__/react-native-localize.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',
+    // Spike 093: native Noise crypto. The real module needs react-native-quick-crypto (Nitro/JSI),
+    // which cannot load under Jest; the mock keeps the mode contract.
+    '^@serfab/cadre-rn/noise-crypto$': '<rootDir>/__mocks__/@serfab/cadre-rn-noise-crypto.js',
     // Phase 39 plan 39-04 (DEBT-09 app-Jest gate) — native TurboModules pulled in
     // transitively by App.test.tsx's full navigation tree (every screen module is
     // eagerly required by src/navigation/index.tsx, not lazily).
@@ -127,19 +153,19 @@ module.exports = {
     // which is the first screen test to require the real MockRegistrationEngine —
     // its selective-disclosure methods import setCommit/setDisclose/randomBytes from
     // quereus-plugin-crypto, which imports { toString, fromString } from 'uint8arrays'.
-    '^uint8arrays$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/index.js',
+    '^uint8arrays$': UINT8ARRAYS_DIST + '/index.js',
     // uint8arrays' own dist/src/index.js internally imports its INTERNAL "#foo"
     // self-references (package.json "imports" map) — that map has "types"/"node"/
     // "import" conditions only, no "require", so Jest's default CJS condition set
     // matches none of them ("No known conditions for '#alloc' specifier"). Map each
     // self-reference straight to its physical dist file, same idiom as the
     // @noble/curves / multiformats subpath mappers above.
-    '^#util/as-uint8array$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/util/as-uint8array.js',
-    '^#alloc$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/alloc.js',
-    '^#compare$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/compare.js',
-    '^#concat$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/concat.js',
-    '^#from-string$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/from-string.js',
-    '^#to-string$': '<rootDir>/../../packages/vote-engine/node_modules/uint8arrays/dist/src/to-string.js',
+    '^#util/as-uint8array$': UINT8ARRAYS_DIST + '/util/as-uint8array.js',
+    '^#alloc$': UINT8ARRAYS_DIST + '/alloc.js',
+    '^#compare$': UINT8ARRAYS_DIST + '/compare.js',
+    '^#concat$': UINT8ARRAYS_DIST + '/concat.js',
+    '^#from-string$': UINT8ARRAYS_DIST + '/from-string.js',
+    '^#to-string$': UINT8ARRAYS_DIST + '/to-string.js',
     // multiformats — ESM-only subpath imports used by @optimystic/quereus-plugin-crypto.
     // The exports field has no "require" condition; map subpaths to their physical dist files.
     '^multiformats/basics$': '<rootDir>/node_modules/multiformats/dist/src/basics.js',

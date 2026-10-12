@@ -24,8 +24,9 @@ const GROUP_RE = /^dashboardSignInCode[A-Z]/;
 /** 12 was the count in each language before the upload copy landed (read off
  * `i18n/index.ts`'s en group, which ran from `dashboardSignInCodeTitle`
  * through `dashboardSignInCodeConfirmBody`). Five keys were added for the
- * upload sequence: the in-flight line and four refusals. */
-const GROUP_SIZE = 17;
+ * upload sequence: the in-flight line and four refusals. Two more (Copied,
+ * CopyFailed) came with the copy-feedback toast. */
+const GROUP_SIZE = 19;
 
 /** The five keys this group gained for the sealed-upload sequence. */
 const NEW_KEYS = [

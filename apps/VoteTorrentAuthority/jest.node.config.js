@@ -8,11 +8,15 @@
 //      prove @serfab/cadre-core actually LOADS under plain Node (D-12), not
 //      under the RN preset's jsdom-adjacent native-mock environment.
 //
-// Scoped via testMatch to ONLY the cadre-core-node.smoke.spec.ts file so this
+// Scoped via testMatch to ONLY cadre-core-node.smoke.spec.ts and
+// node-config-esm-mappers.spec.ts (which guards the ESM mappers below) so this
 // config never picks up the RN-preset specs (compliance-strand.spec.ts, etc.).
 module.exports = {
   testEnvironment: 'node',
-  testMatch: ['<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts'],
+  testMatch: [
+    '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
+    '<rootDir>/src/engines/__tests__/node-config-esm-mappers.spec.ts',
+  ],
   // Same-style ESM transform exception as jest.config.js — @serfab/cadre-core's
   // own dependency tree (libp2p, multiformats, @quereus/*) is ESM-only.
   transformIgnorePatterns: [
@@ -111,10 +115,15 @@ module.exports = {
       '<rootDir>/node_modules/@libp2p/crypto/node_modules/uint8arrays/dist/src/$1.js',
     '^uint8arraylist$':
       '<rootDir>/node_modules/uint8arraylist/dist/src/index.js',
+    // protons-runtime and uint8-varint are ESM-only (`import` condition, no
+    // `require`), so they still need a mapper even though the allowlist above
+    // lets them transform. They were once nested under @libp2p/crypto; they
+    // are now hoisted to the app level, and the old nested paths silently
+    // broke this whole config. Guarded by node-config-esm-mappers.spec.ts.
     '^protons-runtime$':
-      '<rootDir>/node_modules/@libp2p/crypto/node_modules/protons-runtime/dist/src/index.js',
+      '<rootDir>/node_modules/protons-runtime/dist/src/index.js',
     '^uint8-varint$':
-      '<rootDir>/node_modules/@libp2p/crypto/node_modules/uint8-varint/dist/src/index.js',
+      '<rootDir>/node_modules/uint8-varint/dist/src/index.js',
     // it-* — libp2p's streaming-iterable utility packages, ESM-only `exports`
     // map, no CJS condition. Generic mapper covers the whole family
     // (it-pipe, it-pushable, it-length-prefixed, it-stream-types, ...) via

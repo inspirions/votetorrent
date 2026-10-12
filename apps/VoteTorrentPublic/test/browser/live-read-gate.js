@@ -99,6 +99,12 @@ import {
 // reads what it left behind. Seeding through the officer-side fixture is that
 // premise made executable.
 import { seedFoundingAuthority } from '../../../../packages/web-data/test/fixtures/seed-founding-authority.js';
+// 62-02 (D-26): a Keyholder row now needs a signed KeyholderDkgBinding in the
+// same transaction. Prerequisites (InviteSlot/InviteResult/UserKey for 'u1')
+// are seeded once at rung 2; rung 7's single observed mutation stays exactly
+// one new Keyholder row (plus its now-mandatory binding, which this gate's
+// subject assertions never read).
+import { seedKeyholderPrerequisites, insertBoundKeyholder } from '../fixtures/seed-bound-keyholder.js';
 import {
 	SEED_ELECTION,
 	SEED_EXPECTED_COUNTS,
@@ -302,11 +308,22 @@ async function main() {
 	// one being two live connections to one store, not one handle used twice.
 	/** @type {any} */
 	let dbB = null;
+	/** @type {{ userId: string, inviteSlotCid: string, signerPublicKey: string } | null} */
+	let u1Prereq = null;
 	await rung(2, 'seed the election surface through handle B, and record its two preconditions', async () => {
 		const db = await createNetworkDb(LIVE_GATE_NETWORK_HASH);
 		dbB = db;
 		await seedFoundingAuthority(db);
 		await seedElectionSurface(db);
+		// 62-02 (D-26): prerequisites for rung 7's signed keyholder write — 'u1'
+		// (the founding officer) gets an InviteSlot/InviteResult/UserKey here so
+		// the later Keyholder+binding pair is the ONLY new row rung 7 observes.
+		u1Prereq = await seedKeyholderPrerequisites(db, {
+			electionId: SEED_ELECTION.id,
+			userId: 'u1',
+			userName: 'live-read gate Officer',
+			now: SEED_NOW,
+		});
 		const counts = await readRowCounts(db, Object.keys(SEED_EXPECTED_COUNTS));
 		for (const [table, expected] of Object.entries(SEED_EXPECTED_COUNTS)) {
 			if (counts[table] !== expected) {
@@ -393,14 +410,12 @@ async function main() {
 	// -- 7 -------------------------------------------------------------------
 	await rung(7, 'write through handle B while the page is mounted', async () => {
 		if (dbB === null) throw new Error('handle B is not open');
-		// The one insert on a seeded election surface that needs no signing
-		// ceremony: this row's insert-time constraint requires exactly that the
-		// three signing context values be null, and they are simply not
-		// supplied. Bound parameters only — no `${` in the statement.
-		await dbB.exec(
-			`insert into Keyholder (ElectionId, ElectionRevision, UserId) with context Tid = :tid values (:electionId, :revision, :userId)`,
-			{ tid: 900, electionId: SEED_ELECTION.id, revision: SEED_REVISION, userId: 'u1' },
-		);
+		if (u1Prereq === null) throw new Error('u1Prereq was not seeded — rung 2 did not complete');
+		// 62-02 (D-26): Keyholder.InsertValid now requires a signed
+		// KeyholderDkgBinding in the SAME transaction — this one call still
+		// produces exactly ONE new Keyholder row (the observed mutation below),
+		// plus its now-mandatory binding.
+		await insertBoundKeyholder(dbB, u1Prereq, { electionId: SEED_ELECTION.id, revision: SEED_REVISION, tid: 900 });
 		const back = await readKeyReleaseProgress(dbB, SEED_ELECTION.id, SEED_REVISION);
 		if (back.keyholderCount !== 1) throw new Error(`the write did not land: handle B reads keyholderCount ${back.keyholderCount}`);
 		return 'one keyholder row inserted; handle B reads it back';

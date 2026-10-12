@@ -111,6 +111,17 @@ jobs:
             ruby "$f" || exit 1
           done
 
+      # A missing purpose string is a privacy-service abort on the first Face
+      # ID prompt, and no build or jest tier detects it (jest mocks the native
+      # module; Xcode builds without the key). This static gate does, and its
+      # selftest proves each failure mode is still detected. Node is
+      # preinstalled on the runner; the script has no dependencies.
+      - name: iOS usage-description gate
+        run: |
+          set -euo pipefail
+          node scripts/check-ios-usage-keys.mjs --selftest
+          node scripts/check-ios-usage-keys.mjs
+
       # D-09's gate as a CI lint (55-03 decided this job should run it here).
       # fastlane is deliberately not installed; this is the same inline
       # FastlaneCore::UI double shape 55-03 proved in vt_team_gate_test.rb.
@@ -292,6 +303,24 @@ jobs:
             exit 1
           fi
           echo "Bundle size: $(du -h "$APP/main.jsbundle" | cut -f1)"
+
+      # The built app must carry the Face ID purpose string in its Info.plist
+      # and both localizations; the static gate checks the sources, this
+      # checks what Xcode actually packaged.
+      - name: Verify the built app carries the Face ID purpose string
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/${{ matrix.app.scheme }}.xcarchive/Products/Applications/${{ matrix.app.scheme }}.app"
+          if ! plutil -extract NSFaceIDUsageDescription raw "$APP/Info.plist" > /dev/null; then
+            echo "::error::${{ matrix.app.name }} built app has no NSFaceIDUsageDescription -- the first Face ID prompt would abort the app"
+            exit 1
+          fi
+          for lang in en es; do
+            if [ ! -f "$APP/$lang.lproj/InfoPlist.strings" ]; then
+              echo "::error::${{ matrix.app.name }} built app has no $lang.lproj/InfoPlist.strings"
+              exit 1
+            fi
+          done
 
       # The .xcarchive itself is deliberately NOT uploaded (unsigned and
       # therefore not installable -- publishing it as an artifact would

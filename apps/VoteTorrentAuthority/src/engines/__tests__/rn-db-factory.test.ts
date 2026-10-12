@@ -109,6 +109,8 @@ const { createStrandDbFactory, rnDbFactory } = require('../rn-db-factory');
 const { EngineFactory } = require('../engine-factory');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createScopedRnStorageProvider } = require('../storage-guard');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { StrandWaitCancelledError } = require('../strand-first-sync');
 
 // ---------------------------------------------------------------------------
 // Fakes: a strand DB whose bare table names resolve, and a CadreNode seam.
@@ -127,6 +129,10 @@ function makeFakeStrandDb() {
 /**
  * Fake CadreNode seam. `connections` controls getControlNode().getConnections().length.
  * addStrand records that it resolved BEFORE getDatabase() is read (ordering guard).
+ *
+ * `whenStrandWritable` is a jest.fn() the first-sync gate tests below reconfigure per
+ * case; it defaults to rejecting so a test that forgets to configure it fails loudly
+ * rather than hanging.
  */
 function makeFakeNode({ connections = 0, db = makeFakeStrandDb() } = {}) {
   let strandAdded = false;
@@ -151,7 +157,25 @@ function makeFakeNode({ connections = 0, db = makeFakeStrandDb() } = {}) {
     getControlNode: jest.fn(() => ({
       getConnections: () => new Array(connections).fill({}),
     })),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    whenStrandWritable: jest.fn(async (_strandId: string): Promise<any> => {
+      throw new Error('whenStrandWritable not configured for this test');
+    }),
+    // Marks the strand's database as present + resolved, mirroring what a real
+    // whenStrandWritable resolution guarantees per Pitfall 3.
+    __markWritable(): void {
+      strandAdded = true;
+    },
   };
+}
+
+/** Builds a fake gate error exactly as the real StrandAwaitingFirstSyncError shapes it. */
+function makeGateError(strandId: string, waitedMs = 300_000): Error {
+  const err = new Error(`Strand ${strandId} is not yet reachable`);
+  err.name = 'StrandAwaitingFirstSyncError';
+  (err as unknown as { strandId: string; waitedMs: number }).strandId = strandId;
+  (err as unknown as { strandId: string; waitedMs: number }).waitedMs = waitedMs;
+  return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +232,21 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
     expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
   });
 
+  it('F-1: logs one closed-token attach marker with the founder flag and connection count, never the strand id', async () => {
+    const info = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      await createStrandDbFactory(makeFakeNode({ connections: 0 }))('networkhash123');
+      await createStrandDbFactory(makeFakeNode({ connections: 1 }))('networkhash123');
+      const marks = info.mock.calls.filter((c) => c[0] === '[strand-factory] attach');
+      expect(marks.length).toBe(2);
+      expect(marks[0][1]).toEqual({ founder: true, controlConnections: 0 });
+      expect(marks[1][1]).toEqual({ founder: false, controlConnections: 1 });
+      expect(JSON.stringify(info.mock.calls)).not.toContain('networkhash123');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('never passes the retired `mode` key (cadre-core 0.11.0 deleted it)', async () => {
     const node = makeFakeNode({ connections: 0 });
     const factory = createStrandDbFactory(node);
@@ -228,6 +267,7 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
       Id: 'networkhash123',
       MemberPrivateKey: null,
       Type: 'o',
+      FounderOwnerKey: null,
     });
     // The factory strips the `declare schema main { ... } apply schema main;` wrapper
     // so cadre-core (which re-wraps under `declare schema App { ... }`) does not nest
@@ -428,5 +468,180 @@ describe('Backend store-namespace disjointness — RESEARCH Open Question 1 (in-
     expect(soloName).not.toBe(strandName);
     expect(soloName.startsWith(strandName)).toBe(false);
     expect(strandName.startsWith(soloName)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// first-sync gate (StrandAwaitingFirstSyncError) — quick task 260928-kkf.
+//
+// addStrand can now REJECT with the retryable StrandAwaitingFirstSyncError for a
+// joiner whose sibling has not been reachable since it joined. These cases prove the
+// factory treats that ONE specific error as "keep waiting" (via whenStrandWritable),
+// while every other error — including the same error for a DIFFERENT strand — still
+// rejects the factory exactly as before.
+// ---------------------------------------------------------------------------
+describe('createStrandDbFactory — first-sync gate (StrandAwaitingFirstSyncError)', () => {
+  it('(a) waits via whenStrandWritable and resolves once writable, calling onAwaitingFirstSync once before resolution', async () => {
+    const node = makeFakeNode();
+    const gateError = makeGateError('networkhash123');
+    node.addStrand.mockRejectedValueOnce(gateError);
+
+    const callOrder: string[] = [];
+    node.whenStrandWritable.mockImplementationOnce(async (strandId: string) => {
+      callOrder.push('whenStrandWritable');
+      expect(strandId).toBe('networkhash123');
+      node.__markWritable();
+      return node.db && { strandId, database: { getDatabase: () => node.db } };
+    });
+    const onAwaitingFirstSync = jest.fn((strandId: string) => {
+      callOrder.push('onAwaitingFirstSync:' + strandId);
+    });
+
+    const factory = createStrandDbFactory(node, { onAwaitingFirstSync });
+    const db = await factory('networkhash123');
+
+    expect(db).toBe(node.db);
+    expect(node.db.setSchemaPath).toHaveBeenCalledTimes(1);
+    expect(node.db.setSchemaPath).toHaveBeenCalledWith(['App', 'main']);
+    expect(node.addStrand).toHaveBeenCalledTimes(1);
+    expect(node.whenStrandWritable).toHaveBeenCalledTimes(1);
+    expect(onAwaitingFirstSync).toHaveBeenCalledTimes(1);
+    expect(onAwaitingFirstSync).toHaveBeenCalledWith('networkhash123');
+    // onAwaitingFirstSync fired BEFORE the wait resolved.
+    expect(callOrder).toEqual(['onAwaitingFirstSync:networkhash123', 'whenStrandWritable']);
+  });
+
+  it('(a2) a gate rejection followed by a resolution does not hot-loop (floored at MIN_FIRST_SYNC_RETRY_INTERVAL_MS), addStrand called exactly once', async () => {
+    jest.useFakeTimers({ doNotFake: ['queueMicrotask'] });
+    try {
+      const node = makeFakeNode();
+      const gateError = makeGateError('networkhash123');
+      node.addStrand.mockRejectedValueOnce(gateError);
+
+      let calls = 0;
+      node.whenStrandWritable.mockImplementation(async (strandId: string) => {
+        calls += 1;
+        if (calls === 1) {
+          // Immediate rejection — the hot-loop guard must still floor the retry.
+          throw makeGateError(strandId);
+        }
+        node.__markWritable();
+        return { strandId, database: { getDatabase: () => node.db } };
+      });
+
+      const factory = createStrandDbFactory(node);
+      const resultPromise = factory('networkhash123');
+
+      // Flush the first (rejecting) whenStrandWritable attempt.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(node.whenStrandWritable).toHaveBeenCalledTimes(1);
+
+      // Advance less than the floor — the second attempt must not have fired yet.
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(node.whenStrandWritable).toHaveBeenCalledTimes(1);
+
+      // Advance past the floor — the second attempt fires and resolves.
+      await jest.advanceTimersByTimeAsync(5000);
+      const db = await resultPromise;
+
+      expect(db).toBe(node.db);
+      expect(node.whenStrandWritable).toHaveBeenCalledTimes(2);
+      expect(node.addStrand).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('(b) a generic addStrand rejection rejects the factory with the SAME error object; whenStrandWritable and onAwaitingFirstSync never called', async () => {
+    const node = makeFakeNode();
+    const boom = new Error('boom');
+    node.addStrand.mockRejectedValueOnce(boom);
+    const onAwaitingFirstSync = jest.fn();
+
+    const factory = createStrandDbFactory(node, { onAwaitingFirstSync });
+
+    await expect(factory('networkhash123')).rejects.toBe(boom);
+    expect(node.whenStrandWritable).not.toHaveBeenCalled();
+    expect(onAwaitingFirstSync).not.toHaveBeenCalled();
+  });
+
+  it('(b2) a gate-named error for a DIFFERENT strand rejects the factory unchanged (not waited on)', async () => {
+    const node = makeFakeNode();
+    const otherStrandError = makeGateError('some-other-strand');
+    node.addStrand.mockRejectedValueOnce(otherStrandError);
+
+    const factory = createStrandDbFactory(node);
+
+    await expect(factory('networkhash123')).rejects.toBe(otherStrandError);
+    expect(node.whenStrandWritable).not.toHaveBeenCalled();
+  });
+
+  it('(b3) a non-gate whenStrandWritable rejection rejects the factory with it', async () => {
+    const node = makeFakeNode();
+    const gateError = makeGateError('networkhash123');
+    node.addStrand.mockRejectedValueOnce(gateError);
+    const notRunning = new Error('strand not running on this node');
+    node.whenStrandWritable.mockRejectedValueOnce(notRunning);
+
+    const factory = createStrandDbFactory(node);
+
+    await expect(factory('networkhash123')).rejects.toBe(notRunning);
+  });
+
+  it('(c) aborting the signal while whenStrandWritable is pending rejects with StrandWaitCancelledError, removes the abort listener, and never touches the orphaned resolution', async () => {
+    const node = makeFakeNode();
+    const gateError = makeGateError('networkhash123');
+    node.addStrand.mockRejectedValueOnce(gateError);
+
+    let resolveOrphan!: (value: unknown) => void;
+    node.whenStrandWritable.mockImplementationOnce(
+      () =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        new Promise<any>((resolve) => {
+          resolveOrphan = resolve;
+        }),
+    );
+
+    const controller = new AbortController();
+    const addSpy = jest.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = jest.spyOn(controller.signal, 'removeEventListener');
+
+    const factory = createStrandDbFactory(node, { signal: controller.signal });
+    const resultPromise = factory('networkhash123');
+
+    // Let addStrand reject and the wait begin (whenStrandWritable called, pending).
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(node.whenStrandWritable).toHaveBeenCalledTimes(1);
+
+    controller.abort();
+
+    await expect(resultPromise).rejects.toBeInstanceOf(StrandWaitCancelledError);
+    expect(addSpy).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+
+    // Orphaned whenStrandWritable resolving later must not call setSchemaPath/getDatabase,
+    // and must not surface as an unhandled rejection.
+    resolveOrphan({ strandId: 'networkhash123', database: { getDatabase: () => node.db } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(node.db.setSchemaPath).not.toHaveBeenCalled();
+  });
+
+  it('(c2) an already-aborted signal rejects with StrandWaitCancelledError without calling whenStrandWritable', async () => {
+    const node = makeFakeNode();
+    const gateError = makeGateError('networkhash123');
+    node.addStrand.mockRejectedValueOnce(gateError);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const factory = createStrandDbFactory(node, { signal: controller.signal });
+
+    await expect(factory('networkhash123')).rejects.toBeInstanceOf(StrandWaitCancelledError);
+    expect(node.whenStrandWritable).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,15 @@ import { seedDevNetwork } from '../dev-seed'
 import { deriveTimeline } from '../../timeline/derive-timeline'
 import { TIMELINE_STAGE_IDS } from '../../timeline/stages'
 import type { TimelineStageId } from '../../timeline/stages'
+import { setDeviceKeyWrapProviderForTests } from '../device-key-wrap'
+import { createInMemoryKeyWrapProviderForTests } from '../__fixtures__/in-memory-key-wrap-provider'
+
+// D-42 (Phase 62 plan 08): seedDevNetwork -> getOrCreateDeviceUser now needs a DeviceKeyWrapProvider.
+// Registered at FILE scope (before this file's own describe-level beforeAll seed) so the seed in
+// that beforeAll already has a provider installed.
+const wrapProvider = createInMemoryKeyWrapProviderForTests()
+beforeAll(() => setDeviceKeyWrapProviderForTests(wrapProvider))
+afterAll(() => setDeviceKeyWrapProviderForTests(undefined))
 
 const DAY_MS = 86_400_000
 

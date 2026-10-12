@@ -9,9 +9,10 @@
  * `pickElectionId` helper, same `let live = true` cancellation guard, one try/catch over the
  * whole chain): `getEngine('elections')` -> `getElections()` -> `openElection(id)` ->
  * `getElectionDetails()` -> `details.current.keyholders`. The released/total counts are a
- * SEPARATE read via `useVoterApp().getElection()` (D-04: `keysReleased`/`keysTotal` legitimately
- * live on the voter app's own lifecycle-content fixture, not on the real engine record — there is
- * no per-keyholder release count anywhere in vote-core or vote-engine).
+ * SEPARATE read via `useVoterApp().getElection()` (D-04). The election-level released count is the
+ * release engine's accepted-release count (D-17), carried on `getElection()`; it is absent, and the
+ * count line HIDDEN, when no election key is published or the read fails. Never "0 of N": that
+ * would claim a release state nobody measured.
  */
 import React, {useEffect, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
@@ -22,13 +23,13 @@ import FontAwesome6 from 'react-native-vector-icons/FontAwesome6';
 import type {IElectionsEngine, InviteStatus, SentKeyholderInvite} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {globalStyles} from '../../theme/styles';
-import {pickElectionId} from './TimelineScreen';
+import {pickElectionId} from '../../engines/election-read';
 
 type Keyholder = InviteStatus<SentKeyholderInvite>;
 
 type ScreenState =
 	| {kind: 'loading'}
-	| {kind: 'ready'; keyholders: Keyholder[]; released: number; total: number}
+	| {kind: 'ready'; keyholders: Keyholder[]; released: number | null; total: number}
 	| {kind: 'indeterminate'};
 
 export default function KeyholdersScreen() {
@@ -71,13 +72,13 @@ export default function KeyholdersScreen() {
 				}
 
 				// Election-level released/total (D-04): read via getElection(), NEVER the engine
-				// chain above — there is no per-keyholder release datum in vote-core/vote-engine.
-				// keysTotal is absent on some lifecycle entries while keysReleased is present; the
-				// clamp prevents an incoherent "9 of 2" when a mock released count outruns the real
-				// keyholder count.
-				const election = await getElection();
-				const total = election.keysTotal ?? keyholders.length;
-				const released = Math.min(election.keysReleased ?? 0, total);
+				// chain above — it is the release engine's accepted-release count (D-17), carried by getElection().
+				// A failed election read only costs the count line, never the keyholder list. The
+				// clamp prevents an incoherent "9 of 2" when a review-fixture released count outruns
+				// the real keyholder count.
+				const election = await getElection().catch(() => null);
+				const total = election?.keysTotal ?? keyholders.length;
+				const released = election?.keysReleased === undefined ? null : Math.min(election.keysReleased, total);
 
 				if (live) setState({kind: 'ready', keyholders, released, total});
 			} catch {
@@ -163,18 +164,20 @@ export default function KeyholdersScreen() {
 
 			{isList && state.kind === 'ready' ? (
 				<View testID="keyholders-list">
-					<Text
-						testID="keyholders-released-count"
-						style={{
-							color: colors.textSecondary,
-							fontFamily: fonts.regular.fontFamily,
-							fontWeight: fonts.regular.fontWeight,
-							fontSize: typeScale.body.fontSize,
-							lineHeight: typeScale.body.lineHeight,
-							marginBottom: 16,
-						}}>
-						{t('keyholders.releasedCount', {released: state.released, total: state.total})}
-					</Text>
+					{state.released !== null ? (
+						<Text
+							testID="keyholders-released-count"
+							style={{
+								color: colors.textSecondary,
+								fontFamily: fonts.regular.fontFamily,
+								fontWeight: fonts.regular.fontWeight,
+								fontSize: typeScale.body.fontSize,
+								lineHeight: typeScale.body.lineHeight,
+								marginBottom: 16,
+							}}>
+							{t('keyholders.releasedCount', {released: state.released, total: state.total})}
+						</Text>
+					) : null}
 					{state.keyholders.map((kh, index) => (
 						<View key={index} testID="keyholders-row" style={styles.row}>
 							<Text

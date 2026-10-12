@@ -41,8 +41,7 @@ import { AssociationEngine } from '../src/association/association-engine.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
 import { PlayIntegrityVerifier } from '../src/association/play-integrity-verifier.js'
 import type { IIntegrityKeyProvider } from '../src/association/key-provider.js'
-import { createTestNetwork, addTestAuthority, addTestElection } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, addTestElection, testKeyPairFor } from './fixtures/test-context.js'
 import { generateSyntheticJweKeyMaterial, SYNTHETIC_EXPECTED_APP_IDENTITY } from './fixtures/attestation/synthetic-jwe.js'
 import { generateTestRootCa } from './fixtures/attestation/test-root-ca.js'
 import { buildSyntheticDeviceAttestation } from './fixtures/attestation/synthetic-device-attestation.js'
@@ -57,7 +56,7 @@ import type { EngineContext } from '../src/types.js'
 
 /** Build a real secp256k1 sign callback (@noble/curves v2 defaults — prehash:true). */
 function makeRealSigner (userId: string): { sign: (digest: Uint8Array) => Promise<Signature> } {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   const sign = async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes) // v2 default: prehash:true

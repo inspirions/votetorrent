@@ -1435,6 +1435,12 @@ jobs:
           node scripts/assert-ci-baselines.mjs selftest
           echo "RECEIPT baseline-checker-selftest" | tee -a ci-receipt.txt
 
+      - name: Prove the card-button geometry gate can fail
+        run: |
+          set -euo pipefail
+          node scripts/assert-card-button-geometry.mjs --selftest
+          echo "RECEIPT geometry-gate-selftest" | tee -a ci-receipt.txt
+
       # The vote-engine suite exits non-zero BY DESIGN (9 known pre-existing
       # failures, per scripts/ci-baselines.json's voteEngine.expectedFailing --
       # that file is the single source of truth; this comment restates it only
@@ -1492,4 +1498,4 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/assert-ci-baselines.mjs receipts ci-receipt.txt \
-            toolchain baseline-checker-selftest vote-engine-baseline authority-typecheck-baseline
+            toolchain baseline-checker-selftest geometry-gate-selftest vote-engine-baseline authority-typecheck-baseline

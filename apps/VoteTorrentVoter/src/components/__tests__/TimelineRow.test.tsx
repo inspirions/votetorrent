@@ -84,13 +84,40 @@ describe('TimelineRow (59-07)', () => {
 		expect(tr.root.findAllByType(CountdownTimer, {deep: false}).length).toBe(0);
 	});
 
-	it('a past Voting Period row renders "View submission", not "Preview ballot" or "Vote now"', () => {
+	it('a past Voting Period row renders "View saved vote", not "Preview ballot" or "Vote now"', () => {
 		const row = buildRowFixture({stageId: 'votingStarts', status: 'past'});
 		const tr = renderRow({row, onViewSubmission: jest.fn(), onPreviewBallot: jest.fn(), onVoteNow: jest.fn()});
 
 		expect(tr.root.findAllByProps({testID: 'timeline-row-view-submission-votingStarts'}, {deep: false}).length).toBe(1);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-preview-ballot-votingStarts'}, {deep: false}).length).toBe(0);
 		expect(tr.root.findAllByProps({testID: 'timeline-row-vote-now-votingStarts'}, {deep: false}).length).toBe(0);
+	});
+
+	it('TR1: a current Voting Period row with only onViewSubmission renders "View saved vote" once and no "Vote now"', () => {
+		const row = buildRowFixture({stageId: 'votingStarts', status: 'current', instantMs: FIXTURE_NOW_MS - 1000});
+		const tr = renderRow({row, onViewSubmission: jest.fn(), countdownTargetIso: CLOSE_ISO});
+
+		expect(tr.root.findAllByProps({testID: 'timeline-row-view-submission-votingStarts'}, {deep: false}).length).toBe(1);
+		expect(countResolvedText(tr, 'View saved vote')).toBe(1);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-vote-now-votingStarts'}, {deep: false}).length).toBe(0);
+	});
+
+	it('TR2: a current row with both callbacks renders both, Vote now first', () => {
+		const row = buildRowFixture({stageId: 'votingStarts', status: 'current', instantMs: FIXTURE_NOW_MS - 1000});
+		const tr = renderRow({row, onVoteNow: jest.fn(), onViewSubmission: jest.fn(), countdownTargetIso: CLOSE_ISO});
+
+		const ids = tr.root
+			.findAll(n => typeof n.type === 'string' && typeof n.props.testID === 'string' && /^timeline-row-(vote-now|view-submission)-votingStarts$/.test(n.props.testID))
+			.map(n => n.props.testID as string);
+		expect(ids).toEqual(['timeline-row-vote-now-votingStarts', 'timeline-row-view-submission-votingStarts']);
+	});
+
+	it('TR3: a future Voting Period row with both previewBallot and onViewSubmission renders preview-ballot only', () => {
+		const row = buildRowFixture({stageId: 'votingStarts', status: 'future'});
+		const tr = renderRow({row, onViewSubmission: jest.fn(), onPreviewBallot: jest.fn()});
+
+		expect(tr.root.findAllByProps({testID: 'timeline-row-preview-ballot-votingStarts'}, {deep: false}).length).toBe(1);
+		expect(tr.root.findAllByProps({testID: 'timeline-row-view-submission-votingStarts'}, {deep: false}).length).toBe(0);
 	});
 
 	// IN-01: mirrors TimelineRail.test.tsx:298's predicate. Counting RESOLVED TEXT, not a testID,

@@ -10,6 +10,7 @@ import {StatusBar, useColorScheme} from 'react-native';
 import {AppProvider} from './src/providers/AppProvider';
 import {CadreNodeProvider} from './src/providers/CadreNodeProvider';
 import {SettingsProvider} from './src/providers/SettingsProvider';
+import {ToastProvider} from './src/components/Toast';
 
 export default function App() {
 	const colorScheme = useColorScheme();
@@ -39,7 +40,10 @@ export default function App() {
 					    EditQuestion/EditQuestionOption. Per-flow reset happens on
 					    CreateBallot mount (fresh) and EditBallot load (from engine). */}
 					<BallotDraftProvider>
-						<RootNavigator />
+						{/* Inside NavigationContainer: the toast reads the theme. */}
+						<ToastProvider>
+							<RootNavigator />
+						</ToastProvider>
 					</BallotDraftProvider>
 				</NavigationContainer>
 			</AppProvider>

@@ -85,6 +85,20 @@ export const NON_CODE_EXTENSIONS = Object.freeze([
 	'.ico',
 ]);
 
+/**
+ * Compound suffixes a source scan may skip, checked BEFORE the plain extension so the bare
+ * extension stays unclassified (a stray `notes.txt` under a scan root still lands in `unknown`).
+ *
+ * Same decision as NON_CODE_EXTENSIONS, made per suffix:
+ *  - `.fixture.txt`: the Authority's raw-error guard fixtures
+ *    (`apps/VoteTorrentAuthority/src/screens/__tests__/__fixtures__/raw-error/`). They are text
+ *    the guard reads with `readFileSync` and feeds to its scanner as a string; nothing compiles,
+ *    imports or bundles them, so a table name in one is never code. They are `.txt` precisely so
+ *    that no toolchain treats them as source.
+ * @type {ReadonlyArray<string>}
+ */
+export const NON_CODE_SUFFIXES = Object.freeze(['.fixture.txt']);
+
 /** Directory names never walked. */
 const SKIP_DIRS = Object.freeze(['node_modules', 'dist', 'dist-gate', '.git']);
 
@@ -157,7 +171,9 @@ export function partitionByExtension(files) {
 	const out = { scanned: [], skipped: [], unknown: [] };
 	for (const file of files) {
 		const ext = path.extname(file).toLowerCase();
-		if (CODE_EXTENSIONS.includes(ext)) out.scanned.push(file);
+		const lower = path.basename(file).toLowerCase();
+		if (NON_CODE_SUFFIXES.some((suffix) => lower.endsWith(suffix) && lower.length > suffix.length)) out.skipped.push(file);
+		else if (CODE_EXTENSIONS.includes(ext)) out.scanned.push(file);
 		else if (NON_CODE_EXTENSIONS.includes(ext)) out.skipped.push(file);
 		else out.unknown.push(file);
 	}

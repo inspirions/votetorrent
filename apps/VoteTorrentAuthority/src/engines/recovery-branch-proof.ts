@@ -43,9 +43,15 @@
  * The ceremony script's `recover-branch` leg asserts the SDK>=30 `BiometricPrompt` dispatch by
  * source guarantee. Below API 30 the leg is now `N/A` — there is no branch left to measure or
  * infer, since the native layer terminally rejects before any dispatch decision.
+ *
+ * iOS: `sdkInt` / the `branch` label are not meaningful there (`Platform.Version` is the iOS version
+ * string, and there is no API-30 split). The proof itself is still valid on iOS: it signs with the
+ * recovery key through `nativeSignInputBase64(PROOF_DIGEST, platformOS)` (iOS pre-hashes, Android
+ * does not) and verifies with the schema verifier. The deferred iPhone re-check (I-8-alt) uses it.
  */
 
 import { verifySigP256 } from '@votetorrent/vote-engine/rn';
+import { nativeSignInputBase64 } from '@votetorrent/attestation-native/src/native-sign-input';
 import { getDeviceProvisioningRecord } from './device-user';
 
 const TAG = '[d26a-local]';
@@ -156,6 +162,7 @@ export async function runRecoveryBranchProof(
 	recoveryKeyAlias: string,
 	sdkInt: number,
 	prompts: { title: string; subtitle: string; negative: string },
+	platformOS: string,
 ): Promise<RecoveryBranchProofResult> {
 	const branch = sdkInt >= 30 ? 'biometric-prompt-device-credential' : 'unsupported-below-api-30';
 	console.info(`${TAG} starting`, JSON.stringify({ sdkInt, branch, recoveryKeyAlias }));
@@ -191,7 +198,7 @@ export async function runRecoveryBranchProof(
 		console.info(`${TAG} ACTION REQUIRED — satisfy the DEVICE CREDENTIAL prompt (not a fingerprint)`);
 		const signed = (await native.signWithRecoveryKey(
 			recoveryKeyAlias,
-			base64FromDigestBytes(PROOF_DIGEST),
+			nativeSignInputBase64(PROOF_DIGEST, platformOS),
 			prompts.title,
 			prompts.subtitle,
 			prompts.negative,

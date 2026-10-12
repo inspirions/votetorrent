@@ -8,8 +8,9 @@
 //
 //  CONTRACT (must match packages/attestation-native/src/specs/NativeAttestation.ts):
 //    64-byte compact `r‖s`, `s` normalized into the LOWER half of the P-256 group order,
-//    hex-encoded. Matches @noble/curves v2 `verify()` defaults: prehash:true, lowS:true,
-//    format:'compact'. Callers must NOT re-normalize.
+//    hex-encoded. The SHAPE matches @noble/curves v2 `verify()` defaults (lowS:true,
+//    format:'compact'); the hashed domain (prehash) is the caller's concern — iOS signs its input
+//    as the final hash (prehash:false), see native-sign-input.ts. Callers must NOT re-normalize.
 //
 //  Android's Keystore returns this shape already. iOS SecKeyCreateSignature returns DER with S
 //  UN-normalized, so this conversion is load-bearing on iOS and has no Android counterpart.

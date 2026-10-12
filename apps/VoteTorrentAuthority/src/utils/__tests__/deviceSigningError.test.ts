@@ -3,7 +3,6 @@ import {
 	DEVICE_SIGNING_ERROR_COPY_KEY,
 	isDeviceSigningError,
 	isNavigationClass,
-	isSignatureDesyncError,
 	mapDeviceSigningError,
 } from '../deviceSigningError';
 
@@ -144,49 +143,40 @@ describe('recovery-key-invalidated / recovery-key-not-registered (49-14 follow-u
 	});
 });
 
-// 49-14 follow-up (interrupted-handleRecovery Keystore/metadata desync): isSignatureDesyncError
-// is the RESCUE-path predicate — a message-based classification, not part of the code-based
-// taxonomy above (see its own doc comment).
-describe('isSignatureDesyncError (49-14 follow-up)', () => {
-	test('recognizes the raw, unwrapped ConstraintError shape observed on real hardware', () => {
-		const err = Object.assign(new Error('CHECK constraint failed: SignatureValid'), {
-			name: 'ConstraintError',
-		});
-		expect(isSignatureDesyncError(err)).toBe(true);
+// Frozen literal copy of CODE_TO_CLASS taken before the O-10 fix.
+const EXPECTED_SNAPSHOT: Record<string, string> = {
+	CANCELED: 'cancellation',
+	NO_BIOMETRICS_ENROLLED: 'no-biometrics-enrolled',
+	LOCKOUT: 'lockout',
+	LOCKOUT_PERMANENT: 'lockout-permanent',
+	KEY_INVALIDATED_REASSOCIATE: 'key-invalidated',
+	NO_KEY_PROVISIONED: 'no-key-provisioned',
+	NO_DEVICE_CREDENTIAL: 'no-device-credential',
+	RECOVERY_KEY_INVALIDATED: 'recovery-key-invalidated',
+	RECOVERY_KEY_NOT_REGISTERED: 'recovery-key-not-registered',
+	RECOVERY_UNSUPPORTED_OS: 'recovery-unsupported-os',
+};
+
+describe('own-property code lookup (O-10)', () => {
+	const PROTOTYPE_NAMES = ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf'];
+
+	test.each(PROTOTYPE_NAMES)('code %s is not a device-signing code and maps to biometric-error', code => {
+		expect(isDeviceSigningError({ code })).toBe(false);
+		expect(mapDeviceSigningError({ code })).toBe('biometric-error');
 	});
 
-	test('recognizes the wrapped shape produced by ElectionsEngine.rethrow/NetworkEngine-style catch blocks', () => {
-		const err = new Error('Quereus error (code 19): CHECK constraint failed: SignatureValid');
-		expect(isSignatureDesyncError(err)).toBe(true);
+	test('every real code keeps its exact class (snapshot taken before the fix)', () => {
+		expect({ ...CODE_TO_CLASS }).toEqual(EXPECTED_SNAPSHOT);
+		for (const [code, cls] of Object.entries(EXPECTED_SNAPSHOT)) {
+			expect(mapDeviceSigningError({ code })).toBe(cls);
+			expect(isDeviceSigningError({ code })).toBe(true);
+		}
 	});
 
-	test('recognizes a plain string message carrying the same shape', () => {
-		expect(isSignatureDesyncError('CHECK constraint failed: SignatureValid')).toBe(true);
-	});
-
-	test('does NOT match InviteSignatureValid — a different table, different signing path', () => {
-		const err = new Error('CHECK constraint failed: InviteSignatureValid');
-		expect(isSignatureDesyncError(err)).toBe(false);
-	});
-
-	test('does NOT match a CHECK failure unrelated to any signature', () => {
-		const err = new Error('CHECK constraint failed: RevisionDeadlineValid');
-		expect(isSignatureDesyncError(err)).toBe(false);
-	});
-
-	test('does NOT match a SignatureValid-mentioning message with no constraint marker at all', () => {
-		const err = new Error('SignatureValid failed for some unrelated reason');
-		expect(isSignatureDesyncError(err)).toBe(false);
-	});
-
-	test('does NOT match undefined, null, {}, or a device-signing-coded error', () => {
-		expect(isSignatureDesyncError(undefined)).toBe(false);
-		expect(isSignatureDesyncError(null)).toBe(false);
-		expect(isSignatureDesyncError({})).toBe(false);
-		expect(isSignatureDesyncError({ code: 'CANCELED' })).toBe(false);
-	});
-
-	test('does NOT match a generic engine failure (the pass-through case must stay pass-through)', () => {
-		expect(isSignatureDesyncError(new Error('engine write failed'))).toBe(false);
+	test('a non-string code is not mine and maps to biometric-error', () => {
+		for (const code of [5, {}, ['CANCELED'], null]) {
+			expect(isDeviceSigningError({ code })).toBe(false);
+			expect(mapDeviceSigningError({ code })).toBe('biometric-error');
+		}
 	});
 });

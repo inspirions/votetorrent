@@ -26,4 +26,45 @@ export {
 	computeAssertionDigest,
 	computePopDigest,
 	createRealAttestationProducer,
+	DEFAULT_DEVICE_KEY_SIGN_PROMPT,
 } from './real-attestation-producer'
+export type { SignDeviceKeyDigestOptions } from './real-attestation-producer'
+
+// D-42 (Phase 62 plan 08): the generic, alias-keyed AES-256-GCM secret-wrap capability consumed
+// by this plan's Voter `device-key-wrap.ts` and by later plans (62-21, 62-26) in other apps. Same
+// "no re-export of the TurboModule default" rule as above — `secret-wrap.ts`'s own `getNative()`
+// stays the only access path, lazily required inside each call.
+export {
+	VOTETORRENT_VOTER_IDENTITY_WRAP_KEY_V1,
+	WRAP_KEY_ALIAS_PATTERN,
+	VOTE_RECORD_WRAP_KEY_ALIAS_PATTERN,
+	isDeletableWrapKeyAlias,
+	MAX_AUTH_WINDOW_SECONDS,
+	isValidWrapKeyAlias,
+	SECRET_WRAP_ERROR_CODES,
+	SecretWrapError,
+	createNativeSecretWrapper,
+} from './secret-wrap'
+export type {
+	WrapKeySecurityLevel,
+	WrappedSecret,
+	SecretWrapPrompt,
+	SecretWrapOptions,
+	SecretWrapper,
+	ReplaceableSecretWrapper,
+	SecretWrapErrorCode,
+} from './secret-wrap'
+
+// Phase 62 plan 75 (D-36): write a cache file and share it AS A FILE. Named exports only — same
+// "no re-export of the TurboModule default" rule as above; `file-share.ts` requires it lazily.
+export { FileShareError, writeShareFile, shareFileAndroid, deleteCachedFile } from './file-share'
+export type { FileShareErrorCode } from './file-share'
+
+// Phase 63 review (CR-01, WR-03): FLAG_SECURE toggle and sensitive clipboard copy. Named exports
+// only; `secure-surface.ts` requires the TurboModule lazily and never throws.
+export { setSecureScreen, copySensitiveText } from './secure-surface'
+export type { SensitiveCopyResult } from './secure-surface'
+
+// Phase 62 plan 90 (gap 2): the single definition of the bytes native signs for verifySigP256-checked
+// signatures. Pure module (no TurboModule), safe in the barrel.
+export { nativeSignInputBytes, nativeSignInputBase64 } from './native-sign-input'

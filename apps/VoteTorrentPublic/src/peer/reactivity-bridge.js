@@ -180,7 +180,7 @@
  *    `56-24-CONNECTION-MEASUREMENT.md` is the record this measurement feeds.
  */
 
-import { edgeProfile, reactivityTopicId, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
+import { edgeProfile, reactivityCollectionTopicId, DEFAULT_SUPER_MAJORITY_THRESHOLD, CohortBackoffError, subscriberTtlForProfile } from '@optimystic/db-core';
 import { ReactivitySubscriptionManager, reactivityTailBytes, peerIdToBytes } from '@optimystic/db-p2p';
 import { probeFretRouting, FRET_ROUTING_PROBE_PREFIX } from './fret-routing-probe.js';
 import { connectionLifecycleSnapshot, probeBootstrapDial, CONNECTION_LIFECYCLE_PROBE_PREFIX } from './connection-lifecycle-probe.js';
@@ -499,7 +499,7 @@ export async function applyPeerRowBatch(db, table, ops) {
  * `tailBytes = reactivityTailBytes(tailId)` (NEVER db-core's OTHER,
  * asynchronous tail-byte conversion, which `sha256`s first and would resolve
  * a different coord, silently stranding origination) ->
- * `topicId = reactivityTopicId(tailBytes)` -> construct the
+ * `topicId = reactivityCollectionTopicId(collectionId)` -> construct the
  * `ReactivitySubscriptionManager` with `deliver` bound to this module's own
  * `onVerifiedNotification` -> register `manager.onNotification` on the
  * subscriber registry under `topicId` -> `await manager.register()`.
@@ -559,7 +559,11 @@ export async function startPeerReplication(options) {
 	// `H(tailId || "reactivity")` and resolve a DIFFERENT coord --
 	// origination would silently never reach this subscriber.
 	const tailBytes = reactivityTailBytes(tailId);
-	const topicId = reactivityTopicId(tailBytes);
+	// @optimystic 1.10: the reactivity topic is anchored on the COLLECTION, not the tail
+	// (`H(collectionId || "reactivity")`, stable for the collection's life); the tail now only
+	// names the root group. Same derivation db-p2p's own `ReactivityCollectionWatch` registers
+	// under, so origination and this subscriber still meet on one topicId.
+	const topicId = reactivityCollectionTopicId(collectionId);
 
 	/**
 	 * The whole point of this module. Reads top to bottom: `readRows` once ->
@@ -617,7 +621,10 @@ export async function startPeerReplication(options) {
 	const manager = new ReactivitySubscriptionManager({
 		service,
 		collectionId,
-		tailIdAtAttach: tailBytes,
+		tail: tailBytes,
+		// @optimystic 1.10 requires the ratio the root group's certificates are signed under; this
+		// node runs db-p2p's default consensus threshold (nothing here overrides `clusterPolicy`).
+		quorumRatio: DEFAULT_SUPER_MAJORITY_THRESHOLD,
 		profile: resolvedProfile,
 		deliver: onVerifiedNotification,
 	});

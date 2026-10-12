@@ -22,7 +22,9 @@ import {
   addTestAuthority,
   addTestElection,
   makeTestSignCallback,
-  seedSignedMutation as seedSignedMutationFixture
+  provisionTestIntakeRecipient,
+  seedSignedMutation as seedSignedMutationFixture,
+  testKeyPairFor
 } from './fixtures/test-context.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import type { TestKeyPair } from './fixtures/keys.js'
@@ -47,7 +49,7 @@ const DAY_TOLERANCE = 0.05
 // ---------------------------------------------------------------------------
 
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const privBytes = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => {
     const sig = secp256k1.sign(digest, privBytes)
@@ -217,6 +219,7 @@ describe('D-12 record validity — ElectionRecordValidityPolicy', () => {
   it("finalizeRegistrantApproval overrides a ten-year submitter-proposed expiration with the policy's RegistrantValidityDays value", async () => {
     const net = await createTestNetwork()
     const auth = await addTestAuthority(net)
+    await provisionTestIntakeRecipient(auth.ctx, auth.authority.id)
     const elec = await addTestElection(auth)
     const electionId = await resolveElectionId(elec.ctx, elec.authority.id)
     // 7 days — distinct from BOTH the ten-year submitter proposal AND the 365-day fallback, so a

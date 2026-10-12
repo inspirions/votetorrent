@@ -43,8 +43,7 @@ import { PlatformDispatchingAttestationVerifier } from '../src/association/platf
 import { PlayIntegrityVerifier } from '../src/association/play-integrity-verifier.js'
 import { AssociationAssociateBuilder } from '../src/association/builders/association-associate-builder.js'
 import { RegistrationEngine } from '../src/registration/registration-engine.js'
-import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
-import { randomTestKeyPair } from './fixtures/keys.js'
+import { createTestNetwork, addTestAuthority, testKeyPairFor } from './fixtures/test-context.js'
 import { APPLE_APP_ATTEST_ROOT_DER } from './fixtures/attestation/apple-app-attest-root.js'
 import type { TestAuthorityContext } from './fixtures/test-context.js'
 
@@ -73,7 +72,7 @@ const FUTURE_REGISTRANT_EXPIRATION = '2099-01-01T00:00:00.000Z'
 const FIXTURE_CAPTURED_AT = new Date(fixture.startedAt)
 
 function makeRealSigner (userId: string): (digest: Uint8Array) => Promise<Signature> {
-  const { privateHex, publicHex } = randomTestKeyPair()
+  const { privateHex, publicHex } = testKeyPairFor(userId)
   const priv = hexToBytes(privateHex)
   return async (digest: Uint8Array): Promise<Signature> => ({
     signerUserId: userId,

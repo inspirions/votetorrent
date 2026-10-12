@@ -14,14 +14,30 @@
  *
  * headerShown:false for RegistrationHome (navigation/index.tsx) — NetworkHeader replaces the plain
  * native header. A __DEV__-gated isRegistered toggle is kept for manual QA (compiled out of release).
+ *
+ * Phase 62 Plan 28 (D-40/D-45) addition: below the card, a `useFocusEffect`-driven read of
+ * `resolveRegistrationCodeAvailability` offers 'available' -> the show-again link (re-resolves
+ * fresh on tap, never cached — 59 D-23), 'not-registered' -> `newDevice.entryLink` into
+ * `ContinueOnAnotherDevice`, 'not-sent'/'not-holder'/'unavailable' -> the code-unavailable notice,
+ * and an unsettled read (null) -> a distinct "checking" line, so "still loading" is never visually
+ * identical to "settled with nothing to show" (UAT 62 test 14: a settled 'unavailable' rendered
+ * nothing and read as a hang).
+ * Known limitation (flagged in the plan SUMMARY): this read is independent of the session-only
+ * `isRegistered` toggle above, so a toggled-off approved device can show the not-registered card
+ * alongside "Show my registration code".
  */
-import React, {useCallback, useState} from 'react';
+import React, {useCallback, useRef, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {useNavigation, useTheme} from '@react-navigation/native';
+import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
+import {useTranslation} from 'react-i18next';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {useRegistrationDraft} from '../../providers/RegistrationDraftProvider';
+import {resolveAttestationProducer} from '../../engines/attestation-producer';
+import {resolveRegistrationCodeAvailability} from '../../engines/continuity';
+import type {RegistrationCodeAvailability} from '../../engines/continuity';
+import {RegistrationConfirmationCodeCard} from './RegistrationConfirmationCodeCard';
 import type {RegistrationStackParamList} from '../../navigation/types';
 import {RegistrationCard} from '../../components/RegistrationCard';
 import {NetworkHeader} from '../../components/NetworkHeader';
@@ -32,8 +48,8 @@ type RegistrationNavigationProp = NativeStackNavigationProp<
 >;
 
 export default function RegistrationScreen() {
-	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline mockData import.
-	const {isInitialized} = useVoterApp();
+	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
+	const {isInitialized, getEngine} = useVoterApp();
 	const {draft} = useRegistrationDraft();
 	// Phase 44-07 (D-02): local session-only state — see file header comment.
 	const [isRegistered, setIsRegisteredState] = useState(false);
@@ -46,6 +62,53 @@ export default function RegistrationScreen() {
 	}, []);
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<RegistrationNavigationProp>();
+	const {t} = useTranslation('continuity');
+
+	const [codeAvailability, setCodeAvailability] = useState<RegistrationCodeAvailability | null>(null);
+	// Explicit, voter-initiated reveal (D-23/D-45) — set only by the showAgainLink tap below, and
+	// cleared on blur so a return visit is a fresh, un-revealed state, never a stale one.
+	const [revealed, setRevealed] = useState<RegistrationCodeAvailability | null>(null);
+
+	useFocusEffect(
+		useCallback(() => {
+			let cancelled = false;
+			(async () => {
+				const result = await resolveRegistrationCodeAvailability({
+					getEngine,
+					getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+				});
+				if (!cancelled) setCodeAvailability(result);
+			})();
+			return () => {
+				cancelled = true;
+				setRevealed(null);
+			};
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, [getEngine]),
+	);
+
+	const retryInFlightRef = useRef(false);
+	async function onRetryCodeRead() {
+		if (retryInFlightRef.current) return;
+		retryInFlightRef.current = true;
+		try {
+			const result = await resolveRegistrationCodeAvailability({
+				getEngine,
+				getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+			});
+			setCodeAvailability(result);
+		} finally {
+			retryInFlightRef.current = false;
+		}
+	}
+
+	async function onShowAgain() {
+		const result = await resolveRegistrationCodeAvailability({
+			getEngine,
+			getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+		});
+		setRevealed(result);
+	}
 
 	return (
 		<View style={[styles.screen, {backgroundColor: colors.background}]}>
@@ -61,6 +124,76 @@ export default function RegistrationScreen() {
 						onUpdateRegistration={() => navigation.navigate('RegisterPersonal')}
 						onHelp={() => navigation.navigate('RegistrationInfo')}
 					/>
+				) : null}
+
+				{codeAvailability?.kind === 'available' ? (
+					<View style={styles.codeSection}>
+						<Pressable testID="registration-code-show-again-link" onPress={onShowAgain} style={styles.link}>
+							<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+								{t('code.showAgainLink')}
+							</Text>
+						</Pressable>
+						{revealed ? (
+							<RegistrationConfirmationCodeCard
+								state={revealed.kind === 'available' ? {kind: 'code', code: revealed.code} : {kind: 'unavailable'}}
+							/>
+						) : null}
+					</View>
+				) : codeAvailability?.kind === 'not-registered' ? (
+					<View style={styles.codeSection}>
+						<Pressable
+							testID="continue-device-entry-link"
+							onPress={() => navigation.navigate('ContinueOnAnotherDevice')}
+							style={styles.link}>
+							<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+								{t('newDevice.entryLink')}
+							</Text>
+						</Pressable>
+					</View>
+				) : codeAvailability?.kind === 'unavailable' && codeAvailability.reason === 'read-failed' ? (
+					// gap6/WR-07: a FAILED read is retryable and distinct from the permanent not-available
+					// notice. If the failure came before the device's registration was known, the voter
+					// still gets the continue-on-another-device entry so they are never at a dead end.
+					<View style={styles.codeSection}>
+						<Text
+							testID="registration-code-unavailable"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
+							{t('code.unavailable')}
+						</Text>
+						<Pressable testID="registration-code-retry" onPress={onRetryCodeRead} style={styles.link}>
+							<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+								{t('code.retryButton')}
+							</Text>
+						</Pressable>
+						{codeAvailability.registrantKnown === false ? (
+							<Pressable
+								testID="continue-device-entry-link"
+								onPress={() => navigation.navigate('ContinueOnAnotherDevice')}
+								style={styles.link}>
+								<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+									{t('newDevice.entryLink')}
+								</Text>
+							</Pressable>
+						) : null}
+					</View>
+				) : codeAvailability?.kind === 'not-sent' ||
+				  codeAvailability?.kind === 'not-holder' ||
+				  codeAvailability?.kind === 'unavailable' ? (
+					<View style={styles.codeSection}>
+						<Text
+							testID="registration-code-not-available"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
+							{t('code.notAvailableOnDevice')}
+						</Text>
+					</View>
+				) : codeAvailability === null && isInitialized ? (
+					<View style={styles.codeSection}>
+						<Text
+							testID="registration-code-checking"
+							style={{color: colors.textSecondary, fontSize: typeScale.body.fontSize}}>
+							{t('code.checking')}
+						</Text>
+					</View>
 				) : null}
 
 				{/* D-03: __DEV__-gated isRegistered toggle — manual QA only, never ships to release. */}
@@ -86,6 +219,14 @@ const styles = StyleSheet.create({
 	content: {
 		padding: 16,
 	},
+	codeSection: {
+		marginTop: 16, // md
+	},
+	link: {
+		minHeight: 44,
+		justifyContent: 'center',
+	},
+	linkText: {},
 	devToggle: {
 		alignSelf: 'center',
 		paddingVertical: 8,

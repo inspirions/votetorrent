@@ -27,8 +27,9 @@
  * Do NOT hand-roll any signing-ceremony SQL here — every mutation below goes
  * through a real `vote-engine` method (`NetworksEngine.create`, `ElectionsEngine.
  * seedElectionSigning`/`seedElectionRevisionSigning`/`createElection`,
- * `RegistrationEngine.addElectionRegistrationField`) that owns its own Digest/
- * AdminSigning/AdminSignature ceremony internally. The app layer only ever
+ * `RegistrationEngine.addElectionRegistrationField`, `ElectionEngine.proposeBallot`/`submitBallotForConfirmation`,
+`SignatureTasksEngine.completeSignature`)
+ * that owns its own Digest/AdminSigning/AdminSignature ceremony internally. The app layer only ever
  * supplies a `SignCallback` — never a raw private key, never a raw AdminSigning
  * INSERT, and never a schema-CHECK-context signature bypass flag.
  *
@@ -44,8 +45,11 @@ import {
 	ElectionType,
 	type ElectionCoreInit,
 	type ElectionRevisionInit,
+	type Ballot,
+	type BallotSignatureTask,
 	type NetworkInit,
 	type NetworkReference,
+	type Question,
 	type Scope,
 	type User,
 } from '@votetorrent/vote-core'
@@ -53,12 +57,15 @@ import {
 	ElectionsEngine,
 	NetworksEngine,
 	RegistrationEngine,
+	SignatureTasksEngine,
 	peekNextElectionTid,
 	type EngineContext,
 } from '@votetorrent/vote-engine/rn'
 import { createDeviceSigner, type SignCallback } from './device-signer'
 import { getOrCreateDeviceUser } from './device-user'
 import { resolveAttestationProducer } from './attestation-producer'
+import { isDeviceKeyAbsent } from './attestation-failure'
+import { SEED_REGISTERED_STATE_FIXTURE } from './proof-flags.generated'
 
 /** Display name used for the seeded device identity (voter + founding officer, one identity). */
 const DEV_SEED_DISPLAY_NAME = 'Dev Voter'
@@ -115,9 +122,14 @@ function loadRegistrantAssociationSeeder(): SeedRegistrantAssociationFn | undefi
 /**
  * D-23(f)/D-23(b)/D-23(c) — seeds (or re-attaches to) the dev-only `registered`-state
  * fixture: a `Status = 'a'` `Registrant` and its matching `Association`, bound to the
- * SAME P-256 device key `resolveAttestationProducer().provisionDeviceKey()` returns
+ * SAME P-256 device key `resolveAttestationProducer().getCurrentDeviceKey()` returns
  * (resolved by CALLING the producer, never a hardcoded placeholder — D-23b), so a real
  * device-key round trip through `getAssociationsByDeviceKey` finds it.
+ *
+ * OPT-IN (62-51): this fixture is no longer seeded by default. A default-on binding of the stub
+ * device key made every fresh dev Voter read as registered-without-a-code (UAT 62 test 14), hiding
+ * the Continue on This Device entry link. Enable it with `SEED_REGISTERED_STATE_FIXTURE` in
+ * `proof-flags.generated.ts` or the `registeredStateFixture` option of `seedDevNetwork`.
  *
  * HONESTY FENCE: this seeds a UI FIXTURE. It is NEVER evidence that the real
  * registration ceremony works — the real ceremony requires a cross-device authority
@@ -142,8 +154,135 @@ async function seedRegisteredAssociationFixture(
 	// be a silent no-op, never a throw.
 	if (!seedRegistrantAssociation) return;
 
-	const { publicKey: deviceKey } = await resolveAttestationProducer().provisionDeviceKey();
+	// Bind the association to the CURRENT key. `provisionDeviceKey` regenerates the key on Android, so
+	// calling it on a device that already has one would orphan the association (63-18). Create the
+	// key (once) only when none exists, i.e. a fresh install.
+	const producer = resolveAttestationProducer();
+	let deviceKey: string;
+	try {
+		deviceKey = (await producer.getCurrentDeviceKey()).publicKey;
+	} catch (err) {
+		if (!isDeviceKeyAbsent(err)) throw err;
+		deviceKey = (await producer.provisionDeviceKey()).publicKey;
+	}
 	await seedRegistrantAssociation(ctx, authorityId, { id: DEV_SEED_ASSOCIATION_REGISTRANT_ID }, deviceKey, sign);
+}
+
+/** One `select` question for the dev ballot: `voteFor` becomes `optionRange.max`. */
+function devSelectQuestion(
+	code: string,
+	title: string,
+	group: string,
+	sequence: number,
+	voteFor: number,
+	options: Array<[code: string, title: string, party: string]>,
+	required: boolean,
+): Question {
+	return {
+		code,
+		title,
+		instructions: '',
+		type: 'select',
+		optionRange: { min: 1, max: voteFor },
+		group,
+		sequence,
+		required,
+		options: options.map(([optionCode, optionTitle, party]) => ({ code: optionCode, title: optionTitle, details: party })),
+	}
+}
+
+/** The dev election's ballot content (the voter app's former in-memory mock ballot, now real rows). */
+export const DEV_SEED_BALLOT_QUESTIONS: Question[] = [
+	devSelectQuestion('us-senate', 'U.S. Senate', 'Federal', 0, 1, [
+		['diana', 'Diana Foster', 'Democratic Party'],
+		['marcus', 'Marcus Whitfield', 'Republican Party'],
+		['elena', 'Elena Vasquez', 'Independent'],
+	], true),
+	devSelectQuestion('us-house', 'U.S. House of Representatives, District 2', 'Federal', 1, 1, [
+		['james', 'James Okafor', 'Democratic Party'],
+		['laura', 'Laura Bennett', 'Republican Party'],
+	], false),
+	devSelectQuestion('governor', 'Governor', 'State (UT)', 0, 1, [
+		['priya', 'Priya Nandan', 'Democratic Party'],
+		['robert', 'Robert Kessler', 'Republican Party'],
+	], true),
+	// voteFor 2 — the capped-checkbox CandidateSelector variant.
+	devSelectQuestion('state-board-education', 'State Board of Education', 'State (UT)', 1, 2, [
+		['angela', 'Angela Torres', 'Nonpartisan'],
+		['brian', 'Brian Michaels', 'Nonpartisan'],
+		['cynthia', 'Cynthia Park', 'Nonpartisan'],
+		['david', 'David Nguyen', 'Nonpartisan'],
+	], true),
+	devSelectQuestion('state-senate', 'State Senate, District 8', 'State (UT)', 2, 1, [
+		['maria', 'Maria Gutierrez', 'Democratic Party'],
+		['thomas', 'Thomas Reyes', 'Republican Party'],
+	], false),
+]
+
+/**
+ * D-03: runs the real single-officer, threshold-1 ballot confirmation for `ballotId` — the
+ * production `ElectionEngine.submitBallotForConfirmation` followed by
+ * `SignatureTasksEngine.completeSignature` with the device signer (software key: no biometric
+ * prompt). Idempotent and resumable: a confirmed ballot returns immediately; a ballot already
+ * submitted (locked, not yet confirmed) skips the submit and just completes its open task.
+ */
+export async function confirmDevBallot(
+	ctx: EngineContext,
+	ref: NetworkReference,
+	electionId: string,
+	ballotId: string,
+	sign: SignCallback,
+): Promise<void> {
+	const electionEngine = await new ElectionsEngine(ctx).openElection(electionId)
+	const state = await electionEngine.getBallotConfirmationState(ballotId)
+	if (state.confirmed) return
+	if (!state.locked) await electionEngine.submitBallotForConfirmation(ballotId)
+
+	const tasks = new SignatureTasksEngine(ref, ctx)
+	const task = (await tasks.getRequestedSignatures(true)).find(
+		(t) => t.signatureType === 'ballot' && (t as BallotSignatureTask).ballot?.proposed?.id === ballotId,
+	)
+	if (!task) throw new Error('confirmDevBallot: no pending ballot task for ' + ballotId)
+
+	const digest = await tasks.getSignatureDigest(task)
+	await tasks.completeSignature(task, { isAccepted: true, signature: await sign(digest), sign })
+}
+
+/**
+ * Proposes the dev election's ballot through the real `ElectionEngine.proposeBallot` if the
+ * election has none, then confirms it through the real threshold-1 single-officer ceremony
+ * (`confirmDevBallot`, D-03) so the confirmed-only Submit gate is reachable in dev exactly as in
+ * release. Idempotent: an existing ballot is never re-proposed, and a confirmed one is left
+ * alone — an install seeded before this change confirms its existing ballot on the next dev boot.
+ *
+ * LONG-LIVED INSTALL NOTE: once a ballot is confirmed, `proposeBallot` refuses to overwrite it, so
+ * the `required: false` seed data (D-04) reaches only a fresh DB. An existing dev install keeps its
+ * old, all-required content until Start Fresh or `pm clear`.
+ */
+async function seedDevBallot(
+	ctx: EngineContext,
+	ref: NetworkReference,
+	electionId: string,
+	authorityId: string,
+	sign: SignCallback,
+): Promise<void> {
+	const electionEngine = await new ElectionsEngine(ctx).openElection(electionId)
+	if ((await electionEngine.getBallots()).length === 0) {
+		const ballot: Ballot = {
+			id: (globalThis as any).crypto.randomUUID(),
+			electionId,
+			authorityId,
+			description: 'Dev-seeded ballot for local voter testing.',
+			districts: [],
+			questions: DEV_SEED_BALLOT_QUESTIONS,
+		}
+		await electionEngine.proposeBallot(ballot)
+	}
+
+	// Sequential on purpose: concurrent Quereus cursors deadlock on one handle.
+	for (const summary of await electionEngine.getBallots()) {
+		await confirmDevBallot(ctx, ref, electionId, summary.id, sign)
+	}
 }
 
 /** Result handed to the composition root / ConfirmationScreen (D-05/D-07/D-08). */
@@ -165,13 +304,17 @@ export interface DevSeedResult {
  * composition root passes the `rnDbFactory`-backed instance it already owns
  * (`EngineFactory.getNetworksEngine()`); tests may pass an in-memory-backed one.
  */
-export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<DevSeedResult> {
+export async function seedDevNetwork(
+	networksEngine: NetworksEngine,
+	options?: { registeredStateFixture?: boolean },
+): Promise<DevSeedResult> {
 	if (!(globalThis as { __DEV__?: boolean }).__DEV__) {
 		throw new Error('seedDevNetwork: must never run outside __DEV__ — this is a dev-only fixture (D-07)')
 	}
 
 	const deviceUser = await getOrCreateDeviceUser(DEV_SEED_DISPLAY_NAME)
 	const sign = await createDeviceSigner(DEV_SEED_DISPLAY_NAME)
+	const wantFixture = options?.registeredStateFixture ?? SEED_REGISTERED_STATE_FIXTURE
 
 	// Idempotency: if the dev-seed network already exists (by its marker name),
 	// re-attach instead of re-creating (a second networksEngine.create() would
@@ -201,7 +344,8 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 		// idempotent (seedRegistrantAssociation re-attaches to the existing rows rather
 		// than duplicating them), and a re-opened network must not silently lose the
 		// registered state a PRIOR boot already seeded.
-		await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+		if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+		await seedDevBallot(ctx, existingRef, electionId, authorityId, sign)
 
 		return { networkReference: existingRef, electionId, deviceUser, sign }
 	}
@@ -378,7 +522,10 @@ export async function seedDevNetwork(networksEngine: NetworksEngine): Promise<De
 	// sunset obligation. This grants dev-seed.ts NO ceremony token of its own; the
 	// forbidden identifiers stay inside the engine-side module reached through
 	// loadRegistrantAssociationSeeder().
-	await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+	if (wantFixture) await seedRegisteredAssociationFixture(ctx, authorityId, sign)
+
+	// (5) The election's ballot (see seedDevBallot).
+	await seedDevBallot(ctx, ref, electionId, authorityId, sign)
 
 	return { networkReference: ref, electionId, deviceUser, sign }
 }

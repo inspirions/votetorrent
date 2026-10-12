@@ -200,14 +200,15 @@ describe("AddNetworkScreen — 49-16 Gap A closure: routes NO_KEY_PROVISIONED th
 		expect(createButton.props.disabled).toBe(false);
 	});
 
-	it("a plain Error (no code) still reaches setErrorMessage with its own text, not a deviceSigningError copy key", async () => {
+	it("a plain Error (no code) shows the translated create-failure copy, never its text, and is not a deviceSigningError copy key", async () => {
 		mockGetOrCreateDeviceUser.mockRejectedValue(new Error("boom"));
 
 		const tr = await renderScreen();
 		await pressSignThenCreate(tr);
 
 		expect(mockNavigate).not.toHaveBeenCalled();
-		expect(inlineErrorMessage(tr)).toBe("boom");
+		expect(inlineErrorMessage(tr)).toBe("networkCreateFailed");
+		expect(JSON.stringify(tr.toJSON())).not.toContain("boom");
 	});
 
 	it("mustSignBeforeCreating gate is unchanged: pressing CREATE without signing sets that error and never calls getOrCreateDeviceUser", async () => {
