@@ -110,6 +110,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				joinNetwork,
+				getNetworkNode: () => null,
 				seededElectionId: undefined,
 				createNewIdentity: __mockCreateNewIdentity,
 			}}>

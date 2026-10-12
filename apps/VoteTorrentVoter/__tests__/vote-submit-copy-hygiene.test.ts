@@ -147,13 +147,49 @@ function walkNonTestSources(root: string): string[] {
 	return out.sort();
 }
 
+/**
+ * Spike 102 made sending real: these keys say a vote WENT OUT, and are rendered only once the
+ * election's strand has recorded it (SendVoteCard: a `sent` status comes from a committed block or a
+ * replicated VoteBlockVoter row; the receipt's status line switches only when every ballot is sent).
+ * F1b pins them to those two files, so the claim cannot leak onto a screen that has not checked.
+ */
+const SENT_STATE_KEYS = ['send.allSent', 'receipt.statusSent'];
+const SENT_STATE_FILES = ['screens/ballot/SendVoteCard.tsx', 'screens/ballot/VoteReceiptScreen.tsx'];
+
 describe('no false submitted claim (D-10)', () => {
+	it('F1b: a "sent" claim is rendered only by the two screens that show a recorded vote', () => {
+		const srcRoot = path.join(__dirname, '../src');
+		const users: Record<string, string[]> = {};
+		for (const file of walkNonTestSources(srcRoot)) {
+			const rel = path.relative(srcRoot, file);
+			if (rel === 'i18n/index.ts') {
+				continue;
+			}
+			const text = fs.readFileSync(file, 'utf8');
+			for (const key of SENT_STATE_KEYS) {
+				if (text.includes(key)) {
+					(users[key] ??= []).push(rel);
+				}
+			}
+		}
+		for (const key of SENT_STATE_KEYS) {
+			for (const rel of users[key] ?? []) {
+				expect(SENT_STATE_FILES).toContain(rel);
+			}
+		}
+		expect(users['send.allSent']).toEqual(['screens/ballot/SendVoteCard.tsx']);
+		expect(users['receipt.statusSent']).toEqual(['screens/ballot/VoteReceiptScreen.tsx']);
+	});
+
 	it('F1: no bundle key or value claims a vote went out', () => {
 		const report: {keys: string[]; values: string[]} = {keys: [], values: []};
 		for (const lang of ['en', 'es'] as const) {
 			const namespaces = resources[lang] as unknown as Record<string, Record<string, string>>;
 			for (const [ns, bundle] of Object.entries(namespaces)) {
 				for (const [key, value] of Object.entries(bundle)) {
+					if (ns === 'ballot' && SENT_STATE_KEYS.includes(key)) {
+						continue;
+					}
 					if (key === CONFIRM_KEY) {
 						report.keys.push(`${lang}.${ns}.${key}`);
 					}

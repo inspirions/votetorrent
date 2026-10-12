@@ -54,6 +54,7 @@ import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-fla
 import { selectAttestationVerifier } from './attestation-verifier'
 import { createVoterStrandPort } from './strand-port-adapter'
 import { createVoterRequestTransportSource, VOTER_REQUEST_TRANSPORTS_ENGINE } from './voter-request-transports'
+import { createVoteSendingPort, VOTE_SENDING_PORT_ENGINE } from './vote-sending-port'
 import { readJoinedNetworkHashes } from './join-bootstrap'
 
 export class EngineFactory {
@@ -404,6 +405,14 @@ export class EngineFactory {
 					port: createVoterStrandPort(ctx.db),
 					peerBacked: this.strandBackedNetworks.has(hash),
 				})
+			}
+
+			case VOTE_SENDING_PORT_ENGINE: {
+				// Spike 102: the send flow's view of the joined network's strand (election key, voting
+				// window, the one-transaction block commit, the recorded-vote lookup). Like the request
+				// transports above, the raw database never leaves this factory.
+				const ctx = this.requireEstablishedCtx()
+				return createVoteSendingPort(ctx.db)
 			}
 
 			case 'association': {

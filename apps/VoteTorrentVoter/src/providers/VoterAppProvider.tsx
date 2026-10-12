@@ -186,6 +186,11 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		[node, selectNetwork, refreshJoinBootstrap],
 	);
 
+	const getNetworkNode = useCallback(
+		() => (node ?? null) as {getControlNode(): unknown} | null,
+		[node],
+	);
+
 	// Quick task 260928-kkf: register the "first wait budget elapsed" listener for the
 	// lifetime of this provider (not just the current init run) — mirrors the authority
 	// app's AppProvider. Deregistered on unmount.
@@ -526,6 +531,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				hasEngine,
 				selectNetwork,
 				joinNetwork,
+				getNetworkNode,
 				seededElectionId,
 				createNewIdentity,
 			}}>

@@ -382,7 +382,8 @@ function freshVoteNonce (): string {
 	return makeVoteNonce(random)
 }
 
-function digestBytesFromBase64Url (digest: string): Uint8Array {
+/** A `Digest()` output (43 base64url characters) as its 32 bytes, for the native signer. */
+export function digestBytesFromBase64Url (digest: string): Uint8Array {
 	if (!/^[A-Za-z0-9_-]{43}$/.test(digest)) throw new Error('digest is not 43 base64url characters')
 	const padded = digest.replace(/-/g, '+').replace(/_/g, '/') + '='
 	const binary = (globalThis as unknown as { atob: (s: string) => string }).atob(padded)

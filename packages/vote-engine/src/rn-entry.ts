@@ -169,7 +169,9 @@ export {
 	hasEnteredReleasingKeys,
 	releasingKeysAt,
 	encryptElectionBlock,
-	openElectionBlock
+	openElectionBlock,
+	encryptVoteEntry,
+	openVoteEntries
 } from './key-release/index.js'
 export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release/index.js'
 export type { KeysTasksEngineDeps } from './tasks/keys-tasks-engine.js'
@@ -253,3 +255,32 @@ export type {
 	TemplateBallot,
 	VotingKeyCheck
 } from './voting/index.js'
+// Spike 102: vote pools — the Voter runs a PoolAgent through the authority's rendezvous; the
+// Authority serves the rendezvous on its control node.
+export {
+	PoolAgent,
+	POOL_MIN_BLOCK_SIZE,
+	poolTopic,
+	commitPoolBlock,
+	poolIdentityFromRawKey,
+	createPoolIdentity,
+	PoolRendezvous,
+	createInMemoryRendezvousClient,
+	poolRequests,
+	POOL_RENDEZVOUS_PROTOCOL,
+	attachPoolRendezvous,
+	createLibp2pRendezvousClient
+} from './pool/index.js'
+export type {
+	PoolAgentOptions,
+	PoolAgentStatus,
+	PoolOutcome,
+	PoolContribution,
+	PoolBallot,
+	FormedPoolBlock,
+	ConsentSignature,
+	PoolIdentity,
+	PoolRendezvousClient,
+	RendezvousRequest,
+	RendezvousReply
+} from './pool/index.js'

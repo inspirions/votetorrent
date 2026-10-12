@@ -243,6 +243,11 @@ export interface VoterAppContextType {
 	 */
 	joinNetwork: (code: NetworkJoinCode, onStep?: (step: NetworkJoinStep) => void) => Promise<NetworkJoinResult>;
 	/**
+	 * Spike 102: the running network node, whose control connection carries vote-pool traffic to
+	 * the authority's rendezvous; null until the node boots. Screens hand it to engines only.
+	 */
+	getNetworkNode: () => {getControlNode(): unknown} | null;
+	/**
 	 * The D-07 dev-seeded election's id, captured from `seedDevNetwork`'s return — pass as
 	 * `RegisterInit.electionId` (44-08) so `validateFieldPolicy` enforces the seeded policy.
 	 * Only set in `__DEV__`; `undefined` otherwise (no production join flow yet).

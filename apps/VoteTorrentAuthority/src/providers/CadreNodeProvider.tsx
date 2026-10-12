@@ -18,6 +18,7 @@ import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootst
 import { noiseCryptoForNode } from '../engines/noise-crypto-config';
 import { openStrandNetworkState } from '../engines/rn-durable-slot';
 import { REPLICATION_PROOF_ENABLED } from '../engines/proof-flags.generated';
+import { hostPoolRendezvous } from '../engines/pool-rendezvous-host';
 
 // ---------------------------------------------------------------------------
 // `Promise.withResolvers` ambient augmentation (D-08/D-09).
@@ -197,6 +198,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   const [syncState, setSyncState] = useState<'connected' | 'syncing' | 'offline'>('offline');
   // nodeRef holds the stable CadreNode instance (created once per mount).
   const nodeRef = useRef<InstanceType<typeof CadreNode> | null>(null);
+  const detachRendezvousRef = useRef<(() => Promise<void>) | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
   const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
 
@@ -411,6 +413,15 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
 
         if (isMounted) {
           nodeRef.current = localNode;
+          // Spike 102: this node is the rendezvous its voters pool their votes through. Best
+          // effort — a voter that cannot reach it keeps its vote saved, never lost.
+          const hosted = localNode;
+          hostPoolRendezvous(hosted)
+            .then((detach) => {
+              if (nodeRef.current === hosted) detachRendezvousRef.current = detach;
+              else void detach();
+            })
+            .catch((e) => console.warn('[CadreNodeProvider] pool rendezvous not hosted:', e instanceof Error ? e.message : String(e)));
           setNode(localNode);
           // D-08/D-09: success exit — the strand backend is now the correct dispatch.
           settleNode({ status: 'ready', node: localNode });
@@ -439,6 +450,8 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
 
     return () => {
       isMounted = false;
+      void detachRendezvousRef.current?.().catch(() => undefined);
+      detachRendezvousRef.current = null;
       // Stop on unmount. Errors are swallowed since the component is gone.
       nodeRef.current?.stop().catch(() => undefined);
       nodeRef.current = null;

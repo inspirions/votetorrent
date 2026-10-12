@@ -40,3 +40,6 @@ export * from './key-release/index.js'
 // the canonical ordering rule and the voting-key normalisation). Named-export barrel; see
 // src/voting/index.ts's header.
 export * from './voting/index.js'
+// Spike 102: vote pools (block negotiation through the authority's rendezvous). Named-export
+// barrel; see src/pool/index.ts.
+export * from './pool/index.js'

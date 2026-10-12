@@ -38,6 +38,7 @@ import type {VoteRecord, VoteRecordEnvelope} from '../../engines/vote-record-vau
 import {copyVoteCode} from '../../utils/vote-code-clipboard';
 import type {VoteCodeCopyResult} from '../../utils/vote-code-clipboard';
 import {usePrivacyCover, useSecureScreenWhileFocused} from '../../utils/receipt-privacy';
+import SendVoteCard from './SendVoteCard';
 
 type ReceiptRoute = RouteProp<VoteStackParamList, 'VoteReceipt'>;
 type ReceiptNavigation = NativeStackNavigationProp<VoteStackParamList, 'VoteReceipt'>;
@@ -68,6 +69,7 @@ export default function VoteReceiptScreen() {
 	const [record, setRecord] = useState<VoteRecord | null>(null);
 	const [notice, setNotice] = useState<RevealNotice | null>(null);
 	const [busy, setBusy] = useState(false);
+	const [allSent, setAllSent] = useState(false);
 
 	const autoRevealConsumed = useRef(false);
 	const focused = useRef(false);
@@ -227,7 +229,7 @@ export default function VoteReceiptScreen() {
 				{saved !== null ? (
 					<>
 						<Text testID="receipt-status" style={[bodyFont, mediumFont, {color: colors.text}]}>
-							{t('receipt.status')}
+							{t(allSent ? 'receipt.statusSent' : 'receipt.status')}
 						</Text>
 						{saved.kind === 'stale' ? (
 							<Text testID="receipt-stale" style={[styles.block, bodyFont, mediumFont, {color: colors.error}]}>
@@ -242,6 +244,16 @@ export default function VoteReceiptScreen() {
 						<Text testID="receipt-loss" style={[styles.block, bodyFont, {color: colors.textSecondary}]}>
 							{t('receipt.loss')}
 						</Text>
+
+						{saved.kind === 'saved' && saved.revisionKnown && electionId !== undefined ? (
+							<SendVoteCard
+								electionId={electionId}
+								electionRevision={saved.marker.electionRevision}
+								envelope={saved.envelope}
+								ballotIds={saved.marker.ballotIds}
+								onAllSentChange={setAllSent}
+							/>
+						) : null}
 
 						{record === null ? (
 							<View style={styles.block}>
