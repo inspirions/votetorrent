@@ -128,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.13.x, @optimystic/db-* 1.12.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.15.x, @optimystic/db-* 1.13.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -170,9 +170,13 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // 2026-10-09: @serfab 1.13.0 -> 1.14.0 (cadre invitations replace the invite/accept ceremony,
       // per-stream control-protocol guard, provisional stranger admission; the public-observer +
       // cohort-topic patch forward-ported with a new guard-classification hunk). @optimystic stays 1.12.1.
+      // 2026-10-13: @serfab 1.14.0 -> 1.15.0 (sereus#34 relay first-attempt fixed, strand redial on the
+      // link budget, `sereus-invite:1.` invitations, CadrePeer `Profile` column; the patch carried with
+      // identical hunk bodies) and @optimystic 1.12.1 -> 1.13.0 (lazy read-repair, isNetworkMember,
+      // prepared streams, commit durability; p2p-fret ^1.0.2). @quereus 4.20.1 -> 4.20.2.
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.14.' : '1.12.'
+        : pkg.startsWith('@serfab/') ? '1.15.' : '1.13.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

@@ -209,8 +209,12 @@ const execAsync = promisify(exec);
 //
 // @serfab 1.13.0 -> 1.14.0 bump (2026-10-09, @optimystic stays 1.12.1): no change to this set —
 // cadre-core 1.14 requires ^1.12.0, which the single 1.12.1 copy already satisfies.
+//
+// @serfab 1.14.0 -> 1.15.0 + @optimystic 1.12.1 -> 1.13.0 + @quereus 4.20.1 -> 4.20.2 bump
+// (2026-10-13): same single mismatch, re-keyed. The peer range is still ^4.20.1 (satisfied by the
+// single patched 4.20.2 copy); YN0002 still names packages/attestation-native.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.12.1',
+  '@optimystic/quereus-plugin-crypto@npm:1.13.0',
 ]);
 
 // The ✘ marker (U+2718)

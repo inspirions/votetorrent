@@ -567,7 +567,8 @@ echo "[run-replication-proof] Drone strand addr: ${STRAND_ADDR}"
 # the strand cohort never forms, and the run fails looking like an addressing problem — the
 # root cause found 2026-08-24 and the reason every n=4 run through 41-09 failed. Treat a
 # missing invite as fatal rather than proceeding into that misleading failure.
-DRONE_INVITE=$(grep -m1 -o 'PROOF_INVITE=[A-Za-z0-9_-]*' "${DRONE_LOG}" 2>/dev/null | cut -d= -f2 || true)
+# Since cadre-core 1.15 the invitation starts with `sereus-invite:1.`, hence `.` and `:`.
+DRONE_INVITE=$(grep -m1 -o 'PROOF_INVITE=[A-Za-z0-9_.:-]*' "${DRONE_LOG}" 2>/dev/null | cut -d= -f2- || true)
 if [ -z "${DRONE_INVITE}" ]; then
   echo "[run-replication-proof] ERROR: drone did not emit PROOF_INVITE= — owner genesis did not run," >&2
   echo "[run-replication-proof]        so no device can become a cadre member and the strand cohort" >&2
@@ -748,7 +749,8 @@ new_content = re.sub(
     count=1,
 )
 
-# Inject PROOF_INVITE (cadre membership). The invitation is base64url-encoded JSON whose
+# Inject PROOF_INVITE (cadre membership). The invitation is `sereus-invite:1.` (cadre-core 1.15's
+# CADRE_INVITATION_PREFIX, which decodeCadreInvitation requires) + base64url-encoded JSON whose
 # `members` are the dialable multiaddrs of the machines it can be redeemed at, and
 # redeemCadreInvitation DIALS them — so the drone's own 127.0.0.1 addresses have to get the same
 # emulator-alias rewrite the constants above get, or the device holds an invitation it can never
@@ -762,15 +764,19 @@ def _b64url_decode(s):
 def _b64url_encode(b):
     return base64.urlsafe_b64encode(b).decode().rstrip('=')
 
-decoded = json.loads(_b64url_decode(invite))
+INVITE_PREFIX = 'sereus-invite:1.'
+if not invite.startswith(INVITE_PREFIX):
+    print(f'[run-replication-proof] ERROR: PROOF_INVITE does not start with {INVITE_PREFIX} - not a cadre-core 1.15 CadreInvitation', file=sys.stderr)
+    sys.exit(1)
+decoded = json.loads(_b64url_decode(invite[len(INVITE_PREFIX):]))
 if not decoded.get('members'):
-    print('[run-replication-proof] ERROR: PROOF_INVITE has no `members` - not a cadre-core 1.14 CadreInvitation', file=sys.stderr)
+    print('[run-replication-proof] ERROR: PROOF_INVITE has no `members` - not a cadre-core 1.15 CadreInvitation', file=sys.stderr)
     sys.exit(1)
 decoded['members'] = [
     a.replace('/ip4/127.0.0.1/', '/ip4/10.0.2.2/').replace('/ip4/0.0.0.0/', '/ip4/10.0.2.2/')
     for a in decoded['members']
 ]
-invite_for_device = _b64url_encode(json.dumps(decoded).encode())
+invite_for_device = INVITE_PREFIX + _b64url_encode(json.dumps(decoded).encode())
 new_content, n_invite = re.subn(
     r"(const PROOF_INVITE = ')[^']*(')",
     r"\g<1>" + invite_for_device + r"\g<2>",

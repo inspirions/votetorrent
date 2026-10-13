@@ -7,6 +7,9 @@
  * `ControlDatabase.loadSchema`). Measured 1.13 -> 1.14: `DROP TABLE IF EXISTS
  * CadreControl.pendingjoin` is refused because `Revocation.RowIsGone` still references it. The
  * Authority hit it on an iPhone 13 on 2026-10-12, with the data the 2026-10-08 build (1.13) wrote.
+ * Measured 1.14 -> 1.15: `ALTER TABLE CadreControl.CadrePeer ADD COLUMN Profile` is refused with
+ * "Module for table 'CadrePeer' does not support ALTER TABLE ADD COLUMN". The module refuses every
+ * ALTER TABLE form the same way ("does not support ALTER ..."), so the predicate matches the family.
  *
  * Unlike the Voter, the Authority founds strands, so its control store does hold party state. The
  * network survives a recreate anyway: every network's rows live in its own per-strand store, and
@@ -31,5 +34,5 @@ function errorChain(e: unknown): string {
 export function isUnrestorableControlSchemaError(e: unknown): boolean {
 	const text = errorChain(e);
 	return /CadreControl\./i.test(text)
-		&& /could not be restored|partially migrated|cannot drop table|drop constraint/i.test(text);
+		&& /could not be restored|partially migrated|cannot drop table|drop constraint|does not support ALTER/i.test(text);
 }

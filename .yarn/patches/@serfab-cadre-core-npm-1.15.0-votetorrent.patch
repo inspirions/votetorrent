@@ -1,8 +1,8 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e5549b18289 100644
+index ae21d43..519c703 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
-@@ -50,6 +50,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
+@@ -51,6 +51,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
  import { controlNetworkName, installControlProtocolGuard } from './control-protocol-guard.js';
  import { StrandWakeService, dialWake } from './strand-wake-protocol.js';
  import { StrandAddrService, collectStrandAddrs } from './strand-addr-protocol.js';
@@ -11,8 +11,8 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
 +import { StrandObserverService } from './strand-observer-protocol.js';
  import { DelegateAdmissionStore, extractCircuitRelayTargets, dueRelayAnnounces, prunePeerStrandKeys, peerStrandKey } from './delegate-admission.js';
  import { relayCircuitAddrs, resolveListenAddrs, resolveTransportOptions, RelayReservationFailedError } from './relay-addrs.js';
- import { resolveRelayServer } from './relay-server.js';
-@@ -291,6 +294,13 @@ export class CadreNode {
+ import { nodeTransportsOption } from './node-transports.js';
+@@ -294,6 +297,13 @@ export class CadreNode {
           * stops conflating control addresses with strand seeding.
           */
          this.strandAddrService = null;
@@ -26,7 +26,7 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
          /**
           * Cadre invitation redemption handler (`/sereus/cadre-invite/1.0.0`): a device holding an
           * invitation dials this machine and proves possession; the handler seats the row and
-@@ -748,6 +758,20 @@ export class CadreNode {
+@@ -772,6 +782,20 @@ export class CadreNode {
          /** `connection:close` listener re-arming the growth edge (teardown in {@link stopRecordRefresh}). */
          this.controlConnectionCloseHandler = null;
          this.config = config;
@@ -47,7 +47,7 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
          this.hostUnclaimedStrands = config.hostUnclaimedStrands ?? config.profile === 'storage';
          this.strandManager = new StrandInstanceManager();
          this.enrollmentService = new EnrollmentService();
-@@ -1054,6 +1078,19 @@ export class CadreNode {
+@@ -1078,6 +1102,19 @@ export class CadreNode {
                  this.pushFanoutService = this.buildPushFanout(this.config.push);
                  log('Push-wake fan-out enabled (injected notifier)');
              }
@@ -67,7 +67,7 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
              this._running = true;
              this.emit('control:connected', undefined);
              timing('[start] total: %dms', Math.round(performance.now() - tTotal));
-@@ -1787,7 +1824,12 @@ export class CadreNode {
+@@ -1897,7 +1934,12 @@ export class CadreNode {
              connectionGater: createMembershipConnectionGater({
                  admitInbound: (remotePeerId) => this.admitInboundControlConnection(remotePeerId),
                  admitRelayReservation: (remotePeerId) => this.admitControlRelayReservation(remotePeerId),
@@ -81,7 +81,7 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
              }, network?.connectionGater, ADMISSION_DECISION_TIMEOUT_MS, relayedRequestBudgetMs(network?.linkRoundTripMs)),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -4400,6 +4442,14 @@ export class CadreNode {
+@@ -4700,6 +4742,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
@@ -97,7 +97,7 @@ index 31e7fc4dbfd0ae41e6fea1469b4de0a3d7031b3c..880a2c7fc6337b7ff0b1d8ade2b12e55
          if (this.cadreInviteHandler && this.controlNode) {
              await this.cadreInviteHandler.unregister(this.controlNode);
 diff --git a/dist/control-protocol-guard.js b/dist/control-protocol-guard.js
-index baab420cdcacf0f29b44c04db3df5b6d9f6951a9..fe20c918852979c99aaf4423a74030c449791bb4 100644
+index baab420..fe20c91 100644
 --- a/dist/control-protocol-guard.js
 +++ b/dist/control-protocol-guard.js
 @@ -81,6 +81,10 @@ import { FORMATION_PROTOCOL } from './strand-formation-protocol.js';
@@ -125,10 +125,10 @@ index baab420cdcacf0f29b44c04db3df5b6d9f6951a9..fe20c918852979c99aaf4423a74030c4
          [STRAND_ADDR_PROTOCOL, 'members'],
          [`${prefix}/repo/1.0.0`, 'members-snapshot'],
 diff --git a/dist/index.js b/dist/index.js
-index 7fd8755988ed773216e1ec79b747e971e773410b..1e1ada4e99985c38077bc85949e820abcc6c3e89 100644
+index 123d4e9..22405b2 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -139,6 +139,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
+@@ -145,6 +145,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
  // Strand Address (control-network strand-address RPC) — wire types come via
  // `export * from './types.js'` (StrandAddrRequest / StrandAddrResponse / StrandAddrStatus).
  export { StrandAddrService, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from './strand-addr-protocol.js';
@@ -136,15 +136,15 @@ index 7fd8755988ed773216e1ec79b747e971e773410b..1e1ada4e99985c38077bc85949e820ab
 +// RPC gated on a node-local observable-strand allowlist rather than membership.
 +export { StrandObserverService, STRAND_OBSERVER_PROTOCOL } from './strand-observer-protocol.js';
  // Peer-address record (self-published, signed, freshness-stamped CadrePeer row)
- export { peerRecordSignedPayload, signPeerRecord, verifyPeerRecordSignature, isPeerRecordFresh, isSignalingAddr, orderSignalingFirst, withTrailingPeerId, currentMemberTrustPolicy, DEFAULT_PEER_RECORD_MAX_AGE_MS, DEFAULT_PEER_RECORD_HEARTBEAT_MS } from './peer-record.js';
+ export { peerRecordSignedPayload, signPeerRecord, verifyPeerRecordSignature, isPeerRecordFresh, isSignalingAddr, orderSignalingFirst, currentMemberTrustPolicy, DEFAULT_PEER_RECORD_MAX_AGE_MS, DEFAULT_PEER_RECORD_HEARTBEAT_MS } from './peer-record.js';
  // Device-token record (self-published, signed FCM/APNs push token — CadrePeer sibling)
 diff --git a/dist/membership-connection-gater.js b/dist/membership-connection-gater.js
-index 4ea1e3458a147b661820c0bdaba4bf51ec0a0cd4..9fa3bd551f26fa2b77ca819ae85ed21a3e1b90e9 100644
+index 10b8761..d2c0147 100644
 --- a/dist/membership-connection-gater.js
 +++ b/dist/membership-connection-gater.js
-@@ -110,6 +110,25 @@
-  * protocols libp2p records the peer as serving. Ticket
-  * `stranger-joins-the-control-cohort-by-advertising-protocols` (blocked).
+@@ -111,6 +111,25 @@
+  * `isNetworkMember`). FRET's ring still counts it: `docs/architecture.md` →
+  * "Per-stream protocol guard" → "What it does not cover".
   *
 + * VoteTorrent patch (public-observer-protocol): there is one further
 + * connection-level carve-out beyond the two above, also NOT a protocol
@@ -168,7 +168,7 @@ index 4ea1e3458a147b661820c0bdaba4bf51ec0a0cd4..9fa3bd551f26fa2b77ca819ae85ed21a
   * ## The relay-reservation seam
   *
   * A circuit-relay reservation is established by the reserving peer DIALING the
-@@ -380,6 +399,18 @@ export function createMembershipConnectionGater(policy, base, decisionTimeoutMs
+@@ -381,6 +400,18 @@ export function createMembershipConnectionGater(policy, base, decisionTimeoutMs
                  return true;
              }
              const remotePeerId = peerId.toString();
@@ -189,7 +189,7 @@ index 4ea1e3458a147b661820c0bdaba4bf51ec0a0cd4..9fa3bd551f26fa2b77ca819ae85ed21a
                  verdict = await decideInbound(remotePeerId);
 diff --git a/dist/strand-observer-protocol.js b/dist/strand-observer-protocol.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbdfa8b6762
+index 0000000..dbaa40b
 --- /dev/null
 +++ b/dist/strand-observer-protocol.js
 @@ -0,0 +1,178 @@
