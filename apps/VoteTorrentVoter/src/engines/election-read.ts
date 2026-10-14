@@ -78,6 +78,23 @@ export function pickElectionId (summaries: ElectionSummary[], fallbackId: string
 	return best?.id
 }
 
+/**
+ * 64 D-28 (not phase 62's D-28): the election registration binds its requests to. It is the same
+ * rule every other screen uses (`getEngine('elections')` -> `getElections()` -> `pickElectionId`),
+ * so a phone on a joined network, which has no dev seed, registers with the election the network
+ * lists. Only an EMPTY list falls back (`pickElectionId`'s own rule). A rejected read PROPAGATES:
+ * the caller shows its transient copy, and the dev seed never stands in for a network that could
+ * not be read. Callers pass `__DEV__ ? seededElectionId : undefined` as the fallback and memoise
+ * the result per attempt, because the request inits embed it.
+ */
+export async function resolveCurrentElectionId (deps: {
+	getEngine: (name: 'elections') => Promise<{ getElections (): Promise<ElectionSummary[]> }>
+	fallbackElectionId: string | undefined
+}): Promise<string | undefined> {
+	const electionsEngine = await deps.getEngine('elections')
+	return pickElectionId(await electionsEngine.getElections(), deps.fallbackElectionId)
+}
+
 async function openCurrentElection (deps: ElectionReadDeps): Promise<{ electionId: string, engine: IElectionEngine }> {
 	const electionsEngine = await deps.getEngine<IElectionsEngine>('elections')
 	const electionId = pickElectionId(await electionsEngine.getElections(), deps.fallbackElectionId)

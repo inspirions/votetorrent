@@ -20,6 +20,9 @@
  * `AssociationRequest` row on every mount — never from persisted state, so an app kill loses
  * nothing resumable. Polling is bounded (`REASSOCIATION_MAX_POLL_ROUNDS`, timer-free) and re-runs
  * on screen focus and on return to the foreground.
+ *
+ * The election the requests name comes from `resolveCurrentElectionId` (64 D-28), once per mount,
+ * and is omitted when nothing resolves (OQ10).
  */
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {ActivityIndicator, AppState, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View} from 'react-native';
@@ -35,6 +38,7 @@ import {normalizeRegistrationCode} from '@votetorrent/vote-core';
 import {useVoterApp} from '../../providers/VoterAppProvider';
 import {useKeyboardInset} from '../../hooks/useKeyboardInset';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
+import {resolveCurrentElectionId} from '../../engines/election-read';
 import {classifyAttestationFailure, isDeviceKeyAbsent, type AttestationFailureClass} from '../../engines/attestation-failure';
 import {resolveVoterRequestTransports} from './attach-voter-request-transport';
 import {
@@ -113,6 +117,9 @@ export default function ContinueOnAnotherDeviceScreen() {
 	const requestIdRef = useRef<string | null>(null);
 	const requestInitRef = useRef<AssociationRequestInit | null>(null);
 	const evidenceKeyRef = useRef<string | null>(null);
+	// 64 D-28: the election id is resolved once per mount (a holder tells "not resolved yet" from
+	// "resolved to undefined"); a rejected read is never memoised, so a retry re-reads.
+	const electionIdRef = useRef<{value: string | undefined} | null>(null);
 	const answeredRef = useRef(false);
 	const advanceInFlightRef = useRef(false);
 	// Set just before an intentional exit (Check Back Later / Back to Registration) so the pending
@@ -221,6 +228,13 @@ export default function ContinueOnAnotherDeviceScreen() {
 		return unsubscribe;
 	}, [branch, failureClass, navigation]);
 
+	async function resolveAttemptElectionId(): Promise<string | undefined> {
+		if (electionIdRef.current !== null) return electionIdRef.current.value;
+		const value = await resolveCurrentElectionId({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined});
+		electionIdRef.current = {value};
+		return value;
+	}
+
 	async function runAdvance() {
 		if (advanceInFlightRef.current) return;
 		if (branchRef.current !== 'pending') return;
@@ -231,6 +245,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 			const authorityId = authorityIdRef.current;
 			const deviceKey = deviceKeyRef.current;
 			if (!authorityId || !deviceKey) return;
+			const electionId = await resolveAttemptElectionId();
 			const transports = await resolveVoterRequestTransports({getEngine, authorityId});
 			if (!transports) {
 				setSubmitError(t('newDevice.submitError'));
@@ -241,7 +256,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 				transports,
 				producer,
 				authorityId,
-				electionId: seededElectionId,
+				electionId,
 				deviceKey,
 			};
 			setFailureClass(null);
@@ -297,6 +312,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 				authorityIdRef.current = authorityId;
 			}
 
+			const electionId = await resolveAttemptElectionId();
 			const transports = await resolveVoterRequestTransports({getEngine, authorityId});
 			if (!transports) {
 				setSubmitError(t('newDevice.submitError'));
@@ -310,7 +326,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 					id: (globalThis as any).crypto.randomUUID() as string,
 					authorityId,
 					deviceKey,
-					electionId: seededElectionId,
+					electionId,
 					submittedAt: new Date().toISOString(),
 				});
 				requestInitRef.current = init;
@@ -321,7 +337,7 @@ export default function ContinueOnAnotherDeviceScreen() {
 				transports,
 				producer,
 				authorityId,
-				electionId: seededElectionId,
+				electionId,
 				deviceKey,
 			};
 			const requestId = await submitReassociationRequest(deps, init, evidence);

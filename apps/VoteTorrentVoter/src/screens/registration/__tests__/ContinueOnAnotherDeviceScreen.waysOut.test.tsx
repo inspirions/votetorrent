@@ -81,9 +81,12 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockListAssociationRequests = jest.fn(async () => [] as unknown[]);
 const mockAssociationEngine = {listAssociationRequests: mockListAssociationRequests};
 
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') return mockNetworkEngine;
 	if (engineName === 'association') return mockAssociationEngine;
+	if (engineName === 'elections') return {getElections: mockGetElections};
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
 

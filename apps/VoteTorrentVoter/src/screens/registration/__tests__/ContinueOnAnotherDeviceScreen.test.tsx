@@ -76,6 +76,7 @@ jest.mock('@react-navigation/native', () => ({
 
 const AUTHORITY_ID = 'auth-1';
 const SEEDED_ELECTION_ID = 'election-1';
+let mockSeededElectionId: string | undefined = SEEDED_ELECTION_ID;
 const P256_PUB = 'P256_NEW_DEVICE_PUB';
 
 const mockGetDetails = jest.fn(async () => ({network: {primaryAuthorityId: AUTHORITY_ID}}));
@@ -83,9 +84,12 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockListAssociationRequests = jest.fn(async () => [] as unknown[]);
 const mockAssociationEngine = {listAssociationRequests: mockListAssociationRequests};
 
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') return mockNetworkEngine;
 	if (engineName === 'association') return mockAssociationEngine;
+	if (engineName === 'elections') return {getElections: mockGetElections};
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
 
@@ -95,7 +99,7 @@ jest.mock('../../../providers/VoterAppProvider', () => ({
 	useVoterApp: () => ({
 		createNewIdentity: mockCreateNewIdentity,
 		getEngine: mockGetEngine,
-		seededElectionId: SEEDED_ELECTION_ID,
+		seededElectionId: mockSeededElectionId,
 	}),
 }));
 
@@ -181,13 +185,13 @@ afterEach(() => {
 	}
 });
 
-async function flush(times = 30) {
+async function flush(times = 60) {
 	for (let i = 0; i < times; i++) {
 		await Promise.resolve();
 	}
 }
 
-async function mountAndFlush(times = 30) {
+async function mountAndFlush(times = 60) {
 	const tr = renderScreen();
 	await renderer.act(async () => {
 		await flush(times);
@@ -205,6 +209,9 @@ beforeEach(() => {
 	mockListAssociationRequests.mockClear();
 	mockListAssociationRequests.mockImplementation(async () => []);
 	mockGetEngine.mockClear();
+	mockGetElections.mockReset();
+	mockGetElections.mockImplementation(async () => []);
+	mockSeededElectionId = SEEDED_ELECTION_ID;
 	mockProvisionDeviceKey.mockClear();
 	mockGetCurrentDeviceKey.mockClear();
 	mockProvisionDeviceKey.mockImplementation(async () => ({publicKey: P256_PUB}));
@@ -688,5 +695,117 @@ describe('ContinueOnAnotherDeviceScreen — IME geometry', () => {
 		const y = revealOffsetFor({fieldY: 520, fieldHeight: 56, viewportHeight: 420, margin: 16});
 		expect(520 - y).toBeGreaterThanOrEqual(0);
 		expect(520 + 56 - y).toBeLessThanOrEqual(420);
+	});
+});
+
+describe('ContinueOnAnotherDeviceScreen — current election (D-28)', () => {
+	const g = globalThis as {__DEV__?: boolean};
+	const originalDev = g.__DEV__;
+	afterEach(() => {
+		g.__DEV__ = originalDev;
+	});
+
+	async function submitCode(tr: renderer.ReactTestRenderer) {
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'continue-device-code-input'}).props.onChangeText('wwwww-wwwww');
+		});
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'continue-device-code-submit'}).props.onPress();
+			await flush(120);
+		});
+	}
+
+	function challengeOnce() {
+		let call = 0;
+		pollDecisionsImpl = async () => {
+			call += 1;
+			if (call === 1) return [{requestId: associationSubmitRequestCalls[0]?.init.id, status: 'c', challengeNonce: 'nonce-1', cursor: '1'}];
+			return [];
+		};
+	}
+
+	it('a joined network (no seed) submits and answers with the listed election, reading it once', async () => {
+		g.__DEV__ = false;
+		mockSeededElectionId = undefined;
+		mockGetElections.mockImplementation(async () => [{id: 'joined-election-7', date: Date.now() + 86_400_000}]);
+		challengeOnce();
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(associationSubmitRequestCalls[0].init.electionId).toBe('joined-election-7');
+		expect(mockProduce).toHaveBeenCalledTimes(1);
+		expect(mockProduce.mock.calls[0][0]).toMatchObject({electionId: 'joined-election-7'});
+		expect(mockGetElections).toHaveBeenCalledTimes(1);
+	});
+
+	it('release build with a seed and an empty list omits electionId (OQ10) and still reaches pending', async () => {
+		g.__DEV__ = false;
+		challengeOnce();
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(associationSubmitRequestCalls[0].init).not.toHaveProperty('electionId');
+		expect((mockProduce.mock.calls[0][0] as {electionId?: string}).electionId).toBeUndefined();
+		expect(JSON.stringify(tr.toJSON())).toContain('Waiting for approval');
+	});
+
+	it('a dev build with an empty list keeps the seed (dev parity)', async () => {
+		g.__DEV__ = true;
+
+		const tr = await mountAndFlush();
+		await submitCode(tr);
+
+		expect(associationSubmitRequestCalls[0].init.electionId).toBe(SEEDED_ELECTION_ID);
+	});
+
+	it('a rejected election read on submit shows the submit error, leaks nothing and submits nothing', async () => {
+		g.__DEV__ = true;
+		mockGetElections.mockImplementation(async () => {
+			throw Object.assign(new Error('peer-xyz unreachable'), {name: 'PeerUnavailableError'});
+		});
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const tr = await mountAndFlush();
+			await submitCode(tr);
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(tr.root.findByProps({testID: 'continue-device-submit-error'})).toBeDefined();
+			expect(text).toContain('Could not send your request');
+			expect(text).not.toContain('peer-xyz');
+			expect(mockAssociationSubmitRequest).not.toHaveBeenCalled();
+			const submitCalls = errorSpy.mock.calls.filter(c => c[0] === 'ContinueOnAnotherDeviceScreen: submit failed:');
+			expect(submitCalls).toEqual([['ContinueOnAnotherDeviceScreen: submit failed:', 'PeerUnavailableError']]);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('resuming an own pending row while the election read rejects shows the pending error and never polls or prompts', async () => {
+		g.__DEV__ = true;
+		mockListAssociationRequests.mockImplementation(async () => [
+			{
+				requestId: 'resumed-req-1',
+				authorityId: AUTHORITY_ID,
+				registrantId: REASSOCIATION_UNRESOLVED_REGISTRANT_ID,
+				deviceKey: P256_PUB,
+				status: 'p',
+				submittedAt: '2026-01-01T00:00:00.000Z',
+				receivedAt: '2026-01-01T00:00:01.000Z',
+			},
+		]);
+		mockGetElections.mockImplementation(async () => {
+			throw new Error('read failed');
+		});
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const tr = await mountAndFlush(120);
+			expect(tr.root.findByProps({testID: 'continue-device-pending-error'})).toBeDefined();
+			expect(mockPollDecisions).not.toHaveBeenCalled();
+			expect(mockProduce).not.toHaveBeenCalled();
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });

@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import type {Ballot, Question} from '@votetorrent/vote-core';
-import {NoElectionError, readVoteContext, readVoterBallot, readVoterElection, toVoterBallot} from '../election-read';
+import {NoElectionError, readVoteContext, resolveCurrentElectionId, readVoterBallot, readVoterElection, toVoterBallot} from '../election-read';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -475,4 +475,53 @@ describe('readVoteContext — source gate: derived window only, no dev override 
 		const planted = 'export async function readVoteContext () { lifecycleFromTimeline( deriveDetailsTimeline( getBallotConfirmationState( lifecycleOverride }';
 		expect(readVoteContextViolations(planted)).toEqual(['contains lifecycleOverride']);
 	});
+});
+
+describe('resolveCurrentElectionId — the election registration uses (D-28)', () => {
+  // The generic getEngine of fakeDeps is wrapped so calls are counted and openElection is observed.
+  function resolverDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
+    const fake = fakeDeps(options, fallbackElectionId);
+    const getEngine = jest.fn(fake.deps.getEngine);
+    return {deps: {getEngine, fallbackElectionId}, getEngine, opened: fake.opened};
+  }
+
+  it('resolves the one listed election on a joined network', async () => {
+    const {deps} = resolverDeps({summaries: [{id: 'joined-election-7', date: D}]});
+    expect(await resolveCurrentElectionId(deps)).toBe('joined-election-7');
+  });
+
+  it('falls back to the seed only when the list is empty', async () => {
+    expect(await resolveCurrentElectionId(resolverDeps({summaries: []}, 'seed-1').deps)).toBe('seed-1');
+    expect(await resolveCurrentElectionId(resolverDeps({summaries: []}, undefined).deps)).toBeUndefined();
+  });
+
+  it('picks the nearest of several, and the lower id on a tie', async () => {
+    const spy = jest.spyOn(Date, 'now').mockReturnValue(D);
+    try {
+      expect(await resolveCurrentElectionId(resolverDeps({summaries: [{id: 'far', date: D + 9 * DAY}, {id: 'near', date: D + DAY}]}).deps)).toBe('near');
+      expect(await resolveCurrentElectionId(resolverDeps({summaries: [{id: 'b', date: D + DAY}, {id: 'a', date: D - DAY}]}).deps)).toBe('a');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('propagates the very error a rejected getElections raised, even with a fallback', async () => {
+    const error = new Error('read failed');
+    const getEngine = jest.fn(async () => ({getElections: async () => { throw error; }}));
+    await expect(resolveCurrentElectionId({getEngine, fallbackElectionId: 'seed-1'})).rejects.toBe(error);
+  });
+
+  it('propagates the very error a rejected getEngine raised, even with a fallback', async () => {
+    const error = new Error('engine failed');
+    const getEngine = jest.fn(async (): Promise<{getElections(): Promise<never[]>}> => { throw error; });
+    await expect(resolveCurrentElectionId({getEngine, fallbackElectionId: 'seed-1'})).rejects.toBe(error);
+  });
+
+  it('asks for the elections engine exactly once and never opens an election', async () => {
+    const {deps, getEngine, opened} = resolverDeps({summaries: [{id: 'e-9', date: D}]});
+    await resolveCurrentElectionId(deps);
+    expect(getEngine).toHaveBeenCalledTimes(1);
+    expect(getEngine).toHaveBeenCalledWith('elections');
+    expect(opened).toEqual([]);
+  });
 });
