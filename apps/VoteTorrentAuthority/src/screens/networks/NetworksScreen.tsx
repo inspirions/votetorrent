@@ -19,6 +19,7 @@ import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { usePreserveScrollOnResize } from "../../hooks/usePreserveScrollOnResize";
 import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
 import { VoterInviteCard } from "./components/VoterInviteCard";
+import { OwnerTrustNotice } from "../../components/OwnerTrustNotice";
 import { reprobeAfterConnect } from "./reprobeAfterConnect";
 
 export default function NetworksScreen() {
@@ -112,6 +113,10 @@ export default function NetworksScreen() {
 		setJoinError(t("qrScanUnavailable"));
 	}, [t]);
 
+	// Open Settings from the owner-trust notice: Home > Settings is where the "Require saved owner
+	// trust" row lives. The same navigation call the app already uses for the Settings tab.
+	const openSettings = useCallback(() => navigation.navigate("Home", { screen: "Settings" }), [navigation]);
+
 	// Re-query recent networks whenever this screen regains focus (not just on
 	// mount / engine change) — otherwise a network created via AddNetwork and
 	// navigated-back-from would not appear until an app restart, since the engine
@@ -150,11 +155,16 @@ export default function NetworksScreen() {
 
 	return (
 		<ScrollView
+			testID="networks-scroll"
 			ref={scrollRef}
 			{...preserveScroll}
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
+			{/* Owner-trust notice: persistent, reads its own state from the cadre-node context and has no
+			    dismiss control, so it stays until the context clears it. First child of the scroll
+			    content. 64-23 adds the needs-reinvite action prop to this element. */}
+			<OwnerTrustNotice onOpenSettings={openSettings} />
 			<View style={styles.section}>
 				<ThemedText type="defaultSemiBold" style={styles.section}>
 					{t("useOneOfTheFollowingToGetConnected")}
