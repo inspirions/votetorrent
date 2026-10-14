@@ -1011,6 +1011,8 @@ describe('CadreNodeProvider — join bootstrap merged at boot (D-26)', () => {
 
   it('JBP-2 puts config addresses first and never turns join hints into relay targets', async () => {
     jest.resetModules();
+    // The replication-proof case above leaves its flag mock registered; this boot needs the real flags.
+    jest.dontMock('../../engines/proof-flags.generated');
     jest.doMock('react', () => actualReact);
     jest.doMock('../../../bootstrap.config.json', () => ({ bootstrapNodes: [RELAY_CFG] }), { virtual: true });
     const transportOptions: Array<{ reservationConcurrency?: number }> = [];
