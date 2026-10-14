@@ -22,7 +22,7 @@
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AccessibilityInfo, Image, PixelRatio, Pressable, Share, View, useWindowDimensions } from "react-native";
+import { AccessibilityInfo, Image, PixelRatio, Pressable, Share, View, useWindowDimensions, type HostInstance } from "react-native";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import { ThemedText } from "../../../components/ThemedText";
 import { CustomButton } from "../../../components/CustomButton";
@@ -91,7 +91,7 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 	const [qrOpen, setQrOpen] = useState(false);
 	const mountedRef = useRef(true);
 	const inFlightRef = useRef(false);
-	const openButtonRef = useRef<View>(null);
+	const openButtonRef = useRef<HostInstance>(null);
 	const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// Re-renders on a density change, so the thumbnail is rebuilt at the new pixel ratio.
 	const { scale } = useWindowDimensions();

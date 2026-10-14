@@ -1,5 +1,5 @@
 import type { Ref } from "react";
-import { StyleSheet, TouchableOpacity, View } from "react-native";
+import { StyleSheet, TouchableOpacity, View, type HostInstance } from "react-native";
 import { ThemedText } from "./ThemedText";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
@@ -16,7 +16,7 @@ interface FullButtonProps {
 	flex?: boolean;
 	testID?: string;
 	/** Host ref (React 19 passes `ref` as a prop); lets a caller return accessibility focus to the button. */
-	ref?: Ref<View>;
+	ref?: Ref<HostInstance>;
 	onPress: () => void;
 }
 
