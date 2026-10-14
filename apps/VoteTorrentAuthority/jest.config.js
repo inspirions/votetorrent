@@ -48,6 +48,10 @@ module.exports = {
     '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
     // Guards jest.node.config.js's own ESM mappers; runs only under that config.
     '<rootDir>/src/engines/__tests__/node-config-esm-mappers.spec.ts',
+    // Phase 64: Node-only specs with REAL cadre-core, written by 64-04 and 64-07 and registered in
+    // jest.node.config.js by 64-07. They must not run under the RN preset.
+    '<rootDir>/src/engines/__tests__/join-code-prefix.spec.ts',
+    '<rootDir>/src/engines/__tests__/owner-trust-store.spec.ts',
     // replication-proof-runner.test.ts was excluded here by Phase 39 plan 39-04 because
     // "Phase 41 is PAUSED (P2P-11 open at 41-11)". It stayed excluded for months and rotted:
     // its CadreNode mock lost getMultiaddrs(), so the runner threw at the relay-reservation
@@ -94,6 +98,11 @@ module.exports = {
     // transitively by App.test.tsx's full navigation tree (every screen module is
     // eagerly required by src/navigation/index.tsx, not lazily).
     '^@react-native-clipboard/clipboard$': '<rootDir>/__mocks__/@react-native-clipboard/clipboard.js',
+    // Phase 64 plan 64-01 (D-03, D-04): native bindings (share sheet, cache files, keep-awake) that
+    // jest cannot load, and transformIgnorePatterns does not transform them.
+    '^react-native-share$': '<rootDir>/__mocks__/react-native-share.js',
+    '^@dr.pogodin/react-native-fs$': '<rootDir>/__mocks__/@dr.pogodin/react-native-fs.js',
+    '^@sayem314/react-native-keep-awake$': '<rootDir>/__mocks__/@sayem314/react-native-keep-awake.js',
     '^@react-native-community/datetimepicker$': '<rootDir>/__mocks__/@react-native-community/datetimepicker.js',
     '^react-native-vector-icons/FontAwesome$': '<rootDir>/__mocks__/react-native-vector-icons/FontAwesome.js',
     '^@multiformats/multiaddr$': '<rootDir>/__mocks__/@multiformats/multiaddr.js',
@@ -101,6 +110,10 @@ module.exports = {
     // The package exports field blocks subpath access; this mapper resolves the TS source directly.
     '^@votetorrent/vote-engine/test/fixtures/test-context$':
       '<rootDir>/../../packages/vote-engine/test/fixtures/test-context.ts',
+    // Phase 64 (planning notes 4.3): the real-encoder join-code fixtures that plan 64-04 generates.
+    // Pure data with no imports.
+    '^@votetorrent/vote-engine/test/fixtures/join-code-fixtures$':
+      '<rootDir>/../../packages/vote-engine/test/fixtures/join-code-fixtures.generated.ts',
     // ESM-only packages: map to their `main` entry so Jest's CJS resolver can find them.
     // The transformIgnorePatterns exception above then lets Babel transform them ESM→CJS.
     '^@quereus/quereus$':
