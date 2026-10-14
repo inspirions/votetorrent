@@ -188,7 +188,7 @@ function styleOf(n: Inst): Record<string, any> {
 	return (StyleSheet.flatten(n.props.style) ?? {}) as Record<string, any>;
 }
 function allStrings(tr: renderer.ReactTestRenderer): string[] {
-	return tr.root.findAll((n) => n.type === "Text").map((n) => textOf(n));
+	return tr.root.findAll((n) => (n.type as unknown) === "Text").map((n) => textOf(n));
 }
 
 type Json = { type: string; props: Record<string, any>; children: Array<Json | string> | null };
@@ -551,7 +551,7 @@ describe("R: rendering", () => {
 		const paste = hostById(tr, "join-network-paste")!;
 		expect(paste.props.accessibilityRole).toBe("button");
 		expect(styleOf(paste)).toMatchObject({ minHeight: 44, minWidth: 44 });
-		const label = tr.root.findAll((n) => n.type === "Text" && textOf(n) === tx("en", "joinNetworkPaste"))[0];
+		const label = tr.root.findAll((n) => (n.type as unknown) === "Text" && textOf(n) === tx("en", "joinNetworkPaste"))[0];
 		expect(styleOf(label).color).toBe(lightTheme.colors.primary);
 	});
 
