@@ -14,11 +14,19 @@
 // this node's own admission row, the check `enrolment-smoke.mjs`'s waitForSelfAdmitted makes,
 // and, if it verifies, by the post-redemption steps the throw skipped (app-supplied).
 //
+// D-07: `invitation-used-up` covers cadre-core's typed `invite-spent` refusal, which also means
+// withdrawn, or expired on the member's clock. It is chosen only from that typed code, after the
+// bounded self-admission wait, never from message text. `invitation-older-version` is a 1.14-era
+// invitation caught before any decode or dial.
+//
+// D-06: the join code is a bearer credential. This file has no console, and `detail` is a closed
+// token (see `NetworkJoinResult`).
+//
 // D-03: vote-engine never imports cadre-core. Every cadre-core call arrives as a dependency;
 // the app wires the real ones (CadreNode, decodeCadreInvitation, verifyInvitationAdmission).
 
 import type { INetworksEngine, NetworkReference, User } from '@votetorrent/vote-core'
-import type { NetworkJoinCode } from './join-code.js'
+import { isOlderVersionInvitation, type NetworkJoinCode } from './join-code.js'
 
 export type NetworkJoinStep = 'admitting' | 'syncing' | 'verifying' | 'done'
 
@@ -59,6 +67,8 @@ export interface NetworkJoinOptions {
 export type NetworkJoinFailureReason =
   | 'invitation-malformed'
   | 'invitation-expired'
+  | 'invitation-older-version'
+  | 'invitation-used-up'
   | 'not-admitted'
   | 'no-peers'
   | 'not-synced'
@@ -76,21 +86,40 @@ export type NetworkJoinResult =
   | {
       readonly ok: false
       readonly reason: NetworkJoinFailureReason
-      /** For logs only — never shown to a voter (it can carry cadre-core error text). */
+      /**
+       * A closed token for logs only: a typed error code, an `...Error` class name, a reason token
+       * or `unknown`. Never message text, input or any slice of the join code (D-06); apps still
+       * never log it.
+       */
       readonly detail: string
     }
 
-const errorName = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+const CODE_TOKEN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+const NAME_TOKEN = /^(?:[A-Z][A-Za-z0-9]{0,58})?Error$/
+
+/** A typed kebab `code`, else an `...Error` class name, else `unknown`. Never reads message, cause or stack. */
+function closedDetail (error: unknown): string {
+  if (error !== null && typeof error === 'object') {
+    const { code, name } = error as { code?: unknown, name?: unknown }
+    if (typeof code === 'string' && code.length <= 32 && CODE_TOKEN.test(code)) return code
+    if (typeof name === 'string' && NAME_TOKEN.test(name)) return name
+  }
+  return 'unknown'
+}
 
 export async function joinNetwork (options: NetworkJoinOptions): Promise<NetworkJoinResult> {
   const now = options.now ?? (() => Date.now())
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
 
+  if (isOlderVersionInvitation(options.code.invitation)) {
+    return { ok: false, reason: 'invitation-older-version', detail: 'invitation-older-version' }
+  }
+
   let invitation: unknown
   try {
     invitation = options.decodeInvitation(options.code.invitation)
   } catch (e) {
-    return { ok: false, reason: 'invitation-malformed', detail: errorName(e) }
+    return { ok: false, reason: 'invitation-malformed', detail: closedDetail(e) }
   }
 
   // ---- 1. admitting
@@ -101,7 +130,7 @@ export async function joinNetwork (options: NetworkJoinOptions): Promise<Network
   } else {
     const expiresAt = options.invitationExpiresAtMs?.(invitation) ?? null
     if (expiresAt !== null && expiresAt <= now()) {
-      return { ok: false, reason: 'invitation-expired', detail: `invitation expired at ${new Date(expiresAt).toISOString()}` }
+      return { ok: false, reason: 'invitation-expired', detail: 'invitation-expired' }
     }
     try {
       await options.node.redeemCadreInvitation(invitation)
@@ -113,7 +142,10 @@ export async function joinNetwork (options: NetworkJoinOptions): Promise<Network
         admitted = await options.isSelfAdmitted().catch(() => false)
         if (!admitted) await sleep(250)
       }
-      if (!admitted) return { ok: false, reason: 'not-admitted', detail: errorName(redeemError) }
+      if (!admitted) {
+        const spent = redeemError !== null && typeof redeemError === 'object' && (redeemError as { code?: unknown }).code === 'invite-spent'
+        return { ok: false, reason: spent ? 'invitation-used-up' : 'not-admitted', detail: closedDetail(redeemError) }
+      }
       // The admission itself is proven; a failed post-step only slows the strand open.
       await options.afterFallbackAdmission?.().catch(() => undefined)
       admittedVia = 'self-admission'
@@ -139,7 +171,7 @@ export async function joinNetwork (options: NetworkJoinOptions): Promise<Network
       return { ok: true, outcome: result.outcome, admittedVia, networkRef: result.networkRef, fingerprint: result.fingerprint }
     }
     if (!result.retryable || now() + retryDelayMs >= budgetEnds) {
-      return { ok: false, reason: result.reason === 'target-open-failed' ? 'open-failed' : result.reason, detail: result.detail }
+      return { ok: false, reason: result.reason === 'target-open-failed' ? 'open-failed' : result.reason, detail: result.reason }
     }
     await sleep(retryDelayMs)
   }
