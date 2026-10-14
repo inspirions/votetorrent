@@ -218,11 +218,16 @@ describe("SettingsScreen owner-trust notice", () => {
 		await unmount(lone);
 	});
 
-	it("S-4: needs-reinvite has no action yet and no pressable", async () => {
+	it("S-4: needs-reinvite has the wired action and exactly one pressable", async () => {
 		const r = await mount({ ownerTrust: "needs-reinvite" });
 		const json = r.toJSON();
-		expect(hosts(json).filter((h) => h.props.testID === "owner-trust-notice-needs-reinvite-action")).toHaveLength(0);
-		expect(pressableCount(noticeHosts(json)[0])).toBe(0);
+		expect(hosts(json).filter((h) => h.props.testID === "owner-trust-notice-needs-reinvite-action").length).toBeGreaterThan(0);
+		expect(pressableCount(noticeHosts(json)[0])).toBe(1);
+		const el = r.root.findAll((n) => n.props.testID === "owner-trust-notice-needs-reinvite-action" && typeof n.props.onPress === "function");
+		await act(async () => {
+			el[0].props.onPress();
+		});
+		expect(mockNavigate.mock.calls).toEqual([["JoinNetwork"]]);
 		await unmount(r);
 	});
 

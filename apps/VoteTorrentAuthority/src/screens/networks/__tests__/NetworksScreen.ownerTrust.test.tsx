@@ -186,12 +186,17 @@ describe("NetworksScreen owner-trust notice", () => {
 		await unmount(r);
 	});
 
-	it("N-5: needs-reinvite has no action yet, and the screen never targets AcceptInvitation", async () => {
+	it("N-5: needs-reinvite has the wired action (JoinNetwork), and the screen never targets AcceptInvitation", async () => {
 		const r = await mount({ ownerTrust: "needs-reinvite" });
 		const json = r.toJSON();
-		expect(hosts(json).filter((h) => h.props.testID === "owner-trust-notice-needs-reinvite-action")).toHaveLength(0);
+		expect(hosts(json).filter((h) => h.props.testID === "owner-trust-notice-needs-reinvite-action").length).toBeGreaterThan(0);
 		const notice = hosts(json).find((h) => h.props.testID === "owner-trust-notice") as Json;
-		expect(pressableCount(notice)).toBe(0);
+		expect(pressableCount(notice)).toBe(1);
+		const el = r.root.findAll((n) => n.props.testID === "owner-trust-notice-needs-reinvite-action" && typeof n.props.onPress === "function");
+		await act(async () => {
+			el[0].props.onPress();
+		});
+		expect(mockNavigate.mock.calls).toEqual([["JoinNetwork"]]);
 		await unmount(r);
 		const src = fs.readFileSync(path.join(__dirname, "../NetworksScreen.tsx"), "utf8");
 		const code = src
@@ -216,8 +221,8 @@ describe("NetworksScreen owner-trust notice", () => {
 		expect(hosts(json).filter((h) => h.props.testID === "owner-trust-notice")).toHaveLength(1);
 		expect(underScroll(json).filter((h) => typeof h.props.testID === "string")[0].props.testID).toBe("owner-trust-notice");
 		const notice = hosts(json).find((h) => h.props.testID === "owner-trust-notice") as Json;
-		// 1 for the two Open Settings states is this file's anti-vacuity case for the predicate.
-		expect(pressableCount(notice)).toBe(state === "needs-reinvite" ? 0 : 1);
+		// Every state now carries exactly one action: Open Settings, or the wired Join a network.
+		expect(pressableCount(notice)).toBe(1);
 		await unmount(r);
 	});
 
