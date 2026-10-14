@@ -16,9 +16,15 @@
  *  - otherwise the cadre has an owner that is not this phone (`not-owner`, e.g. a phone that joined
  *    a drone's cadre): the owner device must invite voters.
  *
+ * A phone that joined a cadre BY INVITATION (its own CadrePeer row has no vouch signature but a vouch
+ * usage) is never offered owner setup: it must not genesis-insert itself as an owner of someone else's
+ * cadre (D-09: pins come only from an invitation or the operator; cadre-core makes the same point at
+ * `cadre-node.js` ~l.7155). That predicate mirrors `self-voucher.ts` `isInvitationAdmitted`.
+ *
  * Nothing here logs the invitation or the code: the invitation carries its private key, a bearer
  * credential for cadre membership.
  */
+import type { CadrePeerRow } from '@serfab/cadre-core';
 import type { FoundingAnchor, INetworksEngine } from '@votetorrent/vote-core';
 
 /** How many voters one code admits. A leaked code admits at most this many strangers as cadre members. */
@@ -32,8 +38,14 @@ export const VOTER_INVITE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The slice of a cadre-core `CadreNode` minting needs (the real class satisfies it). */
 export interface VoterInviteNode {
+	readonly peerId?: { toString(): string };
 	getIdentityOwnerKey(): { publicKeyB64: string; privateKeyB64: string };
-	getControlDatabase(): { getOwnerKeys(): Promise<ReadonlySet<string>>; ensureOwnerKey(key: string): Promise<boolean> } | null;
+	getControlDatabase(): {
+		getOwnerKeys(): Promise<ReadonlySet<string>>;
+		ensureOwnerKey(key: string): Promise<boolean>;
+		queryCadrePeers(retry?: boolean): Promise<ReadonlyArray<Pick<CadrePeerRow, 'peerId' | 'vouchSig' | 'vouchUsage'>>>;
+	} | null;
+	getSeedBootstrapService(): { canAuthorize(): boolean } | null;
 	trustOwnerKeys(keys: Iterable<string>, source: 'operator'): Promise<void>;
 	initializeSeedBootstrap(ownerPrivateKey: string): Promise<void>;
 	createCadreInvitation(options: {
@@ -45,6 +57,21 @@ export interface VoterInviteNode {
 
 export type VoterInviteCapability = 'ready' | 'needs-owner-setup' | 'not-owner' | 'unavailable';
 
+/**
+ * Was this phone admitted to the cadre by an invitation? Its own row then has no vouch signature but a
+ * vouch usage (the `self-voucher.ts` `isInvitationAdmitted` predicate). Throws when the peer id or the
+ * rows cannot be read, so callers fail closed.
+ */
+async function selfAdmittedByInvitation(
+	node: VoterInviteNode,
+	db: NonNullable<ReturnType<VoterInviteNode['getControlDatabase']>>,
+): Promise<boolean> {
+	const self = node.peerId?.toString();
+	if (!self) throw new Error('voter-invite: this device has no peer id yet');
+	const rows = await db.queryCadrePeers();
+	return rows.some((row) => row.peerId === self && row.vouchSig === null && row.vouchUsage != null);
+}
+
 /** Can this phone mint voter invitations, and if not, why. Never throws. */
 export async function voterInviteCapability(node: VoterInviteNode | null | undefined): Promise<VoterInviteCapability> {
 	if (!node) return 'unavailable';
@@ -53,20 +80,23 @@ export async function voterInviteCapability(node: VoterInviteNode | null | undef
 		const db = node.getControlDatabase();
 		if (!db) return 'unavailable';
 		const owners = await db.getOwnerKeys();
-		if (owners.size === 0) return 'needs-owner-setup';
+		if (owners.size === 0) return (await selfAdmittedByInvitation(node, db)) ? 'not-owner' : 'needs-owner-setup';
 		return owners.has(self) ? 'ready' : 'not-owner';
 	} catch {
 		return 'unavailable';
 	}
 }
 
-/** The nodes whose seed bootstrap this process has wired (it is in-memory: once per launch). */
-const seededThisLaunch = new WeakSet<object>();
-
 /**
  * Make this phone the cadre's owner (only when the cadre has NO owner yet), then wire the seed
  * bootstrap that signs invitations. Idempotent: an existing genesis row is kept (`ensureOwnerKey`
- * returns false), and the seed bootstrap is wired once per launch.
+ * returns false).
+ *
+ * The seed bootstrap is wired only while it cannot authorize. The boot re-anchor
+ * (`wireOwnKeyIfOwner`, CadreNodeProvider) already wires it on an owner phone, and a second
+ * `initializeSeedBootstrap` re-registers `/sereus/seed/1.0.0`, which libp2p refuses with
+ * `DuplicateProtocolHandlerError`. So the guard asks cadre-core instead of keeping per-launch state.
+ * A phone admitted by invitation is refused before any write.
  */
 export async function ensureVoterInviteOwner(node: VoterInviteNode): Promise<void> {
 	const owner = node.getIdentityOwnerKey();
@@ -77,12 +107,14 @@ export async function ensureVoterInviteOwner(node: VoterInviteNode): Promise<voi
 		throw new Error('voter-invite: this device is not an owner of its cadre');
 	}
 	if (owners.size === 0) {
+		if (await selfAdmittedByInvitation(node, db)) {
+			throw new Error('voter-invite: this device joined its cadre by invitation and cannot become its owner');
+		}
 		await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
 		await db.ensureOwnerKey(owner.publicKeyB64);
 	}
-	if (!seededThisLaunch.has(node)) {
+	if (!node.getSeedBootstrapService()?.canAuthorize()) {
 		await node.initializeSeedBootstrap(owner.privateKeyB64);
-		seededThisLaunch.add(node);
 	}
 }
 
