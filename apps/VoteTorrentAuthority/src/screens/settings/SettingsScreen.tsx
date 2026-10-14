@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, ScrollView, StyleSheet, Switch, TouchableOpacity } from "react-native";
 import { useNavigation, useTheme, useFocusEffect } from "@react-navigation/native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -24,6 +24,9 @@ import { InlineError } from "../../components/InlineError";
 import { isNoNetworkEstablishedError } from "../../engines/engine-factory";
 import { PeerReadUnavailableNotice } from "../../components/PeerReadUnavailableNotice";
 import { classifyPeerReadFailure } from "../../engines/peer-read-unavailable";
+import { OwnerTrustNotice } from "../../components/OwnerTrustNotice";
+import { ToggleRow } from "../../components/ToggleRow";
+import { readRequireOwnerTrust, writeRequireOwnerTrust } from "../../engines/owner-trust-setting";
 
 const LANGUAGES: { code: 'en' | 'es'; label: string }[] = [
 	{ code: 'en', label: 'English' },
@@ -45,6 +48,14 @@ export default function SettingsScreen() {
 	const [peerUnavailable, setPeerUnavailable] = useState(false);
 	// Bumped by the notice's Try Again so every network-scoped load re-runs.
 	const [retryNonce, setRetryNonce] = useState(0);
+	// D-11: "Require saved owner trust". Off by default. requireOwnerTrustRef mirrors what is shown;
+	// the touched flag and the write sequence keep a late first read, or an older write's re-read,
+	// from overwriting what the officer just chose.
+	const [requireOwnerTrust, setRequireOwnerTrust] = useState(false);
+	const requireOwnerTrustRef = useRef(false);
+	const requireOwnerTrustTouchedRef = useRef(false);
+	const requireOwnerTrustWriteSeqRef = useRef(0);
+	const mountedRef = useRef(false);
 	const { colors } = useTheme() as ExtendedTheme;
 	const { t } = useTranslation();
 	const { getEngine } = useApp();
@@ -74,6 +85,54 @@ export default function SettingsScreen() {
 		setSettingsError("");
 		setRetryNonce((n) => n + 1);
 	}, []);
+
+	useEffect(() => {
+		mountedRef.current = true;
+		return () => {
+			mountedRef.current = false;
+		};
+	}, []);
+
+	// Only sets state when the value changes and the screen is mounted, so the default-off first read
+	// causes no update.
+	const showRequireOwnerTrust = useCallback((on: boolean) => {
+		if (!mountedRef.current || on === requireOwnerTrustRef.current) {
+			return;
+		}
+		requireOwnerTrustRef.current = on;
+		setRequireOwnerTrust(on);
+	}, []);
+
+	// An unreadable setting is shown ON: the cadre-node provider treats it as strict, so the row
+	// must never show OFF while the next start would block (fail closed).
+	useEffect(() => {
+		readRequireOwnerTrust()
+			.then((on) => {
+				if (!requireOwnerTrustTouchedRef.current) showRequireOwnerTrust(on);
+			})
+			.catch(() => {
+				console.warn("[owner-trust] setting: unreadable");
+				if (!requireOwnerTrustTouchedRef.current) showRequireOwnerTrust(true);
+			});
+	}, [showRequireOwnerTrust]);
+
+	// The change takes effect at the next start (the help text says so), so no prompt.
+	const handleRequireOwnerTrustChange = useCallback(
+		(next: boolean) => {
+			requireOwnerTrustTouchedRef.current = true;
+			const seq = ++requireOwnerTrustWriteSeqRef.current;
+			showRequireOwnerTrust(next);
+			writeRequireOwnerTrust(next).catch(() => {
+				console.warn("[owner-trust] setting: write failed");
+				if (seq !== requireOwnerTrustWriteSeqRef.current) return;
+				// Show what is stored, never a value that was not saved.
+				readRequireOwnerTrust()
+					.then(showRequireOwnerTrust)
+					.catch(() => showRequireOwnerTrust(true));
+			});
+		},
+		[showRequireOwnerTrust]
+	);
 
 	const handleLanguageChange = async (lang: 'en' | 'es') => {
 		await i18n.changeLanguage(lang);
@@ -236,6 +295,10 @@ export default function SettingsScreen() {
 				style={[styles.content, { backgroundColor: colors.background }]}
 				contentContainerStyle={styles.container}
 			>
+				{/* Owner-trust notice: persistent, reads its own state from the cadre-node context, no
+				    dismiss. Open Settings is not passed here because the setting row is on this screen.
+				    64-23 adds the needs-reinvite action prop to this element. */}
+				<OwnerTrustNotice />
 				<View style={[styles.helpIconsRow, { zIndex: 10 }]}>
 					<ThemedText type="default">{t('language')}</ThemedText>
 					<View style={styles.langSelector}>
@@ -392,6 +455,19 @@ export default function SettingsScreen() {
 						icon="chevron-right"
 						onPress={() => navigation.navigate("DashboardSignInCode")}
 					/>
+				</View>
+
+				<View testID="settings-require-owner-trust-entry" style={{ marginTop: 8, marginBottom: 16 }}>
+					<ToggleRow
+						label={t("settingsRequireOwnerTrust")}
+						accessibilityLabel={t("settingsRequireOwnerTrust")}
+						testID="settings-require-owner-trust"
+						value={requireOwnerTrust}
+						onValueChange={handleRequireOwnerTrustChange}
+					/>
+					<ThemedText type="small" testID="settings-require-owner-trust-help" style={{ color: colors.text }}>
+						{t("settingsRequireOwnerTrustHelp")}
+					</ThemedText>
 				</View>
 
 				{/* Per-network block: only shown once a network is selected. Without a
