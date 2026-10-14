@@ -17,6 +17,7 @@ import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 import { noiseCryptoForNode } from '../engines/noise-crypto-config';
 import { openStrandNetworkState, openTrustedOwnerStore } from '../engines/rn-durable-slot';
+import { readJoinBootstrap } from '../engines/join-bootstrap';
 import { readRequireOwnerTrust } from '../engines/owner-trust-setting';
 import {
   OwnerTrustUnreadableError,
@@ -354,9 +355,17 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         }
         storeKindRef.current = storeKind;
 
+        // A joined Authority install's bootstrap is the member machines its join code named. They are
+        // bootstrap peers only and never relay reservation targets, as the Voter does
+        // (apps/VoteTorrentVoter/src/providers/CadreNodeProvider.tsx l.239-245; D-26, research M4).
+        // The recovery rebuild below reuses this list, and the control-scope wipe leaves the
+        // AsyncStorage record alone. The read never rejects, so an unreadable record boots on config.
+        const joinBootstrap = await readJoinBootstrap();
+        const bootstrapNodes = [...new Set([...CONTROL_RELAY_ADDRS, ...joinBootstrap])];
+
         const makeNode = () => new CadreNode({
           privateKey,
-          controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
+          controlNetwork: { partyId: PARTY_ID, bootstrapNodes },
           strandNetworkState: { store: strandNetworkStateStore },
           // D-08: spread only when the store opened. The recovery rebuild reuses this closure, so it gets
           // the SAME store (cadre-core keeps an injected store across stop and start).
