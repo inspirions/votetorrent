@@ -40,6 +40,20 @@ type Listener = (...args: unknown[]) => void;
 // Each constructed fake CadreNode pushes itself here for the test to drive.
 const mockConstructedNodes: FakeCadreNode[] = [];
 
+// Phase 64 plan 07 fixtures (all `mock`-prefixed for the jest-hoist rule). The fake cadre-core node
+// reads them lazily, so a test sets them before the provider boots. Reset in the top-level beforeEach.
+const mockCallOrder: string[] = [];
+const mockControlOwners = new Set<string>();
+const mockSavedAnchor = new Set<string>();
+const mockMemoryAnchor = new Set<string>();
+const mockStartErrors: Error[] = [];
+let mockWireError: Error | null = null;
+let mockOwnerKeysError: Error | null = null;
+const mockHostPoolRendezvous = jest.fn(async (..._args: unknown[]) => {
+  mockCallOrder.push('hostPoolRendezvous');
+  return async () => undefined;
+});
+
 interface FakeCadreNode {
   start: jest.Mock;
   stop: jest.Mock;
@@ -48,6 +62,8 @@ interface FakeCadreNode {
   offCalls: Array<[string, Listener]>;
   /** The options object the constructor was called with (D-14 wiring proof). */
   receivedOptions: unknown;
+  trustOwnerKeys: jest.Mock;
+  wireOwnKeyIfOwner: jest.Mock;
   emit(event: string, payload?: unknown): void;
   hasListener(event: string): boolean;
 }
@@ -56,8 +72,39 @@ jest.mock(
   '@serfab/cadre-core',
   () => {
     class FakeCadreNode {
-      public start = jest.fn(async () => {});
+      public start = jest.fn(async () => {
+        mockCallOrder.push('start');
+        const queued = mockStartErrors.shift();
+        if (queued) throw queued;
+      });
       public stop = jest.fn(async () => {});
+      public trustOwnerKeys = jest.fn(async () => undefined);
+      // cadre-core 1.15: anchors this node's own identity key when its OwnerKey row is live.
+      public wireOwnKeyIfOwner = jest.fn(async () => {
+        mockCallOrder.push('wireOwnKeyIfOwner');
+        if (mockWireError) throw mockWireError;
+        if (mockControlOwners.has('self-pub')) {
+          mockSavedAnchor.add('self-pub');
+          return true;
+        }
+        return false;
+      });
+      public getTrustedOwnerStore() {
+        const injected = (this.receivedOptions as { trustedOwners?: { store?: unknown } }).trustedOwners?.store;
+        return injected ?? { all: () => new Set(mockMemoryAnchor) };
+      }
+      public getControlDatabase() {
+        return {
+          getOwnerKeys: async () => {
+            mockCallOrder.push('getOwnerKeys');
+            if (mockOwnerKeysError) throw mockOwnerKeysError;
+            return new Set(mockControlOwners);
+          },
+        };
+      }
+      public getIdentityOwnerKey() {
+        return { publicKeyB64: 'self-pub', privateKeyB64: 'self-priv' };
+      }
       public getStrand = jest.fn(() => undefined);
       private listeners: Record<string, Listener[]> = {};
       public onCalls: Array<[string, Listener]> = [];
@@ -102,16 +149,42 @@ jest.mock(
         forget: async () => undefined,
       })),
     };
-    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore };
+    // cadre-core 1.15: the saved trusted-owner anchor. open() reads the slot first, as the real class
+    // does, so an AsyncStorage failure rejects it (the D-10 trigger).
+    const PersistentTrustedOwnerStore = {
+      open: jest.fn(async (slot: { load(): Promise<unknown> }, partyId: string) => {
+        await slot.load();
+        return {
+          partyId,
+          slot,
+          all: () => new Set(mockSavedAnchor),
+          has: (k: string) => mockSavedAnchor.has(k),
+          sources: () => new Map(),
+          trust: jest.fn(async () => undefined),
+          remove: jest.fn(async () => undefined),
+        };
+      }),
+    };
+    const controlStorageScope = (partyId: string) => 'control-' + Buffer.from(partyId).toString('hex');
+    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore, PersistentTrustedOwnerStore, controlStorageScope };
   },
   { virtual: true },
 );
 
 jest.mock(
   'rn-leveldb',
-  () => ({ LevelDB: class {}, LevelDBWriteBatch: class {} }),
+  () => ({
+    LevelDB: class {
+      static destroyDB() {}
+    },
+    LevelDBWriteBatch: class {},
+  }),
   { virtual: true },
 );
+
+jest.mock('../../engines/pool-rendezvous-host', () => ({
+  hostPoolRendezvous: (...a: unknown[]) => mockHostPoolRendezvous(...a),
+}));
 
 // `mock`-prefixed so the hoisted jest.mock factory below is allowed to reference it
 // (jest hoisting rule). Task 2's settlement-failure case makes this reject once.
@@ -136,6 +209,7 @@ jest.mock(
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { CadreNodeProvider, useCadreNode, resolveBootstrapNodes } = require('../CadreNodeProvider');
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -166,15 +240,25 @@ function renderProvider() {
 
 beforeEach(() => {
   mockConstructedNodes.length = 0;
+  mockCallOrder.length = 0;
+  mockControlOwners.clear();
+  mockSavedAnchor.clear();
+  mockMemoryAnchor.clear();
+  mockStartErrors.length = 0;
+  mockWireError = null;
+  mockOwnerKeysError = null;
   jest.clearAllMocks();
 });
+
+/** The boot now has more awaits (store open, re-anchor, classification), so flush more turns. */
+const BOOT_FLUSH_TURNS = 50;
 
 /** Flush the async microtasks queued by the provider's boot effect (construct + start). */
 async function flushBoot() {
   await renderer.act(async () => {
     // Several turns: openOptimysticRNDb (sync) → await loadOrCreateRNPeerKey →
     // construct CadreNode → await start() → setNode → listener effect.
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
       // eslint-disable-next-line no-await-in-loop
       await Promise.resolve();
     }
@@ -532,7 +616,7 @@ describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
           <Probe />
         </mod.CadreNodeProvider>,
       );
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
         // eslint-disable-next-line no-await-in-loop
         await Promise.resolve();
       }
@@ -559,7 +643,7 @@ describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
           <Probe />
         </mod.CadreNodeProvider>,
       );
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
         // eslint-disable-next-line no-await-in-loop
         await Promise.resolve();
       }
@@ -594,7 +678,7 @@ describe('CadreNodeProvider — config-fault wiring (D-14)', () => {
           <Probe />
         </mod.CadreNodeProvider>,
       );
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
         // eslint-disable-next-line no-await-in-loop
         await Promise.resolve();
       }
@@ -659,7 +743,7 @@ describe('CadreNodeProvider — yields the device to the replication proof (spik
     }
     await R.act(async () => {
       R.create(ReactIso.createElement(mod.CadreNodeProvider, null, ReactIso.createElement(Probe)));
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
         // eslint-disable-next-line no-await-in-loop
         await Promise.resolve();
       }
@@ -668,5 +752,201 @@ describe('CadreNodeProvider — yields the device to the replication proof (spik
     await expect(captured.value!.nodeSettled).resolves.toEqual({ status: 'failed', node: null });
     expect(infoSpy.mock.calls.some(c => String(c[0]).includes('replication proof owns'))).toBe(true);
     infoSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 64 plan 07: the saved trusted-owner anchor (D-08), the three trust states (D-09, D-10, D-11),
+// the founder re-anchor and refreshOwnerTrust.
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — saved owner trust (D-08..D-11)', () => {
+  const TRUST_PREFIX = '@votetorrent/trustedOwners/';
+  const SETTING_KEY = '@votetorrent/settings/requireOwnerTrust';
+  const OPEN_FAIL_TOKEN = '[CadreNodeProvider] trusted-owner store unavailable; using the in-memory anchor';
+  const BLOCKED_TOKEN =
+    '[CadreNodeProvider] trusted-owner store unavailable and saved owner trust is required; the node was not started';
+
+  let warnSpy: jest.SpyInstance;
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(async () => {
+    await AsyncStorage.clear();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    // P-14: nothing in the provider ever pins.
+    for (const n of mockConstructedNodes) expect(n.trustOwnerKeys).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
+  /** Make the saved store unreadable, and answer the require-trust setting as asked. */
+  function failStore(setting: 'absent' | 'true' | 'reject') {
+    return jest.spyOn(AsyncStorage, 'getItem').mockImplementation(async (key: string) => {
+      if (key.startsWith(TRUST_PREFIX)) throw new Error('planted-io-text');
+      if (key === SETTING_KEY) {
+        if (setting === 'reject') throw new Error('planted-io-text');
+        return setting === 'true' ? 'true' : null;
+      }
+      return null;
+    });
+  }
+
+  const loggedJson = () => JSON.stringify([...warnSpy.mock.calls, ...errorSpy.mock.calls]);
+  const callsWith = (spy: jest.SpyInstance, token: string) => spy.mock.calls.filter((c) => c[0] === token);
+
+  async function boot() {
+    const r = renderProvider();
+    await flushBoot();
+    return r;
+  }
+
+  it('P-1 builds the node on a persistent store for its party and slot, and never reads the setting', async () => {
+    const getItem = jest.spyOn(AsyncStorage, 'getItem');
+    const { captured } = await boot();
+    const opts = mockConstructedNodes[0].receivedOptions as {
+      trustedOwners?: { store?: { partyId?: string; slot?: { key?: string } } };
+    };
+    expect(opts.trustedOwners?.store?.partyId).toBe('votetorrent');
+    expect(opts.trustedOwners?.store?.slot?.key).toBe('@votetorrent/trustedOwners/votetorrent-cadre-node/votetorrent');
+    expect(captured.value!.ownerTrust).toBe('ok');
+    expect(getItem.mock.calls.some((c) => c[0] === SETTING_KEY)).toBe(false);
+  });
+
+  it('P-2 the recovery rebuild receives the SAME store and the re-anchor runs once, on the second node', async () => {
+    mockStartErrors.push(new Error('CadreControl.Revocation could not be restored'));
+    const { captured } = await boot();
+    expect(mockConstructedNodes).toHaveLength(2);
+    const [first, second] = mockConstructedNodes;
+    const storeOf = (n: FakeCadreNode) => (n.receivedOptions as { trustedOwners: { store: unknown } }).trustedOwners.store;
+    expect(storeOf(second)).toBe(storeOf(first));
+    expect(first.wireOwnKeyIfOwner).not.toHaveBeenCalled();
+    expect(second.wireOwnKeyIfOwner).toHaveBeenCalledTimes(1);
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('P-3 boots in order: start, re-anchor, classification read, rendezvous; the re-anchor runs once', async () => {
+    await boot();
+    const order = mockCallOrder.filter((c) => ['start', 'wireOwnKeyIfOwner', 'getOwnerKeys', 'hostPoolRendezvous'].includes(c));
+    expect(order).toEqual(['start', 'wireOwnKeyIfOwner', 'getOwnerKeys', 'hostPoolRendezvous']);
+    expect(mockConstructedNodes[0].wireOwnKeyIfOwner).toHaveBeenCalledTimes(1);
+  });
+
+  it('P-4 a founder whose own key gets re-anchored reads ok', async () => {
+    mockControlOwners.add('self-pub');
+    const { captured } = await boot();
+    expect(mockSavedAnchor.has('self-pub')).toBe(true);
+    expect(captured.value!.ownerTrust).toBe('ok');
+  });
+
+  it('P-5 a re-anchor that rejects logs one closed token and the boot still completes ready', async () => {
+    mockWireError = new Error('planted-io-text');
+    const { captured } = await boot();
+    expect(callsWith(warnSpy, '[owner-trust] reanchor: failed')).toHaveLength(1);
+    expect(loggedJson()).not.toContain('planted-io-text');
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('P-6 an empty saved anchor in a cadre this phone does not own reads needs-reinvite, with a live node', async () => {
+    mockControlOwners.add('drone-owner');
+    const { captured } = await boot();
+    expect(captured.value!.ownerTrust).toBe('needs-reinvite');
+    expect(captured.value!.node).not.toBeNull();
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('P-7 refreshOwnerTrust clears needs-reinvite once the pins exist, and does not pin', async () => {
+    mockControlOwners.add('drone-owner');
+    const { captured } = await boot();
+    expect(captured.value!.ownerTrust).toBe('needs-reinvite');
+    mockSavedAnchor.add('drone-owner');
+    await renderer.act(async () => {
+      await captured.value!.refreshOwnerTrust();
+    });
+    expect(captured.value!.ownerTrust).toBe('ok');
+  });
+
+  it('P-8 refreshOwnerTrust rejects on an unreadable read and leaves the state alone', async () => {
+    mockControlOwners.add('drone-owner');
+    const { captured } = await boot();
+    mockOwnerKeysError = new Error('planted-io-text');
+    let thrown: unknown = null;
+    await renderer.act(async () => {
+      try {
+        await captured.value!.refreshOwnerTrust();
+      } catch (caught) {
+        thrown = caught;
+      }
+    });
+    expect((thrown as Error).name).toBe('OwnerTrustUnreadableError');
+    expect(captured.value!.ownerTrust).toBe('needs-reinvite');
+    expect(callsWith(warnSpy, '[owner-trust] classify: unreadable')).toHaveLength(1);
+    expect(loggedJson()).not.toContain('planted-io-text');
+  });
+
+  it('P-9 an unreadable classification at boot reports ok, logs the closed token and still settles ready', async () => {
+    mockOwnerKeysError = new Error('planted-io-text');
+    const { captured } = await boot();
+    expect(captured.value!.ownerTrust).toBe('ok');
+    expect(callsWith(warnSpy, '[owner-trust] classify: unreadable')).toHaveLength(1);
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('P-10 a store that will not open runs on the in-memory anchor and says so (memory-only)', async () => {
+    failStore('absent');
+    const { captured } = await boot();
+    expect(mockConstructedNodes).toHaveLength(1);
+    const opts = mockConstructedNodes[0].receivedOptions as Record<string, unknown>;
+    expect('trustedOwners' in opts).toBe(false);
+    expect(mockConstructedNodes[0].start).toHaveBeenCalledTimes(1);
+    expect(captured.value!.ownerTrust).toBe('memory-only');
+    expect(callsWith(warnSpy, OPEN_FAIL_TOKEN)).toHaveLength(1);
+    expect(loggedJson()).not.toContain('planted-io-text');
+    await renderer.act(async () => {
+      await captured.value!.refreshOwnerTrust();
+    });
+    expect(captured.value!.ownerTrust).toBe('memory-only');
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('P-11 with saved trust required, a store that will not open starts no node (blocked)', async () => {
+    failStore('true');
+    const { captured } = await boot();
+    expect(mockConstructedNodes).toHaveLength(0);
+    await expect(captured.value!.nodeSettled).resolves.toEqual({ status: 'failed', node: null });
+    expect(captured.value!.ownerTrust).toBe('blocked');
+    expect(callsWith(errorSpy, BLOCKED_TOKEN)).toHaveLength(1);
+    expect(loggedJson()).not.toContain('planted-io-text');
+  });
+
+  it('P-12 an unreadable setting fails closed (blocked)', async () => {
+    failStore('reject');
+    const { captured } = await boot();
+    expect(mockConstructedNodes).toHaveLength(0);
+    expect(captured.value!.ownerTrust).toBe('blocked');
+    await expect(captured.value!.nodeSettled).resolves.toEqual({ status: 'failed', node: null });
+  });
+
+  it('P-13 saved trust required with a healthy store starts the node and never reads the setting', async () => {
+    await AsyncStorage.setItem(SETTING_KEY, 'true');
+    const getItem = jest.spyOn(AsyncStorage, 'getItem');
+    const { captured } = await boot();
+    expect(mockConstructedNodes).toHaveLength(1);
+    expect(captured.value!.ownerTrust).toBe('ok');
+    expect(getItem.mock.calls.some((c) => c[0] === SETTING_KEY)).toBe(false);
+  });
+
+  it('P-15 offers no retry or restart on the context', async () => {
+    const { captured } = await boot();
+    expect(Object.keys(captured.value!).sort()).toEqual([
+      'configFault',
+      'connectedPeers',
+      'node',
+      'nodeSettled',
+      'ownerTrust',
+      'refreshOwnerTrust',
+      'syncState',
+    ]);
   });
 });
