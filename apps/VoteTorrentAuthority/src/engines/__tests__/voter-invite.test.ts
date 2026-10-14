@@ -5,6 +5,7 @@
  * `.planning/spikes/100-voter-joins-authority-network/product-join.ts` OWNER_LATE=1.
  */
 import { decodeNetworkJoinCode } from "@votetorrent/vote-engine/rn";
+import { JOIN_CODE_FIXTURES, type JoinCodeFixtureName } from "@votetorrent/vote-engine/test/fixtures/join-code-fixtures";
 import {
 	createVoterJoinCode,
 	ensureVoterInviteOwner,
@@ -24,11 +25,32 @@ const ANCHOR = {
 	fingerprint: "17b0 6508 2fd5 aab2",
 };
 
+/** The real cadre-core mint inside a real-encoder fixture (a `sereus-invite:1.` string). */
+function fixtureMint(name: JoinCodeFixtureName): string {
+	const d = decodeNetworkJoinCode(JOIN_CODE_FIXTURES[name].text);
+	if (!d.ok) throw new Error("fixture did not decode");
+	return d.code.invitation;
+}
+function fixtureAnchor(name: JoinCodeFixtureName) {
+	const d = decodeNetworkJoinCode(JOIN_CODE_FIXTURES[name].text);
+	if (!d.ok) throw new Error("fixture did not decode");
+	const { networkHash, name: networkName, genesis, digest } = d.code;
+	return { networkHash, name: networkName, genesis, digest, fingerprint: d.fingerprint };
+}
+const MINT = fixtureMint("v2-1-member");
+
+/** Count the 16-char windows of `secret` that occur in `haystack`. */
+function windowHits(haystack: string, secret: string): number {
+	let hits = 0;
+	for (let i = 0; i + 16 <= secret.length; i++) if (haystack.includes(secret.slice(i, i + 16))) hits++;
+	return hits;
+}
+
 type SelfRow = { peerId: string; vouchSig: string | null; vouchUsage: string | null };
 
 function fakeNode(
 	owners: string[],
-	opts: { identityThrows?: boolean; noDb?: boolean; selfRow?: SelfRow; peersThrow?: boolean; noPeerId?: boolean; alreadyWired?: boolean } = {},
+	opts: { invitation?: string; identityThrows?: boolean; noDb?: boolean; selfRow?: SelfRow; peersThrow?: boolean; noPeerId?: boolean; alreadyWired?: boolean } = {},
 ) {
 	const state = { owners: new Set(owners), wired: opts.alreadyWired === true };
 	const node = {
@@ -60,7 +82,7 @@ function fakeNode(
 			if (state.wired) throw Object.assign(new Error("handler already registered"), { name: "DuplicateProtocolHandlerError" });
 			state.wired = true;
 		}),
-		createCadreInvitation: jest.fn(async () => ({ encoded: "encoded-invitation", invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
+		createCadreInvitation: jest.fn(async () => ({ encoded: opts.invitation ?? MINT, invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
 	};
 	return { node: node as unknown as VoterInviteNode & typeof node, state };
 }
@@ -164,11 +186,12 @@ describe("createVoterJoinCode", () => {
 		expect(node.createCadreInvitation).toHaveBeenCalledWith({ grantsOwner: false, uses: VOTER_INVITE_USES, expiresInMs: VOTER_INVITE_LIFETIME_MS });
 		expect(result).toMatchObject({ fingerprint: ANCHOR.fingerprint, expiresAt: "2026-11-11T11:26:21.316", networkName: ANCHOR.name });
 		const decoded = decodeNetworkJoinCode(result.code);
-		expect(decoded).toEqual({
-			ok: true,
-			fingerprint: ANCHOR.fingerprint,
-			code: { v: 1, invitation: "encoded-invitation", networkHash: ANCHOR.networkHash, name: ANCHOR.name, genesis: ANCHOR.genesis, digest: ANCHOR.digest },
-		});
+		expect(decoded.ok).toBe(true);
+		expect(decoded.ok && decoded.code.v === 2).toBe(true);
+		expect(decoded.ok && decoded.fingerprint === ANCHOR.fingerprint).toBe(true);
+		expect(decoded.ok && decoded.code.invitation === MINT).toBe(true);
+		expect(decoded.ok && decoded.code.networkHash === ANCHOR.networkHash && decoded.code.name === ANCHOR.name && decoded.code.digest === ANCHOR.digest).toBe(true);
+		expect(decoded.ok && JSON.stringify(decoded.code.genesis) === JSON.stringify(ANCHOR.genesis)).toBe(true);
 	});
 
 	it("a network this phone cannot anchor (not its founding officer) fails before any owner change", async () => {
@@ -181,6 +204,69 @@ describe("createVoterJoinCode", () => {
 		).rejects.toThrow();
 		expect(state.owners.size).toBe(0);
 		expect(node.createCadreInvitation).not.toHaveBeenCalled();
+	});
+});
+
+describe("createVoterJoinCode emits vtjoin2. (D-01)", () => {
+	const mint = (name: JoinCodeFixtureName, anchorName?: string) => {
+		const anchor = fixtureAnchor(name);
+		const { node } = fakeNode([SELF.publicKeyB64], { invitation: fixtureMint(name) });
+		return createVoterJoinCode({
+			node,
+			networksEngine: { getFoundingAnchor: jest.fn(async () => (anchorName === undefined ? anchor : { ...anchor, name: anchorName })) },
+			networkHash: anchor.networkHash,
+			founder: { userId: "officer", signerKey: "officer-key" },
+		});
+	};
+
+	it.each(["v2-1-member", "v2-6-members", "v2-non-ascii-name"] as const)("%s: the minted code is byte-identical to the real-encoder fixture", async (name) => {
+		const result = await mint(name);
+		expect(result.code.startsWith("vtjoin2.")).toBe(true);
+		const decoded = decodeNetworkJoinCode(result.code);
+		expect(decoded.ok && decoded.code.v === 2).toBe(true);
+		expect(result.code === JOIN_CODE_FIXTURES[name].text).toBe(true);
+	});
+
+	it("a mint that is not a sereus invitation rejects without echoing the anchor or the mint", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64], { invitation: "encoded-invitation" });
+		let thrown = "";
+		try {
+			await createVoterJoinCode({
+				node,
+				networksEngine: { getFoundingAnchor: jest.fn(async () => ANCHOR) },
+				networkHash: ANCHOR.networkHash,
+				founder: { userId: "officer", signerKey: "officer-key" },
+			});
+		} catch (err) {
+			thrown = String(err);
+		}
+		expect(thrown).not.toBe("");
+		expect(windowHits(thrown, "encoded-invitation")).toBe(0);
+		expect(windowHits(thrown, ANCHOR.digest)).toBe(0);
+		// Non-vacuous: the same anchor with a real mint resolves.
+		const ok = await createVoterJoinCode({
+			node: fakeNode([SELF.publicKeyB64]).node,
+			networksEngine: { getFoundingAnchor: jest.fn(async () => ANCHOR) },
+			networkHash: ANCHOR.networkHash,
+			founder: { userId: "officer", signerKey: "officer-key" },
+		});
+		expect(ok.code.startsWith("vtjoin2.")).toBe(true);
+	});
+
+	it("a name that pushes the code past 4096 chars rejects with no window of the code, mint or name in the error", async () => {
+		const name = "v2-6-members";
+		const long = "\u00e9".repeat(256);
+		await expect(mint(name)).resolves.toMatchObject({ fingerprint: JOIN_CODE_FIXTURES[name].fingerprint });
+		let text = "";
+		try {
+			await mint(name, long);
+		} catch (err) {
+			text = String(err);
+		}
+		expect(text).not.toBe("");
+		expect(windowHits(text, JOIN_CODE_FIXTURES[name].text)).toBe(0);
+		expect(windowHits(text, fixtureMint(name))).toBe(0);
+		expect(windowHits(text, long)).toBe(0);
 	});
 });
 

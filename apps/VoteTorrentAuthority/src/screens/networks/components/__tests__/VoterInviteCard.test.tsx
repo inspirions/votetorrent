@@ -6,6 +6,7 @@
 import React from "react";
 import renderer, { act } from "react-test-renderer";
 import { decodeNetworkJoinCode } from "@votetorrent/vote-engine/rn";
+import { JOIN_CODE_FIXTURES } from "@votetorrent/vote-engine/test/fixtures/join-code-fixtures";
 import { resources } from "../../../../i18n";
 
 jest.mock("react-native-vector-icons/FontAwesome6", () => "FontAwesome6");
@@ -30,6 +31,12 @@ jest.mock("@react-navigation/native", () => ({
 		return theme;
 	},
 }));
+
+const MINT = (() => {
+	const d = decodeNetworkJoinCode(JOIN_CODE_FIXTURES["v2-1-member"].text);
+	if (!d.ok) throw new Error("fixture did not decode");
+	return d.code.invitation;
+})();
 
 const ANCHOR = {
 	networkHash: "hashA",
@@ -62,7 +69,7 @@ function makeNode() {
 		initializeSeedBootstrap: jest.fn(async () => {
 			mockNodeState.seeded = true;
 		}),
-		createCadreInvitation: jest.fn(async () => ({ encoded: "encoded-invitation", invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
+		createCadreInvitation: jest.fn(async () => ({ encoded: MINT, invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
 	};
 }
 jest.mock("../../../../providers/CadreNodeProvider", () => ({
@@ -121,7 +128,8 @@ describe("VoterInviteCard", () => {
 		expect(hasId(tr, "voter-invite-expiry")).toBe(true);
 		const code = byId(tr, "voter-invite-code").props.children as string;
 		const decoded = decodeNetworkJoinCode(code);
-		expect(decoded.ok && decoded.code.invitation).toBe("encoded-invitation");
+		expect(decoded.ok && decoded.code.v === 2).toBe(true);
+		expect(decoded.ok && decoded.code.invitation === MINT).toBe(true);
 		expect(mockOpen).toHaveBeenCalledWith(REF, expect.objectContaining({ id: "user-1" }), false);
 		expect(mockGetFoundingAnchor).toHaveBeenCalledWith("hashA", { userId: "user-1", signerKey: "key-1" });
 	});
@@ -193,7 +201,7 @@ describe("VoterInviteCard", () => {
 		const message = (shareSpy.mock.calls[0]![0] as { message: string }).message;
 		expect(message).toContain("Network A");
 		expect(message).toContain("17b0 6508 2fd5 aab2");
-		expect(message).toContain(code);
+		expect(message.includes(code)).toBe(true);
 		shareSpy.mockRestore();
 	});
 
