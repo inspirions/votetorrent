@@ -24,9 +24,15 @@ const ANCHOR = {
 	fingerprint: "17b0 6508 2fd5 aab2",
 };
 
-function fakeNode(owners: string[], opts: { identityThrows?: boolean; noDb?: boolean } = {}) {
-	const state = { owners: new Set(owners) };
+type SelfRow = { peerId: string; vouchSig: string | null; vouchUsage: string | null };
+
+function fakeNode(
+	owners: string[],
+	opts: { identityThrows?: boolean; noDb?: boolean; selfRow?: SelfRow; peersThrow?: boolean; noPeerId?: boolean; alreadyWired?: boolean } = {},
+) {
+	const state = { owners: new Set(owners), wired: opts.alreadyWired === true };
 	const node = {
+		...(opts.noPeerId ? {} : { peerId: { toString: () => "self-peer" } }),
 		getIdentityOwnerKey: jest.fn(() => {
 			if (opts.identityThrows) throw new Error("ephemeral identity");
 			return SELF;
@@ -41,14 +47,25 @@ function fakeNode(owners: string[], opts: { identityThrows?: boolean; noDb?: boo
 							state.owners.add(key);
 							return true;
 						}),
+						queryCadrePeers: jest.fn(async () => {
+							if (opts.peersThrow) throw new Error("peers unreadable");
+							return opts.selfRow ? [opts.selfRow] : [];
+						}),
 					},
 		),
 		trustOwnerKeys: jest.fn(async () => undefined),
-		initializeSeedBootstrap: jest.fn(async () => undefined),
+		getSeedBootstrapService: jest.fn(() => ({ canAuthorize: () => state.wired })),
+		// What cadre-core does on a second wire: libp2p refuses to register /sereus/seed/1.0.0 twice.
+		initializeSeedBootstrap: jest.fn(async () => {
+			if (state.wired) throw Object.assign(new Error("handler already registered"), { name: "DuplicateProtocolHandlerError" });
+			state.wired = true;
+		}),
 		createCadreInvitation: jest.fn(async () => ({ encoded: "encoded-invitation", invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
 	};
 	return { node: node as unknown as VoterInviteNode & typeof node, state };
 }
+
+const JOINED_ROW: SelfRow = { peerId: "self-peer", vouchSig: null, vouchUsage: "usage-1" };
 
 describe("voterInviteCapability", () => {
 	it("a cadre with no owner key needs owner setup", async () => {
@@ -59,6 +76,17 @@ describe("voterInviteCapability", () => {
 	});
 	it("a cadre someone else owns cannot be invited into from this phone", async () => {
 		expect(await voterInviteCapability(fakeNode(["drone-owner"]).node)).toBe("not-owner");
+	});
+	it("a phone admitted to the cadre by invitation, with no owner rows, is never offered owner setup", async () => {
+		expect(await voterInviteCapability(fakeNode([], { selfRow: JOINED_ROW }).node)).toBe("not-owner");
+	});
+	it("an ownerless cadre whose rows lack this phone, or hold it vouched, still needs owner setup", async () => {
+		expect(await voterInviteCapability(fakeNode([], { selfRow: { peerId: "someone-else", vouchSig: null, vouchUsage: "u" } }).node)).toBe("needs-owner-setup");
+		expect(await voterInviteCapability(fakeNode([], { selfRow: { peerId: "self-peer", vouchSig: "sig", vouchUsage: null } }).node)).toBe("needs-owner-setup");
+	});
+	it("an unreadable self row or a missing peer id fails closed to unavailable", async () => {
+		expect(await voterInviteCapability(fakeNode([], { peersThrow: true }).node)).toBe("unavailable");
+		expect(await voterInviteCapability(fakeNode([], { noPeerId: true }).node)).toBe("unavailable");
 	});
 	it("no node, no control database or an ephemeral identity is unavailable", async () => {
 		expect(await voterInviteCapability(null)).toBe("unavailable");
@@ -76,12 +104,43 @@ describe("ensureVoterInviteOwner", () => {
 		expect(node.initializeSeedBootstrap).toHaveBeenCalledWith(SELF.privateKeyB64);
 	});
 
-	it("already the owner: no new owner row, and the seed bootstrap is wired once per launch", async () => {
+	it("already the owner: no new owner row, and the seed bootstrap is wired once (canAuthorize guard)", async () => {
 		const { node } = fakeNode([SELF.publicKeyB64]);
 		await ensureVoterInviteOwner(node);
 		await ensureVoterInviteOwner(node);
 		expect(node.trustOwnerKeys).not.toHaveBeenCalled();
 		expect(node.initializeSeedBootstrap).toHaveBeenCalledTimes(1);
+	});
+
+	it("a boot that already wired the seed bootstrap is never wired again", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64], { alreadyWired: true });
+		await ensureVoterInviteOwner(node);
+		expect(node.initializeSeedBootstrap).not.toHaveBeenCalled();
+	});
+
+	it("survives the boot wire that cadre-core would punish with DuplicateProtocolHandlerError", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64]);
+		await node.initializeSeedBootstrap(SELF.privateKeyB64); // the boot wireOwnKeyIfOwner
+		await expect(node.initializeSeedBootstrap(SELF.privateKeyB64)).rejects.toMatchObject({ name: "DuplicateProtocolHandlerError" });
+		node.initializeSeedBootstrap.mockClear();
+		await expect(ensureVoterInviteOwner(node)).resolves.toBeUndefined();
+		expect(node.initializeSeedBootstrap).not.toHaveBeenCalled();
+	});
+
+	it("refuses owner setup on a phone admitted by invitation, before any write", async () => {
+		const { node, state } = fakeNode([], { selfRow: JOINED_ROW });
+		await expect(ensureVoterInviteOwner(node)).rejects.toThrow(/joined its cadre by invitation/);
+		expect(node.trustOwnerKeys).not.toHaveBeenCalled();
+		expect(node.initializeSeedBootstrap).not.toHaveBeenCalled();
+		expect(state.owners.size).toBe(0);
+	});
+
+	it("an unreadable self row refuses before any write", async () => {
+		const { node, state } = fakeNode([], { peersThrow: true });
+		await expect(ensureVoterInviteOwner(node)).rejects.toThrow();
+		expect(node.trustOwnerKeys).not.toHaveBeenCalled();
+		expect(node.initializeSeedBootstrap).not.toHaveBeenCalled();
+		expect(state.owners.size).toBe(0);
 	});
 
 	it("refuses on a cadre someone else owns", async () => {

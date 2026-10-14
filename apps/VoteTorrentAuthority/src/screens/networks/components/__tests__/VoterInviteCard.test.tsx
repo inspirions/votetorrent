@@ -44,11 +44,14 @@ jest.mock("../../../../providers/AppProvider", () => ({
 	useApp: () => ({ networksEngine: { open: mockOpen, getFoundingAnchor: mockGetFoundingAnchor } }),
 }));
 
-const mockNodeState: { owners: Set<string>; node: unknown } = { owners: new Set(), node: null };
+const mockNodeState: { owners: Set<string>; node: unknown; seeded: boolean } = { owners: new Set(), node: null, seeded: false };
 function makeNode() {
 	return {
+		peerId: { toString: () => "self-peer" },
 		getIdentityOwnerKey: () => ({ publicKeyB64: "self-pub", privateKeyB64: "self-priv" }),
+		getSeedBootstrapService: () => ({ canAuthorize: () => mockNodeState.seeded }),
 		getControlDatabase: () => ({
+			queryCadrePeers: async () => [],
 			getOwnerKeys: async () => new Set(mockNodeState.owners),
 			ensureOwnerKey: jest.fn(async (key: string) => {
 				mockNodeState.owners.add(key);
@@ -56,7 +59,9 @@ function makeNode() {
 			}),
 		}),
 		trustOwnerKeys: jest.fn(async () => undefined),
-		initializeSeedBootstrap: jest.fn(async () => undefined),
+		initializeSeedBootstrap: jest.fn(async () => {
+			mockNodeState.seeded = true;
+		}),
 		createCadreInvitation: jest.fn(async () => ({ encoded: "encoded-invitation", invitation: { invite: { expiresAt: "2026-11-11T11:26:21.316" } } })),
 	};
 }
@@ -100,6 +105,7 @@ const textOf = (node: renderer.ReactTestInstance) =>
 
 beforeEach(() => {
 	mockNodeState.owners = new Set();
+	mockNodeState.seeded = false;
 	mockNodeState.node = makeNode();
 	mockOpen.mockClear();
 	mockGetFoundingAnchor.mockClear();
