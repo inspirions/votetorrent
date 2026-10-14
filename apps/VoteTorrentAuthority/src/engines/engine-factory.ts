@@ -49,6 +49,8 @@ import {
 import type { DbFactory, EngineContext, ElectionSubject, StagingOpener, StagingDecisionSigner } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
+import { wrapCreateWithFounding } from './founder-intent';
+import { isJoinedNetwork } from './joined-networks';
 import type { StrandHost } from './rn-db-factory';
 import { createStrandPort } from './strand-port-adapter';
 import type { StrandSqlDatabase } from './strand-port-adapter';
@@ -303,11 +305,16 @@ export class EngineFactory {
 				return createStrandDbFactory(this.node, {
 					signal: this.firstSyncAbort.signal,
 					onAwaitingFirstSync: (id) => this.firstSyncListener?.(id),
+					isJoinedNetwork: (strandId) => isJoinedNetwork(strandId),
 				})(networkHash);
 			}
 			this.strandBackedNetworkHashes.delete(networkHash);
 			return this.rnDbFactory(networkHash);
 		});
+		// D-30: the founding window around the create path that Add Network's
+		// `buildCreate().commit()` reaches. It is set here and never in a screen. Import and join
+		// do not call `create`, so they keep the default.
+		wrapCreateWithFounding(this.networksEngine);
 	}
 
 	/** Expose the shared NetworksEngine for initialize() in AppProvider. */

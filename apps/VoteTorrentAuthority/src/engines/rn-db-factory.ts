@@ -19,6 +19,7 @@ import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
 import type { DbFactory } from '@votetorrent/vote-engine';
 import type { StrandConfig, StrandInstance } from '@serfab/cadre-core';
 import { isStrandAwaitingFirstSyncError, waitForStrandWritable } from './strand-first-sync';
+import { takeFounderIntent, resolveFounderFlag, JoinedNetworksUnreadableError } from './founder-intent';
 
 // cadre-core's StrandDatabase.executeSchema() wraps the sApp schema as
 // `declare schema App { ${schema} } apply schema App;`. VOTETORRENT_SCHEMA_SQL is
@@ -102,6 +103,13 @@ export interface StrandHost {
 export interface StrandDbFactoryOptions {
 	signal?: AbortSignal;
 	onAwaitingFirstSync?: (strandId: string) => void;
+	/**
+	 * D-30: whether `strandId` is on the persisted joined list (a network this node JOINED rather
+	 * than founded). A joined hash never opens as founder. Same shape as the Voter's option. An
+	 * unreadable list refuses the open: a throw or rejection here becomes a rejected
+	 * `JoinedNetworksUnreadableError` and `addStrand` is never called.
+	 */
+	isJoinedNetwork?: (strandId: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -134,6 +142,12 @@ export interface StrandDbFactoryOptions {
  *       `main` as the fallback for SchemaInit / TidSequence. One call fixes
  *       the entire SQL tier — zero engine query rewrites.
  *
+ * D-30: `!hasPeers` stays the DEFAULT for every existing open path. On top of it, a persisted
+ *       joined hash is never founder; a founding window (set around `NetworksEngine.create`) is
+ *       founder exactly once; a joining window is never founder. See `founder-intent.ts`. The
+ *       intent is read synchronously as the first statement, so it is claimed by the open that
+ *       the window was installed for and by no other.
+ *
  * Ordering (Pitfall 3): never read `strand.database` before `await addStrand`
  * resolves (or, on the first-sync gate path below, before `waitForStrandWritable`
  * resolves) — `database` is present once the strand is active/idle, which EITHER
@@ -155,13 +169,28 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 		// D-05: the network hash is already unique per network — use it as the strandId.
 		const strandId = networkHash;
 
-		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
+		// D-30: the one-shot intent read is the FIRST statement, before any await, so a founding
+		// window is claimed by the open it was installed for and by no other.
+		const intent = takeFounderIntent(strandId);
+
+		// D-30: a persisted joined hash is never founder. Only awaited when the option is given, so
+		// the timing of a factory without it is unchanged (addStrand stays synchronous).
+		let joined = false;
+		if (options?.isJoinedNetwork) {
+			try {
+				joined = (await options.isJoinedNetwork(strandId)) === true;
+			} catch {
+				console.warn("[strand-factory] attach refused", { reason: 'joined-list-unreadable' });
+				throw new JoinedNetworksUnreadableError();
+			}
+		}
+
+		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder (the default).
 		const controlConnections = node.getControlNode()?.getConnections().length ?? 0;
-		const hasPeers = controlConnections > 0;
+		const founder = resolveFounderFlag({ intent, joined, controlConnections });
 		// Closed tokens only (never the strand id / network hash). This line exists so a device
-		// run can read which founder flag a cold start or an import attached with (O-02); the
-		// founder semantics themselves are decided in a later round.
-		console.info("[strand-factory] attach", { founder: controlConnections === 0, controlConnections });
+		// run can read which founder flag a cold start, an import or a create attached with.
+		console.info("[strand-factory] attach", { founder, controlConnections, intent: intent ?? 'none' });
 
 		let strand: StrandInstance;
 		try {
@@ -178,7 +207,7 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 					schema: VOTETORRENT_INNER_DDL,
 					latencyHint: 'interactive',
 				},
-				founder: !hasPeers,
+				founder,
 			});
 		} catch (error) {
 			// Only the first-sync gate error, FOR THIS strand, is retryable — every other
