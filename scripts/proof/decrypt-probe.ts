@@ -47,7 +47,6 @@ export const RESULT_KEYS: string[] = [
 export const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$/
 export const HEX_RE = /^[0-9a-f]{8,64}$/
 
-const SQL = 'select Cid, Id, BallotId, EntryCount, Ciphertext from VoteBlock where ElectionId = :electionId and ElectionRevision = :revision'
 const RUN_TIMEOUT_MS = 180000
 
 // ---------------------------------------------------------------------------
@@ -242,7 +241,7 @@ async function readRows (kr: any, electionId: string, revision: number): Promise
 	const db = kr.ctx !== undefined ? kr.ctx.db : undefined
 	if (db === undefined || db === null || typeof db.eval !== 'function') throw codedError('no-db-handle')
 	const rows: any[] = []
-	for await (const row of db.eval(SQL, { electionId, revision })) {
+	for await (const row of db.eval('select Cid, Id, BallotId, EntryCount, Ciphertext from VoteBlock where ElectionId = :electionId and ElectionRevision = :revision', { electionId, revision })) {
 		rows.push(row)
 	}
 	return rows

@@ -39,7 +39,6 @@ export const DEVICE_KEYS: string[] = ['deviceIdPrefix', 'registrantIdPrefix', 't
 export const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$/
 export const HEX_RE = /^[0-9a-f]{8,64}$/
 
-const SQL = 'select Cid, RegistrantId, DeviceKey, DeviceId, AttestationTime, Nonce, AttestationDetails, Expiration from AssociationPrivate'
 const COLUMNS: string[] = ['Cid', 'RegistrantId', 'DeviceKey', 'DeviceId', 'AttestationTime', 'Nonce', 'AttestationDetails', 'Expiration']
 const CAPTURE_TIMEOUT_MS = 120000
 
@@ -237,7 +236,7 @@ async function runCapture (startedAt: number): Promise<void> {
 	const db = engine !== null && engine !== undefined && engine.ctx !== undefined ? engine.ctx.db : undefined
 	if (db === undefined || db === null || typeof db.eval !== 'function') throw codedError('no-db-handle')
 	const rows: Array<Record<string, unknown>> = []
-	for await (const row of db.eval(SQL, {})) {
+	for await (const row of db.eval('select Cid, RegistrantId, DeviceKey, DeviceId, AttestationTime, Nonce, AttestationDetails, Expiration from AssociationPrivate', {})) {
 		rows.push(copyRow(row))
 	}
 	const doc = { v: 1, probe: ASSOCIATION_CAPTURE_PROBE_VERSION, capturedAtMs: Date.now(), rows }
