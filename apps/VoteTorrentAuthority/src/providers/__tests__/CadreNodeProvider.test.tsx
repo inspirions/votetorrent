@@ -768,8 +768,13 @@ describe('CadreNodeProvider — saved owner trust (D-08..D-11)', () => {
 
   let warnSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
+  // The AsyncStorage jest mock's getItem is already a jest.fn, so spyOn hands back that SAME mock and
+  // restoreAllMocks cannot undo a mockImplementation. Put the original implementation back by hand.
+  const getItemMock = AsyncStorage.getItem as unknown as jest.Mock;
+  let priorGetItem: ((...a: never[]) => unknown) | undefined;
 
   beforeEach(async () => {
+    priorGetItem = getItemMock.getMockImplementation();
     await AsyncStorage.clear();
     warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -779,6 +784,7 @@ describe('CadreNodeProvider — saved owner trust (D-08..D-11)', () => {
     // P-14: nothing in the provider ever pins.
     for (const n of mockConstructedNodes) expect(n.trustOwnerKeys).not.toHaveBeenCalled();
     jest.restoreAllMocks();
+    getItemMock.mockImplementation(priorGetItem);
   });
 
   /** Make the saved store unreadable, and answer the require-trust setting as asked. */

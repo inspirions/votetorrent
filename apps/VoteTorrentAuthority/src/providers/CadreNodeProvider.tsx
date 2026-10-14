@@ -10,13 +10,21 @@ import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
 import { createScopedRnStorageProvider } from '../engines/storage-guard';
 import { isUnrestorableControlSchemaError } from '../engines/control-schema-recovery';
-import { CadreNode, controlStorageScope } from '@serfab/cadre-core';
+import { CadreNode, controlStorageScope, type TrustedOwnerStore } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 import { noiseCryptoForNode } from '../engines/noise-crypto-config';
-import { openStrandNetworkState } from '../engines/rn-durable-slot';
+import { openStrandNetworkState, openTrustedOwnerStore } from '../engines/rn-durable-slot';
+import { readRequireOwnerTrust } from '../engines/owner-trust-setting';
+import {
+  OwnerTrustUnreadableError,
+  readOwnerTrustClassification,
+  reanchorOwnKey,
+  type OwnerStoreKind,
+  type OwnerTrustState,
+} from '../engines/owner-trust';
 import { REPLICATION_PROOF_ENABLED } from '../engines/proof-flags.generated';
 import { hostPoolRendezvous } from '../engines/pool-rendezvous-host';
 
@@ -84,6 +92,24 @@ interface CadreNodeContextType {
    * across renders (ref-held) — see `CadreNodeSettlement` above.
    */
   nodeSettled: Promise<CadreNodeSettlement>;
+  /**
+   * Saved owner trust (D-08..D-11). Priority blocked > memory-only > needs-reinvite > ok:
+   *  - 'blocked'        the saved store would not open and the officer requires saved trust; no node was
+   *                     started (`nodeSettled` is failed). The copy says to reopen the app.
+   *  - 'memory-only'    the saved store would not open; the node runs on cadre-core's in-memory anchor,
+   *                     which a restart loses.
+   *  - 'needs-reinvite' the saved anchor is empty in a cadre this phone does not own; a fresh invitation
+   *                     is the only way to restore the pins.
+   *  - 'ok'             anything else. A consumer that finds the value missing treats it as 'ok'.
+   * There is deliberately no retry or restart member on this context.
+   */
+  ownerTrust: OwnerTrustState;
+  /**
+   * Re-classifies and never pins. Resolves with the state unchanged when there is no node or the store is
+   * not the persistent one (memory-only, blocked). Sets 'ok' or 'needs-reinvite' otherwise. Rejects
+   * OwnerTrustUnreadableError, leaving the state unchanged, when the classification cannot be read.
+   */
+  refreshOwnerTrust: () => Promise<void>;
 }
 
 const CadreNodeContext = createContext<CadreNodeContextType | null>(null);
@@ -121,6 +147,9 @@ export function useCadreNode(): CadreNodeContextType {
 // / 56-10-SUMMARY.md for the full survivor list).
 // ---------------------------------------------------------------------------
 const PARTY_ID = 'votetorrent';
+
+/** The store scope for this node's two saved records (strand network state and trusted owners). */
+const CADRE_STORE_SCOPE = 'votetorrent-cadre-node';
 
 /** Strand-address re-ask interval (ms); see the `controlCohort` comment in the CadreNode config. */
 const STRAND_ADDR_REFRESH_MS = 30_000;
@@ -201,6 +230,9 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   const detachRendezvousRef = useRef<(() => Promise<void>) | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
   const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
+  // D-08..D-11: what the boot learned about the saved owner anchor, and which store backs the node.
+  const [ownerTrust, setOwnerTrust] = useState<OwnerTrustState>('ok');
+  const storeKindRef = useRef<OwnerStoreKind | null>(null);
 
   // D-08/D-09: nodeSettled — a one-time-settling promise resolved from the
   // boot effect's existing exits (never rejected). Built with
@@ -299,12 +331,36 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
 
         // cadre-core 1.9.0 strand network state (the saved FRET table), durable across launches.
         // In memory it dies with the process, and on a phone every launch is a restart.
-        const strandNetworkStateStore = await openStrandNetworkState(PARTY_ID, 'votetorrent-cadre-node');
+        const strandNetworkStateStore = await openStrandNetworkState(PARTY_ID, CADRE_STORE_SCOPE);
+
+        // D-08: the saved trusted-owner anchor. Without it a restart leaves cadre-core's in-memory anchor
+        // and every voter is refused at the pool rendezvous. `open` rejects only when the slot cannot be
+        // READ; a corrupt record loads empty (owner-trust.ts covers that). Its failure is its own try.
+        let trustedOwnerStore: TrustedOwnerStore | null = null;
+        let storeKind: OwnerStoreKind = 'persistent';
+        try {
+          trustedOwnerStore = await openTrustedOwnerStore(PARTY_ID, CADRE_STORE_SCOPE);
+        } catch {
+          // D-10 / D-11. The setting is read ONLY on this path, and an unreadable setting counts as ON.
+          const strict = await readRequireOwnerTrust().catch(() => true);
+          if (strict) {
+            console.error('[CadreNodeProvider] trusted-owner store unavailable and saved owner trust is required; the node was not started');
+            if (isMounted) setOwnerTrust('blocked');
+            settleNode({ status: 'failed', node: null });
+            return;
+          }
+          console.warn('[CadreNodeProvider] trusted-owner store unavailable; using the in-memory anchor');
+          storeKind = 'memory';
+        }
+        storeKindRef.current = storeKind;
 
         const makeNode = () => new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
           strandNetworkState: { store: strandNetworkStateStore },
+          // D-08: spread only when the store opened. The recovery rebuild reuses this closure, so it gets
+          // the SAME store (cadre-core keeps an injected store across stop and start).
+          ...(trustedOwnerStore ? { trustedOwners: { store: trustedOwnerStore } } : {}),
           profile: 'transaction',
           // sApp-schema signing is DISABLED for VoteTorrent — a deliberate project
           // decision, not an oversight.
@@ -411,8 +467,17 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           await localNode.start();
         }
 
+        // D-08 founder re-anchor: anchors this node's own key when its OwnerKey row is live. It never
+        // pins a foreign key. Bounded and never rejecting, so it cannot stop the boot.
+        await reanchorOwnKey(localNode);
+        // D-09: classify AFTER the re-anchor. An unreadable read reports 'ok' (the token is logged).
+        const classification = storeKind === 'persistent' ? await readOwnerTrustClassification(localNode, 'persistent') : 'ok';
+        const nextTrust: OwnerTrustState =
+          storeKind === 'memory' ? 'memory-only' : classification === 'needs-reinvite' ? 'needs-reinvite' : 'ok';
+
         if (isMounted) {
           nodeRef.current = localNode;
+          setOwnerTrust(nextTrust);
           // Spike 102: this node is the rendezvous its voters pool their votes through. Best
           // effort — a voter that cannot reach it keeps its vote saved, never lost.
           const hosted = localNode;
@@ -513,9 +578,27 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     [],
   );
 
+  // Re-classifies only; never pins (D-09). See the context type for the exact semantics.
+  const refreshOwnerTrust = useCallback(async (): Promise<void> => {
+    const n = nodeRef.current;
+    if (!n || storeKindRef.current !== 'persistent') return;
+    const result = await readOwnerTrustClassification(n, 'persistent');
+    if (nodeRef.current !== n) return;
+    if (result === 'unreadable') throw new OwnerTrustUnreadableError();
+    setOwnerTrust(result);
+  }, []);
+
   return (
     <CadreNodeContext.Provider
-      value={{ node, syncState, configFault: bootstrapConfig.fault, connectedPeers, nodeSettled: nodeSettledRef.current.promise }}
+      value={{
+        node,
+        syncState,
+        configFault: bootstrapConfig.fault,
+        connectedPeers,
+        nodeSettled: nodeSettledRef.current.promise,
+        ownerTrust,
+        refreshOwnerTrust,
+      }}
     >
       {children}
     </CadreNodeContext.Provider>
