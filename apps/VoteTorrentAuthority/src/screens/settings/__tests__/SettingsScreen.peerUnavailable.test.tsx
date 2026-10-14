@@ -84,6 +84,8 @@ let mockGetEngine = jest.fn();
 jest.mock("../../../providers/AppProvider", () => ({
 	useApp: () => ({ getEngine: (...a: unknown[]) => mockGetEngine(...a) }),
 }));
+// Settings renders the owner-trust notice, which reads the cadre-node context; no ownerTrust means "ok", so nothing renders.
+jest.mock("../../../providers/CadreNodeProvider", () => ({ useCadreNode: () => ({ node: null }) }));
 
 async function renderScreen() {
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
