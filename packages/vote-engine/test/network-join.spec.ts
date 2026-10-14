@@ -18,6 +18,7 @@ import { decodeNetworkJoinCode, encodeNetworkJoinCode, NETWORK_JOIN_CODE_PREFIX,
 import { joinNetwork, type NetworkJoinOptions, type NetworkJoinStep } from '../src/networks/network-join.js'
 import type { DbFactory } from '../src/types.js'
 import { createTestNetwork, makeTestSignCallback } from './fixtures/test-context.js'
+import { mintInvitation, randomCadreInvitation, randomJoinAnchor } from './fixtures/join-code-fixtures.js'
 
 function makeDeviceLocalStorage (): LocalStorage {
   const store = new Map<string, unknown>()
@@ -273,10 +274,13 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
     alreadyAdmitted?: boolean
     expiresAtMs?: number | null
     decodeThrows?: boolean
+    decodeThrowsWith?: unknown
+    code?: NetworkJoinCode
+    joinFailureDetail?: string
   } = {}) {
     let clock = 1_000_000
     const steps: NetworkJoinStep[] = []
-    const calls = { redeem: 0, fallback: 0, remember: 0, join: 0, admittedChecks: 0 }
+    const calls = { redeem: 0, fallback: 0, remember: 0, join: 0, admittedChecks: 0, decode: 0 }
     const joinResults = [...(opts.joinResults ?? [{ ok: true, outcome: 'joined', networkRef: NET_REF, fingerprint: 'abcd abcd abcd abcd' } as JoinFromStrandResult])]
     let redeemedAt: number | null = null
     const options: NetworkJoinOptions = {
@@ -297,8 +301,10 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
         }
       },
       user: undefined,
-      code: sampleCode(),
+      code: opts.code ?? sampleCode(),
       decodeInvitation: (encoded: string) => {
+        calls.decode++
+        if (opts.decodeThrowsWith !== undefined) throw opts.decodeThrowsWith
         if (opts.decodeThrows) throw new Error('bad invitation')
         return { encoded }
       },
@@ -319,7 +325,7 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
       syncBudgetMs: 10_000,
       retryDelayMs: 1_000
     }
-    return { options, calls, steps }
+    return { options, calls, steps, clock: () => clock, redeemedAtMs: () => redeemedAt }
   }
 
   it('JN-1 redeem succeeds: admitted by redemption, joined, every step reported in order', async () => {
@@ -340,7 +346,7 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
   it('JN-3 redeem throws and no admission arrives within the budget: not-admitted, nothing opened', async () => {
     const h = harness({ redeem: async () => { throw new Error('CadreInviteRejectedError: exhausted') } })
     const result = await joinNetwork(h.options)
-    expect(result).to.deep.include({ ok: false, reason: 'not-admitted' })
+    expect(result).to.deep.include({ ok: false, reason: 'not-admitted', detail: 'Error' })
     expect(h.calls.join).to.equal(0)
     expect(h.calls.remember).to.equal(0)
   })
@@ -355,14 +361,14 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
   it('JN-5 an expired invitation is refused before any dial', async () => {
     const h = harness({ expiresAtMs: 999_000 })
     const result = await joinNetwork(h.options)
-    expect(result).to.deep.include({ ok: false, reason: 'invitation-expired' })
+    expect(result).to.deep.include({ ok: false, reason: 'invitation-expired', detail: 'invitation-expired' })
     expect(h.calls.redeem).to.equal(0)
   })
 
   it('JN-6 a malformed invitation inside a well-formed code: invitation-malformed', async () => {
     const h = harness({ decodeThrows: true })
     const result = await joinNetwork(h.options)
-    expect(result).to.deep.include({ ok: false, reason: 'invitation-malformed' })
+    expect(result).to.deep.include({ ok: false, reason: 'invitation-malformed', detail: 'Error' })
     expect(h.calls.redeem).to.equal(0)
   })
 
@@ -382,7 +388,7 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
   it('JN-8 digest-mismatch is final: one attempt, no retry', async () => {
     const h = harness({ joinResults: [{ ok: false, reason: 'digest-mismatch', retryable: false, detail: 'x' }] })
     const result = await joinNetwork(h.options)
-    expect(result).to.deep.include({ ok: false, reason: 'digest-mismatch' })
+    expect(result).to.deep.include({ ok: false, reason: 'digest-mismatch', detail: 'digest-mismatch' })
     expect(h.calls.join).to.equal(1)
   })
 
@@ -396,5 +402,77 @@ describe('spike 100: joinNetwork orchestration (JN)', () => {
   it('JN-10 target-open-failed surfaces as open-failed', async () => {
     const h = harness({ joinResults: [{ ok: false, reason: 'target-open-failed', retryable: false, detail: '' }] })
     expect(await joinNetwork(h.options)).to.deep.include({ ok: false, reason: 'open-failed' })
+  })
+
+  const DETAIL_TOKEN = /^(?:[a-z][a-z0-9]*(?:-[a-z0-9]+)*|(?:[A-Z][A-Za-z0-9]{0,58})?Error|unknown)$/
+  const rejection = (code: string | undefined, message: string) =>
+    Object.assign(new Error(message), { name: 'CadreInviteRejectedError', ...(code === undefined ? {} : { code }), retryable: false })
+
+  it('JN-11 invite-spent after the bounded wait ends as invitation-used-up', async () => {
+    const h = harness({ redeem: async () => { throw rejection('invite-spent', 'spent') } })
+    const result = await joinNetwork(h.options)
+    expect(result).to.deep.equal({ ok: false, reason: 'invitation-used-up', detail: 'invite-spent' })
+    expect(h.clock() - h.redeemedAtMs()!).to.be.at.least(20_000)
+    expect(h.calls.admittedChecks).to.be.greaterThan(2)
+    expect(h.calls).to.deep.include({ join: 0, remember: 0, fallback: 0 })
+  })
+
+  it('JN-12 invite-spent but the self-admission row appears: the wait wins over the code', async () => {
+    const h = harness({ redeem: async () => { throw rejection('invite-spent', 'spent') }, admittedAfterMs: 2_000 })
+    expect(await joinNetwork(h.options)).to.deep.include({ ok: true, admittedVia: 'self-admission' })
+  })
+
+  it('JN-13 other typed codes end as not-admitted with the code as detail', async () => {
+    for (const code of ['invite-invalid', 'busy', 'unrecognized']) {
+      const h = harness({ redeem: async () => { throw rejection(code, 'x') } })
+      expect(await joinNetwork(h.options), code).to.deep.equal({ ok: false, reason: 'not-admitted', detail: code })
+    }
+  })
+
+  it('JN-14 message text alone never produces invitation-used-up', async () => {
+    const h = harness({ redeem: async () => { throw rejection(undefined, 'invite-spent') } })
+    expect(await joinNetwork(h.options)).to.deep.equal({ ok: false, reason: 'not-admitted', detail: 'CadreInviteRejectedError' })
+  })
+
+  it('JN-15 a 1.14-era no-prefix invitation is invitation-older-version before any decode or dial', async () => {
+    const old = btoa('{"v":1,"partyId":"votetorrent"}').replace(/=+$/, '')
+    const h = harness({ code: sampleCode({ invitation: old }) })
+    expect(await joinNetwork(h.options)).to.deep.equal({ ok: false, reason: 'invitation-older-version', detail: 'invitation-older-version' })
+    expect(h.calls).to.deep.include({ decode: 0, redeem: 0, join: 0 })
+    expect(h.steps).to.deep.equal([])
+  })
+
+  it('JN-16 (D-06) detail is a closed token and never carries message text or code slices', async () => {
+    const text = encodeNetworkJoinCode({ v: 2, invitation: mintInvitation(randomCadreInvitation({ members: 1 })), ...randomJoinAnchor() })
+    const clean = (detail: string) => {
+      for (let i = 0; i + 16 <= text.length; i += 7) expect(detail.includes(text.slice(i, i + 16))).to.equal(false)
+    }
+    const a = await joinNetwork(harness({ decodeThrowsWith: new Error(text) }).options)
+    expect(a).to.deep.include({ ok: false, reason: 'invitation-malformed', detail: 'Error' })
+    const b = await joinNetwork(harness({ redeem: async () => { throw text } }).options)
+    expect(b).to.deep.include({ ok: false, reason: 'not-admitted', detail: 'unknown' })
+    const c = await joinNetwork(harness({ redeem: async () => { throw Object.assign(new Error(text), { code: 'Not A Token!', name: 'weird name' }) } }).options)
+    expect(c).to.deep.include({ ok: false, reason: 'not-admitted', detail: 'unknown' })
+    const d = await joinNetwork(harness({ expiresAtMs: 999_000 }).options)
+    expect(d).to.deep.include({ ok: false, reason: 'invitation-expired', detail: 'invitation-expired' })
+    const e = await joinNetwork(harness({ joinResults: [{ ok: false, reason: 'digest-mismatch', retryable: false, detail: 'join: RAW ENGINE TEXT' }] }).options)
+    expect(e).to.deep.include({ ok: false, reason: 'digest-mismatch', detail: 'digest-mismatch' })
+    for (const r of [a, b, c, d, e]) if (!r.ok) clean(r.detail)
+  })
+
+  it('JN-17 every failure detail matches the closed-token shape', async () => {
+    const results = [
+      await joinNetwork(harness({ redeem: async () => { throw new Error('CadreInviteRejectedError: exhausted') } }).options),
+      await joinNetwork(harness({ expiresAtMs: 999_000 }).options),
+      await joinNetwork(harness({ decodeThrows: true }).options),
+      await joinNetwork(harness({ joinResults: [{ ok: false, reason: 'digest-mismatch', retryable: false, detail: 'x y z' }] }).options),
+      await joinNetwork(harness({ joinResults: [{ ok: false, reason: 'target-open-failed', retryable: false, detail: 'open: boom' }] }).options),
+      await joinNetwork(harness({ redeem: async () => { throw rejection('invite-spent', 'm') } }).options),
+      await joinNetwork(harness({ code: sampleCode({ invitation: btoa('{"v":1,"partyId":"p"}') }) }).options)
+    ]
+    for (const r of results) {
+      expect(r.ok).to.equal(false)
+      if (!r.ok) expect(r.detail).to.match(DETAIL_TOKEN)
+    }
   })
 })
