@@ -95,9 +95,14 @@ export const NON_CODE_EXTENSIONS = Object.freeze([
  *    the guard reads with `readFileSync` and feeds to its scanner as a string; nothing compiles,
  *    imports or bundles them, so a table name in one is never code. They are `.txt` precisely so
  *    that no toolchain treats them as source.
+ *  - `-license.txt`: a third-party licence shipped next to the asset it covers, today
+ *    `apps/VoteTorrentAuthority/src/utils/qr/FINGERPRINT-ATLAS-LICENSE.txt` (the OFL text for the
+ *    fingerprint glyph atlas). It is licence prose; a test reads it with `readFileSync` to pin its
+ *    hash, and nothing compiles, imports or bundles it. Compared case-insensitively, so a bare
+ *    `LICENSE.txt` (no prefix) stays unknown.
  * @type {ReadonlyArray<string>}
  */
-export const NON_CODE_SUFFIXES = Object.freeze(['.fixture.txt']);
+export const NON_CODE_SUFFIXES = Object.freeze(['.fixture.txt', '-license.txt']);
 
 /** Directory names never walked. */
 const SKIP_DIRS = Object.freeze(['node_modules', 'dist', 'dist-gate', '.git']);

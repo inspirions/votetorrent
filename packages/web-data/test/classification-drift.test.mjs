@@ -322,24 +322,46 @@ test('control C2 (inertness of the exclusion): the matcher DOES fire on the real
 	);
 });
 
-test('control C2 (extension partition): a raw-error *.fixture.txt is non-code, any other .txt stays unknown', () => {
+test('control C2 (extension partition): a raw-error *.fixture.txt and a named *-LICENSE.txt are non-code, any other .txt stays unknown', () => {
 	const part = partitionByExtension([
 		path.join('r', 'n01-instanceof-ternary.fixture.txt'),
+		path.join('r', 'FINGERPRINT-ATLAS-LICENSE.txt'),
 		path.join('r', 'notes.txt'),
 		path.join('r', '.fixture.txt'),
 		path.join('r', 'n01.fixture.txt.bak'),
+		path.join('r', 'LICENSE.txt'),
+		path.join('r', '-license.txt'),
+		path.join('r', 'ATLAS-LICENSE.txt.bak'),
 	]);
-	assert.deepEqual(part.skipped, [path.join('r', 'n01-instanceof-ternary.fixture.txt')], 'a *.fixture.txt was not classified non-code');
+	assert.deepEqual(
+		part.skipped,
+		[path.join('r', 'n01-instanceof-ternary.fixture.txt'), path.join('r', 'FINGERPRINT-ATLAS-LICENSE.txt')],
+		'a *.fixture.txt or a named *-LICENSE.txt was not classified non-code',
+	);
 	assert.deepEqual(
 		part.unknown,
-		[path.join('r', 'notes.txt'), path.join('r', '.fixture.txt'), path.join('r', 'n01.fixture.txt.bak')],
-		'a .txt that is not a named *.fixture.txt left the unknown bucket; the walker no longer fails closed on it',
+		[
+			path.join('r', 'notes.txt'),
+			path.join('r', '.fixture.txt'),
+			path.join('r', 'n01.fixture.txt.bak'),
+			path.join('r', 'LICENSE.txt'),
+			path.join('r', '-license.txt'),
+			path.join('r', 'ATLAS-LICENSE.txt.bak'),
+		],
+		'a .txt that is not a named *.fixture.txt or *-LICENSE.txt left the unknown bucket; the walker no longer fails closed on it',
 	);
-	// Positive anchor: the real fixtures exist under a product src root and are the ones skipped.
+	// Positive anchors: the real files exist under a product src root and are the ones skipped.
 	const rawErrorDir = workspacePath('apps', 'VoteTorrentAuthority', 'src', 'screens', '__tests__', '__fixtures__', 'raw-error');
 	const real = partitionByExtension(walkSourceFiles(rawErrorDir));
 	assert.ok(real.skipped.length > 0, 'no raw-error *.fixture.txt was found; this control no longer covers the files it was written for');
 	assert.deepEqual(real.unknown, [], `the raw-error fixtures did not all classify: ${real.unknown.join(', ')}`);
+	const qrDir = workspacePath('apps', 'VoteTorrentAuthority', 'src', 'utils', 'qr');
+	const qr = partitionByExtension(walkSourceFiles(qrDir));
+	assert.ok(
+		qr.skipped.some((file) => path.basename(file) === 'FINGERPRINT-ATLAS-LICENSE.txt'),
+		'the fingerprint atlas licence was not found and skipped; this control no longer covers the file it was written for',
+	);
+	assert.deepEqual(qr.unknown, [], `the qr dir did not all classify: ${qr.unknown.join(', ')}`);
 });
 
 test('C2 (D-15): no second table-classification list is declared anywhere in product source', () => {
