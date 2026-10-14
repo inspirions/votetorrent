@@ -81,8 +81,7 @@ describe('spike 100: network join code (JC)', () => {
     const good = sampleCode()
     const cases: Array<[string, unknown]> = [
       ['not a string', 42],
-      ['no prefix', encodeNetworkJoinCode(good).slice(NETWORK_JOIN_CODE_PREFIX.length)],
-      ['other prefix', 'vtjoin2.' + encodeNetworkJoinCode(good).slice(NETWORK_JOIN_CODE_PREFIX.length)],
+      ['v2 prefix over a v1 body', 'vtjoin2.' + encodeNetworkJoinCode(good).slice(NETWORK_JOIN_CODE_PREFIX.length)],
       ['bad alphabet', NETWORK_JOIN_CODE_PREFIX + 'abc$def'],
       ['not JSON', rawCode('x').replace(/.$/, '') + '!'],
       ['an array', rawCode([1, 2])],
@@ -103,6 +102,20 @@ describe('spike 100: network join code (JC)', () => {
 
   it('JC-5 a code from a newer encoder is unsupported-version, not malformed', () => {
     expect(decodeNetworkJoinCode(rawCode({ ...sampleCode(), v: 2 }))).to.deep.equal({ ok: false, reason: 'unsupported-version' })
+  })
+
+  it('JC-6 text that is not a join code is not-join-code', () => {
+    const noPrefix = encodeNetworkJoinCode(sampleCode()).slice(NETWORK_JOIN_CODE_PREFIX.length)
+    for (const input of [noPrefix, '', 'hello']) {
+      expect(decodeNetworkJoinCode(input)).to.deep.equal({ ok: false, reason: 'not-join-code' })
+    }
+  })
+
+  it('JC-7 vtjoin<N>. with N not 1 or 2 is unsupported-version', () => {
+    const v1Body = encodeNetworkJoinCode(sampleCode()).slice(NETWORK_JOIN_CODE_PREFIX.length)
+    for (const input of ['vtjoin3.' + v1Body, 'vtjoin10.abc']) {
+      expect(decodeNetworkJoinCode(input)).to.deep.equal({ ok: false, reason: 'unsupported-version' })
+    }
   })
 })
 
