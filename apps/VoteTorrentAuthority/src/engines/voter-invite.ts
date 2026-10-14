@@ -149,7 +149,7 @@ export async function createVoterJoinCode(args: {
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const { encodeNetworkJoinCode } = require('@votetorrent/vote-engine/rn') as typeof import('@votetorrent/vote-engine/rn');
 	const code = encodeNetworkJoinCode({
-		v: 1,
+		v: 2,
 		invitation: minted.encoded,
 		networkHash: anchor.networkHash,
 		name: anchor.name,
