@@ -5,7 +5,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import type {Ballot, Question} from '@votetorrent/vote-core';
+import type {Ballot, ElectionSummary, Question} from '@votetorrent/vote-core';
 import {NoElectionError, readVoteContext, resolveCurrentElectionId, readVoterBallot, readVoterElection, toVoterBallot} from '../election-read';
 
 const HOUR = 3_600_000;
@@ -481,7 +481,7 @@ describe('resolveCurrentElectionId — the election registration uses (D-28)', (
   // The generic getEngine of fakeDeps is wrapped so calls are counted and openElection is observed.
   function resolverDeps(options: FakeOptions = {}, fallbackElectionId?: string) {
     const fake = fakeDeps(options, fallbackElectionId);
-    const getEngine = jest.fn(fake.deps.getEngine);
+    const getEngine = jest.fn((name: 'elections') => fake.deps.getEngine<{getElections(): Promise<ElectionSummary[]>}>(name));
     return {deps: {getEngine, fallbackElectionId}, getEngine, opened: fake.opened};
   }
 

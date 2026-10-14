@@ -329,8 +329,9 @@ async function flushUntil(predicate: () => boolean, maxTicks = 5000) {
  */
 function installInstantDecisionWait() {
 	let virtualNow = 1_000_000;
-	const nowSpy = jest.spyOn(decisionWaitClock, 'now').mockImplementation(() => virtualNow);
-	const sleepSpy = jest.spyOn(decisionWaitClock, 'sleep').mockImplementation(async (ms: number) => {
+	const clock = decisionWaitClock as {now(): number; sleep(ms: number): Promise<void>};
+	const nowSpy = jest.spyOn(clock, 'now').mockImplementation(() => virtualNow);
+	const sleepSpy = jest.spyOn(clock, 'sleep').mockImplementation(async (ms: number) => {
 		virtualNow += ms;
 	});
 	return () => {
@@ -343,6 +344,9 @@ function installInstantDecisionWait() {
 function labelOf(node: renderer.ReactTestInstance): unknown {
 	return node.findByType(Text).props.children;
 }
+
+/** `mockPollDecisions` with a loose notice type, for the cases that script their own notices. */
+const looseMockPollDecisions = mockPollDecisions as unknown as jest.Mock<Promise<unknown[]>, [string?]>;
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -1541,7 +1545,7 @@ describe('ConfirmationScreen — waiting for the decision (D-27, UI-SPEC A3)', (
 	/** pollDecisions answers `batches` in order, then `[]`. */
 	function scriptPolls(batches: Array<() => unknown[]>) {
 		let read = 0;
-		mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
 			callOrder.push('association.pollDecisions');
 			const next = batches[read++];
 			return next ? next() : [];
@@ -1658,7 +1662,7 @@ describe('ConfirmationScreen — waiting for the decision (D-27, UI-SPEC A3)', (
 	it('(6) Stop during an in-flight read discards a late notice: no prompt, no attestation answer', async () => {
 		const late = deferred<unknown[]>();
 		let read = 0;
-		mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
 			read += 1;
 			return read === 2 ? late.promise : [];
 		});
@@ -1681,7 +1685,7 @@ describe('ConfirmationScreen — waiting for the decision (D-27, UI-SPEC A3)', (
 	it('(7) unmount during an in-flight read: nothing runs afterwards, no state is set and nothing is logged', async () => {
 		const late = deferred<unknown[]>();
 		let read = 0;
-		mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
 			read += 1;
 			return read === 2 ? late.promise : [];
 		});
@@ -1764,7 +1768,7 @@ describe('ConfirmationScreen — waiting for the decision (D-27, UI-SPEC A3)', (
 
 			// The retry: its first read is empty, the next carries the decision.
 			let read = 0;
-			mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+			looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
 				callOrder.push('association.pollDecisions');
 				read += 1;
 				return read === 1 ? [] : [decision('c')];
@@ -1819,7 +1823,7 @@ describe('ConfirmationScreen — decision-wait logging (D-27, A3 D-06)', () => {
 				});
 			};
 			const never = () =>
-				mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
+				looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
 					{requestId: 'someone-else', status: 'p', cursor: 'cursor-never'},
 				]);
 
@@ -1836,7 +1840,7 @@ describe('ConfirmationScreen — decision-wait logging (D-27, A3 D-06)', () => {
 			await press(stopped);
 			await press(stopped, 'confirmation-waiting-cancel');
 			// 3) a success
-			mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
+			looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
 				{requestId: capturedAssociationRequestId, status: 'c', challengeNonce: CHALLENGE_NONCE, cursor: 'cursor-1'},
 			]);
 			const succeeded = renderScreen();
@@ -1900,7 +1904,7 @@ describe('ConfirmationScreen — decision-wait copy in both locales (UI-SPEC A6 
 		await renderer.act(async () => {
 			await i18n.changeLanguage(lng);
 		});
-		mockPollDecisions.mockImplementation(async (_sinceCursor?: string) => []);
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => []);
 		const tr = renderScreen();
 		await renderer.act(async () => {
 			tr.root.findByProps({testID: 'confirmation-confirm-face-id'}).props.onPress();
