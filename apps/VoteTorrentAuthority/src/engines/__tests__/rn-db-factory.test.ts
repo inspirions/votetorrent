@@ -239,8 +239,8 @@ describe('createStrandDbFactory — P2P-03 / D-14 / D-07', () => {
       await createStrandDbFactory(makeFakeNode({ connections: 1 }))('networkhash123');
       const marks = info.mock.calls.filter((c) => c[0] === '[strand-factory] attach');
       expect(marks.length).toBe(2);
-      expect(marks[0][1]).toEqual({ founder: true, controlConnections: 0 });
-      expect(marks[1][1]).toEqual({ founder: false, controlConnections: 1 });
+      expect(marks[0][1]).toEqual({ founder: true, controlConnections: 0, intent: 'none' });
+      expect(marks[1][1]).toEqual({ founder: false, controlConnections: 1, intent: 'none' });
       expect(JSON.stringify(info.mock.calls)).not.toContain('networkhash123');
     } finally {
       info.mockRestore();
@@ -643,5 +643,199 @@ describe('createStrandDbFactory — first-sync gate (StrandAwaitingFirstSyncErro
 
     await expect(factory('networkhash123')).rejects.toBeInstanceOf(StrandWaitCancelledError);
     expect(node.whenStrandWritable).not.toHaveBeenCalled();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 64-08 D-30: founder intent in createStrandDbFactory
+// ---------------------------------------------------------------------------
+
+describe('64-08 D-30: founder intent in createStrandDbFactory (DF)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let fi: any;
+  beforeAll(() => {
+    // Lazy: the existing cases must still load while the module is missing.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    fi = require('../founder-intent');
+  });
+
+  function deferredValue<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  /** Like makeFakeNode, but the connection count is read on every getConnections() call. */
+  function makeMutableFakeNode(initial = 0) {
+    const state = { connections: initial };
+    const node = makeFakeNode({ connections: 0 });
+    node.getControlNode = jest.fn(() => ({
+      getConnections: () => new Array(state.connections).fill({}),
+    }));
+    return { node, state };
+  }
+
+  let info: jest.SpyInstance;
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    info = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    info.mockRestore();
+    warn.mockRestore();
+    expect(fi.takeFounderIntent('__probe__')).toBeNull();
+  });
+
+  const attachLines = () => info.mock.calls.filter((c) => c[0] === '[strand-factory] attach').map((c) => c[1]);
+
+  type Mode = 'founding' | 'joining' | 'none';
+  const rows: Array<[Mode, boolean, number]> = [];
+  for (const mode of ['founding', 'joining', 'none'] as Mode[]) {
+    for (const joined of [true, false]) {
+      for (const connections of [0, 2]) rows.push([mode, joined, connections]);
+    }
+  }
+
+  it.each(rows)('DF-1 intent=%s joined=%s connections=%s follows the resolution table', async (mode, joined, connections) => {
+    const node = makeFakeNode({ connections });
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: async () => joined });
+    const run = () => factory('hashDF1');
+    if (mode === 'founding') await fi.withFounding(run);
+    else if (mode === 'joining') await fi.withJoining('hashDF1', run);
+    else await run();
+    const intent = mode === 'none' ? null : mode;
+    const expected = fi.resolveFounderFlag({ intent, joined, controlConnections: connections });
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(expected);
+    expect(attachLines()).toEqual([{ founder: expected, controlConnections: connections, intent: mode }]);
+  });
+
+  it('DF-2 no options keeps addStrand synchronous; with isJoinedNetwork it waits for the list', async () => {
+    const plain = makeFakeNode();
+    const p1 = createStrandDbFactory(plain)('hashDF2');
+    expect(plain.addStrand).toHaveBeenCalledTimes(1);
+    await p1;
+
+    const withList = makeFakeNode();
+    const p2 = createStrandDbFactory(withList, { isJoinedNetwork: async () => false })('hashDF2');
+    expect(withList.addStrand).not.toHaveBeenCalled();
+    await p2;
+    expect(withList.addStrand).toHaveBeenCalledTimes(1);
+  });
+
+  it('DF-3 an unreadable list refuses the open and calls no addStrand', async () => {
+    const check = async (opt: () => boolean | Promise<boolean>, wrap: boolean) => {
+      info.mockClear();
+      warn.mockClear();
+      const node = makeFakeNode();
+      const factory = createStrandDbFactory(node, { isJoinedNetwork: opt });
+      const run = () => factory('hashDF3');
+      const err = await (wrap ? fi.withFounding(run) : run()).catch((e: unknown) => e);
+      expect(fi.isJoinedNetworksUnreadableError(err)).toBe(true);
+      expect(node.addStrand).not.toHaveBeenCalled();
+      expect(attachLines()).toEqual([]);
+      const refusals = warn.mock.calls.filter((c) => c[0] === '[strand-factory] attach refused');
+      expect(refusals.length).toBe(1);
+      expect(refusals[0][1]).toEqual({ reason: 'joined-list-unreadable' });
+    };
+    await check(async () => { throw new Error('io'); }, false);
+    await check(() => { throw new Error('io'); }, false);
+    await check(async () => { throw new Error('io'); }, true);
+    await check(() => { throw new Error('io'); }, true);
+  });
+
+  it('DF-4 a joined hash is never founder, even in a founding window with no connections', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: async () => true });
+    await fi.withFounding(() => factory('hashDF4'));
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
+    expect(attachLines()[0].intent).toBe('founding');
+    expect(fi.takeFounderIntent('hashDF4')).toBeNull();
+  });
+
+  it('DF-5 one founding window serves one open only', async () => {
+    const node = makeFakeNode({ connections: 2 });
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: async () => false });
+    await fi.withFounding(async () => {
+      await factory('hashA');
+      await factory('hashB');
+    });
+    const calls = node.addStrand.mock.calls.map((c: any[]) => [c[0].strandRow.Id, c[0].founder]);
+    expect(calls).toEqual([['hashA', true], ['hashB', false]]);
+    expect(attachLines().map((l: any) => l.intent)).toEqual(['founding', 'none']);
+  });
+
+  it('DF-6 an open that started before the window does not inherit it', async () => {
+    const node = makeFakeNode({ connections: 2 });
+    const gateB = deferredValue<boolean>();
+    const factoryB = createStrandDbFactory(node, { isJoinedNetwork: () => gateB.promise });
+    const factoryA = createStrandDbFactory(node, { isJoinedNetwork: async () => false });
+    const pB = factoryB('hashB');
+    const pA = fi.withFounding(() => factoryA('hashA'));
+    gateB.resolve(false);
+    await Promise.all([pA, pB]);
+    const by = (id: string) => node.addStrand.mock.calls.map((c: any[]) => c[0]).find((c: any) => c.strandRow.Id === id);
+    expect(by('hashB').founder).toBe(false);
+    expect(by('hashA').founder).toBe(true);
+    const intents = attachLines().map((l: any) => l.intent).sort();
+    expect(intents).toEqual(['founding', 'none']);
+  });
+
+  it('DF-7 the claim is made at call time, not after the window ended', async () => {
+    const node = makeFakeNode({ connections: 2 });
+    const gate = deferredValue<boolean>();
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: () => gate.promise });
+    let pA!: Promise<unknown>;
+    await fi.withFounding(() => {
+      pA = factory('hashA');
+      return Promise.resolve();
+    });
+    gate.resolve(false);
+    await pA;
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(true);
+    expect(attachLines()[0].intent).toBe('founding');
+  });
+
+  it('DF-8 a joining window covers every open of its own hash only', async () => {
+    const node = makeFakeNode({ connections: 0 });
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: async () => false });
+    await fi.withJoining('hashJ', async () => {
+      await factory('hashJ');
+      await factory('hashJ');
+      await factory('hashK');
+    });
+    const calls = node.addStrand.mock.calls.map((c: any[]) => [c[0].strandRow.Id, c[0].founder]);
+    expect(calls).toEqual([['hashJ', false], ['hashJ', false], ['hashK', true]]);
+    expect(attachLines().map((l: any) => l.intent)).toEqual(['joining', 'joining', 'none']);
+  });
+
+  it('DF-9 attach payloads hold exactly the closed keys and never a hash', async () => {
+    const node = makeFakeNode({ connections: 1 });
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: async () => false });
+    await factory('hashNineA');
+    await fi.withFounding(() => factory('hashNineB'));
+    await fi.withJoining('hashNineC', () => factory('hashNineC'));
+    const lines = attachLines();
+    expect(lines.length).toBe(3);
+    for (const l of lines) expect(Object.keys(l).sort()).toEqual(['controlConnections', 'founder', 'intent']);
+    const text = JSON.stringify([...info.mock.calls, ...warn.mock.calls]);
+    for (const h of ['hashNineA', 'hashNineB', 'hashNineC']) expect(text).not.toContain(h);
+  });
+
+  it('DF-10 controlConnections is read after the joined-list await', async () => {
+    const { node, state } = makeMutableFakeNode(0);
+    const gate = deferredValue<boolean>();
+    const factory = createStrandDbFactory(node, { isJoinedNetwork: () => gate.promise });
+    const p = factory('hashDF10');
+    state.connections = 2;
+    gate.resolve(false);
+    await p;
+    expect(attachLines()[0]).toEqual({ founder: false, controlConnections: 2, intent: 'none' });
+    expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
   });
 });
