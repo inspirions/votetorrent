@@ -66,7 +66,7 @@ describe('console-leak helper', () => {
 	describe('planted full code', () => {
 		it.each(NAMES)('fails when the full %s text is warned', (name) => {
 			const text = JOIN_CODE_FIXTURES[name].text;
-			expectLeak((c) => void console.warn('x', text), text);
+			expectLeak(() => void console.warn('x', text), text);
 		});
 	});
 
