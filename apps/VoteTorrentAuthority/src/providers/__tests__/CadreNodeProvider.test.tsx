@@ -956,3 +956,138 @@ describe('CadreNodeProvider — saved owner trust (D-08..D-11)', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 64 plan 16 (D-26, research M4): a joined install's relay-circuit dial hints are merged into
+// `controlNetwork.bootstrapNodes` at boot, config addresses first, and never become relay targets.
+// ---------------------------------------------------------------------------
+import { captureConsole, expectNoSecretInConsole } from '../../engines/__fixtures__/console-leak';
+
+describe('CadreNodeProvider — join bootstrap merged at boot (D-26)', () => {
+  const JB_KEY = '@votetorrent/authorityJoinBootstrap';
+  const RELAY_ID = '12D3KooWRBhwfeP2Y4TCx1SM6s9rUoHhR5STiGwxBhgFRcw3UERE';
+  const C1 = `/ip4/192.168.1.7/tcp/4001/ws/p2p/${RELAY_ID}/p2p-circuit/p2p/12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo`;
+  const C2 = `/ip4/192.168.1.8/tcp/4001/ws/p2p/${RELAY_ID}/p2p-circuit/p2p/12D3KooWJWoaqZhDaoEFshF7Rh1bpY9ohihFhzNAc5dVLAHZmwCe`;
+  const DIRECT = `/ip4/203.0.113.7/tcp/4001/ws/p2p/${RELAY_ID}`;
+  const RELAY_CFG = `/ip4/203.0.113.9/tcp/443/wss/p2p/${RELAY_ID}`;
+  const actualReact = jest.requireActual('react');
+  const getItemMock = AsyncStorage.getItem as unknown as jest.Mock;
+  let priorGetItem: ((...a: never[]) => unknown) | undefined;
+
+  type Received = {
+    controlNetwork: { bootstrapNodes: string[] };
+    network: { relayAddrs: string[] };
+  };
+  const optionsOf = (n: FakeCadreNode) => n.receivedOptions as Received;
+
+  beforeEach(async () => {
+    priorGetItem = getItemMock.getMockImplementation();
+    await AsyncStorage.clear();
+  });
+
+  afterEach(async () => {
+    getItemMock.mockImplementation(priorGetItem);
+    await AsyncStorage.clear();
+    jest.dontMock('../../../bootstrap.config.json');
+    jest.dontMock('@libp2p/circuit-relay-v2');
+    jest.dontMock('react');
+  });
+
+  it('JBP-1 merges the stored circuit addresses (sanitized, deduplicated) and leaves relayAddrs empty', async () => {
+    await AsyncStorage.setItem(JB_KEY, JSON.stringify([C1, ` ${C1} `, DIRECT, C2]));
+    const c = captureConsole();
+    try {
+      const { captured } = renderProvider();
+      await flushBoot();
+      expect(mockConstructedNodes).toHaveLength(1);
+      expect(optionsOf(mockConstructedNodes[0]).controlNetwork.bootstrapNodes).toEqual([C1, C2]);
+      expect(optionsOf(mockConstructedNodes[0]).network.relayAddrs).toEqual([]);
+      await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+      expectNoSecretInConsole(c, [C1, C2, 'planted-jb-text']);
+    } finally {
+      c.restore();
+    }
+  });
+
+  it('JBP-2 puts config addresses first and never turns join hints into relay targets', async () => {
+    jest.resetModules();
+    jest.doMock('react', () => actualReact);
+    jest.doMock('../../../bootstrap.config.json', () => ({ bootstrapNodes: [RELAY_CFG] }), { virtual: true });
+    const transportOptions: Array<{ reservationConcurrency?: number }> = [];
+    jest.doMock(
+      '@libp2p/circuit-relay-v2',
+      () => ({
+        circuitRelayTransport: (o: { reservationConcurrency?: number }) => {
+          transportOptions.push(o);
+          return {};
+        },
+      }),
+      { virtual: true },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('../CadreNodeProvider');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const freshStorageModule = require('@react-native-async-storage/async-storage');
+    const freshStorage = freshStorageModule.default ?? freshStorageModule;
+    await freshStorage.setItem(JB_KEY, JSON.stringify([C1]));
+    const c = captureConsole();
+    try {
+      await renderer.act(async () => {
+        renderer.create(
+          <mod.CadreNodeProvider>
+            <></>
+          </mod.CadreNodeProvider>,
+        );
+        for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
+          // eslint-disable-next-line no-await-in-loop
+          await Promise.resolve();
+        }
+      });
+      const last = mockConstructedNodes[mockConstructedNodes.length - 1];
+      expect(optionsOf(last).controlNetwork.bootstrapNodes).toEqual([RELAY_CFG, C1]);
+      expect(optionsOf(last).network.relayAddrs).toEqual([RELAY_CFG]);
+      expect(transportOptions.length).toBeGreaterThan(0);
+      expect(transportOptions.every((o) => o.reservationConcurrency === 1)).toBe(true);
+      expectNoSecretInConsole(c, [C1, RELAY_CFG]);
+    } finally {
+      c.restore();
+    }
+  });
+
+  it('JBP-3 an unreadable join-bootstrap record boots on the config addresses alone', async () => {
+    getItemMock.mockImplementation(async (key: string, ...rest: never[]) => {
+      if (key === JB_KEY) throw new Error('planted-jb-text');
+      return priorGetItem ? priorGetItem(key as never, ...rest) : null;
+    });
+    const c = captureConsole();
+    try {
+      const { captured } = renderProvider();
+      await flushBoot();
+      expect(mockConstructedNodes).toHaveLength(1);
+      expect(mockConstructedNodes[0].start).toHaveBeenCalledTimes(1);
+      expect(optionsOf(mockConstructedNodes[0]).controlNetwork.bootstrapNodes).toEqual([]);
+      await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+      expectNoSecretInConsole(c, [C1, C2, 'planted-jb-text']);
+    } finally {
+      c.restore();
+    }
+  });
+
+  it('JBP-4 the control-schema recovery rebuild dials the same merged list', async () => {
+    await AsyncStorage.setItem(JB_KEY, JSON.stringify([C1]));
+    mockStartErrors.push(new Error('CadreControl.Revocation could not be restored'));
+    const c = captureConsole();
+    try {
+      const { captured } = renderProvider();
+      await flushBoot();
+      expect(mockConstructedNodes).toHaveLength(2);
+      const [first, second] = mockConstructedNodes;
+      expect(optionsOf(first).controlNetwork.bootstrapNodes).toEqual([C1]);
+      expect(optionsOf(second).controlNetwork.bootstrapNodes).toEqual([C1]);
+      await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+      expectNoSecretInConsole(c, [C1, C2, 'planted-jb-text']);
+    } finally {
+      c.restore();
+    }
+  });
+});
