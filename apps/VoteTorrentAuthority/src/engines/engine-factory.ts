@@ -48,7 +48,7 @@ import {
 } from '@votetorrent/vote-engine/rn';
 import type { DbFactory, EngineContext, ElectionSubject, StagingOpener, StagingDecisionSigner } from '@votetorrent/vote-engine/rn';
 import type { BootstrapSnapshot } from '@votetorrent/vote-engine/bootstrap';
-import { rnDbFactory, createStrandDbFactory } from './rn-db-factory';
+import { createStrandDbFactory } from './rn-db-factory';
 import { wrapCreateWithFounding } from './founder-intent';
 import { isJoinedNetwork } from './joined-networks';
 import type { StrandHost } from './rn-db-factory';
