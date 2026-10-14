@@ -1,3 +1,4 @@
+import type { Ref } from "react";
 import { StyleSheet, TouchableOpacity, View } from "react-native";
 import { ThemedText } from "./ThemedText";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
@@ -14,6 +15,8 @@ interface FullButtonProps {
 	size?: "tall" | "thin";
 	flex?: boolean;
 	testID?: string;
+	/** Host ref (React 19 passes `ref` as a prop); lets a caller return accessibility focus to the button. */
+	ref?: Ref<View>;
 	onPress: () => void;
 }
 
@@ -27,6 +30,7 @@ export function CustomButton({
 	size = "tall",
 	flex = false,
 	testID,
+	ref,
 	onPress,
 }: FullButtonProps) {
 	const { colors } = useTheme() as ExtendedTheme;
@@ -38,6 +42,7 @@ export function CustomButton({
 
 	return (
 		<TouchableOpacity
+			ref={ref}
 			style={[
 				styles.button,
 				{ backgroundColor: buttonColor },

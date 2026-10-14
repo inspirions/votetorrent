@@ -2,9 +2,15 @@
  * VoterInviteCard.tsx — "Invite voters" for one network (spike 100).
  *
  * Produces a JOIN CODE (`engines/voter-invite.ts`): an untargeted, multi-use cadre invitation plus
- * the network's founding anchor. The officer copies or shares the code, and publishes the network
- * fingerprint shown here through an official channel; a voter's phone shows the same fingerprint
- * before it joins (Voter app, Settings → Join a network).
+ * the network's founding anchor. The officer shows the code as a QR (inline thumbnail, then a
+ * full-screen view), copies it or shares it, and publishes the network fingerprint shown here through
+ * an official channel; a voter's phone shows the same fingerprint before it joins (Voter app,
+ * Settings → Join a network). Paste, Share and both QR panels carry exactly the same text (D-01).
+ *
+ * The full-screen view is a Modal OWNED BY THIS CARD, never a route, so the code cannot enter
+ * navigation params or persisted navigation state. The code text itself is no longer rendered on the
+ * card (D-06). The Share QR image PNG is built and deleted by `VoterInviteQrView` / `engines/qr-share`;
+ * the card deletes any leftover on unmount.
  *
  * A phone that founded its cadre without an owner key must first become the cadre's owner. That
  * changes who can admit machines to this network, so it waits for an explicit confirm. A phone that
@@ -14,15 +20,17 @@
  * key).
  */
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Share, View } from "react-native";
+import { AccessibilityInfo, Image, PixelRatio, Pressable, Share, View, useWindowDimensions } from "react-native";
 import type { NetworkReference } from "@votetorrent/vote-core";
 import { ThemedText } from "../../../components/ThemedText";
 import { CustomButton } from "../../../components/CustomButton";
 import { useApp } from "../../../providers/AppProvider";
 import { useCadreNode } from "../../../providers/CadreNodeProvider";
 import { getDeviceUser } from "../../../engines/device-user";
+import { deleteSharedQrImage } from "../../../engines/qr-share";
+import { VoterInviteQrView, tryBuildQrPanel } from "./VoterInviteQrView";
 import { copyToClipboard } from "../../../utils/copyToClipboard";
 import {
 	createVoterJoinCode,
@@ -36,6 +44,9 @@ export interface VoterInviteCardProps {
 	networkRef: NetworkReference;
 	onClose: () => void;
 }
+
+/** Delay before accessibility focus returns to the Show QR code button (UI-SPEC: after the Modal's fade). */
+export const QR_FOCUS_RETURN_DELAY_MS = 250;
 
 // Mirrors FoundingBundleExportCard's EXPORT_OPEN_TIMEOUT_MS: open() can stall on a first-sync wait.
 const INVITE_OPEN_TIMEOUT_MS = 45000;
@@ -71,20 +82,49 @@ function logInviteFailure(stage: string): void {
 
 export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 	const { t } = useTranslation();
-	const { colors } = useTheme() as ExtendedTheme;
+	const theme = useTheme() as ExtendedTheme;
+	const { colors } = theme;
 	const { networksEngine } = useApp();
 	const { node } = useCadreNode();
 	const [state, setState] = useState<CardState>({ kind: "checking" });
 	const [copyNotice, setCopyNotice] = useState<"copied" | "failed" | undefined>(undefined);
+	const [qrOpen, setQrOpen] = useState(false);
 	const mountedRef = useRef(true);
 	const inFlightRef = useRef(false);
+	const openButtonRef = useRef<View>(null);
+	const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Re-renders on a density change, so the thumbnail is rebuilt at the new pixel ratio.
+	const { scale } = useWindowDimensions();
+	const readyCode = state.kind === "ready" ? state.result.code : null;
+	const thumb = useMemo(
+		() => (readyCode === null ? null : tryBuildQrPanel(readyCode, 160 * PixelRatio.get())),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[readyCode, scale],
+	);
+
+	useEffect(() => {
+		if (thumb && !thumb.ok) logInviteFailure("qr");
+	}, [thumb]);
 
 	useEffect(
 		() => () => {
 			mountedRef.current = false;
+			if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
+			void deleteSharedQrImage();
 		},
 		[],
 	);
+
+	const closeQr = useCallback(() => {
+		setQrOpen(false);
+		if (focusTimerRef.current !== null) clearTimeout(focusTimerRef.current);
+		focusTimerRef.current = setTimeout(() => {
+			focusTimerRef.current = null;
+			if (mountedRef.current && openButtonRef.current) {
+				AccessibilityInfo.sendAccessibilityEvent(openButtonRef.current, "focus");
+			}
+		}, QR_FOCUS_RETURN_DELAY_MS);
+	}, []);
 
 	const generate = useCallback(async () => {
 		if (inFlightRef.current) return;
@@ -195,11 +235,42 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 		case "ready": {
 			const { result } = state;
 			const expiry = inviteExpiryMs(result.expiresAt);
+			const ratio = PixelRatio.get();
 			return (
 				<View testID="voter-invite-body-ready" style={{ gap: 8 }}>
-					<ThemedText type="default" style={{ color: colors.textSecondary }}>
+					<ThemedText type="default" testID="voter-invite-ready-body" style={{ color: colors.textSecondary }}>
 						{t("voterInviteReadyBody")}
 					</ThemedText>
+					{thumb?.ok ? (
+						<>
+							<Pressable
+								testID="voter-invite-qr"
+								accessibilityRole="button"
+								accessibilityLabel={t("voterInviteQrThumbA11y")}
+								onPress={() => setQrOpen(true)}
+								style={{ alignSelf: "center" }}
+							>
+								<View style={{ borderWidth: 1 / ratio, borderColor: theme.dark ? colors.accent : colors.border }}>
+									<Image
+										testID="voter-invite-qr-image"
+										source={{ uri: "data:image/png;base64," + thumb.panel.base64 }}
+										style={{ width: thumb.panel.panelPx / ratio, height: thumb.panel.panelPx / ratio }}
+										resizeMode="stretch"
+										fadeDuration={0}
+										accessible={false}
+										onError={() => logInviteFailure("qr")}
+									/>
+								</View>
+							</Pressable>
+							<ThemedText type="small" style={{ color: colors.text, textAlign: "center" }}>
+								{t("voterInviteQrHint")}
+							</ThemedText>
+						</>
+					) : (
+						<ThemedText type="small" testID="voter-invite-qr-render-failed" style={{ color: colors.error }}>
+							{t("voterInviteQrRenderFailed")}
+						</ThemedText>
+					)}
 					<ThemedText type="defaultSemiBold">{t("networkFoundingExportFingerprintLabel")}</ThemedText>
 					<ThemedText type="default" testID="voter-invite-fingerprint" selectable>
 						{result.fingerprint}
@@ -212,9 +283,16 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 							{t("voterInviteExpires", { when: new Date(expiry).toLocaleDateString() })}
 						</ThemedText>
 					)}
-					<ThemedText type="small" testID="voter-invite-code" selectable numberOfLines={3} style={{ color: colors.textSecondary }}>
-						{result.code}
-					</ThemedText>
+					{thumb?.ok && (
+						<CustomButton
+							ref={openButtonRef}
+							testID="voter-invite-qr-open"
+							icon="qrcode"
+							backgroundColor={colors.primary}
+							title={t("voterInviteQrOpen")}
+							onPress={() => setQrOpen(true)}
+						/>
+					)}
 					<CustomButton testID="voter-invite-copy" title={t("voterInviteCopy")} onPress={() => void copyCode(result.code)} />
 					<CustomButton testID="voter-invite-share" title={t("voterInviteShare")} onPress={() => void shareCode(result)} />
 					{copyNotice !== undefined && (
@@ -227,6 +305,7 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 						</ThemedText>
 					)}
 					<CustomButton testID="voter-invite-done" title={t("voterInviteDone")} onPress={onClose} />
+					{qrOpen ? <VoterInviteQrView code={result.code} fingerprint={result.fingerprint} onClose={closeQr} /> : null}
 				</View>
 			);
 		}
