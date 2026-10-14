@@ -31,9 +31,10 @@
  *      (`attach-voter-request-transport.ts`), signed under the voter's OWN secp256k1 device
  *      identity (62-08's `createDeviceSigner`, unwrapped in memory — D-42) — never the officer
  *      signer.
- *   4. Submit a self-signed association-request document bound to the P-256 device key, then poll
- *      (bounded, no timer-based background poller) for the authority's challenge-issued decision
- *      notice — never calling the authority's challenge-issuing engine method directly.
+ *   4. Submit a self-signed association-request document bound to the P-256 device key, then wait
+ *      for the authority's challenge-issued decision notice — a bounded wall-clock wait (64 D-27),
+ *      cancelled by Stop or unmount — never calling the authority's challenge-issuing engine method
+ *      directly.
  *   5. `producer.produce(challenge)` — the D-11 second step, after the challenge is obtained and before
  *      the attestation answer is submitted. On iOS this is where the biometric prompt fires. On
  *      Android it raises none (spike 104, R1d): a throwaway key answers the nonce and the voting key
@@ -51,8 +52,9 @@
  * D-32/D-05: both inits (not just their ids) are minted once per mounted attempt and reused
  * byte-identical on every "Try Again" retry — a P2P re-submit of an identical Digest + RequesterKey
  * is idempotent, but a fresh `submittedAt` would change the Digest and be refused forever as
- * 'duplicate-request-id'. The bounded, timer-free poll is unchanged; a timeout is recovered by
- * "Try Again", which re-submits idempotently and polls again.
+ * 'duplicate-request-id'. The decision wait is bounded by wall clock (64 D-27) and ends on a
+ * timeout, a Stop or an unmount; a timeout or a Stop is recovered by "Try Again", which re-submits
+ * idempotently and waits again.
  *
  * On any thrown step, `classifyAttestationFailure(err)` (D-09) drives the failure UX exactly as
  * before: `'recoverable-action'` renders a setup prompt + retry reusing the same `registrantId`
@@ -69,8 +71,8 @@
  * `RegistrationConfirmationCodeCard` appended below the existing pending content whenever this
  * device both staged the registration over P2P and holds the derived code's matching identity key.
  */
-import React, {useCallback, useRef, useState} from 'react';
-import {Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {ActivityIndicator, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
@@ -119,11 +121,33 @@ type ConfirmationNavigationProp = NativeStackNavigationProp<RegistrationStackPar
 const IGNORED_EXPIRATION_PLACEHOLDER = new Date(0).toISOString();
 
 /**
- * The bounded number of decision-poll attempts before giving up — never an unbounded or
- * timer-based background poll. Each attempt is a real, awaited transport round trip; there is no
- * scheduled-delay call anywhere in this loop.
+ * 64 D-27: how long the first Confirm press waits for the officer's decision. 180 s, a 2 s poll
+ * interval and a 300 s ceiling are the UI-SPEC A3 author's choice (RESEARCH C1). The rehearsal may
+ * revise `DECISION_WAIT_DEADLINE_MS` once (64-28), never above `DECISION_WAIT_MAX_MS`.
  */
-const MAX_POLL_ATTEMPTS = 20;
+export const DECISION_WAIT_DEADLINE_MS = 180_000;
+export const DECISION_POLL_INTERVAL_MS = 2_000;
+export const DECISION_WAIT_MAX_MS = 300_000;
+
+/**
+ * The wait's clock. It is WALL clock (`Date.now`), so a suspended app cannot extend the deadline.
+ * A test seam: tests spy on its two methods, so it is read at call time and never destructured.
+ */
+export const decisionWaitClock: {now(): number; sleep(ms: number): Promise<void>} = {
+	now: () => Date.now(),
+	sleep: ms => new Promise<void>(resolve => setTimeout(resolve, ms)),
+};
+
+/**
+ * The wait ended without a decision. Matched by `name` (the duck typing `NoElectionConfiguredError`
+ * already uses), which is safe under Babel and Hermes class transforms.
+ */
+function decisionWaitError(name: 'DecisionWaitTimeoutError' | 'DecisionWaitStoppedError'): Error {
+	return Object.assign(
+		new Error(name === 'DecisionWaitTimeoutError' ? 'The decision wait reached its deadline.' : 'The decision wait was stopped.'),
+		{name},
+	);
+}
 
 interface DecisionNoticeLike {
 	requestId: string;
@@ -132,27 +156,67 @@ interface DecisionNoticeLike {
 	challengeNonce?: string;
 }
 
+/** File-local: the failure classes of the attestation ceremony plus the two ends of the wait. */
+type ConfirmationFailureClass = AttestationFailureClass | 'decision-timeout' | 'wait-stopped';
+
+/** File-local: one Confirm press. Stop and unmount flip its flags; `wake` ends a sleeping wait at once. */
+interface CeremonyAttempt {
+	cancelled: boolean;
+	stopRequested: boolean;
+	wake: (() => void) | null;
+}
+
 /**
- * Polls `poll` (bounded, `MAX_POLL_ATTEMPTS`) until a notice for `requestId` reaches one of
- * `terminalStatuses`, forwarding the cursor between calls. Throws on exhaustion — re-delivery is
- * tolerated, an unbounded wait is not.
+ * Waits until a notice for `requestId` reaches one of `terminalStatuses` (64 D-27), forwarding the
+ * cursor between reads. The first read is immediate; each later read follows a sleep of at most
+ * `DECISION_POLL_INTERVAL_MS`, clamped to the time left. The wait is bounded by wall clock
+ * (`options.deadlineMs`, itself capped at `DECISION_WAIT_MAX_MS`; a non-finite or non-positive
+ * value falls to the cap) and rejects with `DecisionWaitTimeoutError`, or with
+ * `DecisionWaitStoppedError` as soon as `shouldStop()` holds (a notice read after that is
+ * discarded). A clock jump past the deadline ends the wait at the next tick with no further read.
+ *
+ * Every tick is a fresh `pollDecisions` cursor read, never a cached list. A timeout therefore says
+ * nothing about whether the requests were written: they were already staged, and Try Again
+ * re-submits them idempotently.
  */
-async function pollForNotice<T extends DecisionNoticeLike>(
+export async function pollForNotice<T extends DecisionNoticeLike>(
 	poll: (sinceCursor?: string) => Promise<T[]>,
 	requestId: string,
 	terminalStatuses: ReadonlySet<string>,
+	options: {now: () => number; sleep: (ms: number) => Promise<void>; deadlineMs: number; shouldStop: () => boolean},
 ): Promise<T> {
+	const bound =
+		Number.isFinite(options.deadlineMs) && options.deadlineMs > 0
+			? Math.min(options.deadlineMs, DECISION_WAIT_MAX_MS)
+			: DECISION_WAIT_MAX_MS;
+	const deadlineAt = options.now() + bound;
 	let cursor: string | undefined;
-	for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+	for (;;) {
+		if (options.shouldStop()) {
+			throw decisionWaitError('DecisionWaitStoppedError');
+		}
 		const notices = await poll(cursor);
+		if (options.shouldStop()) {
+			throw decisionWaitError('DecisionWaitStoppedError');
+		}
 		for (const notice of notices) {
 			cursor = notice.cursor;
 			if (notice.requestId === requestId && terminalStatuses.has(notice.status)) {
 				return notice;
 			}
 		}
+		const left = deadlineAt - options.now();
+		if (left <= 0) {
+			throw decisionWaitError('DecisionWaitTimeoutError');
+		}
+		await options.sleep(Math.min(DECISION_POLL_INTERVAL_MS, left));
+		if (options.shouldStop()) {
+			throw decisionWaitError('DecisionWaitStoppedError');
+		}
+		if (options.now() >= deadlineAt) {
+			throw decisionWaitError('DecisionWaitTimeoutError');
+		}
 	}
-	throw new Error('Timed out waiting for a response from the authority.');
 }
 
 export default function ConfirmationScreen() {
@@ -166,8 +230,10 @@ export default function ConfirmationScreen() {
 	const {t: tContinuity} = useTranslation('continuity');
 
 	const [isSubmitting, setIsSubmitting] = useState(false);
-	const [failureClass, setFailureClass] = useState<AttestationFailureClass | null>(null);
+	const [failureClass, setFailureClass] = useState<ConfirmationFailureClass | null>(null);
 	const [isPending, setIsPending] = useState(false);
+	// 64 D-27 / UI-SPEC A3: true only while the first Confirm waits for the officer's decision.
+	const [isWaiting, setIsWaiting] = useState(false);
 	// Plan 28 (D-45): the re-showable code card's own availability read — re-resolved on every
 	// focus while pending, never cached beyond this render (59 D-23).
 	const [codeAvailability, setCodeAvailability] = useState<RegistrationCodeAvailability | null>(null);
@@ -194,6 +260,29 @@ export default function ConfirmationScreen() {
 	// 64 D-28: one election id per mounted attempt. Both inits and the challenge embed it, and Try
 	// Again reuses the inits byte-identical, so the id is resolved once and never re-read.
 	const electionIdRef = useRef<string | null>(null);
+	// 64 D-27: the in-flight press, so Stop and unmount can end its wait.
+	const attemptRef = useRef<CeremonyAttempt | null>(null);
+
+	// Unmount ends the attempt: no further read, no biometric prompt, no state set. A no-op on
+	// StrictMode's simulated first cleanup, because no attempt exists then.
+	useEffect(() => {
+		return () => {
+			const attempt = attemptRef.current;
+			if (attempt) {
+				attempt.cancelled = true;
+				attempt.wake?.();
+			}
+		};
+	}, []);
+
+	/** The Stop control: ends the wait. It sets no state; the ceremony's catch owns the UI. */
+	function onStopWaiting() {
+		const attempt = attemptRef.current;
+		if (attempt) {
+			attempt.stopRequested = true;
+			attempt.wake?.();
+		}
+	}
 
 	/**
 	 * Spike 104: this attempt's voting key. A retry reads the key back (read-only) and keeps it when it
@@ -231,6 +320,14 @@ export default function ConfirmationScreen() {
 		}
 		setIsSubmitting(true);
 		setFailureClass(null);
+		const attempt: CeremonyAttempt = {cancelled: false, stopRequested: false, wake: null};
+		attemptRef.current = attempt;
+		const isStopped = (): boolean => attempt.cancelled || attempt.stopRequested;
+		const throwIfStopped = (): void => {
+			if (isStopped()) {
+				throw decisionWaitError('DecisionWaitStoppedError');
+			}
+		};
 		try {
 			// The voter's OWN device identity (secp256k1, device-user.ts) — self-signs both requests
 			// below as ITSELF. This is the SAME underlying keypair `useVoterApp().sign` wraps as the
@@ -246,8 +343,10 @@ export default function ConfirmationScreen() {
 			// (device-key-wrap.ts; native unwrap skips BiometricPrompt / LAContext for it), so the
 			// biometric-last property below is unchanged.
 			const deviceUser = await getOrCreateDeviceUser('Device User');
+			throwIfStopped();
 			const deviceUserKey = deviceUser.activeKeys[0]!.key;
 			const deviceSign = await createDeviceSigner('Device User');
+			throwIfStopped();
 
 			// WR-03: the registration request's payload only enforces field policy when
 			// init.electionId is set. Fail closed rather than submit with policy unenforced. 64 D-28:
@@ -256,6 +355,7 @@ export default function ConfirmationScreen() {
 			let electionId = electionIdRef.current;
 			if (electionId === null) {
 				const resolved = await resolveCurrentElectionId({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined});
+				throwIfStopped();
 				if (!resolved) {
 					throw Object.assign(
 						new Error('No election configured — cannot register (field policy would be unenforced).'),
@@ -270,17 +370,20 @@ export default function ConfirmationScreen() {
 			// request is submitted — does NOT prompt biometric.
 			const producer = resolveAttestationProducer();
 			const p256DeviceKey = await resolveAttemptDeviceKey(producer);
+			throwIfStopped();
 
 			// The seeded network's authority — resolved from the already-established network
 			// context, never hand-rolled.
 			const networkEngine = await getEngine<INetworkEngine>('network');
 			const details = await networkEngine.getDetails();
+			throwIfStopped();
 			const authorityId = details.network.primaryAuthorityId;
 
 			// D-28/D-29/D-32: reach the authority through the joined network's own strand — P2P by
 			// default, or the authority-configured REST bridge for registration only. Unreachable
 			// (no delivery path at all) is a user-visible condition, never a crash.
 			const transports = await resolveVoterRequestTransports({getEngine, authorityId});
+			throwIfStopped();
 			if (!transports) {
 				throw new Error('Cannot reach the authority right now — please try again later.');
 			}
@@ -348,6 +451,7 @@ export default function ConfirmationScreen() {
 			// itself — never a raw key.
 			if (transports.registrationRoute === 'peer' && registrationCodeRef.current === null) {
 				registrationCodeRef.current = await mintRegistrationCodeForSubmit(getEngine, registrantId, deviceSign);
+				throwIfStopped();
 			}
 			if (transports.registrationRoute === 'peer') {
 				await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign, {
@@ -356,6 +460,7 @@ export default function ConfirmationScreen() {
 			} else {
 				await transports.registrationTransport.submitRequest(registrationRequestInit, deviceUserKey, deviceSign);
 			}
+			throwIfStopped();
 
 			// (2) Submit the self-signed association-request document, bound to the P-256 device
 			// key. The requester key MUST equal the device key (the authority's engine enforces this
@@ -383,15 +488,30 @@ export default function ConfirmationScreen() {
 				return producer.signDeviceKeyDigest(digest);
 			};
 			await transports.associationTransport.submitRequest(associationRequestInit, p256DeviceKey, associationSign);
+			throwIfStopped();
 
 			// (3) Obtain the challenge nonce from a challenge-issued decision notice — never call the
-			// authority's challenge-issuing engine method directly. Bounded, no timer-based
-			// background poller.
+			// authority's challenge-issuing engine method directly. 64 D-27: wait for the officer's
+			// decision, bounded by wall clock, cancelled by Stop or unmount (UI-SPEC A3).
+			setIsWaiting(true);
 			const decisionNotice = await pollForNotice(
 				transports.associationTransport.pollDecisions.bind(transports.associationTransport),
 				associationRequestId,
 				new Set(['c', 'r']),
+				{
+					now: () => decisionWaitClock.now(),
+					// Stop or unmount wakes a sleeping wait at once, instead of after the interval.
+					sleep: ms =>
+						new Promise<void>(resolve => {
+							attempt.wake = resolve;
+							decisionWaitClock.sleep(ms).then(resolve, resolve);
+						}),
+					deadlineMs: DECISION_WAIT_DEADLINE_MS,
+					shouldStop: isStopped,
+				},
 			);
+			throwIfStopped();
+			setIsWaiting(false);
 			if (decisionNotice.status === 'r') {
 				throw new Error('The authority rejected the association request.');
 			}
@@ -410,7 +530,10 @@ export default function ConfirmationScreen() {
 				deviceKey: p256DeviceKey,
 				electionId,
 			};
+			// On iOS `produce` raises Face ID: it never runs for a stopped or unmounted attempt.
+			throwIfStopped();
 			const attestation = await producer.produce(challenge);
+			throwIfStopped();
 
 			// (5) Submit the self-signed attestation-answer document — never a direct associate
 			// write.
@@ -420,6 +543,7 @@ export default function ConfirmationScreen() {
 				attestation,
 			};
 			await transports.associationTransport.submitAttestation(answer, p256DeviceKey, associationSign);
+			throwIfStopped();
 
 			// The authority's automatic driver processes the answer separately, on its own "Sync
 			// Now" trigger — this screen has no further decision to await synchronously, and
@@ -431,12 +555,33 @@ export default function ConfirmationScreen() {
 			clearDraft();
 			setIsPending(true);
 		} catch (err) {
+			if (attempt.cancelled) {
+				// Unmounted: nothing is set or logged.
+				return;
+			}
+			// 64 D-27: closed literal tokens only, never an id, nonce or cursor.
+			if (err instanceof Error && err.name === 'DecisionWaitTimeoutError') {
+				console.info('ConfirmationScreen: decision wait: timed-out');
+				setFailureClass('decision-timeout');
+				return;
+			}
+			if (err instanceof Error && err.name === 'DecisionWaitStoppedError') {
+				console.info('ConfirmationScreen: decision wait: stopped');
+				setFailureClass('wait-stopped');
+				return;
+			}
 			console.error('ConfirmationScreen: registration ceremony failed:', errorClassName(err));
 			// D-09/T-45-06-04: classify to a generic UX class — raw reject codes / internal
 			// error messages never reach the UI.
 			setFailureClass(classifyAttestationFailure(err));
 		} finally {
-			setIsSubmitting(false);
+			if (!attempt.cancelled) {
+				setIsWaiting(false);
+				setIsSubmitting(false);
+			}
+			if (attemptRef.current === attempt) {
+				attemptRef.current = null;
+			}
 		}
 	}
 
@@ -529,7 +674,11 @@ export default function ConfirmationScreen() {
 						? t('confirmation.error.intakeUnavailable')
 						: failureClass === 'no-election'
 							? t('confirmation.error.noElection')
-							: null; // includes 'identity-lost': IdentityRecoveryView above, never error copy
+							: failureClass === 'decision-timeout'
+								? t('confirmation.error.decisionTimeout')
+								: failureClass === 'wait-stopped'
+									? t('confirmation.error.waitStopped')
+									: null; // includes 'identity-lost': IdentityRecoveryView above, never error copy
 
 	return (
 		<ScrollView
@@ -564,19 +713,21 @@ export default function ConfirmationScreen() {
 			<View style={styles.iconWrap}>
 				<FontAwesome6 name="fingerprint" size={96} color={colors.primary} />
 			</View>
-			<Text
-				style={[
-					styles.caption,
-					{
-						color: colors.textSecondary,
-						fontFamily: fonts.regular.fontFamily,
-						fontWeight: fonts.regular.fontWeight,
-						fontSize: typeScale.caption.fontSize,
-						lineHeight: typeScale.caption.lineHeight,
-					},
-				]}>
-				{captionCopy}
-			</Text>
+			{isWaiting ? null : (
+				<Text
+					style={[
+						styles.caption,
+						{
+							color: colors.textSecondary,
+							fontFamily: fonts.regular.fontFamily,
+							fontWeight: fonts.regular.fontWeight,
+							fontSize: typeScale.caption.fontSize,
+							lineHeight: typeScale.caption.lineHeight,
+						},
+					]}>
+					{captionCopy}
+				</Text>
+			)}
 			{isPending ? (
 				<>
 					<Text
@@ -639,6 +790,40 @@ export default function ConfirmationScreen() {
 						</Text>
 					) : null}
 				</>
+			) : isWaiting ? (
+				<View testID="confirmation-waiting" style={styles.waiting}>
+					<ActivityIndicator testID="confirmation-waiting-indicator" size="large" color={colors.primary} accessible={false} />
+					<Text
+						testID="confirmation-waiting-text"
+						accessibilityLiveRegion="polite"
+						style={[
+							styles.waitingText,
+							{
+								color: colors.text,
+								fontFamily: fonts.regular.fontFamily,
+								fontWeight: fonts.regular.fontWeight,
+								fontSize: typeScale.body.fontSize,
+								lineHeight: typeScale.body.lineHeight,
+							},
+						]}>
+						{t('confirmation.waiting')}
+					</Text>
+					<Pressable
+						testID="confirmation-waiting-cancel"
+						accessibilityRole="button"
+						onPress={onStopWaiting}
+						style={[styles.waitingCancel, {borderColor: colors.primary, borderRadius: radii.pill}]}>
+						<Text
+							style={{
+								color: colors.primary,
+								fontFamily: fonts.bold.fontFamily,
+								fontWeight: fonts.bold.fontWeight,
+								fontSize: typeScale.body.fontSize,
+							}}>
+							{t('confirmation.waitingCancel')}
+						</Text>
+					</Pressable>
+				</View>
 			) : (
 				<>
 					{errorCopy ? (
@@ -726,6 +911,22 @@ const styles = StyleSheet.create({
 	},
 	retryCta: {
 		marginTop: 16, // md spacing token
+		minHeight: 44, // minimum touch target
+		alignItems: 'center',
+		justifyContent: 'center',
+		paddingHorizontal: 24,
+		borderWidth: 1,
+	},
+	waiting: {
+		marginTop: 24, // lg spacing token
+		alignItems: 'center',
+	},
+	waitingText: {
+		marginTop: 16, // md spacing token
+		textAlign: 'center',
+	},
+	waitingCancel: {
+		marginTop: 24, // lg spacing token
 		minHeight: 44, // minimum touch target
 		alignItems: 'center',
 		justifyContent: 'center',
