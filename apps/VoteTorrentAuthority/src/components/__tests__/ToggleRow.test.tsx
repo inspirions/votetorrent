@@ -20,6 +20,20 @@ jest.mock("@react-navigation/native", () => ({
 
 import { ToggleRow } from "../ToggleRow";
 
+async function make(el: React.ReactElement): Promise<renderer.ReactTestRenderer> {
+	let r!: renderer.ReactTestRenderer;
+	await act(async () => {
+		r = renderer.create(el);
+	});
+	return r;
+}
+
+async function unmount(r: renderer.ReactTestRenderer): Promise<void> {
+	await act(async () => {
+		r.unmount();
+	});
+}
+
 function stripKeys(node: unknown, keys: string[]): unknown {
 	if (Array.isArray(node)) return node.map((n) => stripKeys(n, keys));
 	if (node && typeof node === "object") {
@@ -34,8 +48,8 @@ function stripKeys(node: unknown, keys: string[]): unknown {
 }
 
 describe("ToggleRow", () => {
-	it("TR-1: without the new props the Switch has no testID or accessibilityLabel and keeps its colours", () => {
-		const tr = renderer.create(<ToggleRow label="Row" value={true} onValueChange={jest.fn()} />);
+	it("TR-1: without the new props the Switch has no testID or accessibilityLabel and keeps its colours", async () => {
+		const tr = await make(<ToggleRow label="Row" value={true} onValueChange={jest.fn()} />);
 		const sw = tr.root.findByType(Switch);
 		expect(sw.props.testID).toBeUndefined();
 		expect(sw.props.accessibilityLabel).toBeUndefined();
@@ -45,23 +59,23 @@ describe("ToggleRow", () => {
 		const json = JSON.stringify(tr.toJSON());
 		expect(json).toContain("Row");
 		expect(json).toContain("600");
-		tr.unmount();
+		await unmount(tr);
 	});
 
-	it("TR-2: a value change calls onValueChange once with the new value", () => {
+	it("TR-2: a value change calls onValueChange once with the new value", async () => {
 		const fn = jest.fn();
-		const tr = renderer.create(<ToggleRow label="Row" value={false} onValueChange={fn} />);
-		act(() => {
+		const tr = await make(<ToggleRow label="Row" value={false} onValueChange={fn} />);
+		await act(async () => {
 			tr.root.findByType(Switch).props.onValueChange(true);
 		});
 		expect(fn).toHaveBeenCalledTimes(1);
 		expect(fn).toHaveBeenCalledWith(true);
-		tr.unmount();
+		await unmount(tr);
 	});
 
-	it("TR-3: with the props the Switch carries both and nothing else in the render changed", () => {
-		const a = renderer.create(<ToggleRow label="Row" value={false} onValueChange={jest.fn()} />);
-		const b = renderer.create(
+	it("TR-3: with the props the Switch carries both and nothing else in the render changed", async () => {
+		const a = await make(<ToggleRow label="Row" value={false} onValueChange={jest.fn()} />);
+		const b = await make(
 			<ToggleRow label="Row" value={false} onValueChange={jest.fn()} testID="t-id" accessibilityLabel="a-label" />,
 		);
 		const sw = b.root.findByType(Switch);
@@ -75,11 +89,11 @@ describe("ToggleRow", () => {
 		);
 		// The label text is not the Switch's accessibility label.
 		expect(JSON.stringify(a.toJSON())).not.toContain("a-label");
-		a.unmount();
-		b.unmount();
+		await unmount(a);
+		await unmount(b);
 	});
 
-	it("TR-4: EditQuestionScreen's two call sites pass neither new prop", () => {
+	it("TR-4: EditQuestionScreen's two call sites pass neither new prop", async () => {
 		const src = fs.readFileSync(path.join(__dirname, "../../screens/ballots/EditQuestionScreen.tsx"), "utf8");
 		const lines = src.split("\n");
 		const starts = lines.map((l, i) => (l.includes("<ToggleRow") ? i : -1)).filter((i) => i >= 0);
