@@ -8,14 +8,18 @@
 //      prove @serfab/cadre-core actually LOADS under plain Node (D-12), not
 //      under the RN preset's jsdom-adjacent native-mock environment.
 //
-// Scoped via testMatch to ONLY cadre-core-node.smoke.spec.ts and
-// node-config-esm-mappers.spec.ts (which guards the ESM mappers below) so this
-// config never picks up the RN-preset specs (compliance-strand.spec.ts, etc.).
+// Scoped via testMatch to ONLY cadre-core-node.smoke.spec.ts,
+// node-config-esm-mappers.spec.ts (which guards the ESM mappers below),
+// join-code-prefix.spec.ts and owner-trust-store.spec.ts so this config never
+// picks up the RN-preset specs (compliance-strand.spec.ts, etc.). The last two
+// are Node-only real-cadre-core specs (phase 64) that jest.config.js excludes.
 module.exports = {
   testEnvironment: 'node',
   testMatch: [
     '<rootDir>/src/engines/__tests__/cadre-core-node.smoke.spec.ts',
     '<rootDir>/src/engines/__tests__/node-config-esm-mappers.spec.ts',
+    '<rootDir>/src/engines/__tests__/join-code-prefix.spec.ts',
+    '<rootDir>/src/engines/__tests__/owner-trust-store.spec.ts',
   ],
   // Same-style ESM transform exception as jest.config.js — @serfab/cadre-core's
   // own dependency tree (libp2p, multiformats, @quereus/*) is ESM-only.

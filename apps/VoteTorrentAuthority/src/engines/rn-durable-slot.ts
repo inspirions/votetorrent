@@ -21,9 +21,19 @@
  * "cold start, nothing was ever written", and the caller then snapshot-writes the whole record.
  * So a read that FAILS must throw. It must never be caught into `undefined`, or a transient
  * AsyncStorage error would destroy an intact book on the next save.
+ *
+ * It also holds the trusted-owner anchor (D-08, phase 64): the saved set of owner keys this party's
+ * `isAuthorizedMember` checks admissions against. Without it a restart leaves an in-memory anchor
+ * and every voter is refused at the pool rendezvous.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { PersistentStrandNetworkStateStore, type DurableSlot, type StrandNetworkStateStore } from '@serfab/cadre-core';
+import {
+  PersistentStrandNetworkStateStore,
+  PersistentTrustedOwnerStore,
+  type DurableSlot,
+  type StrandNetworkStateStore,
+  type TrustedOwnerStore,
+} from '@serfab/cadre-core';
 
 export class AsyncStorageDurableSlot implements DurableSlot {
   constructor(private readonly key: string) {}
@@ -46,6 +56,22 @@ export class AsyncStorageDurableSlot implements DurableSlot {
 export function openStrandNetworkState(partyId: string, scope: string): Promise<StrandNetworkStateStore> {
   return PersistentStrandNetworkStateStore.open(
     new AsyncStorageDurableSlot(`@votetorrent/strandNetworkState/${scope}/${partyId}`),
+    partyId,
+  );
+}
+
+/**
+ * The trusted-owner anchor for one node (D-08). The anchor is per PARTY, not per network, and
+ * namespaced by store scope so two nodes on one device never share a slot.
+ *
+ * Plain AsyncStorage is deliberate: owner pins are public integrity data, not secrets.
+ * `open` rejects only when the slot cannot be READ (the D-10 trigger). A corrupt, foreign-party or
+ * unknown-version record loads EMPTY instead; owner-trust.ts classification and the boot re-anchor
+ * cover that case. Never point two nodes at one scope.
+ */
+export function openTrustedOwnerStore(partyId: string, scope: string): Promise<TrustedOwnerStore> {
+  return PersistentTrustedOwnerStore.open(
+    new AsyncStorageDurableSlot(`@votetorrent/trustedOwners/${scope}/${partyId}`),
     partyId,
   );
 }
