@@ -174,9 +174,12 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // link budget, `sereus-invite:1.` invitations, CadrePeer `Profile` column; the patch carried with
       // identical hunk bodies) and @optimystic 1.12.1 -> 1.13.0 (lazy read-repair, isNetworkMember,
       // prepared streams, commit durability; p2p-fret ^1.0.2). @quereus 4.20.1 -> 4.20.2.
+      // 2026-10-14: @optimystic 1.13.0 -> 1.14.0 (owed cancels re-sent by the writer; a two-member
+      // cohort skips the commit round and defers a sole-reservation pend's delivery onto its commit).
+      // @serfab stays 1.15.0 (latest), quereus 4.20.2, p2p-fret 1.0.2.
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.15.' : '1.13.'
+        : pkg.startsWith('@serfab/') ? '1.15.' : '1.14.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`
