@@ -153,6 +153,9 @@ export default function NetworksScreen() {
 		});
 	}, [navigation, t]);
 
+	// The owner-trust notice is persistent, has no dismiss control, reads the cadre-node context and is the
+	// first child of the scroll content. The Import Network and Join a network buttons sit together in the
+	// first section (UI-SPEC A1), and Join a network is always visible.
 	return (
 		<ScrollView
 			testID="networks-scroll"
@@ -161,10 +164,7 @@ export default function NetworksScreen() {
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
-			{/* Owner-trust notice: persistent, reads its own state from the cadre-node context and has no
-			    dismiss control, so it stays until the context clears it. First child of the scroll
-			    content. 64-23 adds the needs-reinvite action prop to this element. */}
-			<OwnerTrustNotice onOpenSettings={openSettings} />
+			<OwnerTrustNotice onOpenSettings={openSettings} onNeedsReinvite={() => navigation.navigate("JoinNetwork")} />
 			<View style={styles.section}>
 				<ThemedText type="defaultSemiBold" style={styles.section}>
 					{t("useOneOfTheFollowingToGetConnected")}
@@ -235,6 +235,12 @@ export default function NetworksScreen() {
 				<CustomButton
 					title={t("networkFoundingImportButton")}
 					onPress={() => navigation.navigate("ImportFoundingBundle")}
+				/>
+				<CustomButton
+					title={t("joinNetworkButton")}
+					icon="right-to-bracket"
+					testID="networks-join-network-button"
+					onPress={() => navigation.navigate("JoinNetwork")}
 				/>
 			</View>
 

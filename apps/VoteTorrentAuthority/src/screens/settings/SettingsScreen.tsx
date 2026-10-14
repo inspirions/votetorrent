@@ -286,6 +286,8 @@ export default function SettingsScreen() {
 		}
 	};
 
+	// The owner-trust notice is persistent, has no dismiss control and reads the cadre-node context. It gets no
+	// Open Settings action here, because the setting row is on this screen.
 	return (
 		<View style={styles.content}>
 			<InlineError message={settingsError} />
@@ -295,10 +297,7 @@ export default function SettingsScreen() {
 				style={[styles.content, { backgroundColor: colors.background }]}
 				contentContainerStyle={styles.container}
 			>
-				{/* Owner-trust notice: persistent, reads its own state from the cadre-node context, no
-				    dismiss. Open Settings is not passed here because the setting row is on this screen.
-				    64-23 adds the needs-reinvite action prop to this element. */}
-				<OwnerTrustNotice />
+				<OwnerTrustNotice onNeedsReinvite={() => navigation.navigate("JoinNetwork")} />
 				<View style={[styles.helpIconsRow, { zIndex: 10 }]}>
 					<ThemedText type="default">{t('language')}</ThemedText>
 					<View style={styles.langSelector}>
