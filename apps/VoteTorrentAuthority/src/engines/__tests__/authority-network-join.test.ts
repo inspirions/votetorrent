@@ -80,6 +80,9 @@ function realInvitation(code: NetworkJoinCode): {
 	return JSON.parse(Buffer.from(rest, 'base64url').toString('utf8'));
 }
 
+/** The real fixture's first member machine (the peer id its connection would carry). */
+const MEMBER_ID = realInvitation(codeFor('v2-1-member')).members[0].split('/p2p/').pop() as string;
+
 const NET_REF = {hash: 'a1b2c3d4e5f60718', relays: [], name: 'Net', primaryAuthorityDomainName: 'example.org'};
 const OK_JOIN = (fingerprint = 'aaaa bbbb cccc dddd') => ({
 	ok: true as const,
@@ -111,7 +114,7 @@ function fakeNode(opts: NodeOpts = {}) {
 	const closed: string[] = [];
 	const trustOwnerKeys = jest.fn(async () => undefined);
 	const store = {has: () => true, trust: jest.fn(async () => undefined)};
-	const memberId = PEER_C1;
+	const memberId = MEMBER_ID;
 	const connections = opts.connections ?? [
 		{remotePeer: {toString: () => memberId}, close: jest.fn(async () => { closed.push(memberId); })},
 	];
@@ -237,8 +240,8 @@ describe('runAuthorityNetworkJoin (D-26, D-30)', () => {
 		const {engine} = fakeEngine(code);
 		const result = await runAuthorityNetworkJoin({node, networksEngine: engine, user: undefined, code});
 		expect(result).toMatchObject({ok: true, admittedVia: 'self-admission'});
-		expect(closed).toEqual([PEER_C1]);
-		expect(mockMergeSeedPeers).toHaveBeenCalledWith(expect.anything(), [{peerId: PEER_C1}]);
+		expect(closed).toEqual([MEMBER_ID]);
+		expect(mockMergeSeedPeers).toHaveBeenCalledWith(expect.anything(), [{peerId: MEMBER_ID}]);
 		expect(node.refreshMembershipGate).toHaveBeenCalledWith('invitation-redeemed');
 		expect(node.reconcileControlCohort).toHaveBeenCalled();
 	});
