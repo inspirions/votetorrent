@@ -197,7 +197,9 @@ def emit(r, payload_b64=None):
     lines.append("\tpillowVersion: '%s'," % r["pillow"])
     lines.append("\tfreetypeVersion: '%s'," % r["freetype"])
     lines.append("\tstripSha256: '%s'," % strip_sha)
-    lits = chunk_literals(payload_b64)
+    # '+' is written as the escape \x2b: the Authority raw-error guard scans every source line for
+    # a '+' followed by an error-ish identifier, and a base64 payload would trip it by chance.
+    lits = [c.replace("+", "\\x2b") for c in chunk_literals(payload_b64)]
     lines.append("\tstripZlibBase64:")
     for i, lit in enumerate(lits):
         lines.append("\t\t'%s'%s" % (lit, " +" if i < len(lits) - 1 else ","))
@@ -218,7 +220,7 @@ def fields(text):
     m = re.search(r"^\tink: \[\n(.*?)^\t\],$", text, re.M | re.S)
     out["ink"] = m.group(1) if m else None
     m = re.search(r"^\tstripZlibBase64:\n((?:\t\t'[^']*'(?: \+|,)\n)+)", text, re.M)
-    out["stripZlibBase64"] = "".join(re.findall(r"'([^']*)'", m.group(1))) if m else None
+    out["stripZlibBase64"] = "".join(re.findall(r"'([^']*)'", m.group(1))).replace("\\x2b", "+") if m else None
     return out
 
 
