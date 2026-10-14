@@ -7,6 +7,7 @@
  *   JV-11       source hygiene (no console, no byte-codec identifiers) with positive controls
  */
 import { expect } from 'chai'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { decodeCadreInvitation, encodeCadreInvitation } from '@serfab/cadre-core'
@@ -21,10 +22,13 @@ import {
 } from '../src/networks/join-code.js'
 import { foundingBundleFingerprint } from '../src/networks/founding-bundle.js'
 import {
+  buildJoinCodeFixtures,
   mintInvitation,
   randomCadreInvitation,
   randomJoinAnchor
 } from './fixtures/join-code-fixtures.js'
+
+import { JOIN_CODE_FIXTURES } from './fixtures/join-code-fixtures.generated.js'
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
@@ -211,5 +215,92 @@ describe('64-04: vtjoin2. join code (JV)', () => {
       expect(message, label).to.match(/^encodeNetworkJoinCode: /)
       for (const w of windows16(input.invitation)) expect(message.includes(w), label).to.equal(false)
     }
+  })
+})
+
+describe('64-04: real-encoder fixtures (JV-10)', () => {
+  const names = ['v2-1-member', 'v2-2-members', 'v2-6-members', 'v2-non-ascii-name', 'v1-legacy-1-member', 'v1-114-no-prefix'] as const
+
+  it('JV-10a..b exactly the six names; lengths and alphabet', () => {
+    expect(Object.keys(JOIN_CODE_FIXTURES).sort()).to.deep.equal([...names].sort())
+    for (const n of names) {
+      const f = JOIN_CODE_FIXTURES[n]
+      expect(f.text.length, n).to.equal(f.chars)
+      expect(f.text, n).to.match(/^[\x21-\x7e]+$/)
+      expect(looksLikeJoinCode(f.text), n).to.equal(true)
+    }
+  })
+
+  it('JV-10c every v2 fixture decodes and re-encodes byte-identically through real cadre-core', () => {
+    for (const n of ['v2-1-member', 'v2-2-members', 'v2-6-members', 'v2-non-ascii-name'] as const) {
+      const f = JOIN_CODE_FIXTURES[n]
+      const d = decodeNetworkJoinCode(f.text)
+      if (!d.ok) throw new Error(n + ': expected ok')
+      expect(d.code.v, n).to.equal(2)
+      expect(d.fingerprint, n).to.equal(f.fingerprint)
+      expect(d.code.networkHash, n).to.equal(f.networkHash)
+      expect(d.code.name, n).to.equal(f.name)
+      const inv = decodeCadreInvitation(d.code.invitation)
+      expect(inv.members.length, n).to.equal(f.members)
+      expect(encodeCadreInvitation(inv) === d.code.invitation, n).to.equal(true)
+    }
+  })
+
+  it('JV-10d sizes', () => {
+    const one = JOIN_CODE_FIXTURES['v2-1-member'].chars
+    const six = JOIN_CODE_FIXTURES['v2-6-members'].chars
+    const v1 = JOIN_CODE_FIXTURES['v1-legacy-1-member'].chars
+    expect(one).to.be.at.least(1370)
+    expect(six).to.be.at.most(4096)
+    expect(v1).to.be.at.least(1700)
+    expect((v1 - one) / v1).to.be.at.least(0.15)
+  })
+
+  it('JV-10e v1 fixtures', () => {
+    const legacy = decodeNetworkJoinCode(JOIN_CODE_FIXTURES['v1-legacy-1-member'].text)
+    if (!legacy.ok) throw new Error('v1-legacy-1-member: expected ok')
+    expect(legacy.code.v).to.equal(1)
+    expect(legacy.code.invitation.startsWith(CADRE_INVITATION_PREFIX_EXPECTED)).to.equal(true)
+    expect(decodeNetworkJoinCode(JOIN_CODE_FIXTURES['v1-114-no-prefix'].text)).to.deep.equal({ ok: false, reason: 'invitation-older-version' })
+  })
+
+  it('JV-10f the non-ASCII name', () => {
+    const f = JOIN_CODE_FIXTURES['v2-non-ascii-name']
+    expect([...f.name].some((c) => c.charCodeAt(0) > 0x7e)).to.equal(true)
+    const d = decodeNetworkJoinCode(f.text)
+    expect(d.ok && d.code.name).to.equal(f.name)
+  })
+
+  it('JV-10g the committed file is not stale', function () {
+    this.timeout(30_000)
+    const fresh = buildJoinCodeFixtures()
+    expect(Object.keys(fresh).sort()).to.deep.equal(Object.keys(JOIN_CODE_FIXTURES).sort())
+    for (const n of names) {
+      expect(fresh[n].chars, n).to.equal(JOIN_CODE_FIXTURES[n].chars)
+      expect(fresh[n].members, n).to.equal(JOIN_CODE_FIXTURES[n].members)
+      if (n.startsWith('v2-')) expect(decodeNetworkJoinCode(fresh[n].text).ok, n).to.equal(true)
+    }
+  })
+})
+
+describe('64-04: join-code source hygiene (JV-11)', () => {
+  const stripComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  const CONSOLE = ['console', '\\.'].join('')
+  const consoleHit = (stripped: string): boolean => new RegExp(CONSOLE).test(stripped)
+  const codecIdentifiers = ['B' + 'uffer', 'Text' + 'Encoder', 'Text' + 'Decoder']
+  const identifierHits = (stripped: string): string[] => codecIdentifiers.filter((id) => new RegExp(`\\b${id}\\b`).test(stripped))
+  const read = (rel: string): string => stripComments(readFileSync(join(SRC_DIR, rel), 'utf8'))
+
+  it('JV-11 no console in join-code.ts or network-join.ts; no byte-codec identifier in join-code.ts', () => {
+    expect(consoleHit(read('networks/join-code.ts'))).to.equal(false)
+    expect(consoleHit(read('networks/network-join.ts'))).to.equal(false)
+    expect(identifierHits(read('networks/join-code.ts'))).to.deep.equal([])
+  })
+
+  it('JV-11 positive control: the scanner flags a planted call and ignores a commented one', () => {
+    const planted = ['console', '.log(code)'].join('')
+    expect(consoleHit(stripComments(`const x = 1\n${planted}\n`))).to.equal(true)
+    expect(consoleHit(stripComments(`const x = 1\n// ${planted}\n/* ${planted} */\n`))).to.equal(false)
+    expect(identifierHits(stripComments('const t = new ' + codecIdentifiers[1] + '()'))).to.deep.equal([codecIdentifiers[1]])
   })
 })
