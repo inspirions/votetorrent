@@ -34,6 +34,7 @@ jest.mock('@react-navigation/native', () => ({
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
 			medium: {fontFamily: 'System', fontWeight: '500'},
+			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
 		type: {
 			h2: {fontSize: 28, lineHeight: 34},
@@ -64,12 +65,19 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockDeriveRegistrationCode = jest.fn(async (_registrantId: string, _sign: unknown) => 'ABCDE12345');
 const mockAssociationEngine = {deriveRegistrationCode: mockDeriveRegistrationCode};
 
+// 64 D-28: the election the registration binds to is read from the joined network's own list.
+// Pushes NOTHING to callOrder, so the exact callOrder assertions stay unchanged.
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
 	}
 	if (engineName === 'association') {
 		return mockAssociationEngine;
+	}
+	if (engineName === 'elections') {
+		return {getElections: mockGetElections};
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
@@ -337,6 +345,8 @@ function findHostNodeByType(json: unknown, targetType: string): TreeNode | null 
 }
 
 beforeEach(() => {
+	mockGetElections.mockReset();
+	mockGetElections.mockImplementation(async () => []);
 	mockPopToTop.mockClear();
 	mockClearDraft.mockClear();
 	mockSign.mockClear();

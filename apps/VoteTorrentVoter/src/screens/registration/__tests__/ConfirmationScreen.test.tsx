@@ -48,6 +48,7 @@ jest.mock('@react-navigation/native', () => ({
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
 			medium: {fontFamily: 'System', fontWeight: '500'},
+			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
 		type: {
 			h2: {fontSize: 28, lineHeight: 34},
@@ -78,12 +79,19 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockDeriveRegistrationCode = jest.fn(async (_registrantId: string, _sign: unknown) => 'ABCDE12345');
 const mockAssociationEngine = {deriveRegistrationCode: mockDeriveRegistrationCode};
 
+// 64 D-28: the election the registration binds to is read from the joined network's own list.
+// Pushes NOTHING to callOrder, so the exact callOrder assertions stay unchanged.
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
 	}
 	if (engineName === 'association') {
 		return mockAssociationEngine;
+	}
+	if (engineName === 'elections') {
+		return {getElections: mockGetElections};
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
@@ -316,7 +324,7 @@ async function flushMicrotasks(times = 60) {
 	}
 }
 
-async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id', flushes = 60) {
+async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id', flushes = 120) {
 	const cta = tr.root.findByProps({testID});
 	await renderer.act(async () => {
 		cta.props.onPress();
@@ -357,6 +365,8 @@ function findHostNodeByType(json: unknown, targetType: string): TreeNode | null 
 }
 
 beforeEach(() => {
+	mockGetElections.mockReset();
+	mockGetElections.mockImplementation(async () => []);
 	mockPopToTop.mockClear();
 	mockClearDraft.mockClear();
 	mockSign.mockClear();
@@ -985,6 +995,9 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		it('a terminal-class code (release build, __DEV__ false) renders the terminal wall with NO retry CTA', async () => {
 			const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
 			(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+			// 64 D-28: a release build no longer honours the dev seed, so the joined network must list
+			// the election for the ceremony to reach the device key.
+			mockGetElections.mockImplementation(async () => [{id: 'joined-election-7', date: Date.now() + 86_400_000}]);
 			mockProvisionDeviceKey.mockRejectedValueOnce({code: 'NO_STRONGBOX_OR_TEE'});
 
 			const tr = renderScreen();
@@ -1151,5 +1164,112 @@ describe('ConfirmationScreen — scroll container regression guard (57-17/57-18)
 
 		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
 		expect(scrollNode).not.toBeNull();
+	});
+});
+
+describe('ConfirmationScreen — current election on a joined network (D-28)', () => {
+	const g = globalThis as {__DEV__?: boolean};
+	const originalDev = g.__DEV__;
+	afterEach(() => {
+		g.__DEV__ = originalDev;
+		mockSeededElectionId = SEEDED_ELECTION_ID;
+	});
+
+	it('registers with the listed election on a joined network: payload, association init and challenge all carry it', async () => {
+		g.__DEV__ = false;
+		mockSeededElectionId = undefined;
+		mockGetElections.mockImplementation(async () => [{id: 'joined-election-7', date: Date.now() + 86_400_000}]);
+
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		expect(registrationRequestInits[0].payload.electionId).toBe('joined-election-7');
+		expect(associationSubmitRequestCalls[0].init.electionId).toBe('joined-election-7');
+		expect(mockProduce.mock.calls[0][0]).toMatchObject({electionId: 'joined-election-7'});
+	});
+
+	it('reads the elections after the identity (WR-04) and before the device key', async () => {
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		const signer = mockCreateDeviceSigner.mock.invocationCallOrder[0];
+		const elections = mockGetElections.mock.invocationCallOrder[0];
+		const provision = mockProvisionDeviceKey.mock.invocationCallOrder[0];
+		expect(signer).toBeLessThan(elections);
+		expect(elections).toBeLessThan(provision);
+	});
+
+	it('release build with a seed and an empty list fails closed: no-election copy, no retry, no device key, no submit', async () => {
+		g.__DEV__ = false;
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('There is no election to register for on this phone yet.');
+		expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
+		expect(text).not.toContain('Try Again');
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+	});
+
+	it('several listed elections: the nearest to now is used', async () => {
+		const now = 1_900_000_000_000;
+		const spy = jest.spyOn(Date, 'now').mockReturnValue(now);
+		try {
+			mockGetElections.mockImplementation(async () => [
+				{id: 'far', date: now + 90 * 86_400_000},
+				{id: 'near', date: now + 86_400_000},
+			]);
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+			expect(registrationRequestInits[0].payload.electionId).toBe('near');
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it('a rejected election read shows the transient copy and Try Again, never uses the seed, and is not memoised', async () => {
+		g.__DEV__ = true;
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			mockGetElections.mockImplementationOnce(async () => {
+				throw Object.assign(new Error('could not reach peer-xyz'), {name: 'PeerUnavailableError'});
+			});
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('Something went wrong verifying your device. Try again.');
+			expect(text).not.toContain('peer-xyz');
+			expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+			expect(text).toContain('Try Again');
+			expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+			expect(errorSpy).toHaveBeenCalledWith('ConfirmationScreen: registration ceremony failed:', 'PeerUnavailableError');
+
+			// Retry with a readable (empty) list: the dev seed stands in only now.
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+			expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+			expect(registrationRequestInits[0].payload.electionId).toBe(SEEDED_ELECTION_ID);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('memoises the election per attempt: Try Again reads once and reuses the same inits and challenge election', async () => {
+		g.__DEV__ = false;
+		mockSeededElectionId = undefined;
+		mockGetElections.mockImplementationOnce(async () => [{id: 'first-election', date: Date.now() + 86_400_000}]);
+		mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+		mockGetElections.mockImplementation(async () => [{id: 'different-election', date: Date.now() + 86_400_000}]);
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		expect(mockGetElections).toHaveBeenCalledTimes(1);
+		expect(mockProduce.mock.calls[1][0]).toMatchObject({electionId: 'first-election'});
+		expect(registrationRequestInits[1]).toBe(registrationRequestInits[0]);
+		expect(associationSubmitRequestCalls[1].init).toBe(associationSubmitRequestCalls[0].init);
 	});
 });

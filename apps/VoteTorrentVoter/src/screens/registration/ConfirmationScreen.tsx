@@ -91,6 +91,7 @@ import {useRegistrationDraft} from '../../providers/RegistrationDraftProvider';
 import {getOrCreateDeviceUser} from '../../engines/device-user';
 import {createDeviceSigner} from '../../engines/device-signer';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
+import {resolveCurrentElectionId} from '../../engines/election-read';
 import {
 	classifyAttestationFailure,
 	isDeviceKeyAbsent,
@@ -190,6 +191,9 @@ export default function ConfirmationScreen() {
 	// on Android `provisionDeviceKey` mints a NEW key every call, which would leave the reused
 	// association request above naming a key the phone no longer holds.
 	const deviceKeyRef = useRef<string | null>(null);
+	// 64 D-28: one election id per mounted attempt. Both inits and the challenge embed it, and Try
+	// Again reuses the inits byte-identical, so the id is resolved once and never re-read.
+	const electionIdRef = useRef<string | null>(null);
 
 	/**
 	 * Spike 104: this attempt's voting key. A retry reads the key back (read-only) and keeps it when it
@@ -234,10 +238,10 @@ export default function ConfirmationScreen() {
 			// destructured from useVoterApp() — the officer signer must not appear anywhere in this
 			// ceremony.
 			//
-			// 62-REVIEW WR-04: read FIRST, before the election and network preconditions. In a release
-			// build seededElectionId is always undefined (only the __DEV__ seed writes it), so a later
-			// read would leave a permanently lost identity hidden behind NoElectionConfiguredError and
-			// the recovery view unreachable. createDeviceSigner unwraps eagerly, so a lost identity
+			// 62-REVIEW WR-04: read FIRST, before the election and network preconditions. The release
+			// build resolves the election through `resolveCurrentElectionId` (64 D-28); only the dev
+			// seed's fallback is gated on __DEV__. A later identity read would still leave a permanently
+			// lost identity hidden behind NoElectionConfiguredError and the recovery view unreachable. createDeviceSigner unwraps eagerly, so a lost identity
 			// throws here. The read prompts nothing: the identity wrap alias is requireAuth:false
 			// (device-key-wrap.ts; native unwrap skips BiometricPrompt / LAContext for it), so the
 			// biometric-last property below is unchanged.
@@ -246,12 +250,20 @@ export default function ConfirmationScreen() {
 			const deviceSign = await createDeviceSigner('Device User');
 
 			// WR-03: the registration request's payload only enforces field policy when
-			// init.electionId is set. Fail closed rather than submit with policy unenforced.
-			if (!seededElectionId) {
-				throw Object.assign(
-					new Error('No election configured — cannot register (field policy would be unenforced).'),
-					{name: 'NoElectionConfiguredError'},
-				);
+			// init.electionId is set. Fail closed rather than submit with policy unenforced. 64 D-28:
+			// the election is the joined network's current one; the dev seed stands in only for an
+			// EMPTY list in a dev build, and a rejected read propagates (transient copy, retry).
+			let electionId = electionIdRef.current;
+			if (electionId === null) {
+				const resolved = await resolveCurrentElectionId({getEngine, fallbackElectionId: __DEV__ ? seededElectionId : undefined});
+				if (!resolved) {
+					throw Object.assign(
+						new Error('No election configured — cannot register (field policy would be unenforced).'),
+						{name: 'NoElectionConfiguredError'},
+					);
+				}
+				electionId = resolved;
+				electionIdRef.current = resolved;
 			}
 
 			// D-11: resolve the producer once and provision the hardware P-256 key BEFORE any
@@ -302,7 +314,7 @@ export default function ConfirmationScreen() {
 			].filter(detail => detail.value !== '');
 
 			const init: RegisterInit = {
-				electionId: seededElectionId,
+				electionId,
 				registrant: {id: registrantId, authorityId, expiration: IGNORED_EXPIRATION_PLACEHOLDER},
 				public: {firstName: draft.firstName, lastName: draft.lastName},
 				private: {expiration: IGNORED_EXPIRATION_PLACEHOLDER, details: privateDetails},
@@ -356,7 +368,7 @@ export default function ConfirmationScreen() {
 					authorityId,
 					registrantId,
 					deviceKey: p256DeviceKey,
-					electionId: seededElectionId,
+					electionId,
 					submittedAt: new Date().toISOString(),
 				};
 				associationRequestInitRef.current = associationRequestInit;
@@ -396,7 +408,7 @@ export default function ConfirmationScreen() {
 				authorityId,
 				registrantId,
 				deviceKey: p256DeviceKey,
-				electionId: seededElectionId,
+				electionId,
 			};
 			const attestation = await producer.produce(challenge);
 
