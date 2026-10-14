@@ -210,7 +210,7 @@ afterEach(() => {
 	}
 });
 
-const FAKE_TIMERS = {doNotFake: ['queueMicrotask', 'nextTick']} as const;
+const FAKE_TIMERS = {doNotFake: ['queueMicrotask', 'nextTick'] as Array<'queueMicrotask' | 'nextTick'>};
 
 describe('runAuthorityNetworkJoin (D-26, D-30)', () => {
 	const code = codeFor('v2-1-member');
