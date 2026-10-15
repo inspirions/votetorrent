@@ -19,7 +19,9 @@ A single JSON object with the keys `base` (`base-host` or `base-device`), an opt
 checker arguments such as the git flag or the streak flag), `ops` (an ordered array) and `expect` (`PASS` or a
 token). An optional `expectAlso` array names extra tokens a `fail-*` case legitimately produces beside `expect`: the
 self-test then requires the distinct token set to equal `expect` plus `expectAlso` exactly (no key keeps the
-single-token rule). The checker is run on the case root, which holds the copied base plus the effect of the ops.
+single-token rule). An optional `knownOverwrites` array (each `root`, `rel`, `beforeContent`, `afterContent`) adds
+selftest-only known-overwrite entries for that case, matched by the git blob ids of the two contents, exactly like the
+checker's built-in `KNOWN_OVERWRITES`. The checker is run on the case root, which holds the copied base plus the effect of the ops.
 
 ## Operations
 
@@ -60,7 +62,7 @@ with a synthetic string that is never a decodable code. The kinds, in words:
 ## Adding a case
 
 Add the file under `cases/`, name it for its token, and re-run `node scripts/assert-evidence-dir.mjs --selftest`.
-The count in the final line is 53 case files plus the self-trip pass.
+The count in the final line is 56 case files plus the self-trip pass.
 
 ## The declared restart (notes 19 E7)
 
@@ -72,3 +74,11 @@ Seven cases pin it: `pass-streak-restart` (accepted, with its `STREAK PASS k=3` 
 `--restart-wrong-token` (another token), `--restart-attempt-1-pass` (over an all-PASS attempt-1; also reports
 `retry-without-failure`, hence `expectAlso`) and `fail-streak-not-pass--restart-attempt-fail` (a declared restart whose
 attempt-2 has a FAIL leg).
+
+## Known overwrites
+
+`KNOWN_OVERWRITES` in the checker accepts one committed rewrite per entry, matched by evidence root, path and the
+exact before and after blob ids. Three cases pin it: `pass-known-overwrite` (the exact rewrite is accepted),
+`fail-evidence-overwritten--known-other-content` (same file, a different rewrite) and
+`fail-evidence-overwritten--known-other-path` (the same rewrite listed for another file). Uncommitted overwrites are
+never excepted. Entries are added only on the user's decision (the first: 64-53 reassert/leg.md, 2026-10-15).

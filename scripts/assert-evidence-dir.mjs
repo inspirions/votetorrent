@@ -74,6 +74,27 @@ const MUTATIONS = [
 ];
 const off = (name) => MUTATE === name;
 
+// Known evidence overwrites. Each entry names one evidence file (root and path below it) and the exact git blob ids
+// before and after the one commit that rewrote it, so only that rewrite is accepted: any other change to the same
+// file, or the same change to another file, is still evidence-overwritten. An entry is added only on the user's
+// decision, never to clear a finding of a run's own legs.
+const KNOWN_OVERWRITES = Object.freeze([
+	// 64-53, 2026-10-15: the orchestrator had the clockRule line rewritten to the user's CLOCK-SKEW-OVERRIDE
+	// (10000 ms per device and per pair) in .planning 7423dae3; the user chose this one-off exception.
+	Object.freeze({
+		root: '64-device-evidence',
+		rel: 'rehearsal-2026-10-14/run-1/attempt-2/reassert/leg.md',
+		before: 'ad65ed6fbfda163bc50c0dc67326964d16f3caf4',
+		after: 'b1ab285f392e6389c1a209c1629f6f8d419116ae',
+	}),
+]);
+let selftestKnown = [];
+const blobId = (buf) => createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+const knownOverwrite = (root, rel, before, after) =>
+	[...KNOWN_OVERWRITES, ...selftestKnown].some(
+		(k) => k.root === root && k.rel === rel && k.before === blobId(before) && k.after === blobId(after),
+	);
+
 const ROOTS = { '64-evidence': 'H', '64-device-evidence': 'D' };
 const SESSION_RE = /^(rehearsal|hardware)-\d{4}-\d{2}-\d{2}(-[a-z0-9]+)?$/;
 const D13 =
@@ -540,7 +561,8 @@ function gitRules(tree, top) {
 			} catch {
 				continue;
 			}
-			if (!isPrefix(before, after)) add('evidence-overwritten', m[2], `commit ${current.slice(0, 12)}`);
+			if (!isPrefix(before, after) && !knownOverwrite(tree.rootName, posix(relative(tree.rootAbs, join(top, m[2]))), before, after))
+				add('evidence-overwritten', m[2], `commit ${current.slice(0, 12)}`);
 		}
 	}
 	const st = git(top, ['status', '--porcelain=v1', '-z', '--no-renames', '--', relRoot]).split('\0').filter(Boolean);
@@ -871,7 +893,18 @@ function runSelftest() {
 			mkdirSync(dir);
 			cpSync(join(FIXTURES, c.base), caseRoot, { recursive: true });
 			const extra = applyOps(caseRoot, join(dir, 'secrets.txt'), c.ops);
-			const res = runChecker([...(c.args ?? []), ...extra, caseRoot]);
+			selftestKnown = (c.knownOverwrites ?? []).map((k) => ({
+				root: k.root,
+				rel: k.rel,
+				before: blobId(Buffer.from(k.beforeContent)),
+				after: blobId(Buffer.from(k.afterContent)),
+			}));
+			let res;
+			try {
+				res = runChecker([...(c.args ?? []), ...extra, caseRoot]);
+			} finally {
+				selftestKnown = [];
+			}
 			const tokens = [...new Set(res.tokens)];
 			const pass = c.expect === 'PASS';
 			const want = pass ? [] : [c.expect, ...(c.expectAlso ?? [])];
@@ -885,8 +918,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 54 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/54`);
-	return ok === total && total === 54 ? 0 : 1;
+	console.log(ok === total && total === 57 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/57`);
+	return ok === total && total === 57 ? 0 : 1;
 }
 
 function main(argv) {
