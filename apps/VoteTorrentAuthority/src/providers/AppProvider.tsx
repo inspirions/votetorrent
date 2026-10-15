@@ -136,6 +136,14 @@ export function useApp() {
 // D-09 also rejects bounded RETRY (`loadAuthoritiesWithRetry.ts` is
 // deliberately not reused here): retrying re-attempts the SAME ambiguous
 // signal this plan removes, it does not resolve it.
+//
+// Device measurements since (2026-10-15): 16957 ms (Redmi 8, after a control-store
+// recreate) and 24387 ms (Pixel_8_p63 relaunch) — the timer itself fires late on a
+// starved JS thread, and cadre-core's first relay reservation alone may take 18 s
+// (`relayReservationBudgetMs`). The bound is kept: it still only decides when the UI
+// stops waiting. What changed is that a timed-out run no longer treats the timeout as
+// final — the init effect re-runs once on the LATE settlement (see LATE SETTLE below),
+// which reacts to the definitive signal rather than retrying the ambiguous one.
 // ---------------------------------------------------------------------------
 const NODE_SETTLE_TIMEOUT_MS = 15000;
 
@@ -607,12 +615,41 @@ export function AppProvider({ children }: PropsWithChildren) {
 				console.info("[AppProvider] node settle:", dispatch.status, Date.now() - settleStart);
 				factory.setNode(dispatch.status === "ready" ? dispatch.node : null);
 
+				// LATE SETTLE: the bound above is a liveness ceiling, not a verdict. On a loaded
+				// device the node routinely settles AFTER it (64-53: `timeout 24387` on a relaunched
+				// keyholder; 64-52: `timeout 16957` on the Redmi after its control-store recreate,
+				// inspirions/votetorrent#97), and a network that lives in a strand can never open on
+				// the solo backend ("Network not opened in this session"). So a timed-out run keeps
+				// listening to `nodeSettled`: if it later settles 'ready' while this run's re-attach is
+				// still in flight or has failed, the run is superseded by a fresh one (the same
+				// initNonce bump Try Again uses), which awaits the now-settled promise and dispatches
+				// on the live node. Bounded: `nodeSettled` settles once and the re-run cannot time out
+				// again, so this adds at most ONE automatic run. A run that attached, or had nothing
+				// to attach, is left alone — the peer-count effect hands the live node to the factory.
+				let lateReady = false;
+				let reattachUnresolved = false;
+				const supersedeOnLiveNode = () => {
+					if (cancelled || !lateReady || !reattachUnresolved || hasNetworkRef.current) return;
+					console.info("[AppProvider] node settle: late-ready", Date.now() - settleStart);
+					setInitError(null);
+					setIsInitialized(false);
+					setInitNonce((n) => n + 1);
+				};
+				if (dispatch.status === "timeout") {
+					void nodeSettled.then((late) => {
+						if (late.status !== "ready") return;
+						lateReady = true;
+						supersedeOnLiveNode();
+					});
+				}
+
 				const networksEng = factory.getNetworksEngine();
 
 				// Attempt to re-attach to the most recently used network.
 				const networks = await networksEng.getRecentNetworks();
 				if (networks.length > 0) {
 					const network = networks[0];
+					reattachUnresolved = true;
 					try {
 						// D-15: inner try/catch for re-attach; on throw → setInitError, NOT setHasNetwork.
 						// NetworksEngine.open() may throw if the on-device store is corrupt/uninitialized.
@@ -663,6 +700,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// not write hasNetwork/initError — the newer run (or no run at all,
 						// post-escape) owns the UI now.
 						if (cancelled) return;
+						reattachUnresolved = false;
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -695,6 +733,8 @@ export function AppProvider({ children }: PropsWithChildren) {
 				hideSplash();
 				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
 				setFirstSyncBudgetElapsed(false);
+				// LATE SETTLE: the node may have gone live while the failed re-attach was running.
+				supersedeOnLiveNode();
 			} catch (fatalError) {
 				if (cancelled) return;
 				// Outer catch handles failures before/after the re-attach block
@@ -725,9 +765,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
 		// for the implicit second attempt the settle-then-dispatch fix above
 		// removes. `initNonce` stays: it is the CR-02 Try Again affordance and is
-		// now also the recovery path for the (rare) timeout branch, since a bump
-		// re-awaits the by-then-settled `nodeSettled` promise and gets the correct
-		// backend. `nodeSettled` itself is NOT in this array either — it is a
+		// also the recovery path for the timeout branch — bumped automatically by
+		// the LATE SETTLE listener above when the node goes live, or by Try Again —
+		// since a bump re-awaits the by-then-settled `nodeSettled` promise and gets
+		// the correct backend. `nodeSettled` itself is NOT in this array either — it is a
 		// stable ref-held promise (CadreNodeProvider.tsx), so listing it would only
 		// matter if some future consumer reconstructed it per render, which would
 		// re-fire this effect and reintroduce the double attempt this plan removes.

@@ -427,6 +427,16 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // The STRAND relay moves to strandNetwork below, so the control and strand
             // libp2p nodes no longer collide at one relay under this peer's shared PeerId.
             relayAddrs: CONTROL_RELAY_ADDRS,
+            // Fail-soft on the FIRST reservation attempt. cadre-core's default (requireRelay unset)
+            // throws RelayReservationFailedError out of start() when that attempt lands nothing
+            // inside its budget (18 s at the default link), and this provider then stops the node
+            // and settles 'failed' for the whole process: no strand network can open until the
+            // app is killed. 64-53 hit exactly that on a relaunched keyholder (status: retrying)
+            // while the relay refused nothing and admitted a reservation within the same minute.
+            // `false` runs the SAME drive and keeps the SAME background supervisor re-driving the
+            // reservation; only the throw is dropped, so a slow relay or a starved JS thread costs
+            // dialability for a while instead of the session.
+            requireRelay: false,
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
