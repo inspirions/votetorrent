@@ -17,7 +17,9 @@ is built, from fragments, in a temporary directory while `--selftest` runs.
 
 A single JSON object with the keys `base` (`base-host` or `base-device`), an optional `args` array (extra
 checker arguments such as the git flag or the streak flag), `ops` (an ordered array) and `expect` (`PASS` or a
-token). The checker is run on the case root, which holds the copied base plus the effect of the ops.
+token). An optional `expectAlso` array names extra tokens a `fail-*` case legitimately produces beside `expect`: the
+self-test then requires the distinct token set to equal `expect` plus `expectAlso` exactly (no key keeps the
+single-token rule). The checker is run on the case root, which holds the copied base plus the effect of the ops.
 
 ## Operations
 
@@ -58,4 +60,15 @@ with a synthetic string that is never a decodable code. The kinds, in words:
 ## Adding a case
 
 Add the file under `cases/`, name it for its token, and re-run `node scripts/assert-evidence-dir.mjs --selftest`.
-The count in the final line is 46 case files plus the self-trip pass.
+The count in the final line is 53 case files plus the self-trip pass.
+
+## The declared restart (notes 19 E7)
+
+`--streak` accepts exactly one restart and nothing else: `run-1` with exactly `attempt-1` and `attempt-2`, an
+attempt-level `attempt-2/reason.txt` of one line `RESTART notes-19-e7: <why>`, and an `attempt-1` with at least one
+non-PASS leg. The streak then reads `run-1/attempt-2` (every leg PASS, the `--legs` list present) and the run summary.
+Seven cases pin it: `pass-streak-restart` (accepted, with its `STREAK PASS k=3` line), `fail-streak-retried--restart-undeclared`
+(a plain reason), `--restart-run-2` (the line on another run), `--restart-attempt-3` (the line on a third attempt),
+`--restart-wrong-token` (another token), `--restart-attempt-1-pass` (over an all-PASS attempt-1; also reports
+`retry-without-failure`, hence `expectAlso`) and `fail-streak-not-pass--restart-attempt-fail` (a declared restart whose
+attempt-2 has a FAIL leg).
