@@ -48,6 +48,11 @@ const mockSavedAnchor = new Set<string>();
 const mockMemoryAnchor = new Set<string>();
 const mockStartErrors: Error[] = [];
 let mockWireError: Error | null = null;
+// Mirrors cadre-core 1.15 `driveControlRelayReservation`: with `network.relayAddrs` named and
+// `network.requireRelay` not `false`, a FIRST reservation attempt that lands nothing inside its
+// budget throws RelayReservationFailedError out of start(); with `requireRelay: false` the same
+// drive only logs and start() carries on, the retry supervisor still running.
+let mockRelayFirstAttemptMisses = false;
 let mockOwnerKeysError: Error | null = null;
 const mockHostPoolRendezvous = jest.fn(async (..._args: unknown[]) => {
   mockCallOrder.push('hostPoolRendezvous');
@@ -76,6 +81,12 @@ jest.mock(
         mockCallOrder.push('start');
         const queued = mockStartErrors.shift();
         if (queued) throw queued;
+        const network = (this.receivedOptions as { network?: { relayAddrs?: string[]; requireRelay?: boolean } }).network;
+        if (mockRelayFirstAttemptMisses && (network?.relayAddrs?.length ?? 0) > 0 && network?.requireRelay !== false) {
+          const e = new Error('network.relayAddrs reservation failed (status: retrying): relay reservation request did not complete before the deadline');
+          e.name = 'RelayReservationFailedError';
+          throw e;
+        }
       });
       public stop = jest.fn(async () => {});
       public trustOwnerKeys = jest.fn(async () => undefined);
@@ -247,6 +258,7 @@ beforeEach(() => {
   mockStartErrors.length = 0;
   mockWireError = null;
   mockOwnerKeysError = null;
+  mockRelayFirstAttemptMisses = false;
   jest.clearAllMocks();
 });
 
@@ -1091,5 +1103,65 @@ describe('CadreNodeProvider — join bootstrap merged at boot (D-26)', () => {
     } finally {
       c.restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A transient first relay-reservation miss (debug authority-reattach-after-settle-timeout).
+//
+// 64-53: a relaunched keyholder Authority on a loaded emulator logged
+// `[CadreNodeProvider] Boot error: RelayReservationFailedError ... (status: retrying)` while the
+// relay refused nothing and admitted a reservation within the same minute. The fail-fast posture
+// stopped the node and settled `failed` for the whole process, so the strand network could never
+// open again until the app was killed.
+// ---------------------------------------------------------------------------
+describe('CadreNodeProvider — a first relay reservation that misses its budget', () => {
+  const actualReact = jest.requireActual('react');
+
+  afterEach(() => {
+    jest.dontMock('../../../bootstrap.config.json');
+    jest.dontMock('@libp2p/circuit-relay-v2');
+    jest.dontMock('react');
+  });
+
+  it('still boots ready with a live node, and builds it with network.requireRelay false', async () => {
+    const relayAddr = '/ip4/203.0.113.9/tcp/4801/ws/p2p/12D3KooWExample';
+    jest.resetModules();
+    // Earlier describes leave the replication-proof flag mock registered and drop the virtual
+    // circuit-relay mock in their afterEach; this boot needs the real flags and the transport stub.
+    jest.dontMock('../../engines/proof-flags.generated');
+    jest.doMock('react', () => actualReact);
+    jest.doMock('../../../bootstrap.config.json', () => ({ bootstrapNodes: [relayAddr] }), { virtual: true });
+    jest.doMock('@libp2p/circuit-relay-v2', () => ({ circuitRelayTransport: () => ({}) }), { virtual: true });
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('../CadreNodeProvider');
+    mockRelayFirstAttemptMisses = true;
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const captured: { value: ReturnType<typeof mod.useCadreNode> | null } = { value: null };
+    function Probe() {
+      captured.value = mod.useCadreNode();
+      return null;
+    }
+
+    await renderer.act(async () => {
+      renderer.create(
+        <mod.CadreNodeProvider>
+          <Probe />
+        </mod.CadreNodeProvider>,
+      );
+      for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+    });
+
+    await expect(captured.value!.nodeSettled).resolves.toMatchObject({ status: 'ready' });
+    expect(captured.value!.node).not.toBeNull();
+    expect(errorSpy.mock.calls.some((c) => c[0] === '[CadreNodeProvider] Boot error:')).toBe(false);
+    const node = mockConstructedNodes[mockConstructedNodes.length - 1];
+    const network = (node.receivedOptions as { network: { relayAddrs: string[]; requireRelay?: boolean } }).network;
+    expect(network.relayAddrs).toEqual([relayAddr]);
+    expect(network.requireRelay).toBe(false);
+    errorSpy.mockRestore();
   });
 });

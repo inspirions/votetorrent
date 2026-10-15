@@ -120,6 +120,10 @@ let mockOpenShouldReject = false;
 // control exactly when/how the boot re-attach settles (escape / cleanup cases).
 let mockOpenDeferred = false;
 let mockOpenController: { resolve: () => void; reject: (err: unknown) => void } | null = null;
+// When true, open() on the SOLO backend (factory node null) rejects the way the real
+// NetworksEngine does for a network whose store lives only in a strand: the D-05
+// isSchemaInitialized gate finds no marker in the empty solo store.
+let mockOpenRejectsOnSolo = false;
 
 jest.mock("../../engines/engine-factory", () => {
 	class FakeEngineFactory {
@@ -161,6 +165,9 @@ jest.mock("../../engines/engine-factory", () => {
 				}
 				if (mockOpenShouldReject) {
 					throw new Error("open failed");
+				}
+				if (mockOpenRejectsOnSolo && this.currentNode === null) {
+					throw new Error("Network not opened in this session — use create() first");
 				}
 			}),
 		};
@@ -226,7 +233,7 @@ const renderer = require("react-test-renderer");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Text, TouchableOpacity } = require("react-native");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { AppProvider } = require("../AppProvider");
+const { AppProvider, useApp } = require("../AppProvider");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -295,6 +302,7 @@ beforeEach(() => {
 	mockOpenShouldReject = false;
 	mockOpenDeferred = false;
 	mockOpenController = null;
+	mockOpenRejectsOnSolo = false;
 	mockCadreHook.current = defaultCadreHookValue();
 });
 
@@ -584,5 +592,201 @@ describe("AppProvider boot 'still syncing' surface + escape — quick task 26092
 			expect(String(call[0])).not.toContain("not wrapped in act");
 		}
 		errorSpy.mockRestore();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Late settle after the bounded wait (debug authority-reattach-after-settle-timeout).
+//
+// On a loaded device the CadreNode can settle AFTER NODE_SETTLE_TIMEOUT_MS: 64-53's
+// relaunched keyholder logged `node settle: timeout 24387`, and the Redmi in 64-52
+// logged `timeout 16957` after its control-store recreate. The timed-out run dispatches
+// solo, a strand-only network cannot open solo ("Network not opened in this session"),
+// and nothing re-ran init once the node was live — the app sat on the boot error view
+// until the officer pressed Try Again or relaunched.
+// ---------------------------------------------------------------------------
+describe("AppProvider — a node that settles after the bounded wait", () => {
+	function deferredSettle() {
+		let resolve!: (v: { status: "ready" | "failed"; node: FakeNode | null }) => void;
+		const promise = new Promise<{ status: "ready" | "failed"; node: FakeNode | null }>((r) => {
+			resolve = r;
+		});
+		return { promise, resolve };
+	}
+
+	const seen: { hasNetwork: boolean | null } = { hasNetwork: null };
+	function HasNetworkProbe() {
+		seen.hasNetwork = useApp().hasNetwork;
+		return null;
+	}
+
+	function renderWithProbe() {
+		let tr: import("react-test-renderer").ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(
+				<AppProvider>
+					<HasNetworkProbe />
+				</AppProvider>,
+			);
+		});
+		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+		return tr!;
+	}
+
+	beforeEach(() => {
+		seen.hasNetwork = null;
+	});
+
+	it("re-attaches on the live node once it settles ready after a timed-out, failed solo attempt", async () => {
+		jest.useFakeTimers();
+		const errSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		mockOpenRejectsOnSolo = true;
+		const settle = deferredSettle();
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		const tr = renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+		expect(factory.openCalls[0].node).toBeNull();
+		expect(hasBootErrorView(tr)).toBe(true);
+
+		const liveNode: FakeNode = { tag: "late-live-node" };
+		await renderer.act(async () => {
+			settle.resolve({ status: "ready", node: liveNode });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		expect(factory.openCalls.length).toBe(2);
+		expect(factory.openCalls[1].node).toBe(liveNode);
+		expect(hasBootErrorView(tr)).toBe(false);
+		expect(seen.hasNetwork).toBe(true);
+		errSpy.mockRestore();
+		infoSpy.mockRestore();
+	});
+
+	it("abandons a solo attempt still in flight when the node settles ready, and re-attaches on the live node", async () => {
+		jest.useFakeTimers();
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		mockOpenDeferred = true;
+		const settle = deferredSettle();
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		const tr = renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+		expect(factory.openCalls[0].node).toBeNull();
+		const staleOpen = mockOpenController!;
+
+		const liveNode: FakeNode = { tag: "late-live-node" };
+		await renderer.act(async () => {
+			settle.resolve({ status: "ready", node: liveNode });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		expect(factory.openCalls.length).toBe(2);
+		expect(factory.openCalls[1].node).toBe(liveNode);
+		// The re-run's own open is pending; let it succeed.
+		await renderer.act(async () => {
+			mockOpenController!.resolve();
+			await Promise.resolve();
+		});
+		await flushMicrotasks(20);
+		expect(seen.hasNetwork).toBe(true);
+
+		// The superseded solo open failing later writes nothing.
+		await renderer.act(async () => {
+			staleOpen.reject(new Error("Network not opened in this session — use create() first"));
+			await Promise.resolve();
+		});
+		await flushMicrotasks();
+		expect(hasBootErrorView(tr)).toBe(false);
+		expect(seen.hasNetwork).toBe(true);
+		infoSpy.mockRestore();
+	});
+
+	it("a late 'failed' settle does not re-run: one open, the error view and Try Again stay", async () => {
+		jest.useFakeTimers();
+		const errSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		mockOpenRejectsOnSolo = true;
+		const settle = deferredSettle();
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		const tr = renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+		await renderer.act(async () => {
+			settle.resolve({ status: "failed", node: null });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+		expect(hasBootErrorView(tr)).toBe(true);
+		expect(findTryAgainButton(tr)).toBeDefined();
+		errSpy.mockRestore();
+		infoSpy.mockRestore();
+	});
+
+	it("a timed-out run that attached (or had nothing to attach) is left alone when the node settles ready later", async () => {
+		jest.useFakeTimers();
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		const settle = deferredSettle();
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+		expect(seen.hasNetwork).toBe(true);
+
+		await renderer.act(async () => {
+			settle.resolve({ status: "ready", node: { tag: "late-live-node" } });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(1);
+		expect(seen.hasNetwork).toBe(true);
+		infoSpy.mockRestore();
+	});
+
+	it("a fresh install with no recent network is not re-run when the node settles ready later", async () => {
+		jest.useFakeTimers();
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		mockNetworksToReturn = [];
+		const settle = deferredSettle();
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		const tr = renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+		await renderer.act(async () => {
+			settle.resolve({ status: "ready", node: { tag: "late-live-node" } });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(0);
+		const networksEngine = (factory as unknown as { getNetworksEngine(): { getRecentNetworks: jest.Mock } }).getNetworksEngine();
+		expect(networksEngine.getRecentNetworks).toHaveBeenCalledTimes(1);
+		expect(seen.hasNetwork).toBe(false);
+		expect(hasBootErrorView(tr)).toBe(false);
+		infoSpy.mockRestore();
 	});
 });
