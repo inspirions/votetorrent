@@ -199,7 +199,7 @@ export default function NetworksScreen() {
 									accessibilityRole="button"
 									accessibilityLabel={t("networkFoundingExportButton")}
 									testID={`founding-export-entry-${networkRef.hash}`}
-									style={styles.exportIconButton}
+									style={styles.iconButton}
 									onPress={() => setExportTargetHash(networkRef.hash)}
 								>
 									<FontAwesome6 name="share-nodes" size={20} color={colors.text} />
@@ -208,7 +208,7 @@ export default function NetworksScreen() {
 									accessibilityRole="button"
 									accessibilityLabel={t("voterInviteButton")}
 									testID={`voter-invite-entry-${networkRef.hash}`}
-									style={styles.exportIconButton}
+									style={styles.iconButton}
 									onPress={() => setInviteTargetHash(networkRef.hash)}
 								>
 									<FontAwesome6 name="user-plus" size={20} color={colors.text} />
@@ -303,16 +303,13 @@ const localStyles = StyleSheet.create({
 		flex: 1,
 		marginRight: 8,
 	},
+	// No fixed height: the column sizes to its buttons. A fixed 80 held two buttons; the third
+	// (invite) overflowed it and the database button drew underneath Import Network.
 	iconContainer: {
-		justifyContent: "space-between",
-		height: 80,
+		justifyContent: "center",
 	},
+	// D-36: every entry in the column gets the minimum touch target (44x44).
 	iconButton: {
-		padding: 8,
-	},
-	// D-36: the export entry's minimum touch target (44x44). 44 + the database button's 36
-	// (padding 8 around a 20px glyph) = 80, matching iconContainer's existing height.
-	exportIconButton: {
 		minWidth: 44,
 		minHeight: 44,
 		alignItems: "center",

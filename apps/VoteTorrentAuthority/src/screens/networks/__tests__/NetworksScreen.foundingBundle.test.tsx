@@ -198,7 +198,7 @@ beforeEach(() => {
 });
 
 describe("E-1: export entry geometry and accessibility", () => {
-	it("each row's export entry is a 44x44+ button, full opacity, icon column stays height 80", async () => {
+	it("each row's export entry is a 44x44+ button, full opacity, icon column sizes to its buttons", async () => {
 		const tr = await renderScreen();
 		const found = findJsonByTestID(tr.toJSON(), `founding-export-entry-${NETWORK_A.hash}`)!;
 		expect(found).toBeTruthy();
@@ -210,11 +210,20 @@ describe("E-1: export entry geometry and accessibility", () => {
 		expect(flat.minHeight as number).toBeGreaterThanOrEqual(44);
 		expect(flat.opacity).not.toBe(0.4);
 
-		// icon column ancestor still height 80, no hidden overflow.
+		// The icon column has no fixed height, so every button fits inside it: a fixed 80 held two
+		// 44 targets and let the third draw underneath Import Network. No hidden overflow either.
 		const iconColumn = found.path[found.path.length - 1] as any;
 		const columnFlat = StyleSheet.flatten(iconColumn.props?.style) as Record<string, unknown>;
-		expect(columnFlat.height).toBe(80);
+		expect(columnFlat.height).toBeUndefined();
+		expect(columnFlat.maxHeight).toBeUndefined();
 		expect(columnFlat.overflow).not.toBe("hidden");
+		const columnButtons = (iconColumn.children ?? []) as any[];
+		expect(columnButtons).toHaveLength(3);
+		for (const button of columnButtons) {
+			const buttonFlat = StyleSheet.flatten(button.props?.style) as Record<string, unknown>;
+			expect(buttonFlat.minWidth as number).toBeGreaterThanOrEqual(44);
+			expect(buttonFlat.minHeight as number).toBeGreaterThanOrEqual(44);
+		}
 	});
 });
 
