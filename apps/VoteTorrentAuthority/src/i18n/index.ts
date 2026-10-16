@@ -144,6 +144,9 @@ const resources = {
 				'The signing threshold cannot be more than the number of key holders.',
 			errCouldNotSaveElection:
 				'Could not save the election. Please review the dates and try again.',
+			// A-9: SignerKeyValid / OfficerValid — the signing key is not an officer key on this network.
+			errElectionSignerNotOfficer:
+				'This device does not hold an officer seat on this network, so it cannot save elections here.',
 			initialAdministrator: 'Initial Administrator',
 			imageUrl: 'Image URL',
 			makePermanent: 'Make Permanent',
@@ -1452,6 +1455,8 @@ const resources = {
 				'El umbral de firmas no puede ser mayor que el número de custodios.',
 			errCouldNotSaveElection:
 				'No se pudo guardar la elección. Revise las fechas e intente de nuevo.',
+			errElectionSignerNotOfficer:
+				'Este dispositivo no tiene un puesto de funcionario en esta red, por lo que no puede guardar elecciones aquí.',
 			initialAdministrator: 'Administrador Inicial',
 			imageUrl: 'URL de Imagen',
 			makePermanent: 'Hacer Permanente',

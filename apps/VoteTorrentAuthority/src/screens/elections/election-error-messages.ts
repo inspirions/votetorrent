@@ -83,5 +83,8 @@ export function mapElectionError(err: unknown, t: Translate): string {
 	if (/timeline|votingStarts|tallyingStarts|certification/i.test(raw)) {
 		return t("errTimelineOrder");
 	}
+	// OfficerSignature's signer checks: the signing key is not an officer key on this network
+	// (A-9: a device that imported only the founding bundle). Not a date problem.
+	if (/\b(SignerKeyValid|OfficerValid)\b/.test(raw)) return t("errElectionSignerNotOfficer");
 	return t("errCouldNotSaveElection");
 }
