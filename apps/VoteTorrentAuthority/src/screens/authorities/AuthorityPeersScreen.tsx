@@ -22,7 +22,7 @@ import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorH
 // authorities-tree consumer among two (47-17 is the other) and imports it
 // rather than forking a second confirmation card.
 import { LifecycleConfirmCard } from "../registration/components/LifecycleConfirmCard";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import type { AuthorityPeer, IAuthorityConfigEngine } from "@votetorrent/vote-core";
 import type { RootStackParamList } from "../../navigation/types";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
@@ -264,7 +264,7 @@ export default function AuthorityPeersScreen() {
 					<View testID="authority-peers-readonly-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("authorityPeerScopeReadOnlyBanner", { scope: scopeDescriptions.cap })}
+							{t("authorityPeerScopeReadOnlyBanner", { scope: scopeLabel("cap", t) })}
 						</ThemedText>
 					</View>
 				))}

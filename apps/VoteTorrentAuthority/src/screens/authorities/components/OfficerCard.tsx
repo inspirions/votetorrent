@@ -10,7 +10,7 @@ import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
 import { ExtendedTheme, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
 import type { Officer } from "@votetorrent/vote-core";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../../utils/scopeLabel";
 import { ThemedText } from "../../../components/ThemedText";
 import { ChipButton } from "../../../components/ChipButton";
 import { globalStyles } from "../../../theme/styles";
@@ -45,10 +45,8 @@ export interface OfficerCardProps {
  * resolved name via the optional `userName` prop (sourced from a User lookup).
  * Falls back to officer.userId when userName is omitted.
  *
- * Permissions: renders bulleted scope list using scopeDescriptions, falling
- * back to the raw scope code when a description is missing. As of 2026-08-25
- * scopeDescriptions covers all nine schema scopes, so the fallback is purely
- * defensive (it previously covered the undefined `rnp` entry).
+ * Permissions: renders a bulleted scope list through utils/scopeLabel (translated `scope_<code>`
+ * keys, then vote-core's English description, then the raw code; PR-1).
  */
 export function OfficerCard({
 	officer,
@@ -98,7 +96,7 @@ export function OfficerCard({
 				{officer.scopes.map((scope) => (
 					<View key={scope} style={styles.bulletRow}>
 						<ThemedText>{"• "}</ThemedText>
-						<ThemedText style={styles.detailValue}>{scopeDescriptions[scope] ?? scope}</ThemedText>
+						<ThemedText style={styles.detailValue}>{scopeLabel(scope, t)}</ThemedText>
 					</View>
 				))}
 			</View>
