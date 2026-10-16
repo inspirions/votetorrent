@@ -216,8 +216,11 @@ const execAsync = promisify(exec);
 //
 // @optimystic 1.13.0 -> 1.14.0 bump (2026-10-14, @serfab stays 1.15.0, quereus 4.20.2): same single
 // mismatch, re-keyed. The peer range is still ^4.20.1.
+//
+// @serfab 1.15.0 -> 1.16.0 + @optimystic 1.14.0 -> 1.15.0 bump (2026-10-16, quereus 4.20.2): same
+// single mismatch, re-keyed. The peer range is still ^4.20.1.
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.14.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.15.0',
 ]);
 
 // The ✘ marker (U+2718)
