@@ -124,6 +124,10 @@ let mockOpenController: { resolve: () => void; reject: (err: unknown) => void } 
 // NetworksEngine does for a network whose store lives only in a strand: the D-05
 // isSchemaInitialized gate finds no marker in the empty solo store.
 let mockOpenRejectsOnSolo = false;
+// When true, getRecentNetworks() returns a promise the test resolves itself, so a test can land
+// the node's settlement BETWEEN the recent-networks read and the open.
+let mockRecentDeferred = false;
+let mockRecentController: { resolve: () => void } | null = null;
 
 jest.mock("../../engines/engine-factory", () => {
 	class FakeEngineFactory {
@@ -151,7 +155,14 @@ jest.mock("../../engines/engine-factory", () => {
 		}
 
 		private fakeNetworksEngine = {
-			getRecentNetworks: jest.fn(async () => mockNetworksToReturn),
+			getRecentNetworks: jest.fn(async () => {
+				if (mockRecentDeferred) {
+					await new Promise<void>((resolve) => {
+						mockRecentController = { resolve };
+					});
+				}
+				return mockNetworksToReturn;
+			}),
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			open: jest.fn(async (_network: any, _user: any) => {
 				// Record the node the factory holds RIGHT NOW — the whole point of
@@ -303,6 +314,8 @@ beforeEach(() => {
 	mockOpenDeferred = false;
 	mockOpenController = null;
 	mockOpenRejectsOnSolo = false;
+	mockRecentDeferred = false;
+	mockRecentController = null;
 	mockCadreHook.current = defaultCadreHookValue();
 });
 
@@ -710,6 +723,40 @@ describe("AppProvider — a node that settles after the bounded wait", () => {
 		});
 		await flushMicrotasks();
 		expect(hasBootErrorView(tr)).toBe(false);
+		expect(seen.hasNetwork).toBe(true);
+		infoSpy.mockRestore();
+	});
+
+	it("a settle that lands before the re-attach reaches the open dispatches that one open on the live node (no solo attempt)", async () => {
+		jest.useFakeTimers();
+		const infoSpy = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		mockOpenRejectsOnSolo = true;
+		mockRecentDeferred = true;
+		const settle = deferredSettle();
+		// The hook's `node` stays null: on a starved device the provider's passive
+		// [connectedPeers, node] effect lags the settlement, so it cannot be what tells the factory.
+		mockCadreHook.current = { ...defaultCadreHookValue(), nodeSettled: settle.promise };
+
+		renderWithProbe();
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(15000);
+		});
+		const factory = mockEngineFactoryInstances[0];
+		expect(factory.openCalls.length).toBe(0);
+
+		const liveNode: FakeNode = { tag: "late-live-node" };
+		await renderer.act(async () => {
+			settle.resolve({ status: "ready", node: liveNode });
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await renderer.act(async () => {
+			mockRecentController!.resolve();
+			await jest.advanceTimersByTimeAsync(0);
+		});
+		await flushMicrotasks(20);
+
+		expect(factory.openCalls.length).toBe(1);
+		expect(factory.openCalls[0].node).toBe(liveNode);
 		expect(seen.hasNetwork).toBe(true);
 		infoSpy.mockRestore();
 	});
