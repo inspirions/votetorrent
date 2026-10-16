@@ -249,9 +249,14 @@ describe('AdministratorInvitationScreen — INV-02 (send mode real invitePrivate
     );
     expect(scopePassed).toBe('rad');
 
+    // The share payload (what SHARE / COPY send) must carry invitePrivate — the invitee's only path
+    // to reconstruct the ephemeral key and accept (D-06) — but the screen must never show it (BIO-4).
+    const block = tr.root.findAll((n) => n.props?.testIDPrefix === 'administrator-invitation-share' && typeof n.props?.shareText === 'string')[0];
+    expect(block.props.shareText).toContain('invitePrivate');
+    expect(block.props.shareText).toContain('admin-ephemeral-private-hex');
     const rendered = JSON.stringify(tr.toJSON());
-    expect(rendered).toContain('invitePrivate');
-    expect(rendered).toContain('admin-ephemeral-private-hex');
+    expect(rendered).not.toContain('invitePrivate');
+    expect(rendered).not.toContain('admin-ephemeral-private-hex');
   });
 });
 

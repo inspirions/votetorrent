@@ -12,7 +12,7 @@ export interface InviteShareBlockProps {
 	label: string;
 	/** The one-time invite material the invitee pastes on their device. */
 	shareText: string;
-	/** Prefix for this block's testIDs (`<prefix>-text`, `-share`, `-copy`, `-status`). */
+	/** Prefix for this block's testIDs (`<prefix>-ready`, `-share`, `-copy`, `-status`). */
 	testIDPrefix: string;
 }
 
@@ -21,8 +21,9 @@ export interface InviteShareBlockProps {
  * InviteShareBlock — the after-send surface shared by the keyholder, administrator and authority
  * invitation screens (UAT 62, Redmi 8 / 360dp).
  *
- * - The invite text renders IN FULL (selectable, wrapping). It used to be cut at 4 lines with no
- *   ellipsis and no way to read the rest.
+ * - The invite text is NOT rendered. It holds invitePrivate, and showing it exposed the secret to
+ *   shoulder-surfing, screenshots and screen recording (Redmi 8 BIO-4, 2026-10-08). A ready line
+ *   stands in its place; the text leaves the device only through SHARE and COPY below.
  * - SHARE opens the OS share sheet (`Share.share`), which matches its label. Android's sheet also
  *   offers its own Copy, so the invite can always leave the device even where the clipboard
  *   module fails.
@@ -65,8 +66,8 @@ export function InviteShareBlock({ label, shareText, testIDPrefix }: InviteShare
 			<ThemedText type="defaultSemiBold" style={styles.label}>
 				{label}
 			</ThemedText>
-			<ThemedText testID={`${testIDPrefix}-text`} style={styles.text} selectable>
-				{shareText}
+			<ThemedText testID={`${testIDPrefix}-ready`} style={styles.text}>
+				{t("invitationShareReady")}
 			</ThemedText>
 			<CustomButton testID={`${testIDPrefix}-share`} title={t("share")} icon="share-nodes" onPress={onShare} />
 			<CustomButton
@@ -96,7 +97,6 @@ const styles = StyleSheet.create({
 	},
 	text: {
 		marginBottom: 8,
-		fontFamily: "monospace",
 	},
 	status: {
 		marginTop: 4,
