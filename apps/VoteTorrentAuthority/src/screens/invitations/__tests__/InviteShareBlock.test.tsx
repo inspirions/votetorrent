@@ -1,8 +1,8 @@
 /**
  * InviteShareBlock (UAT 62 L2/L3, Redmi 8). The invite JSON used to be cut at 4 lines with no
  * ellipsis, and SHARE silently called Clipboard.setString, which left the system clipboard empty
- * with no feedback. The block now shows the whole text, SHARE opens the OS share sheet, and COPY
- * toasts "Copied" only after an Android read-back matches.
+ * with no feedback. SHARE opens the OS share sheet, and COPY toasts "Copied" only after an Android
+ * read-back matches. The invite text itself is no longer shown at all (BIO-4: it held invitePrivate).
  */
 
 import React from 'react';
@@ -91,12 +91,18 @@ afterAll(() => {
 });
 
 describe('InviteShareBlock', () => {
-  it('shows the whole invite text, selectable, with no line cap', () => {
+  // Redmi 8 BIO-4 (2026-10-08): after Send the block rendered the invite JSON, invitePrivate
+  // included, in plain text (shoulder-surfing, screenshots, screen recording). The secret leaves the
+  // device only through SHARE / COPY; the screen shows a ready line instead.
+  it('never renders the invite material on screen, and shows the ready line instead', () => {
     const tr = render();
-    const text = tr.root.findAll((n) => n.props?.testID === 'p-text' && n.props?.children === SHARE)[0];
-    expect(text).toBeTruthy();
-    expect(text.props.selectable).toBe(true);
-    expect(text.props.numberOfLines).toBeUndefined();
+    const rendered = JSON.stringify(tr.toJSON());
+    expect(rendered).not.toContain('a'.repeat(16));
+    expect(rendered).not.toContain('b'.repeat(16));
+    expect(rendered).not.toContain('invitePrivate');
+    expect(tr.root.findAll((n) => n.props?.testID === 'p-text')).toHaveLength(0);
+    const ready = tr.root.findAll((n) => n.props?.testID === 'p-ready' && n.props?.children === 'invitationShareReady');
+    expect(ready.length).toBeGreaterThan(0);
   });
 
   it('SHARE opens the OS share sheet with the invite text', async () => {
