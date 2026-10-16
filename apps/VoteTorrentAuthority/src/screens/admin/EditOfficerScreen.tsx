@@ -8,7 +8,7 @@ import { CustomButton } from "../../components/CustomButton";
 import { Footer } from "../../components/Footer";
 import { InfoCard } from "../../components/InfoCard";
 import type { Authority, IAuthorityEngine, INetworkEngine, IUserEngine, Officer, OfficerSelection, Scope, ThresholdPolicy, User } from "@votetorrent/vote-core";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { OFFICER_SCOPE_CODES, scopeLabel } from "../../utils/scopeLabel";
 import { useRoute, useNavigation } from "@react-navigation/native";
 import { useApp } from "../../providers/AppProvider";
 import { useSettings } from "../../providers/SettingsProvider";
@@ -279,10 +279,10 @@ export default function EditOfficerScreen() {
 					<ThemedText type="title" style={styles.sectionTitle}>
 						{t("permissions")}
 					</ThemedText>
-					{Object.entries(scopeDescriptions).map(([scope, description]) => (
+					{OFFICER_SCOPE_CODES.map((scope) => (
 						<View key={scope} style={styles.scopeRow}>
 							<View style={styles.scopeDescriptionContainer}>
-								<ThemedText>{description}</ThemedText>
+								<ThemedText>{scopeLabel(scope, t)}</ThemedText>
 								{showHelpIcons && (
 									<FontAwesome6
 										name="circle-info"

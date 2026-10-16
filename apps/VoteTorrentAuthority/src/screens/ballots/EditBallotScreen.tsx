@@ -97,7 +97,7 @@ const EditBallotScreen = () => {
 	// Seed the draft with electionId from route params (edit mode entry point)
 	useEffect(() => {
 		if (electionId && ballotDraft.electionId !== electionId) {
-			setBallotDraft({ ...ballotDraft, electionId });
+			setBallotDraft((prev) => ({ ...prev, electionId }));
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [electionId]);
@@ -132,7 +132,7 @@ const EditBallotScreen = () => {
 	// ballot's authorityId, so this never clobbers an existing selection).
 	useEffect(() => {
 		if (primaryAuthorityId && !(ballotDraft as any).authority) {
-			setBallotDraft({ ...ballotDraft, authority: primaryAuthorityId } as any);
+			setBallotDraft((prev) => ({ ...prev, authority: primaryAuthorityId }) as any);
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [primaryAuthorityId, (ballotDraft as any).authority]);
@@ -152,9 +152,9 @@ const EditBallotScreen = () => {
 					comparable: (authorityId: string) => comparableBallot({ ...stored, authorityId }),
 				};
 				// WR-06: the async load replaces the whole draft, so it must not drop
-				// the electionId that the synchronous seed effect set. setBallotDraft
-				// is a plain setter (no functional updater), so fall back explicitly to
-				// the loaded ballot's electionId, else the route's electionId param.
+				// the electionId that the synchronous seed effect set, so fall back
+				// explicitly to the loaded ballot's electionId, else the route's
+				// electionId param.
 				// Map authorityId → authority (the loose key BallotTemplateForm's
 				// dropdown reads) so the Authority field re-populates on reopen.
 				setBallotDraft({
@@ -393,15 +393,15 @@ const EditBallotScreen = () => {
 	};
 
 	const handleAuthorityChange = (authority: string) => {
-		setBallotDraft({ ...ballotDraft, authority } as any);
+		setBallotDraft((prev) => ({ ...prev, authority }) as any);
 	};
 
 	const handleDescriptionChange = (description: string) => {
-		setBallotDraft({ ...ballotDraft, description });
+		setBallotDraft((prev) => ({ ...prev, description }));
 	};
 
 	const handleDistrictsChange = (districts: string[]) => {
-		setBallotDraft({ ...ballotDraft, districts });
+		setBallotDraft((prev) => ({ ...prev, districts }));
 	};
 
 	const handleAddQuestion = () => {

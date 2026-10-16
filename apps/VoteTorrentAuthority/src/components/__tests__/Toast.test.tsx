@@ -26,6 +26,9 @@ function Trigger({ message }: { message: string }) {
   );
 }
 
+// Unmounted in afterEach so no provider (and no fade timer) outlives its test.
+const mounted: renderer.ReactTestRenderer[] = [];
+
 function render(withProvider = true) {
   const buttons = (
     <>
@@ -37,6 +40,7 @@ function render(withProvider = true) {
   act(() => {
     tr = renderer.create(withProvider ? <ToastProvider>{buttons}</ToastProvider> : buttons);
   });
+  mounted.push(tr);
   return tr;
 }
 
@@ -60,6 +64,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  act(() => {
+    for (const tr of mounted.splice(0)) tr.unmount();
+  });
   jest.useRealTimers();
 });
 

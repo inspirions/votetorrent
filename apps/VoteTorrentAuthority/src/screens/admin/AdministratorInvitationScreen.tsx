@@ -12,7 +12,7 @@ import type {
 	Scope,
 	SentOfficerInvite,
 } from "@votetorrent/vote-core";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import { ThemedText } from "../../components/ThemedText";
 import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
@@ -274,7 +274,7 @@ export default function AdministratorInvitationScreen() {
 	// Accept mode (Figma frame 32)
 	const seedInvite = invite?.invite;
 	const permissions = (seedInvite?.scopes ?? [])
-		.map((scope: Scope) => scopeDescriptions[scope] ?? t(`scope_${scope}`))
+		.map((scope: Scope) => scopeLabel(scope, t))
 		.join(", ");
 	return (
 		<KeyboardAvoidingScreen>
