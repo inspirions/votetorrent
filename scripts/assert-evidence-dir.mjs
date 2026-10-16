@@ -10,10 +10,13 @@
  *     (run summaries, the failure index), the coverage statement and the wall-gate first line, the ledger, the
  *     command-log rules and the sha256 sum files;
  *   - with the git flag, append-only history of attempt files, logs and verdicts (committed or still uncommitted);
- *   - with the streak flag, that the last K runs of a rehearsal session each passed on the first attempt. One declared
- *     restart is accepted and nothing else (notes 19 E7): run-1 only, attempts exactly attempt-1 and attempt-2, an
- *     attempt-level attempt-2/reason.txt of one line "RESTART notes-19-e7: <why>", and an attempt-1 holding at least
- *     one non-PASS leg. The streak then reads run-1/attempt-2; every other retry stays a streak-retried finding.
+ *   - with the streak flag, that the last K runs of a rehearsal session each passed on the first attempt. Two declared
+ *     restart chains are accepted and nothing else, both on run-1 only. E7 (notes 19 E7): attempts exactly attempt-1
+ *     and attempt-2, an attempt-level attempt-2/reason.txt of one line "RESTART notes-19-e7: <why>", and an attempt-1
+ *     holding at least one non-PASS leg. E12 (notes 19 E12, 64-55): attempts exactly attempt-1, attempt-2 and
+ *     attempt-3, attempt-2/reason.txt the one e7 line, attempt-3/reason.txt one line "RESTART notes-19-e12: <why>", and
+ *     attempt-1 and attempt-2 each holding at least one non-PASS leg. The streak then reads the last attempt
+ *     (attempt-2 or attempt-3); every other retry stays a streak-retried finding.
  *
  * Modes:
  *   [--git] [--secrets-file <abs>] [--streak <K> [--session <abs dir>] [--legs a,b]] <path>...
@@ -586,22 +589,44 @@ function gitRules(tree, top) {
 
 // ---------- streak ----------
 const RESTART_RE = new RegExp('^RESTART notes-19-e7: .+$');
-/** True only for the one declared restart of notes 19 E7 (see the header). attempts is the sorted list of attempt dirs. */
-function declaredRestart(rdir, attempts) {
-	if (basename(rdir) !== 'run-1') return false;
-	if (attempts.length !== 2 || attempts[0].name !== 'attempt-1' || attempts[1].name !== 'attempt-2') return false;
+const RESTART_E12_RE = new RegExp('^RESTART notes-19-e12: .+$');
+/** attempt/reason.txt is exactly one line matching re. */
+function restartLine(rdir, attempt, re) {
 	let text;
 	try {
-		text = readFileSync(join(rdir, 'attempt-2', 'reason.txt'), 'utf8');
+		text = readFileSync(join(rdir, attempt, 'reason.txt'), 'utf8');
 	} catch {
 		return false;
 	}
 	const lines = text.replace(/\n$/, '').split('\n');
-	if (lines.length !== 1 || !RESTART_RE.test(lines[0])) return false;
-	const a1 = join(rdir, 'attempt-1');
-	const legDirs = readdirSync(a1, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+	return lines.length === 1 && re.test(lines[0]);
+}
+/** The attempt holds at least one leg whose verdict line 1 is not VERDICT: PASS (a leg-less attempt reads its own verdict). */
+function attemptHasNonPass(rdir, attempt) {
+	const a = join(rdir, attempt);
+	const legDirs = readdirSync(a, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
 	const legs = legDirs.length ? legDirs : [''];
-	return legs.some((l) => firstLine(join(a1, l, 'verdict.txt')) !== 'VERDICT: PASS');
+	return legs.some((l) => firstLine(join(a, l, 'verdict.txt')) !== 'VERDICT: PASS');
+}
+/**
+ * True only for the two declared restart chains (see the header). attempts is the sorted list of attempt dirs.
+ * E7: run-1, attempts exactly attempt-1 and attempt-2, attempt-2 reason "RESTART notes-19-e7: ...", attempt-1 non-PASS.
+ * E12 (64-55): run-1, attempts exactly attempt-1..attempt-3, attempt-2 reason e7, attempt-3 reason
+ * "RESTART notes-19-e12: ...", attempt-1 and attempt-2 each non-PASS. Nothing else is accepted.
+ */
+function declaredRestart(rdir, attempts) {
+	if (basename(rdir) !== 'run-1') return false;
+	const names = attempts.map((a) => a.name).join(',');
+	if (names === 'attempt-1,attempt-2') {
+		if (!restartLine(rdir, 'attempt-2', RESTART_RE)) return false;
+		return attemptHasNonPass(rdir, 'attempt-1');
+	}
+	if (names === 'attempt-1,attempt-2,attempt-3') {
+		if (!restartLine(rdir, 'attempt-2', RESTART_RE)) return false;
+		if (!restartLine(rdir, 'attempt-3', RESTART_E12_RE)) return false;
+		return attemptHasNonPass(rdir, 'attempt-1') && attemptHasNonPass(rdir, 'attempt-2');
+	}
+	return false;
 }
 function streakRules(opts, trees) {
 	const out = [];
@@ -909,7 +934,7 @@ function runSelftest() {
 			const pass = c.expect === 'PASS';
 			const want = pass ? [] : [c.expect, ...(c.expectAlso ?? [])];
 			let good = pass ? res.exitCode === 0 : res.exitCode === 1 && tokens.length === want.length && want.every((t) => tokens.includes(t));
-			if (good && (name === 'pass-device' || name === 'pass-streak-restart') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
+			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
 			if (good) {
 				ok++;
 				console.log(`CASE ${name} OK`);
@@ -918,8 +943,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 57 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/57`);
-	return ok === total && total === 57 ? 0 : 1;
+	console.log(ok === total && total === 64 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/64`);
+	return ok === total && total === 64 ? 0 : 1;
 }
 
 function main(argv) {

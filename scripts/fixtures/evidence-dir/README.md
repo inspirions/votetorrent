@@ -62,7 +62,7 @@ with a synthetic string that is never a decodable code. The kinds, in words:
 ## Adding a case
 
 Add the file under `cases/`, name it for its token, and re-run `node scripts/assert-evidence-dir.mjs --selftest`.
-The count in the final line is 56 case files plus the self-trip pass.
+The count in the final line is 63 case files plus the self-trip pass.
 
 ## The declared restart (notes 19 E7)
 
@@ -74,6 +74,18 @@ Seven cases pin it: `pass-streak-restart` (accepted, with its `STREAK PASS k=3` 
 `--restart-wrong-token` (another token), `--restart-attempt-1-pass` (over an all-PASS attempt-1; also reports
 `retry-without-failure`, hence `expectAlso`) and `fail-streak-not-pass--restart-attempt-fail` (a declared restart whose
 attempt-2 has a FAIL leg).
+
+## The declared E12 chain (notes 19 E12, 64-55)
+
+`--streak` also accepts exactly one longer chain and nothing else: `run-1` with exactly `attempt-1`, `attempt-2` and
+`attempt-3`, `attempt-2/reason.txt` the one line `RESTART notes-19-e7: <why>`, `attempt-3/reason.txt` the one line
+`RESTART notes-19-e12: <why>`, and `attempt-1` and `attempt-2` each with at least one non-PASS leg. The streak then
+reads `run-1/attempt-3`. The E7 rule above is unchanged, so an e7 line on attempt-3 stays `streak-retried`
+(`--restart-attempt-3`). Seven cases pin the chain: `pass-streak-restart-e12` (accepted, with its `STREAK PASS k=3`
+line), `fail-streak-retried--e12-on-attempt-2` (the two reason tokens swapped), `--e12-without-e7` (a plain attempt-2
+reason), `--e12-run-2` (the chain on another run), `--e12-attempt-4` (a fourth attempt after the chain),
+`--e12-attempt-2-all-pass` (attempt-2 all PASS; also reports `retry-without-failure`, hence `expectAlso`) and
+`fail-streak-not-pass--e12-attempt-3-fail` (the declared chain whose attempt-3 has a FAIL leg).
 
 ## Known overwrites
 
