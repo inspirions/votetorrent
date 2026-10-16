@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useRoute, useTheme } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import { scopeDescriptions, type Signature } from "@votetorrent/vote-core";
+import { type Signature } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
 import { TransportStatusCard } from "../../components/TransportStatusCard";
@@ -343,7 +344,7 @@ export function BulkImportSyncScreen() {
 				) : (
 					<View testID="bulk-import-sync-scope-banner" style={styles.banner}>
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrationRequestScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
+							{t("registrationRequestScopeReadOnlyBanner", { scope: scopeLabel("vrg", t) })}
 						</ThemedText>
 					</View>
 				))}

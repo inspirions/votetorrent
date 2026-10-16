@@ -336,6 +336,16 @@ const resources = {
 			// Phase 8 plan 08-05 (NETUI-02): label used in the Proposed Changes diff row.
 			electionType: 'Election Type',
 			reviseNetwork: 'Revise Network',
+			// PR-1: officer permission names, through utils/scopeLabel (vote-core's scope descriptions are English only).
+			scope_rn: 'Revise Network',
+			scope_rad: 'Revise or replace the Administration',
+			scope_vrg: 'Validate registrations',
+			scope_iad: 'Invite other Authorities',
+			scope_uai: 'Update Authority Information',
+			scope_ceb: 'Create/Edit ballot templates',
+			scope_mel: 'Manage Elections',
+			scope_cap: 'Configure Authority Peers',
+			scope_ik: 'Invite Keyholders',
 			servers: 'Server(s)',
 			proposedChanges: 'Proposed Changes',
 			network: 'Network',
@@ -1459,7 +1469,8 @@ const resources = {
 				'No se pudo guardar la elección. Revise las fechas e intente de nuevo.',
 			errElectionSignerNotOfficer:
 				'Este dispositivo no tiene un puesto de funcionario en esta red, por lo que no puede guardar elecciones aquí.',
-			initialAdministrator: 'Administrador Inicial',
+			// PR-1: the founding field AddNetworkScreen renders; officer = funcionario (62-140 ruling).
+			initialAdministrator: 'Funcionario Inicial',
 			imageUrl: 'URL de Imagen',
 			makePermanent: 'Hacer Permanente',
 			mediaPinning: 'Haciendo permanente…',
@@ -1637,6 +1648,15 @@ const resources = {
 			// Phase 8 plan 08-05 (NETUI-02): label used in the Proposed Changes diff row.
 			electionType: 'Tipo de Elección',
 			reviseNetwork: 'Revisar Red',
+			scope_rn: 'Revisar Red',
+			scope_rad: 'Revisar o reemplazar la Administración',
+			scope_vrg: 'Validar registros',
+			scope_iad: 'Invitar a otras Autoridades',
+			scope_uai: 'Actualizar la información de la Autoridad',
+			scope_ceb: 'Crear/Editar plantillas de boletas',
+			scope_mel: 'Gestionar Elecciones',
+			scope_cap: 'Configurar los Pares de la Autoridad',
+			scope_ik: 'Invitar Custodios de Clave',
 			servers: 'Servidor(es)',
 			proposedChanges: 'Cambios Propuestos',
 			network: 'Red',
@@ -1794,7 +1814,7 @@ const resources = {
 			manageProposal: 'Gestionar Propuesta', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			// Phase 8 plan 08-02 — Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			thresholdPolicies: 'Políticas de Umbral', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
-			addAdministrator: 'Agregar Administrador', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
+			addAdministrator: 'Agregar Funcionario', // PR-1: the add button ProposedAdministrationScreen renders (62-140 ruling).
 			loading: 'Cargando...', // Phase 11 plan 11-01 (D-11) — Spanish backfill.
 			invitationNeedsNetwork: 'Seleccione primero una red y luego vuelva a abrir esta invitación.',
 			invitationLoadFailed: 'No se pudo cargar esta invitación. Vuelva atrás e inténtelo de nuevo.',

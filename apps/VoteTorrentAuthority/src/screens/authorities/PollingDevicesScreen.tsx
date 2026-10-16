@@ -17,7 +17,7 @@ import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
 import { createDeviceSigner } from "../../engines/device-signer";
 import type { SignCallback } from "../../engines/device-signer";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import type { IAuthorityConfigEngine, PollingDevice } from "@votetorrent/vote-core";
 import type { NavigationProp, RootStackParamList } from "../../navigation/types";
 import {
@@ -257,7 +257,7 @@ export default function PollingDevicesScreen() {
 					<View testID="polling-devices-readonly-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrantScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
+							{t("registrantScopeReadOnlyBanner", { scope: scopeLabel("vrg", t) })}
 						</ThemedText>
 					</View>
 				)

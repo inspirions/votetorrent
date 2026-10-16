@@ -20,7 +20,7 @@ import type {
 	ThresholdPolicy,
 	User,
 } from "@votetorrent/vote-core";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
@@ -321,8 +321,7 @@ export default function ProposedAdministrationScreen() {
 							key={scope}
 							scope={scope}
 							label={
-								scopeDescriptions[scope] ??
-								t("scope_" + scope)
+								scopeLabel(scope, t)
 							}
 							value={thresholds[scope] ?? 1}
 							min={1}
