@@ -479,7 +479,8 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
   };
   const nameInputs = (tr: renderer.ReactTestRenderer) => tr.root.findAll((n) => (n.type as unknown) === 'TextInput');
   const sharedPayload = (tr: renderer.ReactTestRenderer) =>
-    JSON.parse(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-text' && typeof n.props?.children === 'string')[0].props.children);
+    // The block no longer renders the invite text (BIO-4), so read the payload SHARE / COPY send.
+    JSON.parse(tr.root.findAll((n) => n.props?.testIDPrefix === 'keyholder-invitation-share' && typeof n.props?.shareText === 'string')[0].props.shareText);
 
   it('shows the five validity presets as radios with 24 hours selected', async () => {
     mockRouteParams.keyholder = invitee('Kay Holder');

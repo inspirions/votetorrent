@@ -209,6 +209,8 @@ const resources = {
 			proposedAdministration: 'Proposed Administration',
 			share: 'Share',
 			// Invitation send screens: the after-send share block (InviteShareBlock).
+			// BIO-4: the invite material is never shown on screen; it leaves only through Share or Copy.
+			invitationShareReady: 'The invitation is ready. Its key stays hidden here: send it with Share or Copy.',
 			invitationShareCopy: 'Copy',
 			invitationShareCopied: 'Copied to clipboard',
 			invitationShareCopyFailed: "Couldn't copy to the clipboard. Use Share instead.",
@@ -1515,6 +1517,7 @@ const resources = {
 			publicKey: 'Clave Pública',
 			proposedAdministration: 'Administración Propuesta',
 			share: 'Compartir',
+			invitationShareReady: 'La invitación está lista. Su clave no se muestra aquí: envíala con Compartir o Copiar.',
 			invitationShareCopy: 'Copiar',
 			invitationShareCopied: 'Copiado al portapapeles',
 			invitationShareCopyFailed: 'No se pudo copiar al portapapeles. Usa Compartir.',

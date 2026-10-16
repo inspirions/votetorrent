@@ -258,11 +258,14 @@ describe('AuthorityInvitationScreen — INV-02 (send mode real invitePrivate sha
     expect(scopePassed).toBe('iad');
     expect(signerPassed).toBe(mockSigner);
 
-    // The rendered share text (selectable ThemedText) must contain invitePrivate —
-    // the invitee's only path to reconstruct the ephemeral key and accept (D-06).
+    // The share payload (what SHARE / COPY send) must carry invitePrivate — the invitee's only path
+    // to reconstruct the ephemeral key and accept (D-06) — but the screen must never show it (BIO-4).
+    const block = tr.root.findAll((n) => n.props?.testIDPrefix === 'authority-invitation-share' && typeof n.props?.shareText === 'string')[0];
+    expect(block.props.shareText).toContain('invitePrivate');
+    expect(block.props.shareText).toContain('ephemeral-private-hex');
     const rendered = JSON.stringify(tr.toJSON());
-    expect(rendered).toContain('invitePrivate');
-    expect(rendered).toContain('ephemeral-private-hex');
+    expect(rendered).not.toContain('invitePrivate');
+    expect(rendered).not.toContain('ephemeral-private-hex');
   });
 });
 
