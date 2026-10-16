@@ -92,7 +92,6 @@ async function bootProvider() {
 			</CadreNodeProvider>,
 		);
 		for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
-			// eslint-disable-next-line no-await-in-loop
 			await Promise.resolve();
 		}
 	});

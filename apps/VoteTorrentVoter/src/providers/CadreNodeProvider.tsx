@@ -132,8 +132,9 @@ export function resolveBootstrapNodes(addr: string): string[] {
 // period that denies exactly that dial, so `listen()` fails and the transport manager's
 // FATAL_ALL aborts start. `relayAddrs` takes the 'search' route (one bare `/p2p-circuit`
 // listener, no dial) and CadreNode.start() drives the reservation explicitly once the
-// control database is up. Failure is still fail-fast: a relay that never answers throws
-// RelayReservationFailedError out of start().
+// control database is up. cadre-core's default is fail-fast (a first attempt that lands nothing
+// throws RelayReservationFailedError out of start()); this provider sets `requireRelay: false`
+// below, so a slow relay costs dialability for a while instead of the node.
 //
 // Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
 // through the blank-safe resolveBootstrapNodes guard per address, so an empty validated
@@ -238,8 +239,8 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
 
         // Spike 100: a joined phone's bootstrap is the authority's member machines its join code
         // named (engines/join-bootstrap.ts). They are bootstrap peers ONLY, never `relayAddrs`: a
-        // relay that does not answer a reservation fails start(), and a member is not
-        // necessarily a relay.
+        // member is not necessarily a relay, and one that does not answer a reservation would
+        // keep the relay supervisor re-driving it for nothing.
         const joinBootstrap = await readJoinBootstrap();
         if (isMounted) setJoinBootstrapCount(joinBootstrap.length);
         const bootstrapNodes = [...new Set([...CONTROL_RELAY_ADDRS, ...joinBootstrap])];
@@ -325,6 +326,16 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // The STRAND relay moves to strandNetwork below, so the control and strand
             // libp2p nodes no longer collide at one relay under this peer's shared PeerId.
             relayAddrs: CONTROL_RELAY_ADDRS,
+            // Fail-soft on the FIRST reservation attempt (same as the Authority, outer 5f8e7b2c).
+            // cadre-core's default (requireRelay unset) throws RelayReservationFailedError out of
+            // start() when that attempt lands nothing inside its budget (18 s at the default link),
+            // and the catch below then stops the node for the whole process: VoterAppProvider waits
+            // for a node before it re-opens a joined network, so the phone never re-attaches until
+            // the app is killed. 64-53 hit exactly that on a relaunched Authority keyholder while the
+            // relay admitted a reservation within the same minute. `false` runs the SAME drive and
+            // keeps the SAME background supervisor re-driving the reservation; only the throw is
+            // dropped.
+            requireRelay: false,
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
