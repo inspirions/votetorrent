@@ -49,6 +49,11 @@ const SHARE = JSON.stringify({
   name: 'Kay Holder',
 });
 
+// Every tree a test mounts, unmounted in afterEach. A COPY test shows a toast on REAL timers, and a
+// provider left mounted keeps its 2.5 s fade timer running past this file; on a shared jest worker it
+// then fired in a later file and threw `reading 'timing'` there (review-fix lanes B and C).
+const mounted: renderer.ReactTestRenderer[] = [];
+
 function render() {
   let tr!: renderer.ReactTestRenderer;
   act(() => {
@@ -58,6 +63,7 @@ function render() {
       </ToastProvider>,
     );
   });
+  mounted.push(tr);
   return tr;
 }
 
@@ -84,6 +90,12 @@ beforeEach(() => {
   jest.clearAllMocks();
   Object.defineProperty(Platform, 'OS', { value: 'android', configurable: true });
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  act(() => {
+    for (const tr of mounted.splice(0)) tr.unmount();
+  });
 });
 
 afterAll(() => {
