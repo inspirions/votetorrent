@@ -637,7 +637,15 @@ export function AppProvider({ children }: PropsWithChildren) {
 				};
 				if (dispatch.status === "timeout") {
 					void nodeSettled.then((late) => {
-						if (late.status !== "ready") return;
+						if (late.status !== "ready" || cancelled) return;
+						// Hand the live node to the factory NOW. The peer-count effect does the same,
+						// but it is a passive effect and on a starved device it lags this settlement
+						// by long enough that a re-attach reaching its open in between still saw null
+						// and went solo (officer Pixel_8 2026-10-16: an hour rebuilding an empty solo
+						// store). The DbFactory reads the node at call time, so every open after this
+						// line goes strand. Same node the effect passes, so setNode's change check
+						// keeps the later effect call a no-op.
+						factory.setNode(late.node);
 						lateReady = true;
 						supersedeOnLiveNode();
 					});
