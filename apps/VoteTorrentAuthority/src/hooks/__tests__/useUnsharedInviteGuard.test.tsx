@@ -18,20 +18,20 @@ const Stack = createNativeStackNavigator();
 const navigationRef = createNavigationContainerRef<any>();
 
 let currentShareText = 'invite-text';
-let forceRender: () => void = () => undefined;
+let setTextInScreen: (v: string) => void = () => undefined;
 
 function Home() {
   return <View />;
 }
 
 function Invite() {
-  const markShared = useUnsharedInviteGuard(currentShareText);
+  const [text, setText] = React.useState(currentShareText);
+  setTextInScreen = setText;
+  const markShared = useUnsharedInviteGuard(text);
   return <Pressable testID="mark-shared" onPress={markShared} />;
 }
 
 function App() {
-  const [, setTick] = React.useState(0);
-  forceRender = () => setTick((n) => n + 1);
   return (
     <NavigationContainer ref={navigationRef}>
       <Stack.Navigator>
@@ -133,8 +133,7 @@ describe('useUnsharedInviteGuard', () => {
     act(() => {
       tr.root.findByProps({ testID: 'mark-shared' }).props.onPress();
     });
-    currentShareText = 'another-invite';
-    act(() => forceRender());
+    act(() => setTextInScreen('another-invite'));
     back();
     expect(route()).toBe('Invite');
     expect(alertSpy).toHaveBeenCalledTimes(1);
