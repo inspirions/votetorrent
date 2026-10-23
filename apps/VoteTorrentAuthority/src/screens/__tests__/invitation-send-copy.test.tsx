@@ -63,6 +63,8 @@ jest.mock('@react-navigation/native', () => ({
   },
   useRoute: () => ({ params: mockRouteParams }),
   useNavigation: () => ({ goBack: jest.fn(), navigate: jest.fn(), setOptions: jest.fn() }),
+
+  usePreventRemove: () => undefined,
 }));
 
 type Screen = { name: string; file: string; load: () => any };

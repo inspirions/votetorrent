@@ -25,6 +25,7 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
+import { Alert, Share } from 'react-native';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
 import { setKeyholderKeyVaultForTests } from '../../../engines/keyholder-vault';
@@ -51,6 +52,30 @@ const mockSetParams = jest.fn();
 const mockReplace = jest.fn();
 const mockPush = jest.fn();
 const mockDispatch = jest.fn();
+
+const mockUsePreventRemove = jest.fn();
+const mockCopyToClipboard = jest.fn(async (_text: string) => true);
+jest.mock('../../../utils/copyToClipboard', () => ({ copyToClipboard: (text: string) => mockCopyToClipboard(text) }));
+/** What the stack does on Back: run the guard callback when it is armed, otherwise pop. */
+function pressBack() {
+  const calls = mockUsePreventRemove.mock.calls;
+  const [prevent, cb] = calls[calls.length - 1];
+  if (prevent) {
+    renderer.act(() => {
+      cb({ data: { action: { type: 'GO_BACK' } } });
+    });
+  } else {
+    mockGoBack();
+  }
+}
+function lastPrevent(): boolean {
+  const calls = mockUsePreventRemove.mock.calls;
+  return calls[calls.length - 1][0];
+}
+function leaveButtons(): Array<{ text: string; style?: string; onPress?: () => void }> {
+  const calls = (Alert.alert as jest.Mock).mock.calls;
+  return calls[calls.length - 1][2];
+}
 /** Navigation calls whose arguments carry a 64-hex secret or the given private key. */
 function navigationLeaks(invitePrivate: string): string[] {
   const out: string[] = [];
@@ -165,6 +190,7 @@ jest.mock('@react-navigation/native', () => ({
     push: mockPush,
     dispatch: mockDispatch,
   }),
+  usePreventRemove: (prevent: boolean, cb: (e: unknown) => void) => mockUsePreventRemove(prevent, cb),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -400,6 +426,12 @@ describe('KeyholderInvitationScreen - paste-first accept mode (no route id)', ()
       delete mockRouteParams.shareToken;
     }
   });
+
+  it('B6: accept mode never arms the leave guard', async () => {
+    await render();
+    expect(mockUsePreventRemove).toHaveBeenCalled();
+    expect(mockUsePreventRemove.mock.calls.every((c) => c[0] === false)).toBe(true);
+  });
 });
 
 describe('KeyholderInvitationScreen - expired share', () => {
@@ -618,6 +650,75 @@ describe('KeyholderInvitationScreen - send mode (UAT 62 L, validity presets, inv
     const json = JSON.stringify(tr.toJSON());
     expect(json).toContain('keyholderInviteSendFailed');
     expect(json).not.toContain('raw engine text');
+  });
+
+  const sendKh = (tr: renderer.ReactTestRenderer) => send(tr);
+
+  describe('leave guard (unshared invite)', () => {
+    let alertSpy: jest.SpyInstance;
+    beforeEach(() => {
+      alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+      mockRouteParams.keyholder = invitee('Kay Holder');
+      mockCopyToClipboard.mockResolvedValue(true);
+    });
+    afterEach(() => {
+      alertSpy.mockRestore();
+    });
+    const tap = async (tr: renderer.ReactTestRenderer, id: string) => {
+      const b = tr.root.findAll((n) => n.props?.testID === id && typeof n.props?.onPress === 'function')[0];
+      await renderer.act(async () => {
+        await b.props.onPress();
+      });
+    };
+
+    it('B1: before Send, Back pops with no Alert', async () => {
+      const tr = await render();
+      expect(lastPrevent()).toBe(false);
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
+
+    it('B2: after Send, Back raises the confirm Alert and the screen stays', async () => {
+      const tr = await render();
+      await sendKh(tr);
+      expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-ready').length).toBeGreaterThan(0);
+      pressBack();
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      expect(alertSpy.mock.calls[0][0]).toBe('inviteLeaveUnsharedTitle');
+      expect(mockGoBack).not.toHaveBeenCalled();
+      expect(mockDispatch).not.toHaveBeenCalled();
+      expect(tr.root.findAll((n) => n.props?.testID === 'keyholder-invitation-share-ready').length).toBeGreaterThan(0);
+    });
+
+    it('B3: the destructive button dispatches the blocked GO_BACK', async () => {
+      const tr = await render();
+      await sendKh(tr);
+      pressBack();
+      const leave = leaveButtons().find((b) => b.style === 'destructive')!;
+      leave.onPress!();
+      expect(mockDispatch).toHaveBeenCalledWith({ type: 'GO_BACK' });
+    });
+
+    it('B4: after a confirmed Copy, Back pops with no Alert', async () => {
+      const tr = await render();
+      await sendKh(tr);
+      await tap(tr, 'keyholder-invitation-share-copy');
+      expect(mockCopyToClipboard).toHaveBeenCalledTimes(1);
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
+
+    it('B5: after a Share that resolves sharedAction, Back pops with no Alert', async () => {
+      jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction } as never);
+      const tr = await render();
+      await sendKh(tr);
+      await tap(tr, 'keyholder-invitation-share-share');
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
   });
 });
 

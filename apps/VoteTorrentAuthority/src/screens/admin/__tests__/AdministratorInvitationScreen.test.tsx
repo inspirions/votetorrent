@@ -19,7 +19,7 @@
 
 import React from 'react';
 import renderer from 'react-test-renderer';
-import { StyleSheet } from 'react-native';
+import { Alert, Share, StyleSheet } from 'react-native';
 import { globalStyles } from '../../../theme/styles';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex } from '@noble/curves/utils.js';
@@ -44,6 +44,29 @@ const mockSetParams = jest.fn();
 const mockReplace = jest.fn();
 const mockPush = jest.fn();
 const mockDispatch = jest.fn();
+const mockUsePreventRemove = jest.fn();
+const mockCopyToClipboard = jest.fn(async (_text: string) => true);
+jest.mock('../../../utils/copyToClipboard', () => ({ copyToClipboard: (text: string) => mockCopyToClipboard(text) }));
+/** What the stack does on Back: run the guard callback when it is armed, otherwise pop. */
+function pressBack() {
+  const calls = mockUsePreventRemove.mock.calls;
+  const [prevent, cb] = calls[calls.length - 1];
+  if (prevent) {
+    renderer.act(() => {
+      cb({ data: { action: { type: 'GO_BACK' } } });
+    });
+  } else {
+    mockGoBack();
+  }
+}
+function lastPrevent(): boolean {
+  const calls = mockUsePreventRemove.mock.calls;
+  return calls[calls.length - 1][0];
+}
+function leaveButtons(): Array<{ text: string; style?: string; onPress?: () => void }> {
+  const calls = (Alert.alert as jest.Mock).mock.calls;
+  return calls[calls.length - 1][2];
+}
 /** Navigation calls whose arguments carry a 64-hex secret or the given private key. */
 function navigationLeaks(invitePrivate: string): string[] {
   const out: string[] = [];
@@ -157,6 +180,7 @@ jest.mock('@react-navigation/native', () => ({
     push: mockPush,
     dispatch: mockDispatch,
   }),
+  usePreventRemove: (prevent: boolean, cb: (e: unknown) => void) => mockUsePreventRemove(prevent, cb),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -257,6 +281,85 @@ describe('AdministratorInvitationScreen — INV-02 (send mode real invitePrivate
     const rendered = JSON.stringify(tr.toJSON());
     expect(rendered).not.toContain('invitePrivate');
     expect(rendered).not.toContain('admin-ephemeral-private-hex');
+  });
+
+  const sendAdmin = async (tr: renderer.ReactTestRenderer) => {
+    await renderer.act(async () => {
+      tr.root.findAll((n) => n.props?.title === 'name' && typeof n.props?.onChangeText === 'function')[0].props.onChangeText('New Officer');
+    });
+    await renderer.act(async () => {
+      tr.root.findAll((n) => n.props?.title === 'title' && typeof n.props?.onChangeText === 'function')[0].props.onChangeText('Clerk');
+    });
+    await renderer.act(async () => {
+      await buttonByTitle(tr, 'send').props.onPress();
+      await Promise.resolve();
+    });
+  };
+
+  describe('leave guard (unshared invite)', () => {
+    let alertSpy: jest.SpyInstance;
+    beforeEach(() => {
+      alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+      mockCopyToClipboard.mockResolvedValue(true);
+    });
+    afterEach(() => {
+      alertSpy.mockRestore();
+    });
+    const tap = async (tr: renderer.ReactTestRenderer, id: string) => {
+      const b = tr.root.findAll((n) => n.props?.testID === id && typeof n.props?.onPress === 'function')[0];
+      await renderer.act(async () => {
+        await b.props.onPress();
+      });
+    };
+
+    it('B1: before Send, Back pops with no Alert', async () => {
+      await render();
+      expect(lastPrevent()).toBe(false);
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
+
+    it('B2: after Send, Back raises the confirm Alert and the screen stays', async () => {
+      const tr = await render();
+      await sendAdmin(tr);
+      expect(tr.root.findAll((n) => n.props?.testID === 'administrator-invitation-share-ready').length).toBeGreaterThan(0);
+      pressBack();
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      expect(alertSpy.mock.calls[0][0]).toBe('inviteLeaveUnsharedTitle');
+      expect(mockGoBack).not.toHaveBeenCalled();
+      expect(mockDispatch).not.toHaveBeenCalled();
+      expect(tr.root.findAll((n) => n.props?.testID === 'administrator-invitation-share-ready').length).toBeGreaterThan(0);
+    });
+
+    it('B3: the destructive button dispatches the blocked GO_BACK', async () => {
+      const tr = await render();
+      await sendAdmin(tr);
+      pressBack();
+      const leave = leaveButtons().find((b) => b.style === 'destructive')!;
+      leave.onPress!();
+      expect(mockDispatch).toHaveBeenCalledWith({ type: 'GO_BACK' });
+    });
+
+    it('B4: after a confirmed Copy, Back pops with no Alert', async () => {
+      const tr = await render();
+      await sendAdmin(tr);
+      await tap(tr, 'administrator-invitation-share-copy');
+      expect(mockCopyToClipboard).toHaveBeenCalledTimes(1);
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
+
+    it('B5: after a Share that resolves sharedAction, Back pops with no Alert', async () => {
+      jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction } as never);
+      const tr = await render();
+      await sendAdmin(tr);
+      await tap(tr, 'administrator-invitation-share-share');
+      pressBack();
+      expect(mockGoBack).toHaveBeenCalledTimes(1);
+      expect(alertSpy).not.toHaveBeenCalled();
+    });
   });
 });
 
