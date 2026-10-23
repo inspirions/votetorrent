@@ -28,6 +28,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useUnsharedInviteGuard } from "../../hooks/useUnsharedInviteGuard";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { takeInviteShare } from "../invitations/invite-share-handoff";
@@ -63,6 +64,8 @@ export default function AuthorityInvitationScreen() {
 
 	// D-05: share text shown after a successful send (authority invite material).
 	const [shareText, setShareText] = useState<string>("");
+	// Protects the only copy of the minted invite until it is shared or copied; confirms before discarding it.
+	const markInviteShared = useUnsharedInviteGuard(shareText);
 
 	// D-06: paste field in accept mode.
 	const [pastedInvite, setPastedInvite] = useState<string>(() => takeInviteShare(shareToken) ?? "");
@@ -292,7 +295,7 @@ export default function AuthorityInvitationScreen() {
 
 						{/* D-05: share text + Copy button after a successful send */}
 						{shareText ? (
-							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="authority-invitation-share" />
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="authority-invitation-share" onShared={markInviteShared} />
 						) : null}
 					</View>
 				</ScrollView>

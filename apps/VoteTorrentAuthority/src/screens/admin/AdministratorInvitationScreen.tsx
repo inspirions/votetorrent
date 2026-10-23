@@ -29,6 +29,7 @@ import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useUnsharedInviteGuard } from "../../hooks/useUnsharedInviteGuard";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { takeInviteShare } from "../invitations/invite-share-handoff";
@@ -53,6 +54,8 @@ export default function AdministratorInvitationScreen() {
 	const [title, setTitle] = useState(mode === "send" ? (officerInit?.title ?? "") : "");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
+	// Protects the only copy of the minted invite until it is shared or copied; confirms before discarding it.
+	const markInviteShared = useUnsharedInviteGuard(shareText);
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [isSending, setIsSending] = useState(false);
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
@@ -248,7 +251,7 @@ export default function AdministratorInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" />
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" onShared={markInviteShared} />
 						) : null}
 
 						{/* Pattern B error display */}

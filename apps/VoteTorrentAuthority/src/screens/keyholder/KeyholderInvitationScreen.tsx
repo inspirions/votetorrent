@@ -37,6 +37,7 @@ import { takeInviteShare } from "../invitations/invite-share-handoff";
 import { InviteSharePasteField } from "../invitations/InviteSharePasteField";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useUnsharedInviteGuard } from "../../hooks/useUnsharedInviteGuard";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 
 type KeyholderInvitationParams = {
@@ -64,6 +65,8 @@ export function KeyholderInvitationScreen() {
 	const [sentExpiration, setSentExpiration] = useState<string>("");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
+	// Protects the only copy of the minted invite until it is shared or copied; confirms before discarding it.
+	const markInviteShared = useUnsharedInviteGuard(shareText);
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [isSending, setIsSending] = useState(false);
 	const [isAccepting, setIsAccepting] = useState(false);
@@ -359,7 +362,7 @@ export function KeyholderInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="keyholder-invitation-share" />
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="keyholder-invitation-share" onShared={markInviteShared} />
 						) : null}
 
 						{/* Pattern B error display */}
