@@ -54,12 +54,12 @@ const SHARE = JSON.stringify({
 // then fired in a later file and threw `reading 'timing'` there (review-fix lanes B and C).
 const mounted: renderer.ReactTestRenderer[] = [];
 
-function render() {
+function render(onShared?: () => void) {
   let tr!: renderer.ReactTestRenderer;
   act(() => {
     tr = renderer.create(
       <ToastProvider>
-        <InviteShareBlock label="invitationKey" shareText={SHARE} testIDPrefix="p" />
+        <InviteShareBlock label="invitationKey" shareText={SHARE} testIDPrefix="p" onShared={onShared} />
       </ToastProvider>,
     );
   });
@@ -164,5 +164,61 @@ describe('InviteShareBlock', () => {
     await press(tr, 'p-copy');
     expect(mockGetString).not.toHaveBeenCalled();
     expect(toastText(tr)).toBe('invitationShareCopied');
+  });
+
+  describe('onShared', () => {
+    it('S1: Share resolving sharedAction calls onShared once', async () => {
+      jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction } as never);
+      const onShared = jest.fn();
+      const tr = render(onShared);
+      await press(tr, 'p-share');
+      expect(onShared).toHaveBeenCalledTimes(1);
+    });
+
+    it('S2: a dismissed iOS share sheet is not shared and shows no status', async () => {
+      jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.dismissedAction } as never);
+      const onShared = jest.fn();
+      const tr = render(onShared);
+      await press(tr, 'p-share');
+      expect(onShared).not.toHaveBeenCalled();
+      expect(statusText(tr)).toBeUndefined();
+    });
+
+    it('S3: a rejected Share is not shared and still shows the failure line', async () => {
+      jest.spyOn(Share, 'share').mockRejectedValue(new Error('no activity'));
+      const onShared = jest.fn();
+      const tr = render(onShared);
+      await press(tr, 'p-share');
+      expect(onShared).not.toHaveBeenCalled();
+      expect(statusText(tr)).toBe('invitationShareSheetFailed');
+    });
+
+    it('S4: COPY with a matching read-back calls onShared once', async () => {
+      mockGetString.mockResolvedValueOnce(SHARE);
+      const onShared = jest.fn();
+      const tr = render(onShared);
+      await press(tr, 'p-copy');
+      expect(onShared).toHaveBeenCalledTimes(1);
+    });
+
+    it('S5: a failed copy (empty read-back, or setString throwing) is not shared', async () => {
+      const onShared = jest.fn();
+      mockGetString.mockResolvedValueOnce('');
+      await press(render(onShared), 'p-copy');
+      mockSetString.mockImplementationOnce(() => {
+        throw new Error('no module');
+      });
+      await press(render(onShared), 'p-copy');
+      expect(onShared).not.toHaveBeenCalled();
+    });
+
+    it('S6: without onShared, Share and Copy still work', async () => {
+      jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction } as never);
+      mockGetString.mockResolvedValueOnce(SHARE);
+      const tr = render();
+      await press(tr, 'p-share');
+      await press(tr, 'p-copy');
+      expect(toastText(tr)).toBe('invitationShareCopied');
+    });
   });
 });
