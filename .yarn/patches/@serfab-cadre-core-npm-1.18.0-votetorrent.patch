@@ -444,3 +444,53 @@ index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbd
 +    }
 +}
 +//# sourceMappingURL=strand-observer-protocol.js.map
+diff --git a/dist/peer-join-backfill.js b/dist/peer-join-backfill.js
+index 73de9f7c008b8e71b384ccbad00a2db91e8a6d15..45ac8b12652928e64f8f42c26a9944e71ce44ea1 100644
+--- a/dist/peer-join-backfill.js
++++ b/dist/peer-join-backfill.js
+@@ -646,7 +646,7 @@ export class PeerJoinBackfill {
+         }
+         const client = this.createPushClient(peerId);
+         const memo = this.memoFor(key);
+-        let chunk = { ids: [], buffers: [], meta: {}, proofs: {}, bytes: 0 };
++        let chunk = { ids: [], blocks: {}, meta: {}, proofs: {}, bytes: 0 };
+         let chunkFailed = false;
+         let anyChunkDelivered = false;
+         /**
+@@ -659,12 +659,14 @@ export class PeerJoinBackfill {
+         const flush = async () => {
+             if (chunk.ids.length === 0)
+                 return;
+-            const { ids, buffers, meta, proofs } = chunk;
+-            chunk = { ids: [], buffers: [], meta: {}, proofs: {}, bytes: 0 };
++            const { ids, blocks, meta, proofs } = chunk;
++            chunk = { ids: [], blocks: {}, meta: {}, proofs: {}, bytes: 0 };
+             try {
+                 // ONE certification value rather than two arguments, so a caller cannot pair a proof
+                 // for one revision with meta for another — both were written from the same `latest`.
+-                const response = await client.pushBlocks(ids, buffers, 'replication', { blockMeta: meta, blockProofs: proofs }, {
++                // votetorrent patch: @optimystic/db-p2p 1.19.0 takes the blocks themselves, keyed by id
++                // (`pushBlocks(blocks, reason, certification, deadlines)`); 1.18.0 took (ids, buffers, ...).
++                const response = await client.pushBlocks(blocks, 'replication', { blockMeta: meta, blockProofs: proofs }, {
+                     dialTimeoutMs: this.config.dialTimeoutMs,
+                     responseTimeoutMs: this.config.responseTimeoutMs
+                 });
+@@ -710,7 +712,7 @@ export class PeerJoinBackfill {
+                     break;
+             }
+             chunk.ids.push(blockId);
+-            chunk.buffers.push(offer.buffer);
++            chunk.blocks[blockId] = offer.block;
+             chunk.meta[blockId] = { rev: offer.latest.rev, actionId: offer.latest.actionId };
+             if (offer.proof) {
+                 chunk.proofs[blockId] = offer.proof;
+@@ -773,7 +775,7 @@ export class PeerJoinBackfill {
+             log('[%s] block=%s is %d bytes (%d on the wire) — exceeds the %d-byte protocol cap alone; skipped', this.deps.label, blockId, buffer.length, base64WireBytes(buffer.length), MAX_BLOCK_MESSAGE_BYTES);
+             return undefined;
+         }
+-        return { latest, buffer, proof };
++        return { latest, buffer, block, proof };
+     }
+ }
+ //# sourceMappingURL=peer-join-backfill.js.map
+\ No newline at end of file
