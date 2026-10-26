@@ -1,7 +1,7 @@
 /**
  * self-voucher.ts — isSelfVouched (QUICK-260928-jwi).
  *
- * Mirrors @serfab/cadre-core 1.16.0's (unchanged since 1.14.0) PRIVATE `CadreNode#hasAnchoredProof(row, chain)` —
+ * Mirrors @serfab/cadre-core 1.18.0's (unchanged in substance since 1.14.0) PRIVATE `CadreNode#hasAnchoredProof(row, chain)` —
  * checks 2-4 of the authorized-membership predicate — applied to THIS peer's own `CadrePeer`
  * row. A row carries one of two proofs, and the voucher wins when both are present:
  *  - an owner VOUCHER (`hasAnchoredVoucher`): complete voucher, `VouchOwner` anchored in the
@@ -23,8 +23,13 @@
  * invitation branch was added (redemption is now the only joiner route the API offers). On the
  * 1.15.0 bump `hasAnchoredProof`, `hasAnchoredVoucher` and `isInvitationAdmitted` re-diffed
  * byte-identical and `peer-authorization.js` was unchanged. 1.16.0's whole `dist/` is
- * byte-identical to 1.15.0's (only dependency ranges moved). A future bump should re-diff the same
- * three in `cadre-node.js` before trusting this unchanged.
+ * byte-identical to 1.15.0's (only dependency ranges moved). 1.18.0 (2026-10-26): `hasAnchoredVoucher`
+ * is byte-identical; `isInvitationAdmitted` was renamed `isConsentSeated` (same predicate, `vouchSig`
+ * null and `vouchUsage` set, now also covering owner-grant `OwnerKey` rows); `hasAnchoredProof` only
+ * gained a NOTE; `verifyInvitationAdmission` inlined its shared chain with the same eight links
+ * (anchored issuer, issuer = `vouchOwner`, usage/peer stamps, targeted peer, peer key, and the add,
+ * redeem and consent signatures). A future bump should re-diff the same three in `cadre-node.js`
+ * before trusting this unchanged.
  */
 import { verifyCadrePeerVoucher, verifyInvitationAdmission } from '@serfab/cadre-core';
 import type { CadreInviteRow, CadreInviteUsageRow, CadrePeerRow } from '@serfab/cadre-core';

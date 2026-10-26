@@ -39,7 +39,10 @@ export interface OwnerTrustNode {
   getTrustedOwnerStore(): { all(): ReadonlySet<string> } | null;
   getControlDatabase(): { getOwnerKeys(): Promise<ReadonlySet<string>> } | null;
   getIdentityOwnerKey(): { publicKeyB64: string };
-  wireOwnKeyIfOwner(): Promise<boolean>;
+  /** cadre-core 1.18 takes the candidate owner signer explicitly (see identity-owner-key.ts). */
+  wireOwnKeyIfOwner(signer?: unknown): Promise<boolean>;
+  /** The identity owner signer, when the node carries one (identity-owner-key.ts). */
+  getIdentityOwnerSigner?(): unknown;
 }
 
 export type ReanchorOutcome = 'wired' | 'not-owner' | 'failed' | 'timed-out';
@@ -83,16 +86,19 @@ async function bounded<T>(work: Promise<T>, timeoutMs: number): Promise<T | type
 }
 
 /**
- * Founder re-anchor at boot. cadre-core's wireOwnKeyIfOwner() anchors only this node's own identity
- * key, and only when its live OwnerKey row exists, with 'operator' provenance; it never pins a foreign
- * key. Bounded, never rejects, and logs only closed tokens.
+ * Founder re-anchor at boot. cadre-core's wireOwnKeyIfOwner(signer) wires the signer's key only when
+ * its live OwnerKey row exists; it never pins a foreign key. Since cadre-core 1.18 it no longer tries
+ * the node's identity key by itself, so the identity owner signer is handed in explicitly
+ * (identity-owner-key.ts); a node without one gets cadre-core's own default. Bounded, never rejects,
+ * and logs only closed tokens.
  */
 export async function reanchorOwnKey(
-  node: Pick<OwnerTrustNode, 'wireOwnKeyIfOwner'>,
+  node: Pick<OwnerTrustNode, 'wireOwnKeyIfOwner' | 'getIdentityOwnerSigner'>,
   timeoutMs: number = OWNER_REANCHOR_TIMEOUT_MS,
 ): Promise<ReanchorOutcome> {
   try {
-    const outcome = await bounded(node.wireOwnKeyIfOwner(), timeoutMs);
+    const signer = node.getIdentityOwnerSigner?.();
+    const outcome = await bounded(node.wireOwnKeyIfOwner(signer), timeoutMs);
     if (outcome === TIMED_OUT) {
       console.warn('[owner-trust] reanchor: timed-out');
       return 'timed-out';

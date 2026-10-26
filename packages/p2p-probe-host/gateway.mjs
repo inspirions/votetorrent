@@ -56,7 +56,7 @@ import { resolve as resolvePath, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate, createHash } from 'node:crypto';
-import { CadreNode, PROVISIONAL_ADMISSION_DEADLINE_MS, PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS } from '@serfab/cadre-core';
+import { CadreNode, PROVISIONAL_ADMISSION_DEADLINE_MS, PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
@@ -817,7 +817,8 @@ export async function startGateway(options = {}) {
 
   // ── Owner genesis — MUST run while the node is solo, above addStrand and above anything that
   // admits a peer (drone.mjs:202-216's ordering, inherited). ─────────────────────────────────
-  const owner = node.getIdentityOwnerKey();
+  // cadre-core 1.18 deleted getIdentityOwnerKey(); derive the same identity owner key here.
+  const owner = ed25519KeyPairFromLibp2p(identityKey);
   await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
   const controlDb = node.getControlDatabase();
   if (!controlDb) fatal('gateway has no control database after start() — cannot run owner genesis.');

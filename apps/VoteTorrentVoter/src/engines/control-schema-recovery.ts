@@ -24,8 +24,28 @@ function errorChain(e: unknown): string {
 	return parts.join(' <- ');
 }
 
+/**
+ * cadre-core 1.17+ checks a warm control store BEFORE applying anything and refuses one it cannot
+ * migrate with a typed `ControlStoreIncompatibleError` (sereus#46). Its `reason` (1.18) says what to
+ * do: `before-migrations` (written by 1.16 or earlier; measured: a 1.16 store reads version 0 against
+ * this build's 3) and `not-migratable` are recreated; `newer-release` means a newer release already
+ * migrated this store and its rows are intact, so the app must be updated and the store must NOT be
+ * wiped. Matched by `name` and `reason` (set as string literals in cadre-core), so no import is needed.
+ */
+const RECREATE_REASONS: ReadonlySet<string> = new Set(['before-migrations', 'not-migratable']);
+
+function typedStoreRefusal(e: unknown): string | null {
+	for (let x: unknown = e, depth = 0; x != null && depth < 6; x = (x as { cause?: unknown }).cause, depth++) {
+		const err = x as { name?: unknown; reason?: unknown };
+		if (err.name === 'ControlStoreIncompatibleError') return typeof err.reason === 'string' ? err.reason : '';
+	}
+	return null;
+}
+
 /** True only for a CadreControl schema that can be neither migrated nor restored. */
 export function isUnrestorableControlSchemaError(e: unknown): boolean {
+	const refusal = typedStoreRefusal(e);
+	if (refusal !== null) return RECREATE_REASONS.has(refusal);
 	const text = errorChain(e);
 	return /CadreControl\./i.test(text)
 		&& /could not be restored|partially migrated|cannot drop table|drop constraint|does not support ALTER/i.test(text);

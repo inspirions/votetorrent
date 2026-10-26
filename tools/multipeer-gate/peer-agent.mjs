@@ -39,7 +39,7 @@
  *   echo '#MPG# {"id":1,"op":"ping"}' | node peer-agent.mjs
  */
 import { createFrameReader, encodeFrame } from './lib/wire.mjs';
-import { decodeCadreInvitation } from '@serfab/cadre-core';
+import { decodeCadreInvitation, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
 import {
   buildNode, generateKeyPair, strandConfig,
   PARTY_ID, STRAND_ID, GATE_TABLE,
@@ -135,7 +135,8 @@ const ops = {
 
   genesis: async () => {
     const node = requireNode();
-    const owner = node.getIdentityOwnerKey();
+    // cadre-core 1.18 deleted getIdentityOwnerKey(): mint an owner key apart from the identity.
+    const owner = ed25519KeyPairFromLibp2p(await generateKeyPair('Ed25519'));
     await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
     const db = node.getControlDatabase();
     if (!db) throw new Error('no control database after start()');
@@ -152,7 +153,7 @@ const ops = {
    * it by passing a live object between two nodes that share a heap.
    */
   createInvite: async ({ peerId }) => {
-    const { invitation, encoded } = await requireNode().createCadreInvitation({ peerId, grantsOwner: false });
+    const { invitation, encoded } = await requireNode().createCadreInvitation({ peerId });
     return { encodedInvite: encoded, partyId: invitation.partyId };
   },
 

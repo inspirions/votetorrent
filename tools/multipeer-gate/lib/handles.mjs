@@ -13,7 +13,8 @@
  * the shared heap was supplying for free.
  */
 import { STRAND_ID } from './topology.mjs';
-import { decodeCadreInvitation } from '@serfab/cadre-core';
+import { decodeCadreInvitation, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
+import { generateKeyPair } from '@libp2p/crypto/keys';
 
 /** A node built and started inside THIS process. */
 export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = {}) {
@@ -61,7 +62,9 @@ export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = 
     },
 
     genesis: async () => {
-      const owner = node.getIdentityOwnerKey();
+      // cadre-core 1.18 deleted getIdentityOwnerKey(): an owner key is no longer the node identity
+      // (sereus tickets 1.08 / 2.4). The gate needs AN owner key, so it mints one per genesis.
+      const owner = ed25519KeyPairFromLibp2p(await generateKeyPair('Ed25519'));
       await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
       const db = node.getControlDatabase();
       if (!db) throw new Error('no control database after start()');
@@ -71,9 +74,10 @@ export function inProcessHandle(name, node, storage, { strandId = STRAND_ID } = 
     },
 
     // cadre-core 1.14: a cadre invitation targeted at one joiner, redeemed by that joiner; the
-    // member that answers seats the joiner's row (no owner-side accept).
+    // member that answers seats the joiner's row (no owner-side accept). 1.18: an invitation never
+    // grants ownership, so `grantsOwner` is gone from the options.
     createInvite: async (peerId) => {
-      const { encoded } = await node.createCadreInvitation({ peerId, grantsOwner: false });
+      const { encoded } = await node.createCadreInvitation({ peerId });
       return { encodedInvite: encoded };
     },
     redeemInvite: async (encodedInvite) => { await node.redeemCadreInvitation(decodeCadreInvitation(encodedInvite)); },

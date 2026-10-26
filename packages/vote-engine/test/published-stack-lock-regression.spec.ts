@@ -4,7 +4,7 @@
  * Phase 40 CI regression locks — three lockfile/manifest invariants for the
  * published-package stack that no existing spec covers:
  *
- *   UPG-06 — patched @quereus/quereus 4.20.2 single copy. Extends
+ *   UPG-06 — patched @quereus/quereus 4.20.3 single copy. Extends
  *            quereus-single-copy-regression.spec.ts (UPG-03, "single copy,
  *            4.x") to the phase-specific version+patch: the resolved version
  *            must be exactly 4.3.1, the required forward-ported patch locator
@@ -81,8 +81,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
   const lock = readFileSync(join(repoRoot, 'yarn.lock'), 'utf8')
   const rootPackageJson = readFileSync(join(repoRoot, 'package.json'), 'utf8')
 
-  describe('UPG-06: patched @quereus/quereus 4.20.2 single copy', () => {
-    it('resolves a single @quereus/quereus version, and it is exactly 4.20.2', () => {
+  describe('UPG-06: patched @quereus/quereus 4.20.3 single copy', () => {
+    it('resolves a single @quereus/quereus version, and it is exactly 4.20.3', () => {
       const versions = resolvedVersionsFor(lock, '@quereus/quereus')
       expect(versions.length, 'expected at least one resolved @quereus/quereus block in yarn.lock').to.be.greaterThan(0)
 
@@ -94,16 +94,22 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @quereus/quereus version must be exactly 4.20.2, got ${distinct[0]}`
-      ).to.equal('4.20.2')
+        `Resolved @quereus/quereus version must be exactly 4.20.3, got ${distinct[0]}`
+      ).to.equal('4.20.3')
     })
 
-    it('carries the required 4.20.2 patch (@quereus-quereus-npm-4.20.2-votetorrent)', () => {
-      const count = (lock.match(/@quereus-quereus-npm-4\.20\.2-votetorrent/g) ?? []).length
+    it('carries the required 4.20.3 patch (@quereus-quereus-npm-4.20.3-votetorrent)', () => {
+      const count = (lock.match(/@quereus-quereus-npm-4\.20\.3-votetorrent/g) ?? []).length
       expect(
         count,
-        'Expected the @quereus-quereus-npm-4.20.2-votetorrent patch locator to be present in yarn.lock. Forward-ported '
-        + '4.11.0 -> 4.14.0 (spike 064) -> 4.17.1 -> 4.18.0 -> 4.19.4 -> 4.20.0 -> 4.20.1 -> 4.20.2 (2026-10-13, with '
+        'Expected the @quereus-quereus-npm-4.20.3-votetorrent patch locator to be present in yarn.lock. Forward-ported '
+        + '4.11.0 -> 4.14.0 (spike 064) -> 4.17.1 -> 4.18.0 -> 4.19.4 -> 4.20.0 -> 4.20.1 -> 4.20.2 -> 4.20.3. The 4.20.3 hop '
+        + '(2026-10-26, forced by @optimystic 1.19.0 / @serfab 1.18.0, whose peer ranges moved to ^4.20.3): 4.20.3 changes '
+        + 'only schema-differ.js, which no hunk touches, so the body is verbatim and every hunk incl. coerceNewSection '
+        + 'was confirmed in all 7 installed copies. Re-measured UNPATCHED on this machine, not carried forward: 2828 '
+        + 'passing / 584 failing, dominated by ExpirationValid / SubmittedAtValid (~369) and the CidValid / SignatureValid '
+        + 'digests over the same datetimes (~196); and a founder apply of 100 tables lets a 5 ms timer fire 0 times '
+        + 'unpatched vs ~135 patched (the yield half; quereus#34 OPEN). The 4.20.2 hop was (2026-10-13, with '
         + '@serfab 1.15.0 / @optimystic 1.13.0; 4.20.2 only adds the sqllogic corpus to the package and its dist is '
         + 'BYTE-IDENTICAL to 4.20.1, so the body is verbatim). The 4.20.1 hop was (2026-10-06, forced by '
         + '@optimystic 1.11.0 / @serfab 1.13.0, whose peer ranges moved to ^4.20.1; all six patched files are '
@@ -133,7 +139,7 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
       ).to.be.greaterThan(0)
     })
 
-    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861, 4.14.0-042f7e4e5e, 4.17.1-831db23a51, 4.18.0-9b9f24c666, 4.19.4-6fd16bc9e5, 4.20.0-6fd16bc9e5, 4.20.1-votetorrent)', () => {
+    it('has zero references to superseded quereus patch locators (4.2.1-64e8a4bca7, 4.3.1-6814ac0861, 4.14.0-042f7e4e5e, 4.17.1-831db23a51, 4.18.0-9b9f24c666, 4.19.4-6fd16bc9e5, 4.20.0-6fd16bc9e5, 4.20.1-votetorrent, 4.20.2-votetorrent)', () => {
       const supersededCounts = {
         '4.2.1-64e8a4bca7': (lock.match(/4\.2\.1-64e8a4bca7/g) ?? []).length,
         '4.3.1-6814ac0861': (lock.match(/4\.3\.1-6814ac0861/g) ?? []).length,
@@ -143,6 +149,7 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         '4.19.4-6fd16bc9e5': (lock.match(/4\.19\.4-6fd16bc9e5/g) ?? []).length,
         '4.20.0-6fd16bc9e5': (lock.match(/4\.20\.0-6fd16bc9e5/g) ?? []).length,
         '4.20.1-votetorrent': (lock.match(/4\.20\.1-votetorrent/g) ?? []).length,
+        '4.20.2-votetorrent': (lock.match(/4\.20\.2-votetorrent/g) ?? []).length,
       }
       const residue = Object.entries(supersededCounts).filter(([, n]) => n > 0)
       expect(
@@ -183,11 +190,11 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
 
       expect(
         distinct[0],
-        `Resolved @optimystic/quereus-plugin-optimystic version must be 1.15.x, got ${distinct[0]}`
-      ).to.match(/^1\.15\./)
+        `Resolved @optimystic/quereus-plugin-optimystic version must be 1.19.x, got ${distinct[0]}`
+      ).to.match(/^1\.19\./)
     })
 
-    it('resolves ^1.15.0 in the root package.json dependency declaration', () => {
+    it('resolves ^1.19.0 in the root package.json dependency declaration', () => {
       const parsed = JSON.parse(rootPackageJson) as {
         dependencies?: Record<string, string>
         resolutions?: Record<string, string>
@@ -196,8 +203,8 @@ describe('published stack lock regression (UPG-06 / PUB-01 / PUB-02)', () => {
         parsed.resolutions?.['@optimystic/quereus-plugin-optimystic']
       expect(
         declared,
-        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.15.0'
-      ).to.equal('^1.15.0')
+        'Expected root package.json to declare @optimystic/quereus-plugin-optimystic as ^1.19.0'
+      ).to.equal('^1.19.0')
     })
 
     it('has zero references to the dead patch locators (0.13.5 plugin-optimystic patch, 0.7.1 cadre-core patch)', () => {

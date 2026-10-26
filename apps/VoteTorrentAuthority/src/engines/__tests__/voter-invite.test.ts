@@ -183,7 +183,7 @@ describe("createVoterJoinCode", () => {
 			founder: { userId: "officer", signerKey: "officer-key" },
 		});
 		expect(getFoundingAnchor).toHaveBeenCalledWith(ANCHOR.networkHash, { userId: "officer", signerKey: "officer-key" });
-		expect(node.createCadreInvitation).toHaveBeenCalledWith({ grantsOwner: false, uses: VOTER_INVITE_USES, expiresInMs: VOTER_INVITE_LIFETIME_MS });
+		expect(node.createCadreInvitation).toHaveBeenCalledWith({ uses: VOTER_INVITE_USES, expiresInMs: VOTER_INVITE_LIFETIME_MS });
 		expect(result).toMatchObject({ fingerprint: ANCHOR.fingerprint, expiresAt: "2026-11-11T11:26:21.316", networkName: ANCHOR.name });
 		const decoded = decodeNetworkJoinCode(result.code);
 		expect(decoded.ok).toBe(true);

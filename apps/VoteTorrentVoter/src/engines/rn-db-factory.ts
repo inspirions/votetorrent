@@ -184,7 +184,9 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 				// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
 				// here rather than merely tolerated — and it is provenance, not content, so
 				// `strandRowMismatches` excludes it from the identical-content comparison.
-				strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
+				// cadre-core 1.18 adds `FounderPeerId` (the machine that runs the founder bootstrap,
+				// read only when no explicit `founder` flag is given). Same reasoning, so null.
+				strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null, FounderPeerId: null },
 				sAppConfig: {
 					id: 'org.votetorrent',
 					version: '1.0.0',

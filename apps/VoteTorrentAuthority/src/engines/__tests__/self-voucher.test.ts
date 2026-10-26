@@ -1,7 +1,7 @@
 /**
  * RED → GREEN test for isSelfVouched (QUICK-260928-jwi).
  *
- * This mirrors cadre-core 1.16.0's (unchanged since 1.14.0) private CadreNode#hasAnchoredProof(row, chain) — checks 2-4
+ * This mirrors cadre-core 1.18.0's (unchanged in substance since 1.14.0) private CadreNode#hasAnchoredProof(row, chain) — checks 2-4
  * of the authorized-membership predicate, by either proof a row can carry (an owner voucher, or
  * the invitation admission a member seats on redemption) — applied to THIS peer's own CadrePeer
  * row. It exists because

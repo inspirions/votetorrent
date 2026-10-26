@@ -48,8 +48,8 @@ export interface VoterInviteNode {
 	getSeedBootstrapService(): { canAuthorize(): boolean } | null;
 	trustOwnerKeys(keys: Iterable<string>, source: 'operator'): Promise<void>;
 	initializeSeedBootstrap(ownerPrivateKey: string): Promise<void>;
+	/** cadre-core 1.18: an invitation never grants ownership, so there is no `grantsOwner` option. */
 	createCadreInvitation(options: {
-		grantsOwner: boolean;
 		uses?: number;
 		expiresInMs?: number;
 	}): Promise<{ encoded: string; invitation: { invite: { expiresAt: string | null } } }>;
@@ -140,7 +140,6 @@ export async function createVoterJoinCode(args: {
 	const anchor: FoundingAnchor = await args.networksEngine.getFoundingAnchor(args.networkHash, args.founder);
 	await ensureVoterInviteOwner(args.node);
 	const minted = await args.node.createCadreInvitation({
-		grantsOwner: false,
 		uses: VOTER_INVITE_USES,
 		expiresInMs: VOTER_INVITE_LIFETIME_MS,
 	});

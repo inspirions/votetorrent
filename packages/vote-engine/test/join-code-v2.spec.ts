@@ -130,7 +130,7 @@ describe('64-04: vtjoin2. join code (JV)', () => {
       ['totalUses 0', mut((b) => { b.invitation.invite.totalUses = 0 })],
       ['totalUses 1.5', mut((b) => { b.invitation.invite.totalUses = 1.5 })],
       ['totalUses as a string', mut((b) => { b.invitation.invite.totalUses = '1000' })],
-      ['grantsOwner as a string', mut((b) => { b.invitation.invite.grantsOwner = 'false' })],
+      ['an unknown invite key in the grantsOwner slot', mut((b) => { b.invitation.invite.grantsowner = false })],
       ['peerId 42', mut((b) => { b.invitation.invite.peerId = 42 })],
       ['expiresAt empty', mut((b) => { b.invitation.invite.expiresAt = '' })],
       ['non-printable-ASCII partyId', mut((b) => { b.invitation.partyId = 'é' })],
@@ -145,6 +145,18 @@ describe('64-04: vtjoin2. join code (JV)', () => {
     for (const [label, input] of cases) {
       expect(decodeNetworkJoinCode(input), label).to.deep.equal({ ok: false, reason: 'malformed' })
     }
+  })
+
+  it('JV-4c a v2 code minted before cadre-core 1.18 (its invite row still carries grantsOwner) is invitation-older-version', () => {
+    const { body } = makeV2(1)
+    const legacy = clone(body) as any // eslint-disable-line @typescript-eslint/no-explicit-any
+    // The pre-1.18 mint order: grantsOwner sat between peerId and expiresAt.
+    const { key, peerId, expiresAt, totalUses, stampId, issuerKey, issuerSig } = legacy.invitation.invite
+    legacy.invitation.invite = { key, peerId, grantsOwner: false, expiresAt, totalUses, stampId, issuerKey, issuerSig }
+    expect(decodeNetworkJoinCode(rawV2(legacy))).to.deep.equal({ ok: false, reason: 'invitation-older-version' })
+    // Any value of the old field reads the same: the shape is what dates it.
+    legacy.invitation.invite.grantsOwner = 'false'
+    expect(decodeNetworkJoinCode(rawV2(legacy))).to.deep.equal({ ok: false, reason: 'invitation-older-version' })
   })
 
   it('JV-4b an empty name decodes (v1 rule kept, R1)', () => {

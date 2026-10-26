@@ -74,7 +74,11 @@ const JOIN_CODE_PREFIX_PATTERN = /^vtjoin(\d+)\./
 const TOP_KEYS = ['digest', 'genesis', 'invitation', 'name', 'networkHash', 'v'] as const
 const GENESIS_KEYS = ['adminEffectiveAt', 'authorityId', 'signerKey', 'userId'] as const
 const INVITATION_KEYS = ['invite', 'invitePrivateKey', 'members', 'ownerKeys', 'partyId', 'v'] as const
-const INVITE_KEYS = ['expiresAt', 'grantsOwner', 'issuerKey', 'issuerSig', 'key', 'peerId', 'stampId', 'totalUses'] as const
+// cadre-core 1.18 dropped `grantsOwner` from the invite row (sereus ticket 2.4: an invitation never grants
+// ownership), so the row's key set and its mint order (`ControlDatabase.signCadreInvite`) lost it.
+const INVITE_KEYS = ['expiresAt', 'issuerKey', 'issuerSig', 'key', 'peerId', 'stampId', 'totalUses'] as const
+/** The invite row's keys up to cadre-core 1.17: a code minted before the 1.18 upgrade, which cannot redeem on it. */
+const PRE_118_INVITE_KEYS = ['expiresAt', 'grantsOwner', 'issuerKey', 'issuerSig', 'key', 'peerId', 'stampId', 'totalUses'] as const
 const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 
 function asciiJson (value: unknown): string {
@@ -202,7 +206,8 @@ const MALFORMED = { ok: false, reason: 'malformed' } as const
  * Decode a pasted or scanned join code. Never throws. Surrounding whitespace (and line breaks a
  * chat app may insert) is ignored. Text with no `vtjoin<N>.` prefix is `not-join-code`; an N
  * other than 1 or 2 is `unsupported-version`; a v1 code whose invitation is a 1.14-era
- * no-prefix mint is `invitation-older-version`; anything else that is not exactly the encoder's
+ * no-prefix mint, or a v2 code whose invite row still carries the pre-1.18 `grantsOwner` field, is
+ * `invitation-older-version`; anything else that is not exactly the encoder's
  * shape is `malformed`. A non-string input is `malformed`.
  */
 export function decodeNetworkJoinCode (text: unknown): NetworkJoinCodeDecodeResult {
@@ -279,12 +284,12 @@ function decodeV2 (compactLength: number, body: string): NetworkJoinCodeDecodeRe
   if (!isPlainObject(inv) || !hasExactKeys(inv, INVITATION_KEYS)) return MALFORMED
   if (inv.v !== 1 || !isWireString(inv.partyId) || !isWireString(inv.invitePrivateKey)) return MALFORMED
   const invite = inv.invite
+  if (isPlainObject(invite) && hasExactKeys(invite, PRE_118_INVITE_KEYS)) return { ok: false, reason: 'invitation-older-version' }
   if (!isPlainObject(invite) || !hasExactKeys(invite, INVITE_KEYS)) return MALFORMED
   if (!isWireString(invite.key) || !isWireString(invite.stampId) || !isWireString(invite.issuerKey) || !isWireString(invite.issuerSig)) {
     return MALFORMED
   }
   if (invite.peerId !== null && !isWireString(invite.peerId)) return MALFORMED
-  if (typeof invite.grantsOwner !== 'boolean') return MALFORMED
   if (invite.expiresAt !== null && !isWireString(invite.expiresAt)) return MALFORMED
   if (invite.totalUses !== null && !(typeof invite.totalUses === 'number' && Number.isSafeInteger(invite.totalUses) && invite.totalUses >= 1)) {
     return MALFORMED
@@ -307,7 +312,6 @@ function decodeV2 (compactLength: number, body: string): NetworkJoinCodeDecodeRe
     invite: {
       key: invite.key,
       peerId: invite.peerId,
-      grantsOwner: invite.grantsOwner,
       expiresAt: invite.expiresAt,
       totalUses: invite.totalUses,
       stampId: invite.stampId,

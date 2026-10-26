@@ -88,6 +88,22 @@ describe('reanchorOwnKey', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('hands wireOwnKeyIfOwner the identity owner signer when the node has one (cadre-core 1.18)', async () => {
+    const signer = { publicKey: 'self-pub' };
+    const wire = jest.fn(async () => true);
+    const node = { wireOwnKeyIfOwner: wire, getIdentityOwnerSigner: () => signer };
+    expect(await reanchorOwnKey(node)).toBe('wired');
+    expect(wire).toHaveBeenCalledWith(signer);
+  });
+
+  it('maps a throwing identity signer to failed, without calling wireOwnKeyIfOwner', async () => {
+    const wire = jest.fn(async () => true);
+    const node = { wireOwnKeyIfOwner: wire, getIdentityOwnerSigner: () => { throw new Error(PLANTED); } };
+    expect(await reanchorOwnKey(node)).toBe('failed');
+    expect(wire).not.toHaveBeenCalled();
+    expect(loggedText(warn)).not.toContain(PLANTED);
+  });
+
   it('maps a rejection to failed with one closed token and no rejection text', async () => {
     const f = fakeNode({
       wire: async () => {
