@@ -54,6 +54,21 @@ import {readVoterBallot, readVoterElection} from '../engines/election-read';
 import type {LifecycleState, VoterBallot, VoterElection, VoterAppContextType} from './types';
 import {DEV_LIFECYCLE_CONTENT} from './devLifecycleFixtures';
 
+/**
+ * How long a joined boot waits for its node before the Continue-without-network escape is offered
+ * under the Syncing label (#99). Same value as the Authority's NODE_SETTLE_TIMEOUT_MS, but it gates
+ * ONLY the escape: the run keeps waiting for the node's definitive settle.
+ */
+export const NODE_WAIT_ESCAPE_MS = 15000;
+
+/** A joined network whose CadreNode failed to start (#99). Its message never reaches the screen. */
+export class NetworkNodeUnavailableError extends Error {
+	constructor() {
+		super('the network node did not start');
+		this.name = 'NetworkNodeUnavailableError';
+	}
+}
+
 const VoterAppContext = createContext<VoterAppContextType | null>(null);
 
 export function useVoterApp(): VoterAppContextType {
@@ -85,6 +100,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// The currently-running init effect's own cancellation flag, published here so the
 	// escape's onPress can mark a superseded run BEFORE calling startFresh().
 	const cancelInitRunRef = useRef<(() => void) | undefined>(undefined);
+	// #99: true while a joined boot waits for its starting node; nodeWaitElapsed flips after
+	// NODE_WAIT_ESCAPE_MS of that wait and offers the escape (the wait itself continues).
+	const [awaitingNode, setAwaitingNode] = useState(false);
+	const [nodeWaitElapsed, setNodeWaitElapsed] = useState(false);
 
 	// D-07: the dev-seeded election id, captured from seedDevNetwork's return once the boot
 	// effect resolves. Only populated in __DEV__ (undefined otherwise). 51-12 (D-09/D-20): does
@@ -145,7 +164,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// mirroring the authority app's AppProvider. connectedPeers is keyed by strandId
 	// (== networkHash); node is null until CadreNode boots (rnDbFactory stays active until then,
 	// solo-safe — P2P-11 stays paused this phase).
-	const {connectedPeers, node, syncState, refreshJoinBootstrap} = useCadreNode();
+	const {connectedPeers, node, nodeStatus, syncState, refreshJoinBootstrap} = useCadreNode();
 	useEffect(() => {
 		engineFactoryRef.current?.setGetPeerCount(connectedPeers);
 		engineFactoryRef.current?.setNode(node);
@@ -203,10 +222,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// it — either the early 'syncing' signal or the later "budget elapsed" signal — even
 	// though isInitialized is still false and the init effect has not resolved.
 	useEffect(() => {
-		if (!isInitialized && (syncState === 'syncing' || firstSyncBudgetElapsed)) {
+		if (!isInitialized && (syncState === 'syncing' || firstSyncBudgetElapsed || awaitingNode)) {
 			hideSplash();
 		}
-	}, [isInitialized, syncState, firstSyncBudgetElapsed]);
+	}, [isInitialized, syncState, firstSyncBudgetElapsed, awaitingNode]);
 
 	// D-42 (Phase 62 plan 08): the one-shot startup sweep of a legacy plaintext
 	// `votingDeviceUser` record (pre-D-42) into the wrapped-at-rest shape. Mirrors the
@@ -233,6 +252,17 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// before the init effect, which clears it on every successful boot.
 	const replacedThisSessionRef = useRef(false);
 
+	// #99: a held run (joined network, node still starting) whose node then FAILS is re-run once, by
+	// nonce, so it can surface the error view (the Authority's supersede-by-initNonce pattern). Bounded:
+	// nodeStatus changes at most once per mount and the failed run clears awaitingNode. A 'ready' settle
+	// needs no bump: the node dep re-runs the init effect. nodeStatus is deliberately NOT a dep of the
+	// init effect (it would re-run the __DEV__ seed on a failed node for phones with no joined network).
+	useEffect(() => {
+		if (nodeStatus === 'failed' && awaitingNode) {
+			setInitNonce(n => n + 1);
+		}
+	}, [nodeStatus, awaitingNode]);
+
 	useEffect(() => {
 		// Quick task 260928-kkf (mirrors authority AppProvider): a cancelled run has been
 		// SUPERSEDED — by unmount, a node change re-running this effect, or the escape
@@ -241,6 +271,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		// itself (only cancelPendingStrandWaits does that, in the cleanup below); it
 		// stops THIS run's reaction to it.
 		let cancelled = false;
+		let nodeWaitTimer: ReturnType<typeof setTimeout> | undefined;
 		cancelInitRunRef.current = () => {
 			cancelled = true;
 		};
@@ -268,6 +299,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				const joinedHashes = recentRef ? await readJoinedNetworkHashes() : [];
 				const joinedRef = recentRef && joinedHashes.includes(recentRef.hash) ? recentRef : undefined;
 
+				// #99: a joined boot WAITS for the node's settle rather than reporting "no network": it
+				// holds the loading view while the node starts and surfaces a failed node as the
+				// recoverable error view. The Authority's D3 (factory.setNode at the settle) holds by
+				// construction: factory.setNode(node) runs synchronously at the start of every run.
 				if (joinedRef) {
 					if (node) {
 						try {
@@ -288,6 +323,25 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 							console.error('joined network re-attach failed:', errorClassName(openError));
 							bootFailed = true;
 							setInitError({error: openError});
+						}
+					} else {
+						if (cancelled) return;
+						if (nodeStatus === 'failed') {
+							// #99: the node never started. Never the silent join-entry state.
+							const unavailable = new NetworkNodeUnavailableError();
+							console.error('joined network re-attach failed:', errorClassName(unavailable));
+							bootFailed = true;
+							setInitError({error: unavailable});
+						} else {
+							// #99: the node is still starting. Hold (loading view, Syncing label,
+							// splash hidden); the node change re-runs this effect, and a failed
+							// settle bumps initNonce (see the effect above).
+							setAwaitingNode(true);
+							hideSplash();
+							nodeWaitTimer = setTimeout(() => {
+								if (!cancelled) setNodeWaitElapsed(true);
+							}, NODE_WAIT_ESCAPE_MS);
+							return;
 						}
 					}
 				} else if (__DEV__) {
@@ -349,6 +403,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				}
 				setIsInitialized(true);
 				hideSplash();
+				setAwaitingNode(false);
+				setNodeWaitElapsed(false);
 				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
 				setFirstSyncBudgetElapsed(false);
 			} catch (fatalError) {
@@ -359,6 +415,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				setInitError({error: fatalError});
 				setIsInitialized(true);
 				hideSplash();
+				setAwaitingNode(false);
+				setNodeWaitElapsed(false);
 			}
 		}
 
@@ -366,6 +424,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 
 		return () => {
 			cancelled = true;
+			if (nodeWaitTimer) clearTimeout(nodeWaitTimer);
 			// Unmount, a node change re-running this effect, or a superseded boot run:
 			// stop waiting on any in-flight first-sync gate so nothing keeps polling in
 			// the background.
@@ -385,6 +444,8 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	const startFresh = useCallback(() => {
 		engineFactoryRef.current?.clearEngineCache();
 		setInitError(null);
+		setAwaitingNode(false);
+		setNodeWaitElapsed(false);
 		setIsInitialized(true);
 	}, []);
 
@@ -465,14 +526,14 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// offered here: it would just start a new ~300s wait on the same strand, which the
 	// background wait is already doing.
 	if (!isInitialized) {
-		const showSyncing = syncState === 'syncing' || firstSyncBudgetElapsed;
+		const showSyncing = syncState === 'syncing' || firstSyncBudgetElapsed || awaitingNode;
 		return (
 			<View style={{flex: 1, justifyContent: 'center', alignItems: 'center'}}>
 				<ActivityIndicator size="large" />
 				{showSyncing && (
 					<Text style={{marginTop: 16, textAlign: 'center'}}>{t('syncSyncing')}</Text>
 				)}
-				{firstSyncBudgetElapsed && (
+				{(firstSyncBudgetElapsed || nodeWaitElapsed) && (
 					<TouchableOpacity
 						onPress={() => {
 							// Mark THIS boot run cancelled before startFresh() clears the

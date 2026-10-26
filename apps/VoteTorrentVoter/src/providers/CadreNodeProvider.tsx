@@ -26,6 +26,13 @@ import { openBootstrapPeerStore, openTrustedOwnerStore } from '../engines/rn-dur
 interface CadreNodeContextType {
   /** The live CadreNode instance (null until started). */
   node: InstanceType<typeof CadreNode> | null;
+  /**
+   * The once-per-mount settle of the node start (#99; mirrors the Authority's `nodeSettled`
+   * 'ready' | 'failed', as React state so consumers react through effect deps). 'starting' from
+   * mount until start() settles; then 'ready' (set in the same commit as `node`) or 'failed'
+   * (start() rejected, including the control-recreate retry). Changes at most once per mount.
+   */
+  nodeStatus: 'starting' | 'ready' | 'failed';
   /** Event-driven sync state derived from CadreNodeEvents (D-10 — no polling). */
   syncState: 'connected' | 'syncing' | 'offline';
   /**
@@ -166,6 +173,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   const nodeRef = useRef<InstanceType<typeof CadreNode> | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
   const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
+  const [nodeStatus, setNodeStatus] = useState<'starting' | 'ready' | 'failed'>('starting');
   // Spike 100: how many dial targets a network join stored (0 = none; the shipped file decides).
   const [joinBootstrapCount, setJoinBootstrapCount] = useState(0);
   const refreshJoinBootstrap = useCallback(async () => {
@@ -391,6 +399,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         if (isMounted) {
           nodeRef.current = localNode;
           setNode(localNode);
+          setNodeStatus('ready');
         } else {
           // Component unmounted before start completed — clean up.
           await localNode.stop().catch(() => undefined);
@@ -402,6 +411,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         } catch {
           // ignore stop errors
         }
+        if (isMounted) setNodeStatus('failed');
       }
     }
 
@@ -473,6 +483,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     <CadreNodeContext.Provider
       value={{
         node,
+        nodeStatus,
         syncState,
         configFault: joinBootstrapCount > 0 ? null : bootstrapConfig.fault,
         connectedPeers,
