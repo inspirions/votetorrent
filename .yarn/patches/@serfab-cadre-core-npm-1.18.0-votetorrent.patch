@@ -1,5 +1,5 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index b6359a55443c66e9478386aca91e3d2b7c42ce3a..6c5e58a9d775ab2e345a7178f21b105dfe2297f2 100644
+index b6359a55443c66e9478386aca91e3d2b7c42ce3a..7e02d996c011f3f89242685cbb21939d66e1efd2 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
 @@ -56,6 +56,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
@@ -81,7 +81,31 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..6c5e58a9d775ab2e345a7178f21b105d
              }, network?.connectionGater, ADMISSION_DECISION_TIMEOUT_MS, relayedRequestBudgetMs(network?.linkRoundTripMs)),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -5134,6 +5176,14 @@ export class CadreNode {
+@@ -2968,6 +3010,23 @@ export class CadreNode {
+         // self-update rule is measured against, and a removal landing mid-publish re-reads as
+         // absent instead of matching no rows under a 'refreshed'. The record it returns is the
+         // one in the row.
++        //
++        // VoteTorrent patch (control-fork guard, debug officer-address-record-content-digest-mismatch):
++        // an UPDATE of this node's own row while no control sibling is reachable commits on a cohort
++        // of one. After a restart that write lands on a stale base; once the sibling's copy reaches
++        // the same revision, the two replicas refuse each other's every later CadrePeer write
++        // (content-digest-mismatch), and the re-touch queued below is itself one of the refused
++        // writes. hasReachableControlSibling() already gates publishFirstSelfRecord and
++        // committedAlone(), but not this path: the 1 s boot timer, the heartbeat and
++        // `self:peer:update` all reach it. So skip the write and mark it pending: the growth-edge
++        // drain (updateControlSiblingReachability -> runDrainControlReplication) calls registerSelf()
++        // for a pending self write as soon as a sibling identifies, on the cohort's lineage. A
++        // first-time owner INSERT (no row yet, above) is not gated, so a founder still seats itself.
++        if (!this.hasReachableControlSibling()) {
++            this.pendingSelfPeerWrite = true;
++            log('registerSelf: no control sibling reachable; own CadrePeer update deferred to the sibling-reachable drain (VoteTorrent control-fork guard)');
++            return 'skipped';
++        }
+         const aloneBefore = this.committedAlone();
+         const record = await this.controlDatabase.updateSelfPeerRecord(peerId, (current) => this.signSelfRecord(peerId, signingKey, addrs, current));
+         if (record === null) {
+@@ -5134,6 +5193,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
