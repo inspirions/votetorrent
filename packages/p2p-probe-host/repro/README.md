@@ -19,6 +19,7 @@ offered for discussion, and this repo's own copy of it is a committed `.yarn` pa
 |---|---|---|
 | `public-observer-blocker.test.mjs` | the runnable repro `56-15` cites — self-contained, `node --test`, mode-detecting (runs against both stock and patched `@serfab/cadre-core` bytes and reports which) | `@serfab/cadre-core`, `@optimystic/db-p2p`, ~5-10s per mode |
 | `control-self-publish-alone.test.mjs` | upstream repro for the CadrePeer control fork: a restarted member's boot timer and heartbeat commit its own row while no control sibling is reachable (`hasReachableControlSibling()` false). FAILS on stock `@serfab/cadre-core` 1.18.0 (2 solo commits); passes with this repo's control-fork guard in the cadre-core patch. Self-contained like the observer repro. | `@serfab/cadre-core`, `@optimystic/db-p2p`, 15 s to 2.5 min (an owner write made while the sibling is down can wait out its retry budget) |
+| `control-sibling-stale-redial.test.mjs` | upstream repro for the second lock of the CadrePeer control fork: a sibling whose signed record is stale (or holds no address), with no address-book entry and no retained target, is never re-dialed through the party relay (`undialable`, off the redial ladder). Two relay-only nodes behind an in-process relay. FAILS on this repo's 1.18.0 patch before the stale-sibling relay redial hunk; passes with it. | `@serfab/cadre-core`, `@optimystic/db-p2p`, `@libp2p/circuit-relay-v2`, about 2-5 min |
 | `README.md` | this file | — |
 
 ## Running it
