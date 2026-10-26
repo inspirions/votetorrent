@@ -23,6 +23,8 @@ const RELAY_ADDR = '/ip4/203.0.113.9/tcp/4801/ws/p2p/12D3KooWExample';
 const BOOT_FLUSH_TURNS = 20;
 
 let mockRelayFirstAttemptMisses = false;
+let mockStartGate: Promise<void> | null = null;
+let mockStartError: Error | null = null;
 const mockConstructedNodes: Array<{ receivedOptions: unknown; stop: jest.Mock }> = [];
 
 jest.mock(
@@ -32,6 +34,8 @@ jest.mock(
 			public receivedOptions: unknown;
 			public stop = jest.fn(async () => {});
 			public start = jest.fn(async () => {
+				if (mockStartGate) await mockStartGate;
+				if (mockStartError) throw mockStartError;
 				const network = (this.receivedOptions as {network?: {relayAddrs?: string[]; requireRelay?: boolean}}).network;
 				if (mockRelayFirstAttemptMisses && (network?.relayAddrs?.length ?? 0) > 0 && network?.requireRelay !== false) {
 					const e = new Error(
@@ -101,6 +105,8 @@ async function bootProvider() {
 beforeEach(() => {
 	mockConstructedNodes.length = 0;
 	mockRelayFirstAttemptMisses = false;
+	mockStartGate = null;
+	mockStartError = null;
 });
 
 describe('CadreNodeProvider (Voter) — a first relay reservation that misses its budget', () => {
@@ -126,5 +132,41 @@ describe('CadreNodeProvider (Voter) — a first relay reservation that misses it
 		const captured = await bootProvider();
 		expect(captured.value!.node).not.toBeNull();
 		expect(mockConstructedNodes).toHaveLength(1);
+	});
+});
+
+describe('CadreNodeProvider (Voter) — the node settle status (#99)', () => {
+	it("reports nodeStatus 'starting' while start() runs, then 'ready' with the live node", async () => {
+		let release!: () => void;
+		mockStartGate = new Promise<void>(resolve => {
+			release = resolve;
+		});
+		const captured = await bootProvider();
+		expect(captured.value!.nodeStatus).toBe('starting');
+		expect(captured.value!.node).toBeNull();
+
+		await renderer.act(async () => {
+			release();
+			for (let i = 0; i < BOOT_FLUSH_TURNS; i++) {
+				await Promise.resolve();
+			}
+		});
+		expect(captured.value!.nodeStatus).toBe('ready');
+		expect(captured.value!.node).not.toBeNull();
+	});
+
+	it("reports nodeStatus 'failed' with no node when start() rejects", async () => {
+		const startError = new Error('start refused');
+		startError.name = 'SomeStartError';
+		mockStartError = startError;
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const captured = await bootProvider();
+			expect(captured.value!.nodeStatus).toBe('failed');
+			expect(captured.value!.node).toBeNull();
+			expect(errorSpy.mock.calls.some(c => c[0] === '[CadreNodeProvider] Boot error:')).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 });

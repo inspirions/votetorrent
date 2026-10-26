@@ -50,10 +50,12 @@ jest.setTimeout(20000);
 const mockCadreNodeValue: {
 	node: unknown;
 	syncState: 'connected' | 'syncing' | 'offline';
+	nodeStatus: 'starting' | 'ready' | 'failed';
 	connectedPeers: () => number;
 } = {
 	node: null,
 	syncState: 'offline',
+	nodeStatus: 'starting',
 	connectedPeers: () => 0,
 };
 jest.mock('../CadreNodeProvider', () => ({
@@ -225,6 +227,7 @@ beforeEach(async () => {
 	(hideSplash as jest.Mock).mockClear();
 	mockCadreNodeValue.node = null;
 	mockCadreNodeValue.syncState = 'offline';
+	mockCadreNodeValue.nodeStatus = 'starting';
 	// AsyncStorage's jest mock is a module-scope singleton store shared across every it() in this
 	// file — clear it so each test's seedRealNetwork() creates a genuinely fresh network (mirrors
 	// dev-seed.test.ts's own AsyncStorage.clear() isolation convention).
@@ -891,18 +894,6 @@ describe('VoterAppProvider — joined networks (spike 100)', () => {
 		mockRunVoterNetworkJoin.mockReset();
 	});
 
-	it('a joined most-recent network is not opened before the CadreNode exists, and the dev seed does not run', async () => {
-		const ref = {hash: 'a1b2c3d4e5f60718', relays: [], name: 'Joined Network', primaryAuthorityDomainName: 'example.org'};
-		await AsyncStorage.setItem('recentNetworks', JSON.stringify([ref]));
-		await AsyncStorage.setItem('@votetorrent/voterJoinedNetworks', JSON.stringify([ref.hash]));
-		const {captured} = renderProvider();
-		await flushBoot(15, () => captured.value !== null);
-
-		expect(captured.value!.isInitialized).toBe(true);
-		expect(captured.value!.hasNetwork).toBe(false);
-		expect(mockSeedDevNetwork).not.toHaveBeenCalled();
-	});
-
 	it('joinNetwork answers no-peers without touching the engine while the CadreNode has not started', async () => {
 		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
 		const {captured} = renderProvider();
@@ -961,5 +952,176 @@ describe('VoterAppProvider — joined networks (spike 100)', () => {
 		expect(JSON.parse((await AsyncStorage.getItem('@votetorrent/voterJoinedNetworks'))!)).toEqual([seeded!.networkReference.hash]);
 		expect(captured.value!.hasNetwork).toBe(true);
 		userSpy.mockRestore();
+	});
+});
+
+describe('VoterAppProvider — a joined network whose node settles late (#99, port of the Authority fix)', () => {
+	const JOINED_REF = {hash: 'a1b2c3d4e5f60718', relays: [], name: 'Joined Network', primaryAuthorityDomainName: 'example.org'};
+	const FAKE_LIVE_NODE = {getControlNode: () => ({getConnections: () => [{}]})};
+
+	async function seedJoined() {
+		await AsyncStorage.setItem('recentNetworks', JSON.stringify([JOINED_REF]));
+		await AsyncStorage.setItem('@votetorrent/voterJoinedNetworks', JSON.stringify([JOINED_REF.hash]));
+	}
+
+	// Spies on the open path: the networks-engine open (recording the factory's node at call
+	// time), the 'network' engine resolve, and the device user. Restored in afterEach.
+	function installOpenSpies() {
+		let factoryNode: unknown = null;
+		const origSetNode = EngineFactory.prototype.setNode;
+		jest.spyOn(EngineFactory.prototype, 'setNode').mockImplementation(function (this: EngineFactory, n: any) {
+			factoryNode = n;
+			return origSetNode.call(this, n);
+		});
+		const nodesAtOpen: unknown[] = [];
+		const openSpy = jest
+			.spyOn(NetworksEngine.prototype, 'open')
+			.mockImplementation((async () => {
+				nodesAtOpen.push(factoryNode);
+			}) as any);
+		const origGetEngine = EngineFactory.prototype.getEngine;
+		jest.spyOn(EngineFactory.prototype, 'getEngine').mockImplementation(function (this: EngineFactory, name: string, params?: unknown) {
+			return name === 'network' ? Promise.resolve({}) : (origGetEngine as any).call(this, name, params);
+		} as any);
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const deviceUser = require('../../engines/device-user');
+		jest.spyOn(deviceUser, 'getOrCreateDeviceUser').mockResolvedValue(FAKE_USER);
+		return {openSpy, nodesAtOpen};
+	}
+
+	const captured: {value: VoterAppContextType | null} = {value: null};
+	function Probe() {
+		captured.value = useVoterApp();
+		return null;
+	}
+	function mount() {
+		captured.value = null;
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(
+				<VoterAppProvider>
+					<Probe />
+				</VoterAppProvider>,
+			);
+		});
+		return tr;
+	}
+	function flip(tr: renderer.ReactTestRenderer, node: unknown, status: 'starting' | 'ready' | 'failed') {
+		mockCadreNodeValue.node = node;
+		mockCadreNodeValue.nodeStatus = status;
+		renderer.act(() => {
+			tr.update(
+				<VoterAppProvider>
+					<Probe />
+				</VoterAppProvider>,
+			);
+		});
+	}
+	const text = (tr: renderer.ReactTestRenderer) => JSON.stringify(tr.toJSON());
+
+	afterEach(() => {
+		jest.restoreAllMocks();
+		jest.useRealTimers();
+	});
+
+	it('a joined most-recent network waits for a starting node: no open, no dev seed, no join entry; the splash hides and the Syncing label shows', async () => {
+		await seedJoined();
+		const {openSpy} = installOpenSpies();
+		const tr = mount();
+		await flushBoot(30);
+
+		expect(text(tr)).toContain('syncSyncing');
+		expect(text(tr)).not.toContain('bootError.continueWithoutNetwork');
+		expect(hideSplash).toHaveBeenCalled();
+		expect(openSpy).toHaveBeenCalledTimes(0);
+		expect(mockSeedDevNetwork).not.toHaveBeenCalled();
+		expect(captured.value).toBeNull();
+	});
+
+	it('a node that settles between the recent-networks read and the open: exactly one open, on the live node', async () => {
+		await seedJoined();
+		const {openSpy, nodesAtOpen} = installOpenSpies();
+		let openGate!: () => void;
+		const gate = new Promise<void>(resolve => {
+			openGate = resolve;
+		});
+		const realRecent = NetworksEngine.prototype.getRecentNetworks;
+		jest.spyOn(NetworksEngine.prototype, 'getRecentNetworks').mockImplementation(async function (this: NetworksEngine) {
+			await gate;
+			return realRecent.call(this);
+		});
+		const tr = mount();
+		await flushBoot(10);
+		flip(tr, FAKE_LIVE_NODE, 'ready');
+		await renderer.act(async () => {
+			openGate();
+		});
+		await flushBoot(30, () => captured.value?.hasNetwork === true);
+
+		expect(openSpy).toHaveBeenCalledTimes(1);
+		expect((openSpy.mock.calls[0]![0] as {hash: string}).hash).toBe(JOINED_REF.hash);
+		expect(nodesAtOpen[0]).toBe(FAKE_LIVE_NODE);
+		expect(captured.value!.hasNetwork).toBe(true);
+	});
+
+	it('a node that fails to start shows the recoverable boot-error view, never the join entry, and opens nothing', async () => {
+		await seedJoined();
+		const {openSpy} = installOpenSpies();
+		const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		const tr = mount();
+		await flushBoot(30);
+		expect(text(tr)).not.toContain('bootError.generic');
+		flip(tr, null, 'failed');
+		await flushBoot(30, () => text(tr).includes('bootError.generic'));
+
+		expect(text(tr)).toContain('bootError.generic');
+		expect(text(tr)).toContain('bootError.tryAgain');
+		expect(openSpy).toHaveBeenCalledTimes(0);
+		expect(errSpy.mock.calls.some(c => c[0] === 'joined network re-attach failed:' && c[1] === 'NetworkNodeUnavailableError')).toBe(true);
+	});
+
+	it('after 15 s of waiting the Continue-without-network escape appears and the run keeps waiting; a later ready settle still opens once on the live node', async () => {
+		await seedJoined();
+		const {openSpy, nodesAtOpen} = installOpenSpies();
+		jest.useFakeTimers();
+		const spin = async (ms: number) => {
+			await renderer.act(async () => {
+				await jest.advanceTimersByTimeAsync(ms);
+			});
+		};
+		try {
+			const tr = mount();
+			for (let i = 0; i < 10; i++) {
+				// eslint-disable-next-line no-await-in-loop
+				await spin(0);
+			}
+			await spin(14999);
+			expect(text(tr)).not.toContain('bootError.continueWithoutNetwork');
+			await spin(1);
+			expect(text(tr)).toContain('bootError.continueWithoutNetwork');
+			expect(text(tr)).toContain('syncSyncing');
+			expect(openSpy).toHaveBeenCalledTimes(0);
+
+			flip(tr, FAKE_LIVE_NODE, 'ready');
+			for (let i = 0; i < 30 && captured.value?.hasNetwork !== true; i++) {
+				// eslint-disable-next-line no-await-in-loop
+				await spin(0);
+			}
+			expect(openSpy).toHaveBeenCalledTimes(1);
+			expect(nodesAtOpen[0]).toBe(FAKE_LIVE_NODE);
+			expect(captured.value!.hasNetwork).toBe(true);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it('a phone with no joined network is not held by a starting node (the dev seed runs as before)', async () => {
+		mockSeedDevNetwork.mockImplementation(seedRealNetwork);
+		mount();
+		await flushBoot(15, () => captured.value !== null);
+
+		expect(mockSeedDevNetwork).toHaveBeenCalledTimes(1);
+		expect(captured.value!.isInitialized).toBe(true);
+		expect(captured.value!.hasNetwork).toBe(true);
 	});
 });
