@@ -100,6 +100,22 @@ attempt), `--e15-run-2` (the chain on another run), `--e15-attempt-5` (a fifth a
 (the declared chain whose attempt-4 has a FAIL leg) and `pass-session-rewarm-section` (a session.md holding the n6
 re-warm section's new `R1`-suffixed keys beside the base keys gives no finding).
 
+## The declared E23 chain (notes 19 E23, 64-60)
+
+`--streak` also accepts the E15 chain with its last reason line replaced: `run-1` with exactly `attempt-1` to `attempt-4`,
+`attempt-2/reason.txt` the e7 line, `attempt-3/reason.txt` the e12 line, `attempt-4/reason.txt` one line
+`RESTART notes-19-e23: <why>` (run 1 redone on a fresh party, the attempt-5 redo), and `attempt-1`, `attempt-2` and
+`attempt-3` each with at least one non-PASS leg. The streak then reads `run-1/attempt-4`. The E7, E12 and E15 chains are
+unchanged and there is no five-attempt branch (`--e23-attempt-5`, an e23 line on a fifth attempt after an e15 fourth,
+stays `streak-retried`). Nine cases pin it: `pass-streak-restart-e23` (accepted, with its `STREAK PASS k=3` line),
+`fail-streak-retried--e23-without-e12` (a plain attempt-3 reason), `--e23-on-attempt-3` (the line on a third attempt),
+`--e23-run-2` (the chain on another run), `--e23-attempt-5`, `--e23-empty-why` (the line with no why),
+`--e23-two-lines` (the line plus a second line; also reports `reason-missing`, hence `expectAlso`),
+`--e23-attempt-3-all-pass` (attempt-3 all PASS; also reports `retry-without-failure`, hence `expectAlso`) and
+`fail-streak-not-pass--e23-attempt-4-fail` (the declared chain whose attempt-4 has a FAIL leg). Only
+`pass-streak-restart-e23` and `fail-streak-not-pass--e23-attempt-4-fail` read BAD before the change; the other seven were
+already correct (a plain reason line never matched) and stay as pins.
+
 ## Known overwrites
 
 `KNOWN_OVERWRITES` in the checker accepts one committed rewrite per entry, matched by evidence root, path and the
