@@ -62,7 +62,13 @@ export class KeysTasksEngine implements IKeysTasksEngine {
     try {
       // 62-20 (D-20): seed first — pull-and-seed, at the head of every read.
       const releaseEngine = new KeyReleaseEngine(this.ctx, this.deps)
-      await releaseEngine.seedReleaseKeyTasks()
+      const seed = await releaseEngine.seedReleaseKeyTasks()
+      // A failed seed leaves that keyholder with no task in the list below; record it, never silently.
+      for (const failure of seed.failures) {
+        console.warn(
+          `KeysTasksEngine.getKeysToRelease: release-key task not seeded for keyholder ${failure.userId} in election ${failure.electionId}: ${failure.detail}`,
+        )
+      }
 
       const userIds = new Set<string>()
       if (this.ctx.user?.id !== undefined) userIds.add(this.ctx.user.id)
