@@ -519,7 +519,10 @@ export class InvitationEngine implements IInvitationEngine {
       // KeyholderDkgBinding, all in ONE BEGIN/COMMIT, so a failed accept (e.g. an invokedId
       // collision on User) leaves ZERO rows behind — fixing the 62-09 crossnote's documented
       // non-atomicity (a failed mint used to orphan the InviteResult write).
-      const tid = await allocateTid(this.ctx.db, 'user')
+      // Per-keyholder namespace: each keyholder's device writes ONLY its own TidHighWater row. A shared
+      // 'user' row is a primary key two replicas upsert from stale views, so the second keyholder's
+      // accept could be refused (same shape as KeyReleaseEngine.seedReleaseKeyTasks' keys-tasks row).
+      const tid = await allocateTid(this.ctx.db, `user:${keyholderWrite.userId}`)
       await withInviteWriteSerial(this.ctx.db, async () => {
         await this.ctx.db.exec('BEGIN')
         try {
