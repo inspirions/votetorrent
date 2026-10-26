@@ -1,5 +1,5 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index b6359a55443c66e9478386aca91e3d2b7c42ce3a..7e02d996c011f3f89242685cbb21939d66e1efd2 100644
+index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9f95e235f 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
 @@ -56,6 +56,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
@@ -105,7 +105,56 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..7e02d996c011f3f89242685cbb21939d
          const aloneBefore = this.committedAlone();
          const record = await this.controlDatabase.updateSelfPeerRecord(peerId, (current) => this.signSelfRecord(peerId, signingKey, addrs, current));
          if (record === null) {
-@@ -5134,6 +5193,14 @@ export class CadreNode {
+@@ -3984,7 +4043,47 @@ export class CadreNode {
+         if (booked.length > 0) {
+             return booked;
+         }
+-        return this.retainedDialAddrs(peerId);
++        const retained = this.retainedDialAddrs(peerId);
++        if (retained.length > 0) {
++            return retained;
++        }
++        return this.partyRelayCircuitDialAddrs(peerId);
++    }
++    /**
++     * VoteTorrent patch (stale-sibling relay redial): a fourth dial source for
++     * {@link resolveControlDialAddrs} (debug `officer-address-record-content-digest-mismatch`,
++     * lock b). A current sibling whose signed record is stale or holds no address, with no
++     * address-book entry and no retained target, is otherwise `undialable` and goes off the
++     * redial ladder, so a control fork that survives a link drop is permanent until a cold boot.
++     * The party's configured relays (`network.relayAddrs`) are a known way to reach a
++     * relay-reserved member: `<relayAddr>/p2p-circuit/p2p/<sibling>`. The address is bound to
++     * the sibling's peer id, so the Noise handshake authenticates the sibling's key. A node with
++     * no `relayAddrs` gets `[]` and behaves exactly as stock; a failed circuit dial returns
++     * `failed` from {@link dialControlSibling}, which keeps the sibling on the redial ladder.
++     * Never throws.
++     */
++    partyRelayCircuitDialAddrs(peerId) {
++        try {
++            const selfPeerId = this.controlNode?.peerId.toString();
++            const circuits = relayCircuitAddrs(this.config.network?.relayAddrs ?? []);
++            const list = [];
++            for (const circuit of circuits) {
++                const relayPeer = circuit.split('/p2p-circuit')[0].split('/p2p/').pop();
++                if (relayPeer === selfPeerId || relayPeer === peerId) {
++                    continue;
++                }
++                list.push(`${circuit}/p2p/${peerId}`);
++            }
++            const addrs = this.normalizeDialAddrs(this.parseMultiaddrs(list), peerId);
++            if (addrs.length > 0) {
++                log('reconcileControlCohort: no fresh control address for sibling %s; redialing it through the party relay circuit (%d relay(s)) (VoteTorrent stale-sibling relay redial)', peerId, addrs.length);
++            }
++            return addrs;
++        }
++        catch (error) {
++            log('reconcileControlCohort: cannot build relay circuit addresses for sibling %s (VoteTorrent stale-sibling relay redial): %o', peerId, error);
++            return [];
++        }
+     }
+     /**
+      * A sibling's retained out-of-band dial target (see {@link bootstrapPeerStore}),
+@@ -5134,6 +5233,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
