@@ -70,7 +70,7 @@
 		"@noble/ciphers": "2.2.0",
 		"@libp2p/crypto": "5.1.23",
 		"@libp2p/circuit-relay-v2": "4.2.10",
-		"@libp2p/websockets": "10.1.25",
+		"@libp2p/websockets": "patch:@libp2p/websockets@npm%3A10.1.25#~/.yarn/patches/@libp2p-websockets-npm-10.1.25-votetorrent.patch",
 		"@libp2p/peer-id@npm:^6.0.0": "6.0.15",
 		"@libp2p/peer-id@npm:^6.0.1": "6.0.15",
 		"@libp2p/peer-id@npm:^6.0.4": "6.0.15",

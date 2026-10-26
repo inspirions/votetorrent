@@ -3915,6 +3915,25 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@libp2p/websockets@patch:@libp2p/websockets@npm%3A10.1.25#~/.yarn/patches/@libp2p-websockets-npm-10.1.25-votetorrent.patch":
+  version: 10.1.25
+  resolution: "@libp2p/websockets@patch:@libp2p/websockets@npm%3A10.1.25#~/.yarn/patches/@libp2p-websockets-npm-10.1.25-votetorrent.patch::version=10.1.25&hash=973a5a"
+  dependencies:
+    "@libp2p/interface": "npm:^3.4.0"
+    "@libp2p/utils": "npm:^7.4.5"
+    "@multiformats/multiaddr": "npm:^13.0.3"
+    "@multiformats/multiaddr-matcher": "npm:^3.0.2"
+    "@multiformats/multiaddr-to-uri": "npm:^12.0.0"
+    main-event: "npm:^1.0.5"
+    p-event: "npm:^8.0.1"
+    progress-events: "npm:^1.0.1"
+    uint8arraylist: "npm:^3.0.2"
+    uint8arrays: "npm:^6.1.1"
+    ws: "npm:^8.18.3"
+  checksum: 10c0/4f15c05cfdfacd1ce3c7f0a6fa6d81dea14b0172ec6017189d482662d381982de6f9432f02a124310c61ad5487743116ff773107e302bd9ffc75f343a8f53630
+  languageName: node
+  linkType: hard
+
 "@multiformats/dns@npm:^1.0.3, @multiformats/dns@npm:^1.0.6":
   version: 1.0.13
   resolution: "@multiformats/dns@npm:1.0.13"
