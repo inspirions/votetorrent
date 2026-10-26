@@ -248,7 +248,9 @@ async function buildGateway({ publicObserverStrandIds } = {}) {
 
   // Owner genesis + one seeded member, no invite ever issued (see header) — the recipe that
   // produces authorized.length > 0 without opening an enrollment window.
-  const owner = node.getIdentityOwnerKey();
+  // cadre-core 1.18 deleted getIdentityOwnerKey(); the identity-derived owner key it returned is
+  // derived here instead (the helper is exported since well before 1.14).
+  const owner = cadreCore.ed25519KeyPairFromLibp2p(privateKey);
   await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('gateway has no control database after start()');

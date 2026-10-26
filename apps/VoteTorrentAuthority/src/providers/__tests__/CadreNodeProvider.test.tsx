@@ -90,7 +90,8 @@ jest.mock(
       });
       public stop = jest.fn(async () => {});
       public trustOwnerKeys = jest.fn(async () => undefined);
-      // cadre-core 1.15: anchors this node's own identity key when its OwnerKey row is live.
+      // cadre-core 1.18: wires the signer it is handed (the identity signer, from the provider's
+      // identity-owner-key adapter) when that key's OwnerKey row is live.
       public wireOwnKeyIfOwner = jest.fn(async () => {
         mockCallOrder.push('wireOwnKeyIfOwner');
         if (mockWireError) throw mockWireError;
@@ -112,9 +113,6 @@ jest.mock(
             return new Set(mockControlOwners);
           },
         };
-      }
-      public getIdentityOwnerKey() {
-        return { publicKeyB64: 'self-pub', privateKeyB64: 'self-priv' };
       }
       public getStrand = jest.fn(() => undefined);
       private listeners: Record<string, Listener[]> = {};
@@ -177,7 +175,11 @@ jest.mock(
       }),
     };
     const controlStorageScope = (partyId: string) => 'control-' + Buffer.from(partyId).toString('hex');
-    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore, PersistentTrustedOwnerStore, controlStorageScope };
+    // cadre-core 1.18: the identity owner key is derived app-side (engines/identity-owner-key.ts) through
+    // these two helpers; the fake keeps the same 'self-pub' key the test owners name.
+    const ed25519KeyPairFromLibp2p = () => ({ publicKeyB64: 'self-pub', privateKeyB64: 'self-priv' });
+    const softwareOwnerSigner = (privateKeyB64: string) => ({ publicKey: privateKeyB64 === 'self-priv' ? 'self-pub' : 'other', approve: async () => () => '' });
+    return { CadreNode: FakeCadreNode, PersistentStrandNetworkStateStore, PersistentTrustedOwnerStore, controlStorageScope, ed25519KeyPairFromLibp2p, softwareOwnerSigner };
   },
   { virtual: true },
 );

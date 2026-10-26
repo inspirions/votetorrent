@@ -269,7 +269,7 @@ jest.mock(
       // the skip branch, so this exists to be ASSERTED ON — chiefly that it is NOT called when no
       // invite is injected.
       public partyId = 'votetorrent';
-      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, redeemedAt: '' }));
 
       // Section 4b write gate (run 18): the runner will not write until this peer's own
       // CadrePeer row carries a voucher from an owner anchored in the local trust store — the
@@ -415,7 +415,7 @@ function reloadRunnerFullMock(): void {
           : [];
       }
       public partyId = 'votetorrent';
-      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, redeemedAt: '' }));
       // Section 4b write gate — mirrors the module-level mock; vouched by default.
       // listAuthorizedMembers ALWAYS excludes self (check 1) — exactly what hid the defect.
       public listAuthorizedMembers = jest.fn(async () => []);
@@ -1090,7 +1090,7 @@ function reloadRunnerWithControlledDb(): void {
           : [];
       }
       public partyId = 'votetorrent';
-      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, grantsOwner: false, redeemedAt: '' }));
+      public redeemCadreInvitation = jest.fn(async () => ({ peerId: null, redeemedAt: '' }));
       public listAuthorizedMembers = jest.fn(async () => []);
       private _selfAuthorized = true;
       public queryCadrePeers = jest.fn(async (): Promise<VoucherRow[]> => [

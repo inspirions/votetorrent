@@ -1,18 +1,18 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index ae21d43..519c703 100644
+index b6359a55443c66e9478386aca91e3d2b7c42ce3a..6c5e58a9d775ab2e345a7178f21b105dfe2297f2 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
-@@ -51,6 +51,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
- import { controlNetworkName, installControlProtocolGuard } from './control-protocol-guard.js';
+@@ -56,6 +56,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
+ import { controlNetworkName, installControlProtocolGuard, servesControlDatabase } from './control-protocol-guard.js';
  import { StrandWakeService, dialWake } from './strand-wake-protocol.js';
  import { StrandAddrService, collectStrandAddrs } from './strand-addr-protocol.js';
 +// VoteTorrent patch (public-observer-protocol): unauthenticated strand-address
 +// resolution for a node-local, operator-configured observable allowlist.
 +import { StrandObserverService } from './strand-observer-protocol.js';
- import { DelegateAdmissionStore, extractCircuitRelayTargets, dueRelayAnnounces, prunePeerStrandKeys, peerStrandKey } from './delegate-admission.js';
+ import { DelegateAdmissionStore, extractCircuitRelayTargets, dueRelayAnnounces, prunePeerStrandKeys, peerStrandKey, recordRelayRefusals, relaysNotRefusing } from './delegate-admission.js';
  import { relayCircuitAddrs, resolveListenAddrs, resolveTransportOptions, RelayReservationFailedError } from './relay-addrs.js';
  import { nodeTransportsOption } from './node-transports.js';
-@@ -294,6 +297,13 @@ export class CadreNode {
+@@ -352,6 +355,13 @@ export class CadreNode {
           * stops conflating control addresses with strand seeding.
           */
          this.strandAddrService = null;
@@ -26,8 +26,8 @@ index ae21d43..519c703 100644
          /**
           * Cadre invitation redemption handler (`/sereus/cadre-invite/1.0.0`): a device holding an
           * invitation dials this machine and proves possession; the handler seats the row and
-@@ -772,6 +782,20 @@ export class CadreNode {
-         /** `connection:close` listener re-arming the growth edge (teardown in {@link stopRecordRefresh}). */
+@@ -908,6 +918,20 @@ export class CadreNode {
+         /** `connection:close` listener: {@link onControlConnectionClosed} (teardown in {@link stopRecordRefresh}). */
          this.controlConnectionCloseHandler = null;
          this.config = config;
 +        // VoteTorrent patch (public-observer-protocol): a node-local, non-replicated
@@ -47,7 +47,7 @@ index ae21d43..519c703 100644
          this.hostUnclaimedStrands = config.hostUnclaimedStrands ?? config.profile === 'storage';
          this.strandManager = new StrandInstanceManager();
          this.enrollmentService = new EnrollmentService();
-@@ -1078,6 +1102,19 @@ export class CadreNode {
+@@ -1238,6 +1262,19 @@ export class CadreNode {
                  this.pushFanoutService = this.buildPushFanout(this.config.push);
                  log('Push-wake fan-out enabled (injected notifier)');
              }
@@ -67,7 +67,7 @@ index ae21d43..519c703 100644
              this._running = true;
              this.emit('control:connected', undefined);
              timing('[start] total: %dms', Math.round(performance.now() - tTotal));
-@@ -1897,7 +1934,12 @@ export class CadreNode {
+@@ -2086,7 +2123,12 @@ export class CadreNode {
              connectionGater: createMembershipConnectionGater({
                  admitInbound: (remotePeerId) => this.admitInboundControlConnection(remotePeerId),
                  admitRelayReservation: (remotePeerId) => this.admitControlRelayReservation(remotePeerId),
@@ -81,7 +81,7 @@ index ae21d43..519c703 100644
              }, network?.connectionGater, ADMISSION_DECISION_TIMEOUT_MS, relayedRequestBudgetMs(network?.linkRoundTripMs)),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -4700,6 +4742,14 @@ export class CadreNode {
+@@ -5134,6 +5176,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
@@ -93,15 +93,15 @@ index ae21d43..519c703 100644
 +            await this.strandObserverService.shutdown();
 +            this.strandObserverService = null;
 +        }
-         // Unregister the cadre invitation redemption handler, for the same reason.
+         // Unregister the two redemption handlers, for the same reason.
          if (this.cadreInviteHandler && this.controlNode) {
              await this.cadreInviteHandler.unregister(this.controlNode);
 diff --git a/dist/control-protocol-guard.js b/dist/control-protocol-guard.js
-index baab420..fe20c91 100644
+index b7cf4c1dcff144d3965f7beba87de7e4bbcde1c1..43328ceb0f989480ec5e22231eb96789e2e29b30 100644
 --- a/dist/control-protocol-guard.js
 +++ b/dist/control-protocol-guard.js
-@@ -81,6 +81,10 @@ import { FORMATION_PROTOCOL } from './strand-formation-protocol.js';
- import { CADRE_INVITE_PROTOCOL } from './cadre-invite-protocol.js';
+@@ -83,6 +83,10 @@ import { CADRE_INVITE_PROTOCOL } from './cadre-invite-protocol.js';
+ import { OWNER_GRANT_PROTOCOL } from './owner-grant-protocol.js';
  import { WAKE_PROTOCOL } from './strand-wake-protocol.js';
  import { STRAND_ADDR_PROTOCOL } from './strand-addr-protocol.js';
 +// VoteTorrent patch (public-observer-protocol): the observer responder registers on the control
@@ -111,10 +111,10 @@ index baab420..fe20c91 100644
  import { withTimeout } from './control-stream.js';
  const log = debug('sereus:cadre:control-protocol-guard');
  /** The class a protocol missing from {@link controlProtocolClasses} is guarded as. */
-@@ -125,6 +129,12 @@ export function controlProtocolClasses(partyId) {
-         [SEED_PROTOCOL, 'stranger-open'],
+@@ -141,6 +145,12 @@ export function controlProtocolClasses(partyId) {
          [FORMATION_PROTOCOL, 'stranger-open'],
          [CADRE_INVITE_PROTOCOL, 'stranger-open'],
+         [OWNER_GRANT_PROTOCOL, 'stranger-open'],
 +        // VoteTorrent patch (public-observer-protocol): stranger-open by design — the handler makes
 +        // its own trust decision in-protocol (the node-local observable-strand allowlist) and
 +        // answers an unlisted strand with the same empty list strand-addr gives a non-member.
@@ -123,12 +123,12 @@ index baab420..fe20c91 100644
 +        [STRAND_OBSERVER_PROTOCOL, 'stranger-open'],
          [WAKE_PROTOCOL, 'members'],
          [STRAND_ADDR_PROTOCOL, 'members'],
-         [`${prefix}/repo/1.0.0`, 'members-snapshot'],
+         ...controlDatabaseProtocols(partyId).map((protocol) => [protocol, 'members-snapshot']),
 diff --git a/dist/index.js b/dist/index.js
-index 123d4e9..22405b2 100644
+index d522bae686a0af216296f32afdccb4e6dad53dcb..5fd827de0c01bb806f64a28e50e290f894f390c8 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -145,6 +145,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
+@@ -160,6 +160,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
  // Strand Address (control-network strand-address RPC) — wire types come via
  // `export * from './types.js'` (StrandAddrRequest / StrandAddrResponse / StrandAddrStatus).
  export { StrandAddrService, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from './strand-addr-protocol.js';
@@ -139,7 +139,7 @@ index 123d4e9..22405b2 100644
  export { peerRecordSignedPayload, signPeerRecord, verifyPeerRecordSignature, isPeerRecordFresh, isSignalingAddr, orderSignalingFirst, currentMemberTrustPolicy, DEFAULT_PEER_RECORD_MAX_AGE_MS, DEFAULT_PEER_RECORD_HEARTBEAT_MS } from './peer-record.js';
  // Device-token record (self-published, signed FCM/APNs push token — CadrePeer sibling)
 diff --git a/dist/membership-connection-gater.js b/dist/membership-connection-gater.js
-index 10b8761..d2c0147 100644
+index 10b8761c2f85694a904d341d01e8f0de3e719c03..d2c0147686e62940c96caaa1230c8dfc87e9a548 100644
 --- a/dist/membership-connection-gater.js
 +++ b/dist/membership-connection-gater.js
 @@ -111,6 +111,25 @@
@@ -189,7 +189,7 @@ index 10b8761..d2c0147 100644
                  verdict = await decideInbound(remotePeerId);
 diff --git a/dist/strand-observer-protocol.js b/dist/strand-observer-protocol.js
 new file mode 100644
-index 0000000..dbaa40b
+index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbdfa8b6762
 --- /dev/null
 +++ b/dist/strand-observer-protocol.js
 @@ -0,0 +1,178 @@

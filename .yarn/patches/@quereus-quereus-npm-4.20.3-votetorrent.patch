@@ -206,13 +206,10 @@ index fe52e105af9484a5107293a5608f08032e1eefa0..db03c82e02540818055dd9d408d83887
              continue;
          }
          // Resolve without a per-row microtask hop (see runtime/async-util.ts).
-@@ -262,4 +264,37 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
-     }
+@@ -263,3 +265,36 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
      return { skip: false };
  }
--//# sourceMappingURL=row-constraints.js.map
-\ No newline at end of file
-+//# sourceMappingURL=row-constraints.js.map
+ //# sourceMappingURL=row-constraints.js.map
 +
 +/**
 + * VoteTorrent patch (datetime-immediate-check-coercion), part 2 of 2.

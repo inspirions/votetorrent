@@ -10,10 +10,14 @@ import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
 import { createScopedRnStorageProvider } from '../engines/storage-guard';
 import { isUnrestorableControlSchemaError } from '../engines/control-schema-recovery';
+import { withIdentityOwnerKey, type WithIdentityOwnerKey } from '../engines/identity-owner-key';
 import { CadreNode, controlStorageScope, type TrustedOwnerStore } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
+
+/** The Authority's node: a CadreNode with its identity owner key restored (cadre-core 1.18). */
+export type AuthorityCadreNode = WithIdentityOwnerKey<InstanceType<typeof CadreNode>>;
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
 import { noiseCryptoForNode } from '../engines/noise-crypto-config';
 import { openStrandNetworkState, openTrustedOwnerStore } from '../engines/rn-durable-slot';
@@ -65,12 +69,12 @@ declare global {
  */
 export interface CadreNodeSettlement {
   status: 'ready' | 'failed';
-  node: InstanceType<typeof CadreNode> | null;
+  node: AuthorityCadreNode | null;
 }
 
 interface CadreNodeContextType {
   /** The live CadreNode instance (null until started). */
-  node: InstanceType<typeof CadreNode> | null;
+  node: AuthorityCadreNode | null;
   /** Event-driven sync state derived from CadreNodeEvents (D-10 — no polling). */
   syncState: 'connected' | 'syncing' | 'offline';
   /**
@@ -227,10 +231,10 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   // syncState 'offline' by default — updated by CadreNode events (D-10).
   const [syncState, setSyncState] = useState<'connected' | 'syncing' | 'offline'>('offline');
   // nodeRef holds the stable CadreNode instance (created once per mount).
-  const nodeRef = useRef<InstanceType<typeof CadreNode> | null>(null);
+  const nodeRef = useRef<AuthorityCadreNode | null>(null);
   const detachRendezvousRef = useRef<(() => Promise<void>) | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
-  const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
+  const [node, setNode] = useState<AuthorityCadreNode | null>(null);
   // D-08..D-11: what the boot learned about the saved owner anchor, and which store backs the node.
   const [ownerTrust, setOwnerTrust] = useState<OwnerTrustState>('ok');
   const storeKindRef = useRef<OwnerStoreKind | null>(null);
@@ -261,7 +265,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   // provider body — must not block initial render (D-06 / T-22-03).
   useEffect(() => {
     let isMounted = true;
-    let localNode: InstanceType<typeof CadreNode> | null = null;
+    let localNode: AuthorityCadreNode | null = null;
 
     async function bootNode() {
       // Spike 093: the P2P-11 replication proof boots its OWN CadreNode. Booting this one too puts
@@ -363,7 +367,8 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         const joinBootstrap = await readJoinBootstrap();
         const bootstrapNodes = [...new Set([...CONTROL_RELAY_ADDRS, ...joinBootstrap])];
 
-        const makeNode = () => new CadreNode({
+        // cadre-core 1.18: keep the owner key = the identity key (engines/identity-owner-key.ts).
+        const makeNode = () => withIdentityOwnerKey(new CadreNode({
           privateKey,
           controlNetwork: { partyId: PARTY_ID, bootstrapNodes },
           strandNetworkState: { store: strandNetworkStateStore },
@@ -465,7 +470,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           // Strand nodes therefore inherit `network` above (the single control relay), which
           // is the topology upstream's delegate-admission path expects.
           hibernation: { enabled: false },
-        });
+        }), privateKey);
 
         // node.start() is inside useEffect — never blocks initial render (D-06 / T-22-03).
         localNode = makeNode();

@@ -255,7 +255,7 @@ describeP2PHarness('D-24 two-node strand harness', function () {
     try {
       const first = harness.nodeA.node.getStrand(strandId)
       const second = await harness.nodeA.node.addStrand({
-        strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
+        strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null, FounderPeerId: null },
         sAppConfig: { id: 'org.votetorrent', version: '1.0.0', schema: VOTETORRENT_INNER_DDL, latencyHint: 'interactive' },
         founder: true,
         awaitFirstSync: false

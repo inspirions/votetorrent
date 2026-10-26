@@ -272,7 +272,7 @@ async function attemptBringUp (
 }> {
   const { partyId, clusterSize, log } = opts
 
-  const { CadreNode } = await import('@serfab/cadre-core')
+  const { CadreNode, ed25519KeyPairFromLibp2p } = await import('@serfab/cadre-core')
   const { MemoryRawStorage } = await import('@optimystic/db-p2p')
   const { webSockets } = await import('@libp2p/websockets')
   const { generateKeyPair } = await import('@libp2p/crypto/keys')
@@ -315,7 +315,8 @@ async function attemptBringUp (
 
     // --- 2. Owner genesis on node-A while it is STILL SOLO (handles.mjs genesis()). ---
     const t1 = Date.now()
-    const owner = nodeA.getIdentityOwnerKey()
+    // cadre-core 1.18 deleted getIdentityOwnerKey(); derive the same identity owner key here.
+    const owner = ed25519KeyPairFromLibp2p(privateKeyA)
     await nodeA.trustOwnerKeys([owner.publicKeyB64], 'operator')
     const controlDb = nodeA.getControlDatabase()
     if (!controlDb) throw new Error('two-node harness: no control database after node-A start()')
@@ -394,7 +395,7 @@ async function enrolNodeB (nodeA: any, nodeB: any, log: (line: string) => void):
       // redemption (no owner-side accept). A retry mints a fresh invitation, so a seat spent by
       // an attempt whose reply was lost never blocks the next one.
       const { invitation } = await withTimeout<any>(
-        nodeA.createCadreInvitation({ peerId, grantsOwner: false }),
+        nodeA.createCadreInvitation({ peerId }),
         HARNESS_TIMEOUTS.enrolMs,
         'node-A createCadreInvitation'
       )
@@ -467,7 +468,7 @@ function buildHarnessNode (
   async function rawOpen (strandId: string): Promise<Database> {
     const started = Date.now()
     const addStrandConfig: any = {
-      strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null },
+      strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null, FounderPeerId: null },
       sAppConfig: { id: HARNESS_SAPP_ID, version: '1.0.0', schema: VOTETORRENT_INNER_DDL, latencyHint: 'interactive' },
       // awaitFirstSync: false — mirrors topology.mjs strandConfig(): cadre-core >= 1.1.0
       // defaults a JOINER's addStrand to block on first sync; opting out lets the strand

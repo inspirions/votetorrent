@@ -55,7 +55,6 @@ export function randomCadreInvitation (opts: { members: number }): CadreInvitati
     invite: {
       key: randomEd25519KeyB64(),
       peerId: null,
-      grantsOwner: false,
       expiresAt: '2099-12-31T23:59:59.000',
       totalUses: 1000,
       stampId: b64(32),

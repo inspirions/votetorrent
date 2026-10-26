@@ -54,7 +54,9 @@ export interface AuthorityJoinNode {
 	getControlNode(): { getConnections(): ReadonlyArray<any> } | null | undefined;
 	refreshMembershipGate(reason: any): Promise<unknown>;
 	reconcileControlCohort(): Promise<unknown>;
-	wireOwnKeyIfOwner(): Promise<boolean>;
+	wireOwnKeyIfOwner(signer?: unknown): Promise<boolean>;
+	/** The identity owner signer (identity-owner-key.ts), handed to wireOwnKeyIfOwner by reanchorOwnKey. */
+	getIdentityOwnerSigner?(): unknown;
 }
 
 export type AuthorityNetworkJoinResult =

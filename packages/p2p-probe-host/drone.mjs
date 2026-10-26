@@ -30,7 +30,7 @@
  * Exit: Ctrl-C (SIGINT) or `kill <pid>` (SIGTERM) — both gracefully stop the node.
  */
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { CadreNode, decodeCadreInvitation } from '@serfab/cadre-core';
+import { CadreNode, decodeCadreInvitation, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
 import { resolveStrandRole, strandFounderOption } from './strand-role.mjs';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
@@ -71,6 +71,7 @@ const DRONE_BOOTSTRAP_CONTROL_ADDR = process.env.DRONE_BOOTSTRAP_CONTROL_ADDR ??
 const STRAND_ROLE = resolveStrandRole(process.env, !DRONE_BOOTSTRAP_CONTROL_ADDR);
 const DRONE_BOOTSTRAP_STRAND_ADDR = process.env.DRONE_BOOTSTRAP_STRAND_ADDR ?? '';
 
+const identityKey = await generateKeyPair('Ed25519');
 const node = new CadreNode({
   // Supply the identity key explicitly instead of letting libp2p mint an ephemeral one:
   // `getIdentityOwnerKey()` — which owner genesis needs — THROWS on an ephemeral key
@@ -81,7 +82,7 @@ const node = new CadreNode({
   // Freshly generated per boot is correct here: the harness captures this drone's address
   // (which carries its peerId) from PROOF_WS_ADDR= on every run, so nothing pins it across
   // restarts. The DEVICE peerId must be stable (D-05); this host-side drone's need not be.
-  privateKey: await generateKeyPair('Ed25519'),
+  privateKey: identityKey,
   controlNetwork: {
     partyId: PARTY_ID,
     bootstrapNodes: DRONE_BOOTSTRAP_CONTROL_ADDR ? [DRONE_BOOTSTRAP_CONTROL_ADDR] : [],
@@ -225,7 +226,8 @@ if (IS_FOUNDER) {
   //   Block default/Revocation is unavailable (peers-unreachable)
   // drone-A boots with empty bootstrapNodes, so "solo" holds here by construction — but this
   // block must stay ABOVE addStrand and above anything that admits a peer.
-  const owner = node.getIdentityOwnerKey();
+  // cadre-core 1.18 deleted getIdentityOwnerKey(); derive the same identity owner key here.
+  const owner = ed25519KeyPairFromLibp2p(identityKey);
   await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
   const controlDb = node.getControlDatabase();
   if (!controlDb) throw new Error('founder has no control database after start()');
@@ -236,7 +238,6 @@ if (IS_FOUNDER) {
   // Untargeted (any redeemer), member-only (never an owner grant), multi-use. Minted while
   // solo, so the CadreInvite row commits locally with no quorum to wait on.
   const { encoded } = await node.createCadreInvitation({
-    grantsOwner: false,
     uses: DRONE_INVITE_USES,
     expiresInMs: ENROL_WINDOW_MS,
   });

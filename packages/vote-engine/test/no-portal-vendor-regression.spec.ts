@@ -128,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.16.x, @optimystic/db-* 1.15.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.18.x, @optimystic/db-* 1.19.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -180,9 +180,16 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // 2026-10-16: @serfab 1.15.0 -> 1.16.0 (dependency ranges only: cadre-core's dist is byte-identical
       // to 1.15.0, so the patch carries verbatim) and @optimystic 1.14.0 -> 1.15.0 (FRET maintenance
       // redial on the node's dial deadline; p2p-fret ^1.1.0 with idle backoff). quereus stays 4.20.2.
+      // 2026-10-26: @serfab 1.16.0 -> 1.18.0 (owner keys apart from the node identity, machine
+      // invitations grant no ownership, control-schema versions with in-place migration from 1.17 on
+      // (a 1.16 store is refused `before-migrations`), identify-gated sibling reachability; the
+      // public-observer patch forward-ported and the control-fork guard added) and @optimystic
+      // 1.15.0 -> 1.19.0 (catalog-only ALTER, storage durability window, one request per member per
+      // multi-collection commit, size-split blocks, Optimystic#35's 1 MiB cap lifted; p2p-fret ^1.2.1).
+      // @quereus 4.20.2 -> 4.20.3, @libp2p/websockets 10.1.18 -> 10.1.25 (patched).
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.16.' : '1.15.'
+        : pkg.startsWith('@serfab/') ? '1.18.' : '1.19.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

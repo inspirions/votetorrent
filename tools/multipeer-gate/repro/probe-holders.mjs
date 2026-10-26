@@ -9,7 +9,7 @@
  *
  * RELAYS=1 (passing) vs RELAYS=2 (failing) is the A/B.
  */
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -78,7 +78,7 @@ try {
   L(`DRONES=${DRONES} PEERS=${PEERS} RELAYS=${RELAYS}`);
   const a = await drone('drone-A', []);
   const genesis = async (when) => {
-    const owner = a.getIdentityOwnerKey();
+    const owner = ed25519KeyPairFromLibp2p(await generateKeyPair('Ed25519')); // 1.18: owner key apart from the identity
     await a.trustOwnerKeys([owner.publicKeyB64], 'operator');
     await a.getControlDatabase().ensureOwnerKey(owner.publicKeyB64);
     await a.initializeSeedBootstrap(owner.privateKeyB64);
@@ -104,7 +104,7 @@ try {
   L('--- enrolment: one attempt per joiner ---');
   for (const { name, node } of nodes.slice(1)) {
     try {
-      const { invitation } = await a.createCadreInvitation({ peerId: node.peerId.toString(), grantsOwner: false });
+      const { invitation } = await a.createCadreInvitation({ peerId: node.peerId.toString() });
       await node.redeemCadreInvitation(invitation);
       const ok = await a.isAuthorizedMember(node.peerId.toString());
       L(`${name}: redeemCadreInvitation ok, authorized=${ok}`);
