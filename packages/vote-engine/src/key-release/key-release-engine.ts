@@ -627,7 +627,10 @@ export class KeyReleaseEngine implements IKeyReleaseEngine {
 
             try {
               // Rule 4: ONE Task + extension pair per transaction — never batched.
-              const tid = await allocateTid(this.ctx.db, 'keys-tasks')
+              // Per-keyholder namespace: each keyholder's device writes ONLY its own TidHighWater row. A shared
+              // 'keys-tasks' row is a primary key two replicas upsert from stale views, so the second
+              // device's commit failed UNIQUE(TidHighWater.Namespace) and its task was never seeded.
+              const tid = await allocateTid(this.ctx.db, `keys-tasks:${userId}`)
               await this.ctx.db.exec('BEGIN')
               try {
                 await this.ctx.db.exec(

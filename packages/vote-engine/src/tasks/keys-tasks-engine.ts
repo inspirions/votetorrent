@@ -224,7 +224,8 @@ export class KeysTasksEngine implements IKeysTasksEngine {
     const releaseEngine = new KeyReleaseEngine(this.ctx!, this.deps)
     const outcome = await releaseEngine.releaseKeyShare(task.election.election.id, signer, revision)
 
-    const tid = await allocateTid(this.ctx!.db, 'keys-tasks')
+    // Per-keyholder namespace (see KeyReleaseEngine.seedReleaseKeyTasks): never a TidHighWater row another keyholder's device writes.
+    const tid = await allocateTid(this.ctx!.db, `keys-tasks:${task.userId}`)
     try {
       await this.ctx!.db.exec(
 				`update Task
