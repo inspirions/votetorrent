@@ -39,6 +39,8 @@ export const VOTER_INVITE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 /** The slice of a cadre-core `CadreNode` minting needs (the real class satisfies it). */
 export interface VoterInviteNode {
 	readonly peerId?: { toString(): string };
+	/** This machine's own addresses; empty on a phone until a relay grants it a reservation. */
+	getMultiaddrs(): string[];
 	getIdentityOwnerKey(): { publicKeyB64: string; privateKeyB64: string };
 	getControlDatabase(): {
 		getOwnerKeys(): Promise<ReadonlySet<string>>;
@@ -118,6 +120,36 @@ export async function ensureVoterInviteOwner(node: VoterInviteNode): Promise<voi
 	}
 }
 
+/**
+ * Why a join code could not be made, as a closed set the card maps to its own sentence. The
+ * engine's and cadre-core's error text is never shown or logged: it can carry ids.
+ *  - `not-reachable`: cadre-core refused the mint and this phone has no address of its own (no relay
+ *    reservation), so a voter's phone would have nothing to dial;
+ *  - `not-founding-officer`: this phone's officer did not found the network, so it has no anchor;
+ *  - `open-timeout`: the network did not open in time (raised by the card, which owns the open).
+ */
+export type VoterInviteFailureReason = 'not-reachable' | 'not-founding-officer' | 'open-timeout';
+
+export class VoterInviteError extends Error {
+	readonly reason: VoterInviteFailureReason;
+
+	constructor(reason: VoterInviteFailureReason) {
+		// A fixed message: callers read `reason`, never the text.
+		super('voter-invite: refused');
+		this.name = 'VoterInviteError';
+		this.reason = reason;
+	}
+}
+
+/** Does this phone have an address of its own? A read that throws counts as none. */
+function hasOwnAddress(node: VoterInviteNode): boolean {
+	try {
+		return node.getMultiaddrs().length > 0;
+	} catch {
+		return false;
+	}
+}
+
 export interface VoterJoinCodeResult {
 	readonly code: string;
 	readonly fingerprint: string;
@@ -130,6 +162,9 @@ export interface VoterJoinCodeResult {
  * Mint an untargeted voter invitation and build the join code for `networkHash`. The network
  * must already be open in `networksEngine`; `founder` is this device's officer (its founding
  * rows select the anchor, exactly as the founding-bundle export does).
+ *
+ * Rejects with a {@link VoterInviteError} for the refusals the card can name; anything else is
+ * rethrown unchanged.
  */
 export async function createVoterJoinCode(args: {
 	node: VoterInviteNode;
@@ -137,12 +172,25 @@ export async function createVoterJoinCode(args: {
 	networkHash: string;
 	founder: { userId: string; signerKey: string };
 }): Promise<VoterJoinCodeResult> {
-	const anchor: FoundingAnchor = await args.networksEngine.getFoundingAnchor(args.networkHash, args.founder);
+	let anchor: FoundingAnchor;
+	try {
+		anchor = await args.networksEngine.getFoundingAnchor(args.networkHash, args.founder);
+	} catch (err) {
+		if ((err as { code?: unknown } | null)?.code === 'not-founding-officer') throw new VoterInviteError('not-founding-officer');
+		throw err;
+	}
 	await ensureVoterInviteOwner(args.node);
-	const minted = await args.node.createCadreInvitation({
-		uses: VOTER_INVITE_USES,
-		expiresInMs: VOTER_INVITE_LIFETIME_MS,
-	});
+	let minted: Awaited<ReturnType<VoterInviteNode['createCadreInvitation']>>;
+	try {
+		minted = await args.node.createCadreInvitation({
+			uses: VOTER_INVITE_USES,
+			expiresInMs: VOTER_INVITE_LIFETIME_MS,
+		});
+	} catch (err) {
+		// Judged by this phone's own state, not by cadre-core's message text, which can change.
+		if (!hasOwnAddress(args.node)) throw new VoterInviteError('not-reachable');
+		throw err;
+	}
 	// Required lazily, like the other engine-only paths in this app: screens import this module, and
 	// several screen suites stub vote-core to an empty module that vote-engine's barrel cannot load.
 	// eslint-disable-next-line @typescript-eslint/no-var-requires

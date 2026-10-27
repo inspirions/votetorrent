@@ -16,6 +16,10 @@
  * changes who can admit machines to this network, so it waits for an explicit confirm. A phone that
  * joined a cadre someone else owns cannot invite voters at all, and says so.
  *
+ * A failed code says why when the reason is known (`inviteFailureReason`): no relay configured in
+ * the app, no relay reservation yet, a network this phone did not found, or a network that did not
+ * open in time. The log carries the same closed reason token.
+ *
  * Translated copy only; logs carry closed tokens, never the code (it holds the invitation's private
  * key).
  */
@@ -36,6 +40,8 @@ import {
 	createVoterJoinCode,
 	inviteExpiryMs,
 	voterInviteCapability,
+	VoterInviteError,
+	type VoterInviteFailureReason,
 	type VoterInviteNode,
 	type VoterJoinCodeResult,
 } from "../../../engines/voter-invite";
@@ -57,11 +63,40 @@ type CardState =
 	| { kind: "not-owner" }
 	| { kind: "generating" }
 	| { kind: "ready"; result: VoterJoinCodeResult }
-	| { kind: "error" };
+	| { kind: "error"; reason: InviteErrorReason };
+
+/** Every reason the error body can name; `failed` is the generic one. */
+export type InviteErrorReason = VoterInviteFailureReason | "no-relay-config" | "failed";
+
+/**
+ * The reason for a failed generate. An unreachable phone whose app ships no relay address is
+ * reported as the config fault, its root cause; anything unrecognised is `failed`.
+ */
+export function inviteFailureReason(err: unknown, configFault: unknown): InviteErrorReason {
+	if (!(err instanceof VoterInviteError)) return "failed";
+	if (err.reason === "not-reachable" && configFault) return "no-relay-config";
+	return err.reason;
+}
+
+/** The translated sentence for each reason. */
+export function inviteFailureKey(reason: InviteErrorReason): string {
+	switch (reason) {
+		case "no-relay-config":
+			return "voterInviteFailedNoRelay";
+		case "not-reachable":
+			return "voterInviteFailedNotReachable";
+		case "not-founding-officer":
+			return "voterInviteFailedNotFounder";
+		case "open-timeout":
+			return "voterInviteFailedOpenTimeout";
+		default:
+			return "voterInviteFailed";
+	}
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	return new Promise<T>((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error("voter-invite: open() timed out")), ms);
+		const timer = setTimeout(() => reject(new VoterInviteError("open-timeout")), ms);
 		promise.then(
 			(value) => {
 				clearTimeout(timer);
@@ -75,9 +110,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	});
 }
 
-function logInviteFailure(stage: string): void {
-	// eslint-disable-next-line no-console -- closed token only, never a code, key or hash.
-	console.info(`[voter-invite] ${stage}: failed`);
+function logInviteFailure(stage: string, reason: InviteErrorReason = "failed"): void {
+	// eslint-disable-next-line no-console -- closed tokens only, never a code, key or hash.
+	console.info(`[voter-invite] ${stage}: ${reason}`);
 }
 
 export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
@@ -85,7 +120,7 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 	const theme = useTheme() as ExtendedTheme;
 	const { colors } = theme;
 	const { networksEngine } = useApp();
-	const { node } = useCadreNode();
+	const { node, configFault } = useCadreNode();
 	const [state, setState] = useState<CardState>({ kind: "checking" });
 	const [copyNotice, setCopyNotice] = useState<"copied" | "failed" | undefined>(undefined);
 	const [qrOpen, setQrOpen] = useState(false);
@@ -144,13 +179,14 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 				founder: { userId: user.id, signerKey },
 			});
 			if (mountedRef.current) setState({ kind: "ready", result });
-		} catch {
-			logInviteFailure("generate");
-			if (mountedRef.current) setState({ kind: "error" });
+		} catch (err) {
+			const reason = inviteFailureReason(err, configFault);
+			logInviteFailure("generate", reason);
+			if (mountedRef.current) setState({ kind: "error", reason });
 		} finally {
 			inFlightRef.current = false;
 		}
-	}, [networkRef, networksEngine, node]);
+	}, [networkRef, networksEngine, node, configFault]);
 
 	// Decide what the card can do on this phone, then generate straight away when nothing needs
 	// confirming.
@@ -164,7 +200,7 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 			else if (capability === "not-owner") setState({ kind: "not-owner" });
 			else {
 				logInviteFailure("capability");
-				setState({ kind: "error" });
+				setState({ kind: "error", reason: "failed" });
 			}
 		})();
 		return () => {
@@ -226,7 +262,7 @@ export function VoterInviteCard({ networkRef, onClose }: VoterInviteCardProps) {
 			return (
 				<View testID="voter-invite-body-error" style={{ gap: 8 }}>
 					<ThemedText type="default" style={{ color: colors.error }}>
-						{t("voterInviteFailed")}
+						{t(inviteFailureKey(state.reason))}
 					</ThemedText>
 					<CustomButton testID="voter-invite-retry" title={t("voterInviteRetry")} onPress={generate} />
 					<CustomButton testID="voter-invite-cancel" title={t("voterInviteCancel")} onPress={onClose} />

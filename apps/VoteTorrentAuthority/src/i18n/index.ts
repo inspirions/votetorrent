@@ -584,6 +584,12 @@ const resources = {
 			voterInviteNotOwner:
 				'This phone cannot invite voters to this network. Ask the officer whose device manages this network to create the join code.',
 			voterInviteFailed: 'Could not create a join code. Try again.',
+			voterInviteFailedNoRelay:
+				'Could not create a join code: this app has no relay set up, so other phones cannot reach this one. Install an app build that includes a relay address.',
+			voterInviteFailedNotReachable:
+				'Could not create a join code: this phone is not connected to its relay yet. Check Wi-Fi or mobile data, then try again.',
+			voterInviteFailedNotFounder: 'Could not create a join code: only the officer who created this network can make join codes for it.',
+			voterInviteFailedOpenTimeout: 'Could not create a join code: the network took too long to open. Try again.',
 			voterInviteRetry: 'Try again',
 			voterInviteReadyBody:
 				'Voters can scan the QR code in the VoteTorrent Voter app under Settings, Join a network, or paste the join code there. Publish the network fingerprint below through an official channel so voters can check it.',
@@ -1865,6 +1871,12 @@ const resources = {
 			voterInviteNotOwner:
 				'Este teléfono no puede invitar a votantes a esta red. Pide al funcionario cuyo dispositivo gestiona esta red que cree el código de acceso.',
 			voterInviteFailed: 'No se pudo crear un código de acceso. Inténtalo de nuevo.',
+			voterInviteFailedNoRelay:
+				'No se pudo crear un código de acceso: esta aplicación no tiene un relé configurado, así que otros teléfonos no pueden llegar a este. Instala una versión de la aplicación que incluya una dirección de relé.',
+			voterInviteFailedNotReachable:
+				'No se pudo crear un código de acceso: este teléfono todavía no está conectado a su relé. Revisa el Wi-Fi o los datos móviles e inténtalo de nuevo.',
+			voterInviteFailedNotFounder: 'No se pudo crear un código de acceso: solo el funcionario que creó esta red puede crear códigos de acceso para ella.',
+			voterInviteFailedOpenTimeout: 'No se pudo crear un código de acceso: la red tardó demasiado en abrirse. Inténtalo de nuevo.',
 			voterInviteRetry: 'Intentar de nuevo',
 			voterInviteReadyBody:
 				'Los votantes pueden escanear el código QR en la aplicación VoteTorrent Voter, en Ajustes, Unirse a una red, o pegar allí el código de acceso. Publica la huella de la red que aparece abajo por un canal oficial para que los votantes puedan comprobarla.',
