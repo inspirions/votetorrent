@@ -60,10 +60,17 @@ jest.mock("../../../../providers/AppProvider", () => ({
 	useApp: () => ({ networksEngine: { open: mockOpen, getFoundingAnchor: mockGetFoundingAnchor } }),
 }));
 
-const mockNodeState: { owners: Set<string>; node: unknown; seeded: boolean } = { owners: new Set(), node: null, seeded: false };
+const mockNodeState: { owners: Set<string>; node: unknown; seeded: boolean; addrs: string[]; configFault: unknown } = {
+	owners: new Set(),
+	node: null,
+	seeded: false,
+	addrs: [],
+	configFault: null,
+};
 function makeNode() {
 	return {
 		peerId: { toString: () => "self-peer" },
+		getMultiaddrs: () => mockNodeState.addrs,
 		getIdentityOwnerKey: () => ({ publicKeyB64: "self-pub", privateKeyB64: "self-priv" }),
 		getSeedBootstrapService: () => ({ canAuthorize: () => mockNodeState.seeded }),
 		getControlDatabase: () => ({
@@ -82,7 +89,7 @@ function makeNode() {
 	};
 }
 jest.mock("../../../../providers/CadreNodeProvider", () => ({
-	useCadreNode: () => ({ node: mockNodeState.node }),
+	useCadreNode: () => ({ node: mockNodeState.node, configFault: mockNodeState.configFault }),
 }));
 jest.mock("../../../../engines/device-user", () => ({
 	getDeviceUser: async () => ({ id: "user-1", name: "O", activeKeys: [{ key: "key-1", type: "ed25519" }] }),
@@ -202,6 +209,8 @@ beforeEach(() => {
 	keepAwake.__resetKeepAwakeMock();
 	mockNodeState.owners = new Set();
 	mockNodeState.seeded = false;
+	mockNodeState.addrs = ["/ip4/203.0.113.7/tcp/443/wss/p2p/relay/p2p-circuit/p2p/self-peer"];
+	mockNodeState.configFault = null;
 	mockNodeState.node = makeNode();
 	mockOpen.mockClear();
 	mockGetFoundingAnchor.mockClear();
@@ -301,6 +310,60 @@ describe("VoterInviteCard", () => {
 		expect(message.includes(mockAnchorState.anchor.fingerprint)).toBe(true);
 		expect(message.includes(code)).toBe(true);
 		shareSpy.mockRestore();
+	});
+
+	const UNDIALABLE = "createCadreInvitation: neither this machine nor any other machine of the party has an address a device could dial";
+	function refuseMint() {
+		const node = mockNodeState.node as ReturnType<typeof makeNode>;
+		node.createCadreInvitation.mockImplementationOnce(async () => {
+			throw new Error(UNDIALABLE);
+		});
+	}
+
+	it("a phone with no relay address says it is not connected yet, with one closed token", async () => {
+		mockNodeState.owners = new Set(["self-pub"]);
+		mockNodeState.addrs = [];
+		refuseMint();
+		const tr = await render();
+		const body = textOf(byId(tr, "voter-invite-body-error"));
+		expect(body).toContain(T.voterInviteFailedNotReachable);
+		expect(body).not.toContain(UNDIALABLE);
+		expect(tokenCount(capture, "[voter-invite] generate: not-reachable")).toBe(1);
+	});
+
+	it("with no relay configured in the app, it says so instead", async () => {
+		mockNodeState.owners = new Set(["self-pub"]);
+		mockNodeState.addrs = [];
+		mockNodeState.configFault = { kind: "missing", reason: "empty-address-list" };
+		refuseMint();
+		const tr = await render();
+		expect(textOf(byId(tr, "voter-invite-body-error"))).toContain(T.voterInviteFailedNoRelay);
+		expect(tokenCount(capture, "[voter-invite] generate: no-relay-config")).toBe(1);
+	});
+
+	it("a network this phone did not found says only its founding officer can invite", async () => {
+		mockNodeState.owners = new Set(["self-pub"]);
+		mockGetFoundingAnchor.mockImplementationOnce(async () => {
+			throw Object.assign(new Error("founding bundle export refused: not-founding-officer"), { code: "not-founding-officer" });
+		});
+		const tr = await render();
+		expect(textOf(byId(tr, "voter-invite-body-error"))).toContain(T.voterInviteFailedNotFounder);
+	});
+
+	it("a network that does not open in time says so", async () => {
+		jest.useFakeTimers();
+		try {
+			mockNodeState.owners = new Set(["self-pub"]);
+			mockOpen.mockImplementationOnce(() => new Promise(() => undefined));
+			const tr = await render();
+			await act(async () => {
+				jest.advanceTimersByTime(45000);
+			});
+			await flush();
+			expect(textOf(byId(tr, "voter-invite-body-error"))).toContain(T.voterInviteFailedOpenTimeout);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	it("no node yet: an error, not a hang", async () => {

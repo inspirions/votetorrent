@@ -13,6 +13,7 @@ import {
 	VOTER_INVITE_LIFETIME_MS,
 	VOTER_INVITE_USES,
 	voterInviteCapability,
+	VoterInviteError,
 	type VoterInviteNode,
 } from "../voter-invite";
 
@@ -50,11 +51,21 @@ type SelfRow = { peerId: string; vouchSig: string | null; vouchUsage: string | n
 
 function fakeNode(
 	owners: string[],
-	opts: { invitation?: string; identityThrows?: boolean; noDb?: boolean; selfRow?: SelfRow; peersThrow?: boolean; noPeerId?: boolean; alreadyWired?: boolean } = {},
+	opts: {
+		invitation?: string;
+		identityThrows?: boolean;
+		noDb?: boolean;
+		selfRow?: SelfRow;
+		peersThrow?: boolean;
+		noPeerId?: boolean;
+		alreadyWired?: boolean;
+		addrs?: string[];
+	} = {},
 ) {
 	const state = { owners: new Set(owners), wired: opts.alreadyWired === true };
 	const node = {
 		...(opts.noPeerId ? {} : { peerId: { toString: () => "self-peer" } }),
+		getMultiaddrs: jest.fn(() => opts.addrs ?? ["/ip4/203.0.113.7/tcp/443/wss/p2p/relay/p2p-circuit/p2p/self-peer"]),
 		getIdentityOwnerKey: jest.fn(() => {
 			if (opts.identityThrows) throw new Error("ephemeral identity");
 			return SELF;
@@ -204,6 +215,42 @@ describe("createVoterJoinCode", () => {
 		).rejects.toThrow();
 		expect(state.owners.size).toBe(0);
 		expect(node.createCadreInvitation).not.toHaveBeenCalled();
+	});
+
+	it("names the not-founding-officer refusal as a typed reason", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64]);
+		const getFoundingAnchor = jest.fn(async () => {
+			throw Object.assign(new Error("founding bundle export refused: not-founding-officer"), { code: "not-founding-officer" });
+		});
+		const err = await createVoterJoinCode({ node, networksEngine: { getFoundingAnchor }, networkHash: "h", founder: { userId: "x", signerKey: "y" } }).catch(
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(VoterInviteError);
+		expect((err as VoterInviteError).reason).toBe("not-founding-officer");
+	});
+
+	it("a refused mint on a phone with no dialable address of its own is not-reachable", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64], { addrs: [] });
+		node.createCadreInvitation.mockImplementationOnce(async () => {
+			throw new Error("createCadreInvitation: neither this machine nor any other machine of the party has an address a device could dial");
+		});
+		const err = await createVoterJoinCode({ node, networksEngine: { getFoundingAnchor: async () => ANCHOR }, networkHash: "h", founder: { userId: "x", signerKey: "y" } }).catch(
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(VoterInviteError);
+		expect((err as VoterInviteError).reason).toBe("not-reachable");
+	});
+
+	it("a refused mint on a phone that has an address is passed through unclassified", async () => {
+		const { node } = fakeNode([SELF.publicKeyB64]);
+		const original = new Error("some other cadre-core refusal");
+		node.createCadreInvitation.mockImplementationOnce(async () => {
+			throw original;
+		});
+		const err = await createVoterJoinCode({ node, networksEngine: { getFoundingAnchor: async () => ANCHOR }, networkHash: "h", founder: { userId: "x", signerKey: "y" } }).catch(
+			(e: unknown) => e,
+		);
+		expect(err).toBe(original);
 	});
 });
 
