@@ -29,9 +29,18 @@
  *   RELAY_LATE_ERROR <name>   RELAY_STOPPED (exit 0)   RELAY_FATAL <token> (exit 1)
  *   PROBE_CLIENT {json}   (--probe-client mode, exit 0)
  *
+ * PUBLIC MODE (--announce). Behind a TLS tunnel or proxy (ngrok, Caddy) that forwards
+ * `wss://<host>:443` to this port, `--announce /dns4/<host>/tcp/443/wss` makes the node advertise that
+ * address instead of its LAN one (cadre-core `network.announceAddrs`). A relayed phone's own address
+ * is built from what the relay advertises, so a LAN address would leave phones off the LAN unable to
+ * dial it; and a release build refuses cleartext `ws://`, so a public relay must be `wss`.
+ * `--lan-ip` is then not needed.
+ *
  * USAGE
  *   serve : node relay-only.mjs --key-file <abs> --port <int> --lan-ip <IPv4> --bootstrap-out <abs .json>
  *                               [--status-ms 60000]
+ *           node relay-only.mjs --key-file <abs> --port <int> --announce /dns4/<host>/tcp/443/wss
+ *                               --bootstrap-out <abs .json> [--status-ms 60000]
  *   probe : node relay-only.mjs --probe-client <multiaddr> [--timeout-ms 60000]
  */
 import { createHash } from 'node:crypto';
@@ -105,6 +114,7 @@ function parseArgs(argv) {
 
 function usage() {
 	out('usage: relay-only.mjs --key-file <abs> --port <int> --lan-ip <IPv4> --bootstrap-out <abs.json> [--status-ms N]');
+	out('       relay-only.mjs --key-file <abs> --port <int> --announce /dns4/<host>/tcp/443/wss --bootstrap-out <abs.json> [--status-ms N]');
 	out('       relay-only.mjs --probe-client <multiaddr> [--timeout-ms N]');
 }
 
@@ -136,6 +146,9 @@ function insideRepo(p) {
 	}
 	return r === repoReal || r.startsWith(repoReal + sep);
 }
+
+/** A public relay is reached as wss on 443 by DNS name, the shape a TLS tunnel or proxy serves. */
+const PUBLIC_WSS_ANNOUNCE = /^\/dns4\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\/tcp\/443\/wss$/;
 
 function isPrivateLanIp(ip) {
 	const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
@@ -232,14 +245,16 @@ async function serve(opts) {
 	const keyFile = opts['key-file'];
 	const bootstrapOut = opts['bootstrap-out'];
 	const lanIp = opts['lan-ip'];
+	const announce = opts.announce;
 	const port = Number(opts.port);
 	const statusMs = opts['status-ms'] === undefined ? 60000 : Number(opts['status-ms']);
-	if (!keyFile || !bootstrapOut || !lanIp || opts.port === undefined) refuse('usage');
+	if (!keyFile || !bootstrapOut || (!lanIp && !announce) || opts.port === undefined) refuse('usage');
 	if (!keyFile.startsWith('/') || !bootstrapOut.startsWith('/')) refuse('usage');
 	if (!bootstrapOut.endsWith('.json')) refuse('usage');
 	if (insideRepo(keyFile) || insideRepo(bootstrapOut)) refuse('inside-repo');
 	if (!Number.isInteger(port) || port < 1024 || port > 65535) refuse('port');
-	if (!isPrivateLanIp(lanIp)) refuse('lan-ip');
+	if (announce !== undefined && !PUBLIC_WSS_ANNOUNCE.test(announce)) refuse('announce');
+	if (announce === undefined && !isPrivateLanIp(lanIp)) refuse('lan-ip');
 	if (!Number.isInteger(statusMs) || statusMs < 1000) refuse('usage');
 	if (existsSync(keyFile) && (statSync(keyFile).mode & 0o077) !== 0) refuse('key-mode');
 	stackPreflight();
@@ -281,6 +296,7 @@ async function serve(opts) {
 	const network = {
 		transports: [webSockets()],
 		listenAddrs: ['/ip4/0.0.0.0/tcp/' + port + '/ws'],
+		...(announce !== undefined ? { announceAddrs: [announce] } : {}),
 	};
 	const node = new CadreNode({
 		privateKey,
@@ -319,9 +335,9 @@ async function serve(opts) {
 	const peerId = String(node.peerId);
 	out('RELAY_PEER_ID=' + peerId);
 	const control = node.getControlNode();
-	const multiaddr = '/ip4/' + lanIp + '/tcp/' + port + '/ws/p2p/' + peerId;
+	const multiaddr = (announce ?? '/ip4/' + lanIp + '/tcp/' + port + '/ws') + '/p2p/' + peerId;
 	const listening = control.getMultiaddrs().map((m) => m.toString());
-	if (!listening.includes(multiaddr)) fatal('lan-ip-not-listening');
+	if (!listening.includes(multiaddr)) fatal(announce !== undefined ? 'announce-not-advertised' : 'lan-ip-not-listening');
 	if (!multiaddr.startsWith('/') || !multiaddr.includes('/p2p/') || multiaddr.length > 256) fatal('multiaddr-shape');
 	out('RELAY_MULTIADDR=' + multiaddr);
 
