@@ -49,6 +49,7 @@ import {
 } from '@votetorrent/vote-engine/rn'
 import type { DbFactory, EngineContext, ElectionSubject } from '@votetorrent/vote-engine/rn'
 import { rnDbFactory, createStrandDbFactory } from './rn-db-factory'
+import { takeFounderIntent, wrapCreateWithFounding } from './founder-intent'
 import type { StrandHost } from './rn-db-factory'
 import { USE_LOCAL_DB_FACTORY, USE_STUB_ATTESTATION_VERIFIER } from './proof-flags.generated'
 import { selectAttestationVerifier } from './attestation-verifier'
@@ -176,8 +177,15 @@ export class EngineFactory {
 				this.strandBackedNetworks.add(networkHash)
 				return db
 			}
+			// D-30: the solo store has no founder flag, but this open still claims (and so frees) a
+			// founding window installed for it, exactly as the strand factory's first statement does.
+			takeFounderIntent(networkHash)
 			return this.rnDbFactory(networkHash)
 		})
+		// D-30 (the Authority's, ported): a network this factory CREATES (the __DEV__ dev seed's
+		// NetworksEngine.create) founds even while the control node holds a relay connection. A join or
+		// a re-open never calls create, so it keeps the default.
+		wrapCreateWithFounding(this.networksEngine)
 	}
 
 	/** Expose the shared NetworksEngine for initialize() in VoterAppProvider. */

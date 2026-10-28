@@ -22,6 +22,7 @@ import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
 import type { DbFactory } from '@votetorrent/vote-engine';
 import type { StrandConfig, StrandInstance } from '@serfab/cadre-core';
 import { isStrandAwaitingFirstSyncError, waitForStrandWritable } from './strand-first-sync';
+import { takeFounderIntent, resolveFounderFlag } from './founder-intent';
 
 // cadre-core's StrandDatabase.executeSchema() wraps the sApp schema as
 // `declare schema App { ${schema} } apply schema App;`. VOTETORRENT_SCHEMA_SQL is
@@ -165,9 +166,13 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 		// D-05: the network hash is already unique per network — use it as the strandId.
 		const strandId = networkHash;
 
-		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder.
+		// D-30 (the Authority's, ported): the one-shot intent read is the FIRST statement, before any
+		// await, so a founding window is claimed by the open it was installed for and by no other.
+		const intent = takeFounderIntent(strandId);
+
+		// D-07 (0.11.0): check for peers BEFORE addStrand — no peers ⇒ we are the founder (the default).
 		// Spike 100: unless this phone joined the network, in which case it never is.
-		const hasPeers = (node.getControlNode()?.getConnections().length ?? 0) > 0;
+		const controlConnections = node.getControlNode()?.getConnections().length ?? 0;
 		let joined = false;
 		try {
 			joined = (await options?.isJoinedNetwork?.(strandId)) === true;
@@ -193,7 +198,7 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 					schema: VOTETORRENT_INNER_DDL,
 					latencyHint: 'interactive',
 				},
-				founder: !joined && !hasPeers,
+				founder: resolveFounderFlag({ intent, joined, controlConnections }),
 			});
 		} catch (error) {
 			// Only the first-sync gate error, FOR THIS strand, is retryable — every other
