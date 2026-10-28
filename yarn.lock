@@ -19749,11 +19749,11 @@ __metadata:
 
 "rn-leveldb@patch:rn-leveldb@npm%3A3.11.1#~/.yarn/patches/rn-leveldb-npm-3.11.1-add1912081.patch":
   version: 3.11.1
-  resolution: "rn-leveldb@patch:rn-leveldb@npm%3A3.11.1#~/.yarn/patches/rn-leveldb-npm-3.11.1-add1912081.patch::version=3.11.1&hash=09ade9"
+  resolution: "rn-leveldb@patch:rn-leveldb@npm%3A3.11.1#~/.yarn/patches/rn-leveldb-npm-3.11.1-add1912081.patch::version=3.11.1&hash=44a256"
   peerDependencies:
     react: "*"
     react-native: "*"
-  checksum: 10c0/762615eb662201954a87e1b1ddc87db8b91b854177c38c6b9442a5e1b1dc07faaef2872533944222ce496ebb7afb2d69d618019be855eed207bb0070f0a1f54f
+  checksum: 10c0/de5db3e1b29bd11886d16a8265db4740f39d1215eec96bc3f0af86692ccfcbc95206dff199800762a31f8350df090b425f8e2e2e894b7ccead061a48baa5748e
   languageName: node
   linkType: hard
 
