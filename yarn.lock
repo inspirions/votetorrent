@@ -4461,7 +4461,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@optimystic/db-p2p@npm:^1.19.0":
+"@optimystic/db-p2p@npm:1.19.0":
   version: 1.19.0
   resolution: "@optimystic/db-p2p@npm:1.19.0"
   dependencies:
@@ -4495,6 +4495,43 @@ __metadata:
     uint8arraylist: "npm:^3.0.2"
     uint8arrays: "npm:^6.1.1"
   checksum: 10c0/85dea0df2617f2d32d6f916a3932c600b6e1431896c2889759bd2c2f7b2d5af3d74f287f7dbd9b0cc251a0272c0950f7f01413cc76ba6a96ee9be0385199fc57
+  languageName: node
+  linkType: hard
+
+"@optimystic/db-p2p@patch:@optimystic/db-p2p@npm%3A1.19.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.19.0-votetorrent.patch":
+  version: 1.19.0
+  resolution: "@optimystic/db-p2p@patch:@optimystic/db-p2p@npm%3A1.19.0#~/.yarn/patches/@optimystic-db-p2p-npm-1.19.0-votetorrent.patch::version=1.19.0&hash=662753"
+  dependencies:
+    "@chainsafe/libp2p-noise": "npm:^17.0.0"
+    "@chainsafe/libp2p-yamux": "npm:^8.0.1"
+    "@libp2p/autonat": "npm:^3.0.28"
+    "@libp2p/bootstrap": "npm:^12.0.32"
+    "@libp2p/circuit-relay-v2": "npm:^4.2.13"
+    "@libp2p/crypto": "npm:^5.1.23"
+    "@libp2p/dcutr": "npm:^3.0.28"
+    "@libp2p/identify": "npm:^4.1.14"
+    "@libp2p/interface": "npm:^3.3.0"
+    "@libp2p/kad-dht": "npm:^16.4.5"
+    "@libp2p/peer-id": "npm:^6.0.15"
+    "@libp2p/ping": "npm:^3.1.13"
+    "@libp2p/tcp": "npm:^11.0.28"
+    "@libp2p/websockets": "npm:^10.1.21"
+    "@multiformats/multiaddr": "npm:^13.0.1"
+    "@noble/curves": "npm:^2.0.1"
+    "@noble/hashes": "npm:^2.0.1"
+    "@optimystic/db-core": "npm:^1.19.0"
+    async-mutex: "npm:^0.5.0"
+    debug: "npm:^4.4.3"
+    it-all: "npm:^3.0.9"
+    it-length-prefixed: "npm:^11.0.1"
+    it-pipe: "npm:^3.0.1"
+    it-pushable: "npm:^3.2.3"
+    libp2p: "npm:^3.3.11"
+    multiformats: "npm:^14.0.5"
+    p2p-fret: "npm:^1.2.1"
+    uint8arraylist: "npm:^3.0.2"
+    uint8arrays: "npm:^6.1.1"
+  checksum: 10c0/c45d89e90415e7d1865645185818ec6f942c2f9b1b6d9acc4075fe35c77c6b7e67098f40913fa4495b2ba5b3a35fa253037d9618058ad735b1cb6a72b7862414
   languageName: node
   linkType: hard
 
