@@ -32,6 +32,9 @@
  *     E84 (notes 19 E84, 64-57) adds the eight-attempt chain: the E83 chain plus attempt-8/reason.txt one line
  *     "RESTART notes-19-e84: <why>", attempts 1 to 7 each holding at least one non-PASS leg (run 1 redone after
  *     attempt-7 stopped at the Redmi accept, a prompt answered at 123 s).
+ *     E85 (notes 19 E85, 64-57) adds the nine-attempt chain: the E84 chain plus attempt-9/reason.txt one line
+ *     "RESTART notes-19-e85: <why>", attempts 1 to 8 each holding at least one non-PASS leg (run 1 redone after
+ *     attempt-8 stopped at the ballot sign, the sign screen leaving at 194 s).
  *
  * Modes:
  *   [--git] [--secrets-file <abs>] [--streak <K> [--session <abs dir>] [--legs a,b]] <path>...
@@ -611,6 +614,7 @@ const RESTART_E77_RE = new RegExp('^RESTART notes-19-e77: .+$');
 const RESTART_E81_RE = new RegExp('^RESTART notes-19-e81: .+$');
 const RESTART_E83_RE = new RegExp('^RESTART notes-19-e83: .+$');
 const RESTART_E84_RE = new RegExp('^RESTART notes-19-e84: .+$');
+const RESTART_E85_RE = new RegExp('^RESTART notes-19-e85: .+$');
 /** attempt/reason.txt is exactly one line matching re. */
 function restartLine(rdir, attempt, re) {
 	let text;
@@ -645,6 +649,8 @@ function attemptHasNonPass(rdir, attempt) {
  * E83 (64-57, notes 19 E83): the E81 chain plus attempt-7 reason "RESTART notes-19-e83: ..." (one line), attempts 1 to 6
  * each non-PASS.
  * E84 (64-57, notes 19 E84): the E83 chain plus attempt-8 reason "RESTART notes-19-e84: ..." (one line), attempts 1 to 7
+ * each non-PASS.
+ * E85 (64-57, notes 19 E85): the E84 chain plus attempt-9 reason "RESTART notes-19-e85: ..." (one line), attempts 1 to 8
  * each non-PASS. Nothing else is accepted.
  */
 function declaredRestart(rdir, attempts) {
@@ -698,6 +704,17 @@ function declaredRestart(rdir, attempts) {
 		if (!restartLine(rdir, 'attempt-7', RESTART_E83_RE)) return false;
 		if (!restartLine(rdir, 'attempt-8', RESTART_E84_RE)) return false;
 		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5', 'attempt-6', 'attempt-7'].every((a) => attemptHasNonPass(rdir, a));
+	}
+	if (names === 'attempt-1,attempt-2,attempt-3,attempt-4,attempt-5,attempt-6,attempt-7,attempt-8,attempt-9') {
+		if (!restartLine(rdir, 'attempt-2', RESTART_RE)) return false;
+		if (!restartLine(rdir, 'attempt-3', RESTART_E12_RE)) return false;
+		if (!restartLine(rdir, 'attempt-4', RESTART_E15_RE) && !restartLine(rdir, 'attempt-4', RESTART_E23_RE)) return false;
+		if (!restartLine(rdir, 'attempt-5', RESTART_E77_RE)) return false;
+		if (!restartLine(rdir, 'attempt-6', RESTART_E81_RE)) return false;
+		if (!restartLine(rdir, 'attempt-7', RESTART_E83_RE)) return false;
+		if (!restartLine(rdir, 'attempt-8', RESTART_E84_RE)) return false;
+		if (!restartLine(rdir, 'attempt-9', RESTART_E85_RE)) return false;
+		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5', 'attempt-6', 'attempt-7', 'attempt-8'].every((a) => attemptHasNonPass(rdir, a));
 	}
 	return false;
 }
@@ -1007,7 +1024,7 @@ function runSelftest() {
 			const pass = c.expect === 'PASS';
 			const want = pass ? [] : [c.expect, ...(c.expectAlso ?? [])];
 			let good = pass ? res.exitCode === 0 : res.exitCode === 1 && tokens.length === want.length && want.every((t) => tokens.includes(t));
-			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81' || name === 'pass-streak-restart-e83' || name === 'pass-streak-restart-e84') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
+			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81' || name === 'pass-streak-restart-e83' || name === 'pass-streak-restart-e84' || name === 'pass-streak-restart-e85') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
 			if (good) {
 				ok++;
 				console.log(`CASE ${name} OK`);
@@ -1016,8 +1033,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 89 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/89`);
-	return ok === total && total === 89 ? 0 : 1;
+	console.log(ok === total && total === 91 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/91`);
+	return ok === total && total === 91 ? 0 : 1;
 }
 
 function main(argv) {
