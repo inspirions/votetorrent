@@ -35,6 +35,9 @@
  *     E85 (notes 19 E85, 64-57) adds the nine-attempt chain: the E84 chain plus attempt-9/reason.txt one line
  *     "RESTART notes-19-e85: <why>", attempts 1 to 8 each holding at least one non-PASS leg (run 1 redone after
  *     attempt-8 stopped at the ballot sign, the sign screen leaving at 194 s).
+ *     E86 (notes 19 E86, 64-57) adds the ten-attempt chain: the E85 chain plus attempt-10/reason.txt one line
+ *     "RESTART notes-19-e86: <why>", attempts 1 to 9 each holding at least one non-PASS leg (run 1 redone on a fresh
+ *     n7 after the full rig wipe; attempt-9 stopped at the ballot propose).
  *
  * Modes:
  *   [--git] [--secrets-file <abs>] [--streak <K> [--session <abs dir>] [--legs a,b]] <path>...
@@ -374,6 +377,18 @@ function oneLine(abs) {
 	return lines.length === 1 && lines[0].trim() !== '';
 }
 
+/**
+ * E86 (64-65, notes 19 E86): after the user-ordered full rig wipe, a session's network-n7 holds exactly attempt-1 to attempt-4
+ * and attempt-4/reason.txt is one line "RESTART notes-19-e86: ..."; then attempt-4 may follow attempt-3's PASS (the n7 that
+ * attempt-3 founded no longer exists on any rig device). Every other rule still applies; nothing else is accepted.
+ */
+function declaredNetworkRestart(tree, rel, sorted, a) {
+	if (basename(rel) !== 'network-n7' || !SESSION_RE.test(basename(dirname(rel)))) return false;
+	if (a.n !== 4 || sorted.map((x) => x.n).join(',') !== '1,2,3,4') return false;
+	const r = join2(a.rel, 'reason.txt');
+	if (!filesIn(tree, a.rel).includes('reason.txt') || !oneLine(join(tree.rootAbs, r))) return false;
+	return RESTART_E86_RE.test(firstLine(join(tree.rootAbs, r)) ?? '');
+}
 function chainRules(tree, zone) {
 	if (off('no-attempt-chain')) return [];
 	const out = [];
@@ -409,7 +424,7 @@ function chainRules(tree, zone) {
 				if (a.n >= 2) {
 					const prev = sorted.find((x) => x.n === a.n - 1);
 					const prevFail = prev && legsOf(tree, prev.rel).some((leg) => isNonPass(verdictLine(tree, leg)));
-					if (!prevFail) out.push(makeFinding('retry-without-failure', path(a.rel)));
+					if (!prevFail && !declaredNetworkRestart(tree, rel, sorted, a)) out.push(makeFinding('retry-without-failure', path(a.rel)));
 				}
 			}
 			if (a.n >= 2) {
@@ -615,6 +630,7 @@ const RESTART_E81_RE = new RegExp('^RESTART notes-19-e81: .+$');
 const RESTART_E83_RE = new RegExp('^RESTART notes-19-e83: .+$');
 const RESTART_E84_RE = new RegExp('^RESTART notes-19-e84: .+$');
 const RESTART_E85_RE = new RegExp('^RESTART notes-19-e85: .+$');
+const RESTART_E86_RE = new RegExp('^RESTART notes-19-e86: .+$');
 /** attempt/reason.txt is exactly one line matching re. */
 function restartLine(rdir, attempt, re) {
 	let text;
@@ -651,6 +667,8 @@ function attemptHasNonPass(rdir, attempt) {
  * E84 (64-57, notes 19 E84): the E83 chain plus attempt-8 reason "RESTART notes-19-e84: ..." (one line), attempts 1 to 7
  * each non-PASS.
  * E85 (64-57, notes 19 E85): the E84 chain plus attempt-9 reason "RESTART notes-19-e85: ..." (one line), attempts 1 to 8
+ * each non-PASS.
+ * E86 (64-57, notes 19 E86): the E85 chain plus attempt-10 reason "RESTART notes-19-e86: ..." (one line), attempts 1 to 9
  * each non-PASS. Nothing else is accepted.
  */
 function declaredRestart(rdir, attempts) {
@@ -715,6 +733,18 @@ function declaredRestart(rdir, attempts) {
 		if (!restartLine(rdir, 'attempt-8', RESTART_E84_RE)) return false;
 		if (!restartLine(rdir, 'attempt-9', RESTART_E85_RE)) return false;
 		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5', 'attempt-6', 'attempt-7', 'attempt-8'].every((a) => attemptHasNonPass(rdir, a));
+	}
+	if (names === 'attempt-1,attempt-2,attempt-3,attempt-4,attempt-5,attempt-6,attempt-7,attempt-8,attempt-9,attempt-10') {
+		if (!restartLine(rdir, 'attempt-2', RESTART_RE)) return false;
+		if (!restartLine(rdir, 'attempt-3', RESTART_E12_RE)) return false;
+		if (!restartLine(rdir, 'attempt-4', RESTART_E15_RE) && !restartLine(rdir, 'attempt-4', RESTART_E23_RE)) return false;
+		if (!restartLine(rdir, 'attempt-5', RESTART_E77_RE)) return false;
+		if (!restartLine(rdir, 'attempt-6', RESTART_E81_RE)) return false;
+		if (!restartLine(rdir, 'attempt-7', RESTART_E83_RE)) return false;
+		if (!restartLine(rdir, 'attempt-8', RESTART_E84_RE)) return false;
+		if (!restartLine(rdir, 'attempt-9', RESTART_E85_RE)) return false;
+		if (!restartLine(rdir, 'attempt-10', RESTART_E86_RE)) return false;
+		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5', 'attempt-6', 'attempt-7', 'attempt-8', 'attempt-9'].every((a) => attemptHasNonPass(rdir, a));
 	}
 	return false;
 }
@@ -1024,7 +1054,7 @@ function runSelftest() {
 			const pass = c.expect === 'PASS';
 			const want = pass ? [] : [c.expect, ...(c.expectAlso ?? [])];
 			let good = pass ? res.exitCode === 0 : res.exitCode === 1 && tokens.length === want.length && want.every((t) => tokens.includes(t));
-			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81' || name === 'pass-streak-restart-e83' || name === 'pass-streak-restart-e84' || name === 'pass-streak-restart-e85') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
+			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81' || name === 'pass-streak-restart-e83' || name === 'pass-streak-restart-e84' || name === 'pass-streak-restart-e85' || name === 'pass-streak-restart-e86') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
 			if (good) {
 				ok++;
 				console.log(`CASE ${name} OK`);
@@ -1033,8 +1063,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 91 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/91`);
-	return ok === total && total === 91 ? 0 : 1;
+	console.log(ok === total && total === 95 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/95`);
+	return ok === total && total === 95 ? 0 : 1;
 }
 
 function main(argv) {
