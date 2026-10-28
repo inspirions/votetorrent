@@ -16,6 +16,7 @@
 
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { ReactNativeLevelDBProvider } from '@quereus/plugin-react-native-leveldb';
+import { leveldbOpenPool } from './leveldb-open-pool';
 import { createIsolatedStoreModule } from '@quereus/store';
 import { Database } from '@quereus/quereus';
 import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
@@ -54,8 +55,10 @@ export const rnDbFactory: DbFactory = async (networkHash: string) => {
   // D-04: version-bumped store name — zero collision with old 'votetorrent-<networkHash>'
   const databaseName = `votetorrent-q2-${networkHash}`;
 
+  // Quereus opens one LevelDB per table and per index; the pool keeps only a few of them open at
+  // once (leveldb-open-pool.ts).
   const provider = new ReactNativeLevelDBProvider({
-    openFn: (n: string, c: boolean, e: boolean) => new LevelDB(n, c, e),
+    openFn: leveldbOpenPool.openFn((n: string, c: boolean, e: boolean) => new LevelDB(n, c, e)),
     WriteBatch: LevelDBWriteBatch,
     databaseName,
     createIfMissing: true,
