@@ -26,6 +26,9 @@
  *     attempt-4 stopped with the officer Authority killed for memory). E81 (notes 19 E81, 64-57) adds the six-attempt
  *     chain: the E77 chain plus attempt-6/reason.txt one line "RESTART notes-19-e81: <why>", attempts 1 to 5 each
  *     holding at least one non-PASS leg (run 1 redone after attempt-5 stopped at the ballot sign, the officer AVD swapping).
+ *     E83 (notes 19 E83, 64-57) adds the seven-attempt chain: the E81 chain plus attempt-7/reason.txt one line
+ *     "RESTART notes-19-e83: <why>", attempts 1 to 6 each holding at least one non-PASS leg (run 1 redone after
+ *     attempt-6 stopped at the ballot form, the officer JS thread starved).
  *
  * Modes:
  *   [--git] [--secrets-file <abs>] [--streak <K> [--session <abs dir>] [--legs a,b]] <path>...
@@ -603,6 +606,7 @@ const RESTART_E15_RE = new RegExp('^RESTART notes-19-e15: .+$');
 const RESTART_E23_RE = new RegExp('^RESTART notes-19-e23: .+$');
 const RESTART_E77_RE = new RegExp('^RESTART notes-19-e77: .+$');
 const RESTART_E81_RE = new RegExp('^RESTART notes-19-e81: .+$');
+const RESTART_E83_RE = new RegExp('^RESTART notes-19-e83: .+$');
 /** attempt/reason.txt is exactly one line matching re. */
 function restartLine(rdir, attempt, re) {
 	let text;
@@ -633,6 +637,8 @@ function attemptHasNonPass(rdir, attempt) {
  * E77 (64-57, notes 19 E77): the E15 or E23 chain plus attempt-5 reason "RESTART notes-19-e77: ..." (one line), attempts
  * 1 to 4 each non-PASS.
  * E81 (64-57, notes 19 E81): the E77 chain plus attempt-6 reason "RESTART notes-19-e81: ..." (one line), attempts 1 to 5
+ * each non-PASS.
+ * E83 (64-57, notes 19 E83): the E81 chain plus attempt-7 reason "RESTART notes-19-e83: ..." (one line), attempts 1 to 6
  * each non-PASS. Nothing else is accepted.
  */
 function declaredRestart(rdir, attempts) {
@@ -667,6 +673,15 @@ function declaredRestart(rdir, attempts) {
 		if (!restartLine(rdir, 'attempt-5', RESTART_E77_RE)) return false;
 		if (!restartLine(rdir, 'attempt-6', RESTART_E81_RE)) return false;
 		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5'].every((a) => attemptHasNonPass(rdir, a));
+	}
+	if (names === 'attempt-1,attempt-2,attempt-3,attempt-4,attempt-5,attempt-6,attempt-7') {
+		if (!restartLine(rdir, 'attempt-2', RESTART_RE)) return false;
+		if (!restartLine(rdir, 'attempt-3', RESTART_E12_RE)) return false;
+		if (!restartLine(rdir, 'attempt-4', RESTART_E15_RE) && !restartLine(rdir, 'attempt-4', RESTART_E23_RE)) return false;
+		if (!restartLine(rdir, 'attempt-5', RESTART_E77_RE)) return false;
+		if (!restartLine(rdir, 'attempt-6', RESTART_E81_RE)) return false;
+		if (!restartLine(rdir, 'attempt-7', RESTART_E83_RE)) return false;
+		return ['attempt-1', 'attempt-2', 'attempt-3', 'attempt-4', 'attempt-5', 'attempt-6'].every((a) => attemptHasNonPass(rdir, a));
 	}
 	return false;
 }
@@ -976,7 +991,7 @@ function runSelftest() {
 			const pass = c.expect === 'PASS';
 			const want = pass ? [] : [c.expect, ...(c.expectAlso ?? [])];
 			let good = pass ? res.exitCode === 0 : res.exitCode === 1 && tokens.length === want.length && want.every((t) => tokens.includes(t));
-			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
+			if (good && (name === 'pass-device' || name === 'pass-streak-restart' || name === 'pass-streak-restart-e12' || name === 'pass-streak-restart-e15' || name === 'pass-streak-restart-e23' || name === 'pass-streak-restart-e77' || name === 'pass-streak-restart-e81' || name === 'pass-streak-restart-e83') && !res.lines.some((l) => l.indexOf('STREAK PASS k=3') === 0)) good = false;
 			if (good) {
 				ok++;
 				console.log(`CASE ${name} OK`);
@@ -985,8 +1000,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 85 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/85`);
-	return ok === total && total === 85 ? 0 : 1;
+	console.log(ok === total && total === 87 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/87`);
+	return ok === total && total === 87 ? 0 : 1;
 }
 
 function main(argv) {
