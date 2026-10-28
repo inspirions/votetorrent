@@ -494,3 +494,36 @@ index 73de9f7c008b8e71b384ccbad00a2db91e8a6d15..45ac8b12652928e64f8f42c26a9944e7
  }
  //# sourceMappingURL=peer-join-backfill.js.map
 \ No newline at end of file
+diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
+index ec4ec98..f194082 100644
+--- a/dist/strand-instance-manager.js
++++ b/dist/strand-instance-manager.js
+@@ -20,6 +20,19 @@ import { superviseRelayReservation } from './relay-reservation.js';
+ import { strandRedialTimings, superviseStrandPeerRedial } from './strand-peer-redial.js';
+ import { groupAddrsByPeerId } from './peer-addr-book.js';
+ import { isCohortUnreachableRead } from './control-read-retry.js';
++import { causeChain } from './control-retry.js';
++/**
++ * Whether a joiner's strand read failed because db-p2p's `findCoordinator` found no member it is
++ * connected to and has confirmed (`NO_NETWORK_COORDINATOR`, `NO_COORDINATOR_AVAILABLE`). On a cold
++ * start that is the same situation as `cohort-unreachable` — the restored serving peers are not
++ * connected yet and the redial loop is still reaching them — so the build waits for a seed peer
++ * rather than releasing the runtime and its redial loop. Matched by name and code, since the typed
++ * class may come from a second loaded copy of db-p2p.
++ */
++function isJoinerCoordinatorMiss(error) {
++    return causeChain(error).some(link => link.name === 'FindCoordinatorError'
++        && (link.code === 'NO_NETWORK_COORDINATOR' || link.code === 'NO_COORDINATOR_AVAILABLE'));
++}
+ import { declaredCohortReadDeadlineMs, optimysticDialLimits, peerJoinPushBudget, relayReservationBudgetMs, resolveLinkRoundTripMs } from './link-budget.js';
+ const log = debug('sereus:cadre:strand-manager');
+ /**
+@@ -806,7 +819,7 @@ export class StrandInstanceManager {
+             await strandDb.initialize();
+         }
+         catch (error) {
+-            if (!isCohortUnreachableRead(error)) {
++            if (!isCohortUnreachableRead(error) && !(config.founder !== true && isJoinerCoordinatorMiss(error))) {
+                 throw error;
+             }
+             await this.discardDatabaseAttempt(strandId, gate);
