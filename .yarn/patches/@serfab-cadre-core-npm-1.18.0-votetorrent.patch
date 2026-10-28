@@ -527,3 +527,64 @@ index ec4ec98..f194082 100644
                  throw error;
              }
              await this.discardDatabaseAttempt(strandId, gate);
+diff --git a/dist/peer-authorization.js b/dist/peer-authorization.js
+index 99cb99bbbfb9c0ae881d28bbb78d4757e5fa9c8f..823a27074f5eea0de93ac9ed367e2589f87d6320 100644
+--- a/dist/peer-authorization.js
++++ b/dist/peer-authorization.js
+@@ -1,5 +1,6 @@
+ import debug from 'debug';
+-import { digest, verify } from '@optimystic/quereus-plugin-crypto';
++import { digest } from '@optimystic/quereus-plugin-crypto';
++import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
+ import { controlAuthorizationFields, unboundAuthorizationFields, cadreInviteRowFields, ownerGrantRowFields } from './control-authorization.js';
+ import { ed25519PublicKeyB64FromPeerId } from './ed25519-key.js';
+ const log = debug('sereus:cadre:peer-authorization');
+diff --git a/dist/peer-record.js b/dist/peer-record.js
+index 221330b917cec9d9bef464f5475fabccdc1453a4..0f78e5c558d6e561de6da593eaebab5184e2c667 100644
+--- a/dist/peer-record.js
++++ b/dist/peer-record.js
+@@ -25,7 +25,8 @@
+  * signature is verified *with* (so a signature already commits to exactly one
+  * key), and its binding to `peerId` is checked separately at resolve time.
+  */
+-import { digest, sign, verify } from '@optimystic/quereus-plugin-crypto';
++import { digest, sign } from '@optimystic/quereus-plugin-crypto';
++import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
+ import { controlAuthorizationFields } from './control-authorization.js';
+ /**
+  * Default freshness ceiling for resolved peer-address records (15 minutes).
+diff --git a/dist/verify-memo.js b/dist/verify-memo.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7a9d7cbd66bf226f0627328ca53c92fbbd9f3e4
+--- /dev/null
++++ b/dist/verify-memo.js
+@@ -0,0 +1,29 @@
++import { verify } from '@optimystic/quereus-plugin-crypto';
++/**
++ * VoteTorrent patch: `verify` with its verdicts remembered. The membership refresh judges the same
++ * `CadrePeer` rows, and `resolvePeerAddrs` the same peer records, on every pass, so the same
++ * (digest, signature, key) triples were re-verified in pure-JS ed25519 each time; on a phone that
++ * kept the JS thread busy. A verdict is a pure function of every argument, all of which are in the
++ * key, so remembering it cannot change one. A call that throws is not remembered. Bounded: the
++ * oldest entry is dropped once the map is full.
++ */
++const MAX_ENTRIES = 4096;
++const verdicts = new Map();
++export function memoVerify(data, signature, publicKey, curveType, inputEncoding, signatureEncoding, keyEncoding) {
++    if (typeof data !== 'string' || typeof signature !== 'string' || typeof publicKey !== 'string') {
++        return verify(data, signature, publicKey, curveType, inputEncoding, signatureEncoding, keyEncoding);
++    }
++    const key = `${curveType}|${inputEncoding}|${signatureEncoding}|${keyEncoding}|${publicKey}|${signature}|${data}`;
++    const known = verdicts.get(key);
++    if (known !== undefined) {
++        return known;
++    }
++    const verdict = verify(data, signature, publicKey, curveType, inputEncoding, signatureEncoding, keyEncoding);
++    if (typeof verdict === 'boolean') {
++        if (verdicts.size >= MAX_ENTRIES) {
++            verdicts.delete(verdicts.keys().next().value);
++        }
++        verdicts.set(key, verdict);
++    }
++    return verdict;
++}
