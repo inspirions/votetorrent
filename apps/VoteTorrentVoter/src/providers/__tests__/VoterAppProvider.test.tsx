@@ -254,6 +254,8 @@ describe('VoterAppProvider — real composition root (D-02/D-04/D-07)', () => {
 		expect(typeof captured.value!.hasEngine).toBe('function');
 		expect(typeof captured.value!.selectNetwork).toBe('function');
 		expect(captured.value!.seededElectionId).toBe('test-seeded-election-id');
+		await flushBoot(15, () => captured.value?.networkName !== undefined);
+		expect(captured.value!.networkName).toBe(FAKE_NETWORK_INIT.name);
 		// 51-12 (D-09/D-20): the context has NO `sign` field at all — dead plumbing that would
 		// hand a future contributor an officer-capable signer is removed structurally, not just
 		// left unused.
@@ -951,6 +953,53 @@ describe('VoterAppProvider — joined networks (spike 100)', () => {
 		);
 		expect(JSON.parse((await AsyncStorage.getItem('@votetorrent/voterJoinedNetworks'))!)).toEqual([seeded!.networkReference.hash]);
 		expect(captured.value!.hasNetwork).toBe(true);
+		userSpy.mockRestore();
+	});
+
+	it("a join replaces the open network's name with the joined network's", async () => {
+		let seeded: DevSeedResult | undefined;
+		let networks: NetworksEngine | undefined;
+		mockSeedDevNetwork.mockImplementation(async (engine: NetworksEngine) => {
+			networks = engine;
+			return (seeded ??= await seedRealNetwork(engine));
+		});
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const deviceUser = require('../../engines/device-user');
+		const userSpy = jest.spyOn(deviceUser, 'getOrCreateDeviceUser').mockResolvedValue(FAKE_USER);
+		const {tr, captured} = renderProvider();
+		await flushBoot(15, () => captured.value?.networkName === FAKE_NETWORK_INIT.name);
+		expect(captured.value!.networkName).toBe(FAKE_NETWORK_INIT.name);
+		// Created before the node is set, so it takes the same local path as the seed.
+		await networks!.create({...FAKE_NETWORK_INIT, name: 'Lean Network'}, FAKE_USER);
+		const joinedRef = (await networks!.getRecentNetworks()).find(ref => ref.hash !== seeded!.networkReference.hash)!;
+
+		mockCadreNodeValue.node = {getControlNode: () => ({getConnections: () => [{}]})};
+		function Probe() {
+			captured.value = useVoterApp();
+			return null;
+		}
+		renderer.act(() => {
+			tr.update(
+				<VoterAppProvider>
+					<Probe />
+				</VoterAppProvider>,
+			);
+		});
+		await flushBoot(15, () => captured.value?.networkName === FAKE_NETWORK_INIT.name);
+
+		mockRunVoterNetworkJoin.mockImplementation(async () => ({
+			ok: true,
+			outcome: 'joined',
+			admittedVia: 'redeemed',
+			networkRef: joinedRef,
+			fingerprint: '17b0 6508 2fd5 aab2',
+		}));
+		await renderer.act(async () => {
+			await captured.value!.joinNetwork(JOIN_CODE);
+		});
+		await flushBoot(15, () => captured.value?.networkName === 'Lean Network');
+
+		expect(captured.value!.networkName).toBe('Lean Network');
 		userSpy.mockRestore();
 	});
 });

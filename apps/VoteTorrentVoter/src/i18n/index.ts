@@ -259,10 +259,10 @@ const resources = {
 			// contract are marked below for traceability.
 			'notRegistered.heading': 'You are not registered',
 			'notRegistered.body':
-				'To participate in the Utah Network you will need to register',
+				'To participate in the {{network}} you will need to register',
 			'notRegistered.cta': 'Register now',
 			'registered.heading': "You're registered to vote",
-			'registered.body': 'You have successfully registered for the Utah Network',
+			'registered.body': 'You have successfully registered for the {{network}}',
 			'registered.identityLine': '{{fullName}}: {{party}} {{dob}}',
 			'registered.validThrough': 'Valid through {{validThrough}}',
 			'registered.updatePrompt':
@@ -276,7 +276,7 @@ const resources = {
 			// [AUTHORED]
 			'deviceAttestation.terminalBody':
 				'This device lacks the secure hardware required to protect a vote, so it cannot be used to register.',
-			'form.sectionTitle': 'Register for the Utah Network',
+			'form.sectionTitle': 'Register for the {{network}}',
 			'form.firstName': 'First Name',
 			'form.lastName': 'Last Name',
 			'form.dob': 'Date of Birth',
@@ -552,7 +552,7 @@ const resources = {
 			close: 'Cerrar',
 			'info.unavailable': 'Esta información no está disponible en este momento.',
 			'info.openLink': 'Más información',
-			networkName: 'Utah Network',
+			networkName: 'Red de Utah',
 			notifications: 'Notificaciones',
 			'breadcrumb.home': 'Inicio',
 			'breadcrumb.ballot': 'Papeleta',
@@ -770,10 +770,10 @@ const resources = {
 			confirmationTitle: 'Todo Listo',
 			'notRegistered.heading': 'No estás registrado',
 			'notRegistered.body':
-				'Para participar en la Red de Utah necesitarás registrarte',
+				'Para participar en la {{network}} necesitarás registrarte',
 			'notRegistered.cta': 'Regístrate ahora',
 			'registered.heading': 'Estás registrado para votar',
-			'registered.body': 'Te has registrado exitosamente en la Red de Utah',
+			'registered.body': 'Te has registrado exitosamente en la {{network}}',
 			'registered.identityLine': '{{fullName}}: {{party}} {{dob}}',
 			'registered.validThrough': 'Válido hasta {{validThrough}}',
 			'registered.updatePrompt':
@@ -784,7 +784,7 @@ const resources = {
 			'deviceAttestation.terminalHeading': 'Este dispositivo no se puede usar para votar',
 			'deviceAttestation.terminalBody':
 				'Este dispositivo no cuenta con el hardware seguro necesario para proteger un voto, por lo que no se puede usar para registrarte.',
-			'form.sectionTitle': 'Regístrate en la Red de Utah',
+			'form.sectionTitle': 'Regístrate en la {{network}}',
 			'form.firstName': 'Nombre',
 			'form.lastName': 'Apellido',
 			'form.dob': 'Fecha de Nacimiento',

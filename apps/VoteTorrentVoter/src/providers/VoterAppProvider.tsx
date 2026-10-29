@@ -33,7 +33,7 @@ import type {PropsWithChildren} from 'react';
 import {ActivityIndicator, Text, TouchableOpacity, View} from 'react-native';
 import {useTranslation} from 'react-i18next';
 import {hideSplash} from 'react-native-splash-view';
-import type {IDefaultUserEngine, NetworkReference} from '@votetorrent/vote-core';
+import type {IDefaultUserEngine, INetworkEngine, NetworkReference} from '@votetorrent/vote-core';
 import {EngineFactory} from '../engines/engine-factory';
 import {LocalStorageReact} from '@votetorrent/vote-engine/rn';
 import {rnDbFactory} from '../engines/rn-db-factory';
@@ -111,6 +111,23 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 	// module doc comment above.
 	const [seededElectionId, setSeededElectionId] = useState<string | undefined>(undefined);
 
+	// The open network's name for the header and the registration copy. Read once per open
+	// network; the sequence number drops a slower read for a network that has since been replaced.
+	const [networkName, setNetworkName] = useState<string | undefined>(undefined);
+	const networkNameSeqRef = useRef(0);
+	const loadNetworkName = useCallback((network: INetworkEngine) => {
+		const seq = ++networkNameSeqRef.current;
+		setNetworkName(undefined);
+		network.getDetails().then(
+			details => {
+				if (seq === networkNameSeqRef.current) setNetworkName(details.network.name || undefined);
+			},
+			err => {
+				if (seq === networkNameSeqRef.current) console.warn('network name read failed:', errorClassName(err));
+			},
+		);
+	}, []);
+
 	// D-03: the __DEV__ cycler's forced card state. null = live (derived from the timeline). The
 	// setter ignores writes outside __DEV__, so a release build can never leave live mode.
 	const [lifecycleOverride, setLifecycleOverrideState] = useState<LifecycleState | null>(null);
@@ -156,9 +173,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		const user = await getOrCreateDeviceUser(defaultUser?.name ?? 'Device User');
 		factory.setCurrentUser(user);
 		await factory.getNetworksEngine().open(networkRef, user);
-		await factory.getEngine('network', networkRef);
+		const network = await factory.getEngine<INetworkEngine>('network', networkRef);
 		setHasNetwork(true);
-	}, []);
+		loadNetworkName(network);
+	}, [loadNetworkName]);
 
 	// D-04/D-05: register the CadreNode live peer-count source + booted node with the factory,
 	// mirroring the authority app's AppProvider. connectedPeers is keyed by strandId
@@ -312,9 +330,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 							if (cancelled) return;
 							factory.setCurrentUser(user);
 							await networksEng.open(joinedRef, user);
-							await factory.getEngine('network', joinedRef);
+							const network = await factory.getEngine<INetworkEngine>('network', joinedRef);
 							if (cancelled) return;
 							setHasNetwork(true);
+							loadNetworkName(network);
 							setInitError(null);
 							console.log('[voter-boot] VoterAppProvider isInitialized (joined network)');
 						} catch (openError) {
@@ -361,9 +380,10 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 						// getEngine("network", ...) so the factory's internal open() also uses
 						// the real user.
 						factory.setCurrentUser(seeded.deviceUser);
-						await factory.getEngine('network', seeded.networkReference);
+						const network = await factory.getEngine<INetworkEngine>('network', seeded.networkReference);
 						if (cancelled) return;
 						setHasNetwork(true);
+						loadNetworkName(network);
 						setSeededElectionId(seeded.electionId);
 						// 51-12 (D-09/D-20): deliberately does NOT also capture seeded.sign onto
 						// context — see the module doc comment above.
@@ -588,6 +608,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				getElection,
 				getBallot,
 				hasNetwork,
+				networkName,
 				getEngine,
 				hasEngine,
 				selectNetwork,

@@ -33,6 +33,7 @@ import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import {useVoterApp} from '../../providers/VoterAppProvider';
+import {useNetworkName} from '../../hooks/useNetworkName';
 import {useRegistrationDraft} from '../../providers/RegistrationDraftProvider';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
 import {resolveRegistrationCodeAvailability} from '../../engines/continuity';
@@ -50,6 +51,7 @@ type RegistrationNavigationProp = NativeStackNavigationProp<
 export default function RegistrationScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
 	const {isInitialized, getEngine, hasNetwork} = useVoterApp();
+	const networkName = useNetworkName();
 	const {draft} = useRegistrationDraft();
 	// Phase 44-07 (D-02): local session-only state — see file header comment.
 	const [isRegistered, setIsRegisteredState] = useState(false);
@@ -113,7 +115,7 @@ export default function RegistrationScreen() {
 
 	return (
 		<View style={[styles.screen, {backgroundColor: colors.background}]}>
-			<NetworkHeader onPressNetwork={() => navigation.navigate('RegistrationInfo')} />
+			<NetworkHeader networkName={networkName} onPressNetwork={() => navigation.navigate('RegistrationInfo')} />
 
 			<ScrollView contentContainerStyle={styles.content}>
 				{/* Spike 100: no network open yet — the way in is the authority's join code. */}
@@ -132,6 +134,7 @@ export default function RegistrationScreen() {
 						isRegistered={isRegistered}
 						draft={draft}
 						registeredAt={registeredAt}
+						networkName={networkName}
 						onRegisterNow={() => navigation.navigate('DeviceAttestation')}
 						onUpdateRegistration={() => navigation.navigate('RegisterPersonal')}
 						onHelp={() => navigation.navigate('RegistrationInfo')}

@@ -106,6 +106,7 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 				getElection,
 				getBallot,
 				hasNetwork: false,
+				networkName: undefined,
 				getEngine,
 				hasEngine,
 				selectNetwork,

@@ -225,6 +225,12 @@ export interface VoterAppContextType {
 	 */
 	hasNetwork: boolean;
 	/**
+	 * The open network's name (`Network.Name`), read after each join, re-attach or dev seed.
+	 * `undefined` until a network is open or when that read fails; screens then show the
+	 * `common:networkName` fallback (see `useNetworkName`).
+	 */
+	networkName?: string;
+	/**
 	 * Real engine accessor — delegates to the `EngineFactory` this provider owns via `useRef`.
 	 * Mirrors the authority app's `AppProvider.getEngine` (D-02/D-04).
 	 */
