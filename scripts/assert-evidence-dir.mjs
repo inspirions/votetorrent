@@ -380,11 +380,15 @@ function oneLine(abs) {
 /**
  * E86 (64-65, notes 19 E86): after the user-ordered full rig wipe, a session's network-n7 holds exactly attempt-1 to attempt-4
  * and attempt-4/reason.txt is one line "RESTART notes-19-e86: ..."; then attempt-4 may follow attempt-3's PASS (the n7 that
- * attempt-3 founded no longer exists on any rig device). Every other rule still applies; nothing else is accepted.
+ * attempt-3 founded no longer exists on any rig device). The same holds for the Redmi keyholder part: network-n7-kh2r holds exactly
+ * attempt-1 and attempt-2, and attempt-2/reason.txt is one "RESTART notes-19-e86: ..." line (attempt-1 joined the wiped n7). Every
+ * other rule still applies; nothing else is accepted.
  */
+const E86_RESTART_SHAPES = { 'network-n7': { n: 4, chain: '1,2,3,4' }, 'network-n7-kh2r': { n: 2, chain: '1,2' } };
 function declaredNetworkRestart(tree, rel, sorted, a) {
-	if (basename(rel) !== 'network-n7' || !SESSION_RE.test(basename(dirname(rel)))) return false;
-	if (a.n !== 4 || sorted.map((x) => x.n).join(',') !== '1,2,3,4') return false;
+	const shape = Object.hasOwn(E86_RESTART_SHAPES, basename(rel)) ? E86_RESTART_SHAPES[basename(rel)] : null;
+	if (!shape || !SESSION_RE.test(basename(dirname(rel)))) return false;
+	if (a.n !== shape.n || sorted.map((x) => x.n).join(',') !== shape.chain) return false;
 	const r = join2(a.rel, 'reason.txt');
 	if (!filesIn(tree, a.rel).includes('reason.txt') || !oneLine(join(tree.rootAbs, r))) return false;
 	return RESTART_E86_RE.test(firstLine(join(tree.rootAbs, r)) ?? '');
@@ -1063,8 +1067,8 @@ function runSelftest() {
 	} finally {
 		if (parent.slice(0, prefix.length) === prefix) rmSync(parent, { recursive: true, force: true });
 	}
-	console.log(ok === total && total === 95 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/95`);
-	return ok === total && total === 95 ? 0 : 1;
+	console.log(ok === total && total === 97 ? `SELFTEST PASS ${ok}/${total}` : `SELFTEST FAIL ${ok}/97`);
+	return ok === total && total === 97 ? 0 : 1;
 }
 
 function main(argv) {
