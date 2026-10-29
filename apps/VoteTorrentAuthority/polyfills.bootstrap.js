@@ -147,6 +147,17 @@ if (typeof WebSocket !== 'undefined' && !('bufferedAmount' in WebSocket.prototyp
   });
 }
 
+// 6d. WebSocket send batching (ported from sereus-chat, polyfills/websocket-batching.js): the
+//     binary sends libp2p makes in one turn reach native code as ONE message, in order. Each RN
+//     binary send is a bridge crossing that base64-encodes on the JS thread first, and about half
+//     of libp2p's are 16 bytes or fewer. Measured only on NativeScript (62% fewer native sends);
+//     UNVERIFIED on React Native, so it needs a device measurement with this on and off.
+//     Set WEBSOCKET_SEND_BATCHING to false to send every chunk as before.
+const WEBSOCKET_SEND_BATCHING = true;
+if (WEBSOCKET_SEND_BATCHING && typeof WebSocket !== 'undefined') {
+  require('./polyfills/websocket-batching').batchWebSocketSends(WebSocket.prototype);
+}
+
 // 7. AbortSignal.prototype.throwIfAborted
 if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.prototype.throwIfAborted !== 'function') {
   AbortSignal.prototype.throwIfAborted = function () {
