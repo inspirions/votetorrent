@@ -120,6 +120,7 @@ each consumer's descriptor:
 | `@optimystic/db-p2p@1.9.0` | `@optimystic-db-p2p-npm-1.9.0-votetorrent.patch` | `.unref?.()` guards in `cluster-repo.js`, whose timers return plain numbers on React Native and in browsers |
 | `@quereus/quereus@4.20.0` | `@quereus-quereus-npm-4.20.0-6fd16bc9e5.patch` | The datetime immediate-CHECK fix |
 | `react-native-quick-base64@3.0.1` | `react-native-quick-base64-npm-3.0.1-f6009a6514.patch` | |
+| `react-native-nitro-modules@0.37.1` | `react-native-nitro-modules-npm-0.37.1-votetorrent.patch` | `JSICache` drops released references when its vectors fill (`WeakReferenceCache.hpp`); unpatched, every value passed to a native method leaked ~100 bytes until the runtime was torn down. Guarded by `apps/VoteTorrentVoter/__tests__/nitro-jsicache-prune.test.ts`. Needs a native rebuild of both apps |
 
 Older files in `.yarn/patches/` that no descriptor references are not applied.
 `packages/vote-engine/test/no-portal-vendor-regression.spec.ts` fails if a

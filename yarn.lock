@@ -18914,13 +18914,23 @@ __metadata:
   languageName: node
   linkType: hard
 
-"react-native-nitro-modules@npm:^0.37.1":
+"react-native-nitro-modules@npm:0.37.1":
   version: 0.37.1
   resolution: "react-native-nitro-modules@npm:0.37.1"
   peerDependencies:
     react: "*"
     react-native: "*"
   checksum: 10c0/5178f2ee891cb746b084fdf382b6020e366d8e4a81922a3f1d60a453d34fca6ebb1b00c4c28785c36385bc182ab76a30cba70441c39abbc25d3ad54db612e46e
+  languageName: node
+  linkType: hard
+
+"react-native-nitro-modules@patch:react-native-nitro-modules@npm%3A0.37.1#~/.yarn/patches/react-native-nitro-modules-npm-0.37.1-votetorrent.patch":
+  version: 0.37.1
+  resolution: "react-native-nitro-modules@patch:react-native-nitro-modules@npm%3A0.37.1#~/.yarn/patches/react-native-nitro-modules-npm-0.37.1-votetorrent.patch::version=0.37.1&hash=188681"
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 10c0/f66a49e1fd8233794ba2cd38418bfe37f4c6a74c368aa8f00d77f9ef1e71f17be2e68de652963d9deeb8aaadecd6e14f9fd16064557364b3438db9cadcf77823
   languageName: node
   linkType: hard
 
@@ -22437,7 +22447,7 @@ __metadata:
     react-native: "npm:0.87.1"
     react-native-get-random-values: "npm:^2.0.0"
     react-native-localize: "npm:^3.4.1"
-    react-native-nitro-modules: "npm:^0.37.1"
+    react-native-nitro-modules: "patch:react-native-nitro-modules@npm%3A0.37.1#~/.yarn/patches/react-native-nitro-modules-npm-0.37.1-votetorrent.patch"
     react-native-quick-base64: "npm:3.0.1"
     react-native-quick-crypto: "npm:^1.1.7"
     react-native-safe-area-context: "npm:^5.2.0"
@@ -22578,7 +22588,7 @@ __metadata:
     react-native-get-random-values: "npm:^2.0.0"
     react-native-localize: "npm:^3.4.1"
     react-native-nitro-image: "npm:0.15.2"
-    react-native-nitro-modules: "npm:^0.37.1"
+    react-native-nitro-modules: "patch:react-native-nitro-modules@npm%3A0.37.1#~/.yarn/patches/react-native-nitro-modules-npm-0.37.1-votetorrent.patch"
     react-native-quick-base64: "npm:3.0.1"
     react-native-quick-crypto: "npm:^1.1.7"
     react-native-safe-area-context: "npm:^5.2.0"
