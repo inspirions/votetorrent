@@ -1,5 +1,5 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9f95e235f 100644
+index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400ecb17f16 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
 @@ -56,6 +56,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
@@ -11,8 +11,8 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
 +import { StrandObserverService } from './strand-observer-protocol.js';
  import { DelegateAdmissionStore, extractCircuitRelayTargets, dueRelayAnnounces, prunePeerStrandKeys, peerStrandKey, recordRelayRefusals, relaysNotRefusing } from './delegate-admission.js';
  import { relayCircuitAddrs, resolveListenAddrs, resolveTransportOptions, RelayReservationFailedError } from './relay-addrs.js';
- import { nodeTransportsOption } from './node-transports.js';
-@@ -352,6 +355,13 @@ export class CadreNode {
+ import { selfAddressesChanged } from './self-address-update.js';
+@@ -353,6 +356,13 @@ export class CadreNode {
           * stops conflating control addresses with strand seeding.
           */
          this.strandAddrService = null;
@@ -26,7 +26,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
          /**
           * Cadre invitation redemption handler (`/sereus/cadre-invite/1.0.0`): a device holding an
           * invitation dials this machine and proves possession; the handler seats the row and
-@@ -908,6 +918,20 @@ export class CadreNode {
+@@ -909,6 +919,20 @@ export class CadreNode {
          /** `connection:close` listener: {@link onControlConnectionClosed} (teardown in {@link stopRecordRefresh}). */
          this.controlConnectionCloseHandler = null;
          this.config = config;
@@ -47,7 +47,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
          this.hostUnclaimedStrands = config.hostUnclaimedStrands ?? config.profile === 'storage';
          this.strandManager = new StrandInstanceManager();
          this.enrollmentService = new EnrollmentService();
-@@ -1238,6 +1262,19 @@ export class CadreNode {
+@@ -1239,6 +1263,19 @@ export class CadreNode {
                  this.pushFanoutService = this.buildPushFanout(this.config.push);
                  log('Push-wake fan-out enabled (injected notifier)');
              }
@@ -67,7 +67,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
              this._running = true;
              this.emit('control:connected', undefined);
              timing('[start] total: %dms', Math.round(performance.now() - tTotal));
-@@ -2086,7 +2123,12 @@ export class CadreNode {
+@@ -2087,7 +2124,12 @@ export class CadreNode {
              connectionGater: createMembershipConnectionGater({
                  admitInbound: (remotePeerId) => this.admitInboundControlConnection(remotePeerId),
                  admitRelayReservation: (remotePeerId) => this.admitControlRelayReservation(remotePeerId),
@@ -81,7 +81,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
              }, network?.connectionGater, ADMISSION_DECISION_TIMEOUT_MS, relayedRequestBudgetMs(network?.linkRoundTripMs)),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -2968,6 +3010,23 @@ export class CadreNode {
+@@ -2969,6 +3011,23 @@ export class CadreNode {
          // self-update rule is measured against, and a removal landing mid-publish re-reads as
          // absent instead of matching no rows under a 'refreshed'. The record it returns is the
          // one in the row.
@@ -105,7 +105,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
          const aloneBefore = this.committedAlone();
          const record = await this.controlDatabase.updateSelfPeerRecord(peerId, (current) => this.signSelfRecord(peerId, signingKey, addrs, current));
          if (record === null) {
-@@ -3984,7 +4043,47 @@ export class CadreNode {
+@@ -3988,7 +4047,47 @@ export class CadreNode {
          if (booked.length > 0) {
              return booked;
          }
@@ -154,7 +154,7 @@ index b6359a55443c66e9478386aca91e3d2b7c42ce3a..0a6fc3510144d2091b4d86e174b26ee9
      }
      /**
       * A sibling's retained out-of-band dial target (see {@link bootstrapPeerStore}),
-@@ -5134,6 +5233,14 @@ export class CadreNode {
+@@ -5138,6 +5237,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
@@ -198,7 +198,7 @@ index b7cf4c1dcff144d3965f7beba87de7e4bbcde1c1..43328ceb0f989480ec5e22231eb96789
          [STRAND_ADDR_PROTOCOL, 'members'],
          ...controlDatabaseProtocols(partyId).map((protocol) => [protocol, 'members-snapshot']),
 diff --git a/dist/index.js b/dist/index.js
-index d522bae686a0af216296f32afdccb4e6dad53dcb..5fd827de0c01bb806f64a28e50e290f894f390c8 100644
+index 4aa05cea074c4f33e4da7acfadb4867a67122892..3a492d25f87dc7bac4cb8bdbda65d4a29c5544a1 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -160,6 +160,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
@@ -260,6 +260,65 @@ index 10b8761c2f85694a904d341d01e8f0de3e719c03..d2c0147686e62940c96caaa1230c8dfc
              let verdict;
              try {
                  verdict = await decideInbound(remotePeerId);
+diff --git a/dist/peer-authorization.js b/dist/peer-authorization.js
+index 99cb99bbbfb9c0ae881d28bbb78d4757e5fa9c8f..823a27074f5eea0de93ac9ed367e2589f87d6320 100644
+--- a/dist/peer-authorization.js
++++ b/dist/peer-authorization.js
+@@ -1,5 +1,6 @@
+ import debug from 'debug';
+-import { digest, verify } from '@optimystic/quereus-plugin-crypto';
++import { digest } from '@optimystic/quereus-plugin-crypto';
++import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
+ import { controlAuthorizationFields, unboundAuthorizationFields, cadreInviteRowFields, ownerGrantRowFields } from './control-authorization.js';
+ import { ed25519PublicKeyB64FromPeerId } from './ed25519-key.js';
+ const log = debug('sereus:cadre:peer-authorization');
+diff --git a/dist/peer-record.js b/dist/peer-record.js
+index 221330b917cec9d9bef464f5475fabccdc1453a4..0f78e5c558d6e561de6da593eaebab5184e2c667 100644
+--- a/dist/peer-record.js
++++ b/dist/peer-record.js
+@@ -25,7 +25,8 @@
+  * signature is verified *with* (so a signature already commits to exactly one
+  * key), and its binding to `peerId` is checked separately at resolve time.
+  */
+-import { digest, sign, verify } from '@optimystic/quereus-plugin-crypto';
++import { digest, sign } from '@optimystic/quereus-plugin-crypto';
++import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
+ import { controlAuthorizationFields } from './control-authorization.js';
+ /**
+  * Default freshness ceiling for resolved peer-address records (15 minutes).
+diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
+index ec4ec9882c960eb56feadcb7e8d7913f270d3076..f19408220c1761d2e3590d12cb09b328e14b4390 100644
+--- a/dist/strand-instance-manager.js
++++ b/dist/strand-instance-manager.js
+@@ -20,6 +20,19 @@ import { superviseRelayReservation } from './relay-reservation.js';
+ import { strandRedialTimings, superviseStrandPeerRedial } from './strand-peer-redial.js';
+ import { groupAddrsByPeerId } from './peer-addr-book.js';
+ import { isCohortUnreachableRead } from './control-read-retry.js';
++import { causeChain } from './control-retry.js';
++/**
++ * Whether a joiner's strand read failed because db-p2p's `findCoordinator` found no member it is
++ * connected to and has confirmed (`NO_NETWORK_COORDINATOR`, `NO_COORDINATOR_AVAILABLE`). On a cold
++ * start that is the same situation as `cohort-unreachable` — the restored serving peers are not
++ * connected yet and the redial loop is still reaching them — so the build waits for a seed peer
++ * rather than releasing the runtime and its redial loop. Matched by name and code, since the typed
++ * class may come from a second loaded copy of db-p2p.
++ */
++function isJoinerCoordinatorMiss(error) {
++    return causeChain(error).some(link => link.name === 'FindCoordinatorError'
++        && (link.code === 'NO_NETWORK_COORDINATOR' || link.code === 'NO_COORDINATOR_AVAILABLE'));
++}
+ import { declaredCohortReadDeadlineMs, optimysticDialLimits, peerJoinPushBudget, relayReservationBudgetMs, resolveLinkRoundTripMs } from './link-budget.js';
+ const log = debug('sereus:cadre:strand-manager');
+ /**
+@@ -806,7 +819,7 @@ export class StrandInstanceManager {
+             await strandDb.initialize();
+         }
+         catch (error) {
+-            if (!isCohortUnreachableRead(error)) {
++            if (!isCohortUnreachableRead(error) && !(config.founder !== true && isJoinerCoordinatorMiss(error))) {
+                 throw error;
+             }
+             await this.discardDatabaseAttempt(strandId, gate);
 diff --git a/dist/strand-observer-protocol.js b/dist/strand-observer-protocol.js
 new file mode 100644
 index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbdfa8b6762
@@ -444,115 +503,6 @@ index 0000000000000000000000000000000000000000..dbaa40b31c6ba204ffd158427e9efdbd
 +    }
 +}
 +//# sourceMappingURL=strand-observer-protocol.js.map
-diff --git a/dist/peer-join-backfill.js b/dist/peer-join-backfill.js
-index 73de9f7c008b8e71b384ccbad00a2db91e8a6d15..45ac8b12652928e64f8f42c26a9944e71ce44ea1 100644
---- a/dist/peer-join-backfill.js
-+++ b/dist/peer-join-backfill.js
-@@ -646,7 +646,7 @@ export class PeerJoinBackfill {
-         }
-         const client = this.createPushClient(peerId);
-         const memo = this.memoFor(key);
--        let chunk = { ids: [], buffers: [], meta: {}, proofs: {}, bytes: 0 };
-+        let chunk = { ids: [], blocks: {}, meta: {}, proofs: {}, bytes: 0 };
-         let chunkFailed = false;
-         let anyChunkDelivered = false;
-         /**
-@@ -659,12 +659,14 @@ export class PeerJoinBackfill {
-         const flush = async () => {
-             if (chunk.ids.length === 0)
-                 return;
--            const { ids, buffers, meta, proofs } = chunk;
--            chunk = { ids: [], buffers: [], meta: {}, proofs: {}, bytes: 0 };
-+            const { ids, blocks, meta, proofs } = chunk;
-+            chunk = { ids: [], blocks: {}, meta: {}, proofs: {}, bytes: 0 };
-             try {
-                 // ONE certification value rather than two arguments, so a caller cannot pair a proof
-                 // for one revision with meta for another — both were written from the same `latest`.
--                const response = await client.pushBlocks(ids, buffers, 'replication', { blockMeta: meta, blockProofs: proofs }, {
-+                // votetorrent patch: @optimystic/db-p2p 1.19.0 takes the blocks themselves, keyed by id
-+                // (`pushBlocks(blocks, reason, certification, deadlines)`); 1.18.0 took (ids, buffers, ...).
-+                const response = await client.pushBlocks(blocks, 'replication', { blockMeta: meta, blockProofs: proofs }, {
-                     dialTimeoutMs: this.config.dialTimeoutMs,
-                     responseTimeoutMs: this.config.responseTimeoutMs
-                 });
-@@ -710,7 +712,7 @@ export class PeerJoinBackfill {
-                     break;
-             }
-             chunk.ids.push(blockId);
--            chunk.buffers.push(offer.buffer);
-+            chunk.blocks[blockId] = offer.block;
-             chunk.meta[blockId] = { rev: offer.latest.rev, actionId: offer.latest.actionId };
-             if (offer.proof) {
-                 chunk.proofs[blockId] = offer.proof;
-@@ -773,7 +775,7 @@ export class PeerJoinBackfill {
-             log('[%s] block=%s is %d bytes (%d on the wire) — exceeds the %d-byte protocol cap alone; skipped', this.deps.label, blockId, buffer.length, base64WireBytes(buffer.length), MAX_BLOCK_MESSAGE_BYTES);
-             return undefined;
-         }
--        return { latest, buffer, proof };
-+        return { latest, buffer, block, proof };
-     }
- }
- //# sourceMappingURL=peer-join-backfill.js.map
-\ No newline at end of file
-diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
-index ec4ec98..f194082 100644
---- a/dist/strand-instance-manager.js
-+++ b/dist/strand-instance-manager.js
-@@ -20,6 +20,19 @@ import { superviseRelayReservation } from './relay-reservation.js';
- import { strandRedialTimings, superviseStrandPeerRedial } from './strand-peer-redial.js';
- import { groupAddrsByPeerId } from './peer-addr-book.js';
- import { isCohortUnreachableRead } from './control-read-retry.js';
-+import { causeChain } from './control-retry.js';
-+/**
-+ * Whether a joiner's strand read failed because db-p2p's `findCoordinator` found no member it is
-+ * connected to and has confirmed (`NO_NETWORK_COORDINATOR`, `NO_COORDINATOR_AVAILABLE`). On a cold
-+ * start that is the same situation as `cohort-unreachable` — the restored serving peers are not
-+ * connected yet and the redial loop is still reaching them — so the build waits for a seed peer
-+ * rather than releasing the runtime and its redial loop. Matched by name and code, since the typed
-+ * class may come from a second loaded copy of db-p2p.
-+ */
-+function isJoinerCoordinatorMiss(error) {
-+    return causeChain(error).some(link => link.name === 'FindCoordinatorError'
-+        && (link.code === 'NO_NETWORK_COORDINATOR' || link.code === 'NO_COORDINATOR_AVAILABLE'));
-+}
- import { declaredCohortReadDeadlineMs, optimysticDialLimits, peerJoinPushBudget, relayReservationBudgetMs, resolveLinkRoundTripMs } from './link-budget.js';
- const log = debug('sereus:cadre:strand-manager');
- /**
-@@ -806,7 +819,7 @@ export class StrandInstanceManager {
-             await strandDb.initialize();
-         }
-         catch (error) {
--            if (!isCohortUnreachableRead(error)) {
-+            if (!isCohortUnreachableRead(error) && !(config.founder !== true && isJoinerCoordinatorMiss(error))) {
-                 throw error;
-             }
-             await this.discardDatabaseAttempt(strandId, gate);
-diff --git a/dist/peer-authorization.js b/dist/peer-authorization.js
-index 99cb99bbbfb9c0ae881d28bbb78d4757e5fa9c8f..823a27074f5eea0de93ac9ed367e2589f87d6320 100644
---- a/dist/peer-authorization.js
-+++ b/dist/peer-authorization.js
-@@ -1,5 +1,6 @@
- import debug from 'debug';
--import { digest, verify } from '@optimystic/quereus-plugin-crypto';
-+import { digest } from '@optimystic/quereus-plugin-crypto';
-+import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
- import { controlAuthorizationFields, unboundAuthorizationFields, cadreInviteRowFields, ownerGrantRowFields } from './control-authorization.js';
- import { ed25519PublicKeyB64FromPeerId } from './ed25519-key.js';
- const log = debug('sereus:cadre:peer-authorization');
-diff --git a/dist/peer-record.js b/dist/peer-record.js
-index 221330b917cec9d9bef464f5475fabccdc1453a4..0f78e5c558d6e561de6da593eaebab5184e2c667 100644
---- a/dist/peer-record.js
-+++ b/dist/peer-record.js
-@@ -25,7 +25,8 @@
-  * signature is verified *with* (so a signature already commits to exactly one
-  * key), and its binding to `peerId` is checked separately at resolve time.
-  */
--import { digest, sign, verify } from '@optimystic/quereus-plugin-crypto';
-+import { digest, sign } from '@optimystic/quereus-plugin-crypto';
-+import { memoVerify as verify } from './verify-memo.js'; // VoteTorrent patch: remembered verdicts
- import { controlAuthorizationFields } from './control-authorization.js';
- /**
-  * Default freshness ceiling for resolved peer-address records (15 minutes).
 diff --git a/dist/verify-memo.js b/dist/verify-memo.js
 new file mode 100644
 index 0000000000000000000000000000000000000000..d7a9d7cbd66bf226f0627328ca53c92fbbd9f3e4

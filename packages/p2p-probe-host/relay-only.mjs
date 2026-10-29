@@ -203,7 +203,7 @@ function stackPreflight() {
 	})();
 	out('RELAY_STACK ' + JSON.stringify({ node: process.versions.node, versions, patch }));
 	const ok =
-		versions['@serfab/cadre-core'] === '1.18.0' &&
+		versions['@serfab/cadre-core'] === '1.19.0' &&
 		patch &&
 		versions['@optimystic/db-p2p'] === '1.19.0' &&
 		versions['main-event'] === '1.0.5' &&

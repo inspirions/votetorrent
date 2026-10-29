@@ -101,11 +101,11 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   globalThis.TextDecoder = require('./polyfills/hermes-text-decoder');
 }
 
-// 4. structuredClone (Quereus B-tree uses it; Hermes lacks it)
-if (typeof globalThis.structuredClone !== 'function') {
-  const sc = require('@ungap/structured-clone').default;
-  globalThis.structuredClone = v => sc(v);
-}
+// 4. structuredClone (Quereus B-tree and Optimystic's db-core use it; Hermes lacks it). The sereus
+//    kit's arm, adopted verbatim (cadre-rn 1.19.0, sereus#51): plain data is copied directly and
+//    anything else goes through @ungap/structured-clone, the bare ungap this used to install. It
+//    checks for a native structuredClone itself. See polyfills/hermes-structured-clone.js.
+require('./polyfills/hermes-structured-clone');
 
 // 5. Web Streams
 if (typeof globalThis.ReadableStream === 'undefined') {
