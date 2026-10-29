@@ -1,7 +1,7 @@
 /**
  * HomeScreen — Vote tab root (D-07 per-domain screen file). Reads through `useVoterApp()`
- * (D-06 / SHELL-03 — no direct fixture-module import), fetches the election on mount and
- * whenever the `__DEV__` lifecycle override changes, and composes the real `ElectionCard` (Phase
+ * (D-06 / SHELL-03 — no direct fixture-module import), fetches the election on every focus, when
+ * a network is attached, and whenever the `__DEV__` lifecycle override changes, and composes the real `ElectionCard` (Phase
  * 40, HOME-01/02/03) once loaded — or an unavailable message when there is no election to read.
  * Also hosts the `__DEV__`-gated lifecycle cycler (D-03): it steps live -> each forced state ->
  * back to live. Dev-only affordance, compiled out of release builds.
@@ -16,7 +16,7 @@
  * changed after the vote (D-21), or an unreadable state. Vote now is hidden while a current vote
  * is saved (a local convenience, D-20).
  */
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {useFocusEffect, useNavigation, useTheme} from '@react-navigation/native';
 import type {ExtendedTheme} from '@react-navigation/native';
@@ -38,9 +38,24 @@ import {useInfoRead} from '../../hooks/useInfoRead';
 
 type HomeNavigationProp = NativeStackNavigationProp<VoteStackParamList, 'Home'>;
 
+/** How often a focused Home re-checks a network that lists no election yet (see the read effect). */
+export const ELECTION_LIST_RECHECK_MS = 10_000;
+
+/** Whether the current network lists an election. A failed read counts as no: keep waiting. */
+async function networkListsAnElection(
+	getEngine: <T>(engineName: string) => Promise<T>,
+): Promise<boolean> {
+	try {
+		const elections = await getEngine<{getElections(): Promise<unknown[]>}>('elections');
+		return (await elections.getElections()).length > 0;
+	} catch {
+		return false;
+	}
+}
+
 export default function HomeScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, lifecycleOverride, setLifecycleOverride, clockOffsetMs, nowMs, getElection, getEngine, seededElectionId} = useVoterApp();
+	const {isInitialized, lifecycleOverride, setLifecycleOverride, clockOffsetMs, nowMs, getElection, getEngine, seededElectionId, hasNetwork} = useVoterApp();
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const {t, i18n} = useTranslation('home');
 	const {t: tCommon} = useTranslation('common');
@@ -57,30 +72,67 @@ export default function HomeScreen() {
 	const electionInfo = useInfoRead(electionInfoVisible ? loadElectionInfo : null);
 	const info = electionInfo.data;
 
-	// Fetch on mount and re-fetch whenever the override changes — getElection's identity changes
-	// with lifecycleOverride (VoterAppProvider's useCallback deps), so this effect naturally
-	// re-runs on every cycler step (and on a shared dev-clock shift, D-02). A rejected read (no election on this network, or an
-	// indeterminate timeline) renders the unavailable message, never a stale or guessed card.
-	useEffect(() => {
-		let live = true;
-		getElection().then(
-			result => {
-				if (live) {
-					setElection(result);
-					setUnavailable(false);
+	// Fetch on every focus, and again whenever getElection's identity changes (it changes with
+	// lifecycleOverride and the dev clock, VoterAppProvider's useCallback deps, so the cycler and a
+	// shared dev-clock shift, D-02, re-fetch) or a network is attached (hasNetwork: a join selects
+	// the joined network). A rejected read (no election on this network, or an indeterminate
+	// timeline) renders the unavailable message, never a stale or guessed card.
+	//
+	// While the network lists NO election, the read falls back to the __DEV__ seed (pickElectionId)
+	// or is unavailable, and nothing else tells Home when a joined network's election replicates
+	// in. So, only in that state and only while focused, the list alone is re-checked every
+	// ELECTION_LIST_RECHECK_MS, and the election is re-read once the list names one. Home mounted
+	// before a join used to keep the dev-seed card for good (iPhone, 2026-10-29).
+	useFocusEffect(
+		useCallback(() => {
+			let live = true;
+			let recheck: ReturnType<typeof setTimeout> | undefined;
+			const read = () => {
+				getElection().then(
+					result => {
+						if (live) {
+							setElection(result);
+							setUnavailable(false);
+						}
+					},
+					() => {
+						if (live) {
+							setElection(null);
+							setUnavailable(true);
+						}
+					},
+				);
+			};
+			const awaitListedElection = () => {
+				recheck = setTimeout(() => {
+					networkListsAnElection(getEngine).then(listed => {
+						if (!live) {
+							return;
+						}
+						if (listed) {
+							read();
+						} else {
+							awaitListedElection();
+						}
+					});
+				}, ELECTION_LIST_RECHECK_MS);
+			};
+			read();
+			if (hasNetwork) {
+				networkListsAnElection(getEngine).then(listed => {
+					if (live && !listed) {
+						awaitListedElection();
+					}
+				});
+			}
+			return () => {
+				live = false;
+				if (recheck !== undefined) {
+					clearTimeout(recheck);
 				}
-			},
-			() => {
-				if (live) {
-					setElection(null);
-					setUnavailable(true);
-				}
-			},
-		);
-		return () => {
-			live = false;
-		};
-	}, [getElection]);
+			};
+		}, [getElection, getEngine, hasNetwork]),
+	);
 
 	// Re-read the marker on every focus, so returning from the receipt or from Submit shows the
 	// fresh state. The `nowMs` identity changes with the dev clock (D-02). Nothing is cached, and a
