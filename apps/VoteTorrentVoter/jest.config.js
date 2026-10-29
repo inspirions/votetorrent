@@ -48,6 +48,13 @@ module.exports = {
     '^@quereus/plugin-react-native-leveldb$':
       '<rootDir>/node_modules/@quereus/plugin-react-native-leveldb/dist/src/index.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',
+    // Native Noise crypto, as in the Authority (spike 093). The real module needs
+    // react-native-quick-crypto (Nitro/JSI), which cannot load under Jest; the mock, copied from
+    // the Authority, keeps the mode contract.
+    '^@serfab/cadre-rn/noise-crypto$': '<rootDir>/__mocks__/@serfab/cadre-rn-noise-crypto.js',
+    // The REAL module (pure JS, no native import): its exports map is import-only, which Jest's
+    // CJS resolver cannot follow.
+    '^@serfab/cadre-rn/native-digest$': '<rootDir>/node_modules/@serfab/cadre-rn/dist/native-digest.js',
     '^@multiformats/multiaddr$': '<rootDir>/__mocks__/@multiformats/multiaddr.js',
     '^@votetorrent/vote-core$':
       '<rootDir>/node_modules/@votetorrent/vote-core/dist/src/index.js',

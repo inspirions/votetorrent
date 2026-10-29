@@ -10,6 +10,10 @@
  *
  * Group D swaps `globalThis.crypto` for a bootstrap-shaped object and restores it in `finally`;
  * nothing else here touches globals.
+ *
+ * Group E covers the Voter, which runs the same two files: it lives here, not in the Voter's suite,
+ * for the reason polyfill-drift.test.js gives (a second copy of a guard needs its own drift guard).
+ * The byte identity is what lets Groups A and D speak for the Voter's copies too.
  */
 
 const fs = require('fs');
@@ -201,9 +205,14 @@ describe('B. the bootstrap digest is the one the sereus kit replaces', () => {
   });
 });
 
+const APP_ROOTS = [
+  ['Authority', path.resolve(__dirname, '../..')],
+  ['Voter', path.resolve(__dirname, '../../../VoteTorrentVoter')],
+];
+
 describe('C. index.js wiring', () => {
-  it('imports native-crypto right after the bootstrap and before App', () => {
-    const src = stripComments(fs.readFileSync(path.resolve(__dirname, '../../index.js'), 'utf8'));
+  it.each(APP_ROOTS)('%s imports native-crypto right after the bootstrap and before App', (_label, root) => {
+    const src = stripComments(fs.readFileSync(path.join(root, 'index.js'), 'utf8'));
     const bootstrap = src.indexOf("import './polyfills.bootstrap';");
     const native = src.indexOf("import './polyfills/native-crypto';");
     const app = src.indexOf("import App from './App';");
@@ -240,6 +249,30 @@ describe('D. native-crypto.js end to end', () => {
       log.mockRestore();
       if (saved) Object.defineProperty(globalThis, 'crypto', saved);
       else delete globalThis.crypto;
+    }
+  });
+});
+
+describe('E. the Voter runs the same native crypto', () => {
+  const VOTER = path.resolve(__dirname, '../../../VoteTorrentVoter');
+
+  it.each(['native-ed25519.js', 'native-crypto.js'])('polyfills/%s is byte-identical in both apps', file => {
+    const authority = fs.readFileSync(path.resolve(__dirname, '..', file), 'utf8');
+    const voter = fs.readFileSync(path.join(VOTER, 'polyfills', file), 'utf8');
+    expect(authority.length).toBeGreaterThan(500);
+    expect(voter).toBe(authority);
+  });
+
+  it('its bootstrap tags the digest with the kit tag and the stubs with ours', () => {
+    const src = stripComments(fs.readFileSync(path.join(VOTER, 'polyfills.bootstrap.js'), 'utf8'));
+    expect(src).toContain("globalThis.crypto.subtle.digest[Symbol.for('@serfab/cadre-rn/js-digest')] = true;");
+    expect(src).toContain("stub[Symbol.for('votetorrent/subtle-stub')] = true;");
+  });
+
+  it('lists the native modules as its OWN dependencies (React Native autolinks only those)', () => {
+    const deps = JSON.parse(fs.readFileSync(path.join(VOTER, 'package.json'), 'utf8')).dependencies;
+    for (const name of ['react-native-quick-crypto', 'react-native-quick-base64', 'react-native-nitro-modules', '@serfab/cadre-rn']) {
+      expect(deps[name]).toEqual(expect.any(String));
     }
   });
 });

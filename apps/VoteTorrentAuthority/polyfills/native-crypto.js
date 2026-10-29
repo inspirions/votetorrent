@@ -25,7 +25,10 @@
  * path is live (logcat `ReactNativeJS`, tag `[native-crypto]`). polyfills/node-crypto.js stays
  * pure JS: only the attestation verifiers reach it.
  *
- * Authority only: the Voter does not ship react-native-quick-crypto.
+ * BYTE-IDENTICAL in both apps, as is polyfills/native-ed25519.js; the Authority's
+ * polyfills/__tests__/native-crypto.test.js guards that. The Voter took both on 2026-10-29: its
+ * iPhone profile spent about 18% of JS time in noble's pure-JS Ed25519 `verify`, reached from
+ * Optimystic's commit-proof `countApprovals` through `@libp2p/crypto`'s `publicKey.verify`.
  */
 import { createHash, subtle as nativeSubtle } from 'react-native-quick-crypto';
 import { installNativeDigest } from '@serfab/cadre-rn/native-digest';

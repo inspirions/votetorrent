@@ -109,6 +109,30 @@ PODS:
     - ReactNativeDependencies
     - Yoga
   - PromisesObjC (2.4.1)
+  - QuickCrypto (1.1.7):
+    - hermes-engine
+    - NitroModules
+    - RCTRequired
+    - RCTTypeSafety
+    - React-bridging
+    - React-callinvoker
+    - React-Core
+    - React-Core-prebuilt
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/core
+    - ReactNativeDependencies
+    - Yoga
   - RCT-Folly (2024.11.18.00):
     - RCT-Folly/Default (= 2024.11.18.00)
     - ReactNativeDependencies
@@ -1363,6 +1387,28 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
+  - react-native-quick-base64 (3.0.1):
+    - hermes-engine
+    - RCTRequired
+    - RCTTypeSafety
+    - React-bridging
+    - React-Core
+    - React-Core-prebuilt
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/core
+    - ReactNativeDependencies
+    - Yoga
   - react-native-safe-area-context (5.8.0):
     - hermes-engine
     - RCTRequired
@@ -2017,6 +2063,7 @@ DEPENDENCIES:
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - NitroImage (from `../node_modules/react-native-nitro-image`)
   - NitroModules (from `../node_modules/react-native-nitro-modules`)
+  - QuickCrypto (from `../node_modules/react-native-quick-crypto`)
   - RCT-Folly (from `build/rndeps-facades/RCT-Folly`)
   - RCTDeprecation (from `build/rncore-facades/RCTDeprecation`)
   - RCTRequired (from `build/rncore-facades/RCTRequired`)
@@ -2059,6 +2106,7 @@ DEPENDENCIES:
   - React-microtasksnativemodule (from `../node_modules/react-native/ReactCommon/react/nativemodule/microtasks`)
   - React-mutationobservernativemodule (from `../node_modules/react-native/ReactCommon/react/nativemodule/mutationobserver`)
   - react-native-get-random-values (from `../node_modules/react-native-get-random-values`)
+  - react-native-quick-base64 (from `../node_modules/react-native-quick-base64`)
   - react-native-safe-area-context (from `../node_modules/react-native-safe-area-context`)
   - React-NativeModulesApple (from `../node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios`)
   - React-networking (from `../node_modules/react-native/ReactCommon/react/networking`)
@@ -2144,6 +2192,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-nitro-image"
   NitroModules:
     :path: "../node_modules/react-native-nitro-modules"
+  QuickCrypto:
+    :path: "../node_modules/react-native-quick-crypto"
   RCT-Folly:
     :path: build/rndeps-facades/RCT-Folly
   RCTDeprecation:
@@ -2226,6 +2276,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native/ReactCommon/react/nativemodule/mutationobserver"
   react-native-get-random-values:
     :path: "../node_modules/react-native-get-random-values"
+  react-native-quick-base64:
+    :path: "../node_modules/react-native-quick-base64"
   react-native-safe-area-context:
     :path: "../node_modules/react-native-safe-area-context"
   React-NativeModulesApple:
@@ -2345,6 +2397,7 @@ SPEC CHECKSUMS:
   NitroImage: 9f433e6cdbb63847b978853eee1da04af99f1254
   NitroModules: 08aff3b1a45badb71cf10d8f2d9cfb4e87cb468e
   PromisesObjC: 752c3227f599e3467650e47ea36f433eeb10c273
+  QuickCrypto: 6b5d93a21587132a807c8d8179ba68532bcdfd9b
   RCT-Folly: d173e541eeb78cad5c81011c1bbf62d5b86b9778
   RCTDeprecation: 1dce662386078170e119b89c1600db1b6e3d42f6
   RCTRequired: b5a9168b680baa2cda4f6b4764d10b6e58368b25
@@ -2386,6 +2439,7 @@ SPEC CHECKSUMS:
   React-microtasksnativemodule: aa3ea1db91e208694042bd8af0bda65202f4a68d
   React-mutationobservernativemodule: 2dcf0e333fe6621c3ffea838fcc48d54435724a1
   react-native-get-random-values: 394b4c6af6d505f3eec20436e7197fcea24888cd
+  react-native-quick-base64: 4a47dacb887382ffa34f752eae078153cb553c57
   react-native-safe-area-context: ceeff92fa28a075a0afd140f5ccf903b3d438823
   React-NativeModulesApple: 885f4cd7626a1ffe20e0dcd23ef8528f415795d3
   React-networking: 31c21d3a8ea93c859706f876d27578782b05d250

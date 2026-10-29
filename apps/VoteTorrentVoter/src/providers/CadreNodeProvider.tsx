@@ -18,6 +18,7 @@ import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootst
 import { relayOnlyAddrs } from '../config/relay-only-addrs';
 import { readJoinBootstrap } from '../engines/join-bootstrap';
 import { openBootstrapPeerStore, openTrustedOwnerStore } from '../engines/rn-durable-slot';
+import { noiseCryptoForNode } from '../engines/noise-crypto-config';
 
 // ---------------------------------------------------------------------------
 // Context type
@@ -347,6 +348,10 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
+            // Native Noise crypto (react-native-quick-crypto) for the control node AND every
+            // strand node, as on the Authority (spike 093): pure-JS Noise on Hermes saturates the
+            // JS thread during bring-up. See engines/noise-crypto-config.ts.
+            noiseCrypto: noiseCryptoForNode(),
           } as any,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.

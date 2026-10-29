@@ -170,3 +170,14 @@ describe('CadreNodeProvider (Voter) — the node settle status (#99)', () => {
 		}
 	});
 });
+
+describe('CadreNodeProvider (Voter) — native Noise crypto (spike 093)', () => {
+	it('builds the node with network.noiseCrypto from the shared switch (symmetric by default)', async () => {
+		await bootProvider();
+		const node = mockConstructedNodes[mockConstructedNodes.length - 1];
+		const network = (node.receivedOptions as {network?: {noiseCrypto?: unknown}}).network;
+		// The jest mock of @serfab/cadre-rn/noise-crypto tags its result with the mode, so this
+		// proves the provider forwards the switch rather than silently running stock pure-JS noise.
+		expect(network?.noiseCrypto).toEqual({__mockNoiseCrypto: 'symmetric'});
+	});
+});
