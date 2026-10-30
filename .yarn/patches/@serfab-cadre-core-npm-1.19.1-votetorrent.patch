@@ -1,8 +1,8 @@
 diff --git a/dist/cadre-node.js b/dist/cadre-node.js
-index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400ecb17f16 100644
+index 332415bea8d986c1ef7c47ef7a04056d82495cd2..d4adbc1ff1d3b06b2fce3f8c286f186ddd6ad1a3 100644
 --- a/dist/cadre-node.js
 +++ b/dist/cadre-node.js
-@@ -56,6 +56,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
+@@ -57,6 +57,9 @@ import { createMembershipConnectionGater, UnauthorizedReservationBudget } from '
  import { controlNetworkName, installControlProtocolGuard, servesControlDatabase } from './control-protocol-guard.js';
  import { StrandWakeService, dialWake } from './strand-wake-protocol.js';
  import { StrandAddrService, collectStrandAddrs } from './strand-addr-protocol.js';
@@ -12,7 +12,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
  import { DelegateAdmissionStore, extractCircuitRelayTargets, dueRelayAnnounces, prunePeerStrandKeys, peerStrandKey, recordRelayRefusals, relaysNotRefusing } from './delegate-admission.js';
  import { relayCircuitAddrs, resolveListenAddrs, resolveTransportOptions, RelayReservationFailedError } from './relay-addrs.js';
  import { selfAddressesChanged } from './self-address-update.js';
-@@ -353,6 +356,13 @@ export class CadreNode {
+@@ -354,6 +357,13 @@ export class CadreNode {
           * stops conflating control addresses with strand seeding.
           */
          this.strandAddrService = null;
@@ -26,7 +26,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
          /**
           * Cadre invitation redemption handler (`/sereus/cadre-invite/1.0.0`): a device holding an
           * invitation dials this machine and proves possession; the handler seats the row and
-@@ -909,6 +919,20 @@ export class CadreNode {
+@@ -910,6 +920,20 @@ export class CadreNode {
          /** `connection:close` listener: {@link onControlConnectionClosed} (teardown in {@link stopRecordRefresh}). */
          this.controlConnectionCloseHandler = null;
          this.config = config;
@@ -47,7 +47,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
          this.hostUnclaimedStrands = config.hostUnclaimedStrands ?? config.profile === 'storage';
          this.strandManager = new StrandInstanceManager();
          this.enrollmentService = new EnrollmentService();
-@@ -1239,6 +1263,19 @@ export class CadreNode {
+@@ -1240,6 +1264,19 @@ export class CadreNode {
                  this.pushFanoutService = this.buildPushFanout(this.config.push);
                  log('Push-wake fan-out enabled (injected notifier)');
              }
@@ -67,7 +67,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
              this._running = true;
              this.emit('control:connected', undefined);
              timing('[start] total: %dms', Math.round(performance.now() - tTotal));
-@@ -2087,7 +2124,12 @@ export class CadreNode {
+@@ -2088,7 +2125,12 @@ export class CadreNode {
              connectionGater: createMembershipConnectionGater({
                  admitInbound: (remotePeerId) => this.admitInboundControlConnection(remotePeerId),
                  admitRelayReservation: (remotePeerId) => this.admitControlRelayReservation(remotePeerId),
@@ -81,7 +81,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
              }, network?.connectionGater, ADMISSION_DECISION_TIMEOUT_MS, relayedRequestBudgetMs(network?.linkRoundTripMs)),
              // Fail-closed per-stream authorization for the four Optimystic control-DB
              // protocols — the members-only layer the connection gater's stranger
-@@ -2969,6 +3011,23 @@ export class CadreNode {
+@@ -2970,6 +3012,23 @@ export class CadreNode {
          // self-update rule is measured against, and a removal landing mid-publish re-reads as
          // absent instead of matching no rows under a 'refreshed'. The record it returns is the
          // one in the row.
@@ -105,7 +105,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
          const aloneBefore = this.committedAlone();
          const record = await this.controlDatabase.updateSelfPeerRecord(peerId, (current) => this.signSelfRecord(peerId, signingKey, addrs, current));
          if (record === null) {
-@@ -3988,7 +4047,47 @@ export class CadreNode {
+@@ -3989,7 +4048,47 @@ export class CadreNode {
          if (booked.length > 0) {
              return booked;
          }
@@ -154,7 +154,7 @@ index d057229ca75e8ca0b0e3cf89b78b02535b93c85e..6e179f622fd52a7240d847ebec95d400
      }
      /**
       * A sibling's retained out-of-band dial target (see {@link bootstrapPeerStore}),
-@@ -5138,6 +5237,14 @@ export class CadreNode {
+@@ -5139,6 +5238,14 @@ export class CadreNode {
              await this.strandAddrService.shutdown();
              this.strandAddrService = null;
          }
@@ -198,10 +198,10 @@ index b7cf4c1dcff144d3965f7beba87de7e4bbcde1c1..43328ceb0f989480ec5e22231eb96789
          [STRAND_ADDR_PROTOCOL, 'members'],
          ...controlDatabaseProtocols(partyId).map((protocol) => [protocol, 'members-snapshot']),
 diff --git a/dist/index.js b/dist/index.js
-index 4aa05cea074c4f33e4da7acfadb4867a67122892..3a492d25f87dc7bac4cb8bdbda65d4a29c5544a1 100644
+index d058ff50bf3629748222685767383289200e2589..5dc0d0111c6afae2f041fce8c7e3ec1cf6b5c2f0 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -160,6 +160,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
+@@ -165,6 +165,9 @@ export { StrandWakeService, dialWake, WAKE_PROTOCOL, DEFAULT_WAKE_DIAL_BUDGET_MS
  // Strand Address (control-network strand-address RPC) — wire types come via
  // `export * from './types.js'` (StrandAddrRequest / StrandAddrResponse / StrandAddrStatus).
  export { StrandAddrService, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from './strand-addr-protocol.js';
@@ -287,7 +287,7 @@ index 221330b917cec9d9bef464f5475fabccdc1453a4..0f78e5c558d6e561de6da593eaebab51
  /**
   * Default freshness ceiling for resolved peer-address records (15 minutes).
 diff --git a/dist/strand-instance-manager.js b/dist/strand-instance-manager.js
-index ec4ec9882c960eb56feadcb7e8d7913f270d3076..f19408220c1761d2e3590d12cb09b328e14b4390 100644
+index fab47518989ef3bdac723539418fceab31a46bf5..f39b9a230db4571ccb43bd35171262ab23fc423d 100644
 --- a/dist/strand-instance-manager.js
 +++ b/dist/strand-instance-manager.js
 @@ -20,6 +20,19 @@ import { superviseRelayReservation } from './relay-reservation.js';
@@ -310,7 +310,7 @@ index ec4ec9882c960eb56feadcb7e8d7913f270d3076..f19408220c1761d2e3590d12cb09b328
  import { declaredCohortReadDeadlineMs, optimysticDialLimits, peerJoinPushBudget, relayReservationBudgetMs, resolveLinkRoundTripMs } from './link-budget.js';
  const log = debug('sereus:cadre:strand-manager');
  /**
-@@ -806,7 +819,7 @@ export class StrandInstanceManager {
+@@ -823,7 +836,7 @@ export class StrandInstanceManager {
              await strandDb.initialize();
          }
          catch (error) {
