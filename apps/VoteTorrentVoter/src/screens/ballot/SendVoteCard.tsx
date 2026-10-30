@@ -24,6 +24,8 @@ type Outcome = Exclude<VoteSendFlowResult, {kind: 'done'}>['kind'];
 const OUTCOME_KEY: Record<Outcome, string> = {
 	'no-network': 'send.noNetwork',
 	'no-rendezvous': 'send.noRendezvous',
+	// no joined address answered: reuses existing copy (D-61, no new strings)
+	'rendezvous-unreachable': 'send.failed',
 	canceled: 'send.canceled',
 	'biometric-unavailable': 'send.biometricUnavailable',
 	unreadable: 'send.failed',
