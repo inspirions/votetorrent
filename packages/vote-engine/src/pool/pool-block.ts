@@ -121,6 +121,48 @@ export type PoolBlockCheck = { ok: true } | { ok: false, reason: string }
 const sameOrder = (a: readonly unknown[], b: readonly unknown[]): boolean =>
   a.length === b.length && a.every((x, i) => canonicalJson(x) === canonicalJson(b[i]))
 
+export type PoolPayloadShapeCode =
+  | 'not-a-payload' | 'counts-differ' | 'voter-count-mismatch' | 'not-canonical-order'
+  | 'duplicate-vote' | 'duplicate-voter' | 'voter-list-mismatch' | 'voter-entry-scope-mismatch'
+
+export type PoolPayloadShapeCheck =
+  | { ok: true }
+  | { ok: false, code: PoolPayloadShapeCode, stage: 'structure' | 'records', reason: string }
+
+/**
+ * Payload structure + record checks shared by checkFormedPoolBlock (member side) and R7 (validator
+ * side). Accepts v:1 and v:2 payloads (no version check; checkFormedPoolBlock keeps its own v:2
+ * check). `reason` is the legacy checkFormedPoolBlock string. `scope` adds the voter-entry
+ * election/revision check. May throw only where the legacy code did (a non-JSON value inside the
+ * arrays); R7 wraps the call.
+ */
+export function checkPoolPayloadShape (
+  payload: ElectionBlockPayload, registrantIds: readonly string[], scope?: { electionId: string, revision: number }
+): PoolPayloadShapeCheck {
+  const p = payload
+  const fail = (code: PoolPayloadShapeCode, stage: 'structure' | 'records', reason: string): PoolPayloadShapeCheck => ({ ok: false, code, stage, reason })
+  if (p === null || typeof p !== 'object' || !Array.isArray(p.votes) || !Array.isArray(p.voterRecords)) {
+    return fail('not-a-payload', 'structure', 'the block is not a pool block')
+  }
+  if (p.votes.length !== p.voterRecords.length) return fail('counts-differ', 'structure', 'vote and voter counts differ')
+  if (p.votes.length !== registrantIds.length) return fail('voter-count-mismatch', 'structure', 'the voter list does not match the entries')
+  if (!sameOrder(p.votes, sortByCanonicalBytes(p.votes)) || !sameOrder(p.voterRecords, sortByCanonicalBytes(p.voterRecords))) {
+    return fail('not-canonical-order', 'structure', 'the entries are not in canonical order')
+  }
+  if (new Set(p.votes as string[]).size !== p.votes.length) return fail('duplicate-vote', 'records', 'a vote appears twice')
+  const ids = (p.voterRecords as VoterEntry[]).map(r => r?.registrantId)
+  if (new Set(ids).size !== ids.length) return fail('duplicate-voter', 'records', 'a voter appears twice')
+  if (canonicalJson([...ids].sort()) !== canonicalJson(registrantIds)) return fail('voter-list-mismatch', 'records', 'the voter list does not match the entries')
+  if (scope !== undefined) {
+    for (const r of p.voterRecords as VoterEntry[]) {
+      if (r?.electionId !== scope.electionId || r?.electionRevision !== scope.revision) {
+        return fail('voter-entry-scope-mismatch', 'records', 'a voter entry is for another election or revision')
+      }
+    }
+  }
+  return { ok: true }
+}
+
 /**
  * What a member checks before it signs a formed block. Every refusal names its reason (the former
  * relays it to the pool); a member never signs a block that fails any of these.
@@ -129,23 +171,14 @@ export function checkFormedPoolBlock (block: FormedPoolBlock, mine: PoolContribu
   const p = block.payload
   if (p?.v !== 2 || !Array.isArray(p.votes) || !Array.isArray(p.voterRecords)) return { ok: false, reason: 'the block is not a pool block' }
   if (block.templateDigest !== ballot.templateDigest) return { ok: false, reason: 'the block names another ballot template' }
-  if (p.votes.length !== p.voterRecords.length) return { ok: false, reason: 'vote and voter counts differ' }
-  if (p.votes.length !== block.registrantIds.length) return { ok: false, reason: 'the voter list does not match the entries' }
-  if (!sameOrder(p.votes, sortByCanonicalBytes(p.votes)) || !sameOrder(p.voterRecords, sortByCanonicalBytes(p.voterRecords))) {
-    return { ok: false, reason: 'the entries are not in canonical order' }
-  }
+  // The shared shape is computed once. Its structure failures are reported before the member's own
+  // entry checks and its record failures after them: exactly the legacy first-failure order.
+  const shape = checkPoolPayloadShape(p, block.registrantIds, { electionId: ballot.electionKey.electionId, revision: ballot.electionKey.revision })
+  if (!shape.ok && shape.stage === 'structure') return { ok: false, reason: shape.reason }
   if (p.votes.filter(v => v === mine.voteCiphertext).length !== 1) return { ok: false, reason: 'my vote is missing or altered' }
   const myEntry = canonicalJson(mine.voterEntry)
   if (p.voterRecords.filter(r => canonicalJson(r) === myEntry).length !== 1) return { ok: false, reason: 'my voter entry is missing or altered' }
-  if (new Set(p.votes as string[]).size !== p.votes.length) return { ok: false, reason: 'a vote appears twice' }
-  const ids = (p.voterRecords as VoterEntry[]).map(r => r?.registrantId)
-  if (new Set(ids).size !== ids.length) return { ok: false, reason: 'a voter appears twice' }
-  if (canonicalJson([...ids].sort()) !== canonicalJson(block.registrantIds)) return { ok: false, reason: 'the voter list does not match the entries' }
-  for (const r of p.voterRecords as VoterEntry[]) {
-    if (r?.electionId !== ballot.electionKey.electionId || r?.electionRevision !== ballot.electionKey.revision) {
-      return { ok: false, reason: 'a voter entry is for another election or revision' }
-    }
-  }
+  if (!shape.ok) return { ok: false, reason: shape.reason }
   if (poolBlockId(p) !== block.blockId) return { ok: false, reason: 'the block id is not the digest of the payload' }
   let rederived: string
   try {
