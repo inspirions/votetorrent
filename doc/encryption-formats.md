@@ -408,39 +408,44 @@ input.
     that name its own `Cid`, so a forged row that reuses an honest `Id`
     fails its own checks and is excluded from the tally (section 7.4). The
     honest row keeps its leaf and its status.
-  - Rows that share a `Cid` are reduced to one, because a leaf is named by
-    its `Cid`. The kept row is chosen in this order:
-    1. An **authenticated** row. That is a row where all of these hold:
-       - its `Cid` is the digest of its own `Ciphertext` (`blockCidOf`,
-         the `cid(Digest(Ciphertext))` check, which needs no key);
-       - its `VoterRegistrantIds` is a JSON array of non-empty ids in
-         strictly ascending order, as long as `EntryCount`;
-       - its `TemplateDigest` is the template digest of its ballot;
-       - every listed registrant has a `VoteBlockVoter` row naming this
-         `Cid` that `judgeBlockVoters` accepts. For that row, the block
-         columns agree, the consent signature verifies over
-         `Digest('VoteBlockVoter', ElectionId, ElectionRevision, BallotId,
-         Cid, Id, RegistrantId, DeviceKey)`, and the registrant and the
-         device key pass the Registrant and Association rule of section
-         7.3.
+  - Rows that share a `Cid`. The root is final at `hashingVotes`, before
+    the key release, so which voter list the ciphertext really holds cannot
+    be decided from the rows. Each row of a shared `Cid` is first checked
+    for **authentication**. A row is authenticated when all of these hold:
+    - its `Cid` is the digest of its own `Ciphertext` (`blockCidOf`, the
+      `cid(Digest(Ciphertext))` check, which needs no key);
+    - its `VoterRegistrantIds` is a JSON array of non-empty ids in strictly
+      ascending order, as long as `EntryCount`;
+    - its `TemplateDigest` is the template digest of its ballot;
+    - every listed registrant has a `VoteBlockVoter` row naming this `Cid`
+      that `judgeBlockVoters` accepts. For that row, the block columns
+      agree, the consent signature verifies over `Digest('VoteBlockVoter',
+      ElectionId, ElectionRevision, BallotId, Cid, Id, RegistrantId,
+      DeviceKey)`, and the registrant and the device key pass the
+      Registrant and Association rule of section 7.3.
 
-       These are all of the validation's block checks that need no key,
-       except the cross-block one. `judgeBlockVoters` is the same function
-       the validation uses, so the two cannot disagree about which voter is
-       authenticated.
-    2. Among authenticated rows, the one with the most listed voters.
-    3. Then a row whose `Cid` is the digest of its own `Ciphertext`.
-    4. Then the lowest UTF-8 bytes of `canonicalJson([Cid, Id, BallotId,
-       EntryCount, TemplateDigest, VoterRegistrantIds, Ciphertext])`.
+    These are all of the validation's block checks that need no key,
+    except the cross-block one. `judgeBlockVoters` is the same function the
+    validation uses, so the two cannot disagree about which voter is
+    authenticated. Then:
+    - **Every** authenticated row is kept as a leaf of its own. An exact
+      duplicate (equal leaf data) collapses to one. The validation decides
+      after the release which leaf the ciphertext holds (section 7.3), and
+      the ciphertext's entries are counted once (sections 7.3 and 7.4).
+    - The rows that are not authenticated are set aside as
+      `duplicate-block`, so junk cannot add leaves under an honest `Cid`.
+    - When no row of the `Cid` is authenticated, one row is kept: a row
+      whose `Cid` is the digest of its own `Ciphertext` first, then the
+      lowest UTF-8 bytes of `canonicalJson([Cid, Id, BallotId,
+      EntryCount, TemplateDigest, VoterRegistrantIds, Ciphertext])`. The
+      validation finds it invalid anyway.
 
-    The other rows of that `Cid` are set aside as `duplicate-block`. When
-    no row of the `Cid` is authenticated, rules 3 and 4 decide, and the
-    kept row is invalid under the validation anyway. Signatures are checked
-    only for a `Cid` that more than one row names, so a tree with no
-    collision costs no signature check. The consent digest and the P-256
-    check (`blockConsentDigest`, `verifyBlockConsent`) make the same calls
-    as the pool's `consentDigest` and the schema's `verifySigP256`. Tests
-    pin that parity, so the block tree stays on the `./browser` entry.
+    Signatures are checked only for a `Cid` that more than one row names,
+    so a tree with no collision costs no signature check. The consent
+    digest and the P-256 check (`blockConsentDigest`,
+    `verifyBlockConsent`) make the same calls as the pool's
+    `consentDigest` and the schema's `verifySigP256`. Tests pin that
+    parity, so the block tree stays on the `./browser` entry.
   - The tree is built over the kept rows. The set-aside rows are returned
     in `tree.rejected` as `{ cid, reason, detail }`, ascending by `cid`
     and carrying no input position, so the result does not depend on the
@@ -466,7 +471,10 @@ input.
   tree (section 7.4) and must not carry registrant ids. `canonicalJson`
   is the sorted-key, no-whitespace JSON of `src/voting/canonical.ts`.
 - **Leaf order.** Ascending by the UTF-8 bytes of `Cid`; a shorter string
-  that is a prefix of a longer one sorts first. A `Cid` must be a base32
+  that is a prefix of a longer one sorts first. Leaves of one `Cid` are
+  then ascending by the UTF-8 bytes of their leaf data, which differ
+  because exact duplicates collapse, and which also give them different
+  leaf hashes. A `Cid` must be a base32
   CIDv1 string, `b` followed by characters of `a-z` and `2-7` (the form
   `cid(Digest(Ciphertext))` produces; `isBase32Cid`), or the row is
   `malformed-row`. That keeps the order total: two distinct strings can
@@ -489,7 +497,9 @@ input.
   difference is `malformed-proof`. It then folds the path from the leaf
   hash with the node hash and compares the result with the root
   (`root-mismatch` when they differ). The caller recomputes `leafHash`
-  from its own row, never from the proof.
+  from its own row, never from the proof. `tree.proofFor(cid, leafHash?)`
+  returns a leaf's proof. When a `Cid` names several leaves it needs the
+  leaf hash, and without one it returns `ambiguous-block`.
 - **Final root.** The accruing period ends at the election timeline's
   `hashingVotes`. `finalBlockTree` and `blockTreeStatus` return a final
   tree only when `nowMs >= hashingVotes`. Before that they return
@@ -522,7 +532,8 @@ the order of `SLICE_CHECK_IDS`:
   `Id`; the block's registrant list holds the voter once; the consent
   signature verifies; the row's device key is the receipt's; the voter
   entry's own signature verifies; and after the release the voter entry
-  is in the payload exactly once.
+  is in the payload exactly once and the block's list is the payload's
+  list of voters (`voter-list-mismatch` otherwise).
 - `block-hash`: the `Cid` is the digest of the ciphertext (needs no key);
   after the release the `Id` is the digest of the payload too.
 - `under-root`: the leaf hash is recomputed from the voter's own block row
@@ -532,6 +543,15 @@ the order of `SLICE_CHECK_IDS`:
   the tree is never built. A supplied proof is then checked by
   `verifyInclusion` alone, and with no proof `under-root` is
   `not-applicable` (`no-authorization`).
+
+Several block rows may share the voter's `Cid`, because the block tree
+keeps every authenticated row of a `Cid` (section 7.1). An example is the
+honest block and a forged one that lists the voter and a colluding
+registrant. Each row is judged, and the best result is reported: the
+fewest failures, then the fewest checks short of a plain pass, then leaf
+order. Before the release both may pass, because nothing yet shows which
+list the ciphertext holds. After it only the row whose list is the
+payload's can pass `my-voter-entry`.
 
 Each result has one of four statuses: `pass`, `fail` (with a reason code
 and a detail), `pending-key-release` and `not-applicable` (reason
@@ -612,7 +632,30 @@ is the report-level error `voter-row-forged` and never touches the block.
 A registrant counts towards `registrant-in-two-blocks` only in the blocks
 where its representative row is authenticated, so a forged block that
 lists an honest voter without that voter's valid consent cannot exclude
-the honest block.
+the honest block. Leaves that share a `Cid` are one block for this check,
+because they are claims about one ciphertext. So a forged leaf of the
+honest `Cid` that lists the honest voters, with their real consent, does
+not put them "in two blocks".
+
+Shared `Cid` (T-65-05-03). After the release, every leaf of a `Cid` is
+checked against the opened payload: `payload-count-mismatch`,
+`voter-count-mismatch`, `voter-list-mismatch` and `id-mismatch`. So at
+most one leaf of a `Cid` can be valid. If two ever were, both would get
+the block-level error `cid-in-two-valid-blocks` and be excluded, rather
+than counted twice. This is unreachable by construction: two leaves that
+both match one payload have equal leaf data and have collapsed.
+
+One leaf per `Cid` counts the ciphertext's entries, chosen in this order:
+1. the valid leaf;
+2. else a leaf that cannot be decrypted yet;
+3. else an invalid one;
+
+ties going to the most `attestedEntries`, then leaf order. Every other
+leaf of the `Cid` carries `shadowedBy` (the counting leaf's `leafHash`)
+and counts nothing: `attestedEntries` 0 and no `undecryptable` entries.
+Before the release the counting leaf is the one with more attested
+entries, so the pre-release totals may include a colluding registrant's
+entry. They never count one ciphertext twice.
 
 The answer policy for one decrypted vote against its ballot template:
 
@@ -630,9 +673,11 @@ The answer policy for one decrypted vote against its ballot template:
   and still receives the structural checks.
 - Invalid votes are counted apart from valid ones and are never dropped.
 
-The report has one finding record per block (ascending by UTF-8 bytes of
-`Cid`), a verdict per vote, report-level findings and totals. Each block
-record carries `declaredEntries` (the `EntryCount`) and
+The report has one finding record per block, in the block tree's leaf
+order (UTF-8 bytes of `Cid`, then of the leaf data), a verdict per vote,
+report-level findings and totals. Each block record carries `leafHash`
+(its block-tree leaf hash, which names the leaf when a `Cid` has several),
+`shadowedBy` (see above), `declaredEntries` (the `EntryCount`) and
 `attestedEntries`, the smallest of `EntryCount`, the number of listed
 voters and the number of listed voters with an authenticated voter row. The totals
 satisfy `valid + invalid + excluded + undecryptable = entries`:
@@ -640,9 +685,11 @@ satisfy `valid + invalid + excluded + undecryptable = entries`:
 - `valid` and `invalid` count the votes of `valid` blocks only. The votes
   inside a block that is `invalid` are never counted as valid or invalid,
   because the tally excludes that block.
-- `excluded` is the `attestedEntries` of every `invalid` block.
+- `excluded` is the `attestedEntries` of every `invalid` block (0 for a
+  shadowed one).
 - `undecryptable` is the `EntryCount` of every `not-decryptable-yet`
-  block, that is, every block before the release.
+  block that is not shadowed, that is, before the release, each
+  ciphertext once.
 - `entries` is their sum: a valid block's payload votes, an invalid
   block's `attestedEntries`, and a not-yet-decryptable block's
   `EntryCount`.
@@ -679,15 +726,17 @@ grouped as the source groups them:
   `registrants`, `associations`, `timeline` and `ballots` as the
   authorization. A set-aside row is not a block of the report and never
   adds a finding to another block, and the blocks of the report are
-  exactly the leaves of the block tree. `duplicate-block` now means only
-  an exact `Cid` collision. Rows that share only an `Id` are separate
-  blocks, each with its own findings.
+  exactly the leaves of the block tree, in its order. `duplicate-block`
+  means only a row of a shared `Cid` that is not authenticated (or the
+  loser when none is), or an exact duplicate. Rows that share only an `Id`
+  are separate blocks, each with its own findings.
 - Block, after the release: `block-does-not-open`, `id-mismatch`,
   `payload-count-mismatch`, `not-a-payload`, `counts-differ`,
   `voter-count-mismatch`, `not-canonical-order`, `duplicate-vote`,
   `duplicate-voter`, `voter-list-mismatch`, `voter-entry-scope-mismatch`,
   `voter-entry-malformed`, `voter-entry-signature-invalid`,
-  `voter-entry-ballot-missing`, `voter-entry-device-key-mismatch`.
+  `voter-entry-ballot-missing`, `voter-entry-device-key-mismatch`,
+  `cid-in-two-valid-blocks`.
 - Per vote, after the release: `vote-does-not-open`, `vote-not-json`
   (the decrypted text does not parse, or has no canonical form), and
   `vote-not-canonical` (info): the decrypted text parses but is not the
@@ -717,7 +766,11 @@ tree does not hash to itself (leaf order and indexes, each leaf's fields
 against its leaf data, the node shape, every leaf hash recomputed from
 its leaf data, every internal hash from its children, and the root), when
 the report does not cover exactly the tree's leaves, or when a block's
-ballot, block id or `declaredEntries` differs from its leaf. The tally tree has one node for every node of the block tree, in
+`Cid`, ballot, block id or `declaredEntries` differs from its leaf.
+Findings are matched to leaves by `leafHash`, because a `Cid` may name
+several leaves. It also refuses a report in which two findings of one
+`Cid` count entries (two valid, or an invalid one with `attestedEntries`
+above 0 next to a valid one): one ciphertext is counted once. The tally tree has one node for every node of the block tree, in
 the same order, so the block-tree root is unchanged by the tally.
 
 - **Histogram.** `{ ballots: { <ballotId>: { votes, invalid, excluded,
@@ -738,7 +791,8 @@ the same order, so the block-tree root is unchanged by the tally.
   `attestedEntries` from the validation goes under `votes` and
   `excluded`. `attestedEntries` is the smallest of the declared
   `EntryCount`, the number of listed voters and the number of listed
-  voters with an authenticated voter row (section 7.3). An invalid block
+  voters with an authenticated voter row (section 7.3), and 0 for a leaf
+  that another leaf of its `Cid` shadows. An invalid block
   is untrusted, so its declared `EntryCount` alone (up to 2^53 - 1) must
   not inflate the excluded volume. A tallied leaf's `votes` equals the
   `EntryCount` its leaf data commits to; an excluded leaf's is at most
@@ -770,11 +824,12 @@ the same order, so the block-tree root is unchanged by the tally.
 - **Contents.** The tally is plain JSON data: counts and public block
   columns only, with no vote entry, nonce, registrant id or key.
 - **Verifier.** `verifyTallyTree(tally)` takes an untrusted tally and
-  checks, in order: the format; the shape (leaf order, node order, ranges
-  and children as the block tree builds them); each leaf's data and
-  disposition; then for each node the block-tree hash, the histogram (a
-  leaf's own bounds, a parent's sum of its children) and the tally hash;
-  and last the root. It reports the first failure with its node or leaf
+  checks, in order: the format; the shape (leaf order by `Cid` then leaf
+  data, node order, ranges and children as the block tree builds them);
+  each leaf's data and disposition; then for each node the block-tree
+  hash, the histogram (a leaf's own bounds, a parent's sum of its
+  children; and of the leaves sharing a `Cid`, at most one with votes) and
+  the tally hash; and last the root. It reports the first failure with its node or leaf
   index. A pass shows the tally is internally consistent and every
   branch holds. It does not show that the leaf histograms match the
   decrypted blocks; that needs the released key, and the check is to
@@ -795,32 +850,27 @@ settle them:
   clock.
 - The voter screens for slice-check and validation results.
 - Closed (T-65-05-03): which of two rows sharing a `Cid` or an `Id` is
-  genuine, before the key release. Rows that share an `Id` under different
-  `Cid`s are now separate leaves, and the validation judges each one.
-  Among rows that share a `Cid`, the authenticated row wins (section 7.1).
-  So these forged rows no longer displace an honest block:
-  - a row that copies an honest ciphertext under another `Id` or voter
-    list;
-  - a row that reuses an honest `Id` under its own `Cid`;
-  - a row that lists only some of the honest voters;
-  - a row that changes only `TemplateDigest`.
+  genuine, before the key release. No forged row displaces an honest
+  block:
+  - Rows that share an `Id` under different `Cid`s are separate leaves.
+  - Among rows that share a `Cid`, every authenticated one is a leaf, and
+    the rest are set aside (section 7.1).
+  - After the release the payload refutes every leaf but the true one,
+    and each ciphertext is counted once (sections 7.3 and 7.4).
 
-  One bounded case remains. A forged row can copy the honest ciphertext,
-  `Id` and voter list, and add a registrant whose own registered and
-  associated device key signs consent over the honest `Cid` and `Id`. That
-  row has more authenticated voters, so it is kept. After the release it
-  fails the payload checks and is excluded, so the honest block's votes
-  are excluded, not counted. Before the release the true list is inside
-  the ciphertext, so nothing can tell the two rows apart. The attack needs
-  all of the following:
-  - a replica that bypasses the schema (the `Cid` primary key refuses the
-    second row);
-  - a registered voter willing to sign;
-  - that voter's one `VoteBlockVoter` row for the ballot, because the
-    primary key is `(ElectionId, BallotId, RegistrantId)`.
-
-  If that voter also votes elsewhere, both of its blocks are
-  `registrant-in-two-blocks`.
+  This covers the copied ciphertext under another `Id` or voter list, the
+  reused `Id` under its own `Cid`, a subset of the honest voters, a
+  changed `TemplateDigest`, and the superset that adds a colluding,
+  registered key. What remains is not a displacement:
+  - Before the release, a `Cid` may carry extra authenticated leaves, and
+    the pre-release totals may count the leaf with more attested entries.
+  - The number of such leaves is bounded only by the consents the forger
+    can use. Without any key it can list subsets of the honest voters;
+    with keys it can add registrants. All of them are excluded after the
+    release with nothing counted.
+  - A writer that bypasses the schema could already add any number of
+    excluded leaves under fresh `Cid`s, so this is not a new kind of
+    growth.
 
 [SEC 1 v2.0]: #5-references
 [SEC 2 v2.0]: #5-references
