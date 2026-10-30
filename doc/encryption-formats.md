@@ -161,12 +161,55 @@ joint election public key `Y` (the DKG group public key — the 33-byte
 `commitments[0]` from `secp256k1_FROST.trustedDealer`/DKG, hex-encoded by
 the caller), and decrypt only with the matching joint secret `s`.
 
-**IMPORTANT — scope note.** The block producer that would call
-`encryptBlockContent` over real vote/voter-record bytes does not exist
-anywhere in this repository as of this plan (research Finding 6, Open Q5).
-This section specifies the cipher API that 62-20 integrates with
-`reconstructElectionKey`; it makes no claim about a block *format* beyond
-"some plaintext bytes."
+**Who produces blocks.** The vote pool, `packages/vote-engine/src/pool/`
+(spike 102, committed at outer `fe520b46`). Voters form a block among
+themselves: `formPoolBlock` in `pool-block.ts` builds it and
+`commitPoolBlock` writes the `VoteBlock` and `VoteBlockVoter` rows. This
+section is also the cipher API that 62-20 integrates with
+`reconstructElectionKey`.
+
+**Two layers, one cipher.** Layer 1: each vote entry is sealed to `Y` on
+its own, on the voter's phone, by `encryptVoteEntry`, with the binding
+`blockId = vote-entry/<ballotId>` (same `electionId` and `revision` as the
+block). A block id is a base64url digest and never contains `/`, so a vote
+ciphertext can never pass as a block ciphertext or the reverse. Layer 2:
+the block payload is `{ v: 2, votes, voterRecords }`, where `votes` are the
+serialized per-vote `BlockCiphertext` JSON strings and `voterRecords` are
+the clear voter entries. `encryptPoolBlock` encrypts it with the binding
+`blockId = VoteBlock.Id`. The wire object in 3.1 stays `v: 1`,
+`alg: "vt-block-1"` for both layers: `v: 2` is the version of the
+payload, not of the cipher.
+
+**Canonical order.** Both arrays are sorted by their own canonical UTF-8
+bytes (`sortByCanonicalBytes`; spike 102's canonical-order rule, its D-28),
+so a position in the block never links a vote to its voter after
+decryption.
+
+**Ids.** `VoteBlock.Id = Digest('VoteBlockRecords', JSON.stringify({ v,
+votes, voterRecords }))`, base64url (`poolBlockId`). `VoteBlock.Ciphertext`
+is the serialized block `BlockCiphertext`. `VoteBlock.Cid =
+cid(Digest(Ciphertext))`; `poolBlockCid` is the JS twin of that SQL.
+
+**Disclosed randomness.** `encryptPoolBlock` draws a fresh CSPRNG `eph`
+scalar and `nonce` and returns them. The former discloses them, and each
+member re-derives the ciphertext with `reencryptElectionBlock` and checks
+it byte for byte. Both functions refuse a `v: 1` payload (disclosing the
+randomness of clear votes would hand every member every vote). Disclosure
+reveals nothing new: a `v: 2` payload holds only per-vote ciphertexts that
+are still sealed to `Y`, and voter entries the members already saw.
+
+**Opening after the key release.** `openElectionBlock` opens the block,
+then `openVoteEntries(secretKey, electionKey, ballotId, payload)` opens
+each vote (it returns an empty list for `v: 1`). A `v: 1` payload (clear
+votes, the original 62-20 `encryptElectionBlock` contract) still parses.
+
+**Owed schema-comment fix.** The `VoteBlock.Ciphertext` column comment in
+`packages/vote-core/schema/votetorrent.qsql` still describes the payload as
+`ElectionBlockPayload { v: 1, votes, voterRecords }`; pool-formed blocks
+carry `v: 2`. It is left unchanged on purpose: `computeSchemaHash` hashes
+the whole schema text, comments included, so editing it would change the
+schema hash of every existing network. Fixing it is owed to the next
+intentional schema change.
 
 ### 3.1 Encrypt
 
