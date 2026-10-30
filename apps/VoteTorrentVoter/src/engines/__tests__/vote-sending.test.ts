@@ -161,7 +161,9 @@ describe('sendSavedVote (spike 102)', () => {
 	});
 });
 
-describe('statusForOutcome (R1 already voted)', () => {
+// 'already-voted' reaches here only from this phone's OWN failed commit as the block's former; a
+// peer's already-voted claim is a hint the agent checks and never stops on (CR-01).
+describe('statusForOutcome (R1 already voted, own commit)', () => {
 	const committed = {status: 'committed', cid: 'c1', blockId: 'b', size: 3, formedByMe: true} as const;
 	const stopped = (reason: string) => ({status: 'stopped', reason}) as never;
 

@@ -16,6 +16,12 @@
 //     member and the rest carry on (the doc reverts the whole merge; spike 102's deviation kept).
 //   * A member the commit names as already voted is dropped and the rest re-form (or keep
 //     presenting below the minimum); it is not a whole-pool revert to solo.
+//   * An `already-voted` outcome from a coordinator is a HINT, never a verdict (CR-01): the member
+//     waits a bounded time for its own strand read to show the row. A recorded cid means sent;
+//     otherwise it refuses that coordinator from now on and keeps pooling alone.
+//   * A member re-parents only to its current coordinator, or to the one that coordinator handed
+//     it over to (`handover`, sent when the coordinator itself merges away). Knowing a member's
+//     vote ciphertext (every co-member of a formation sees it) is not enough.
 //   * Discovery goes through a `PoolDiscovery` (the Authority rendezvous by default). A coordinator
 //     climbs from a 2-bit and a 1-bit pool-hash bucket topic to the plain topic, per doc/election.md
 //     "Pool Merging". That is client-side only: the server keys opaque topics. The plain topic is
@@ -124,6 +130,8 @@ type PoolMessage =
   | { t: 'form', id: string, topic: string, block: FormedPoolBlock }
   | { t: 'sign', re: string, signature: ConsentSignature }
   | { t: 'outcome', topic: string, committed: boolean, cid?: string, reason?: string, code?: 'already-voted' }
+  /** the sender (this member's coordinator) merged into `to`: accept `to`'s inform from now on */
+  | { t: 'handover', topic: string, to: string }
 
 const holdOf = (voteCiphertext: string): string => bytesToHex(sha256(utf8ToBytes(voteCiphertext)))
 const better = (a: { size: number, peerId: string }, b: { size: number, peerId: string }): boolean =>
@@ -170,6 +178,11 @@ export class PoolAgent {
   private stopped = false
   private seq = 0
   private readonly pending = new Map<string, { from: string, resolve: (m: PoolMessage | null) => void, timer: ReturnType<typeof setTimeout> }>()
+  /** the coordinator this member's current coordinator handed it over to, if any */
+  private handover: { from: string, to: string } | null = null
+  private readonly handoverWaiters = new Set<() => void>()
+  /** an `already-voted` claim is being checked against the strand */
+  private checkingClaim = false
   /** observability: message counts by type, sent and received */
   readonly counts: Record<string, number> = {}
 
@@ -226,6 +239,7 @@ export class PoolAgent {
       this.stopped = true
       for (const [, p] of this.pending) { clearTimeout(p.timer); p.resolve(null) }
       this.pending.clear()
+      for (const wake of [...this.handoverWaiters]) wake()
       await this.withdraw()
       await polling
     }
@@ -288,7 +302,7 @@ export class PoolAgent {
     if (this.role !== 'coordinator' || this.busy) return
     const mine = { size: this.pool.length, peerId: this.me }
     const best = list
-      .filter(c => better(c, mine) && c.size + this.pool.length <= this.o.capacity)
+      .filter(c => !this.excluded.has(c.peerId) && better(c, mine) && c.size + this.pool.length <= this.o.capacity)
       .sort((a, b) => (better(a, b) ? -1 : 1))[0]
     if (best !== undefined) await this.mergeInto(best.peerId)
   }
@@ -331,10 +345,14 @@ export class PoolAgent {
   }
 
   private becomeMemberOf (coordinator: string): void {
+    // The members of the pool given away learn who holds them now; nobody else can re-parent them.
+    const handed = this.pool.filter(c => c.member !== this.me)
     this.confirmed.clear()
     this.role = 'member'
     this.coordinator = coordinator
+    this.handover = null
     this.pool = []
+    for (const c of handed) void this.post(c.member, { t: 'handover', topic: this.topic, to: coordinator })
     this.lastHeardAt = this.o.now()
     void this.withdraw()
     this.log('member-of', { coordinator: coordinator.slice(-6) })
@@ -345,6 +363,7 @@ export class PoolAgent {
     this.confirmed.clear()
     this.role = 'coordinator'
     this.coordinator = null
+    this.handover = null
     this.pool = [this.o.contribution]
     this.lastGrowthAt = this.o.now()
     this.busy = false
@@ -567,7 +586,8 @@ export class PoolAgent {
       case 'merge': await this.onMerge(from, m); return
       case 'inform': await this.onInform(from, m); return
       case 'form': await this.onForm(from, m); return
-      case 'outcome': await this.onOutcome(from, m)
+      case 'outcome': await this.onOutcome(from, m); return
+      case 'handover': this.onHandover(from, m)
     }
   }
 
@@ -595,20 +615,30 @@ export class PoolAgent {
       if (this.role === 'member' && this.coordinator === from) this.revertToSolo('dropped by the coordinator')
       return
     }
-    // The sender must prove it holds MY contribution (a digest of my vote ciphertext), so nobody
-    // can talk a member out of its pool by claiming to be its new coordinator.
+    if (this.excluded.has(from)) return await this.post(from, { t: 'refuse', re: m.id, reason: 'refused here before' })
+    // The sender must hold MY contribution (a digest of my vote ciphertext). That alone is not
+    // enough (CR-01): every co-member of a formation has seen my ciphertext.
     if (m.hold !== this.myHold) return await this.post(from, { t: 'refuse', re: m.id, reason: 'you do not hold my vote' })
     if (this.role === 'member') {
+      // Only my coordinator, or the one it handed me over to. The handover usually arrives just
+      // after the new coordinator's first inform, so wait a little for it; an inform nobody handed
+      // over gets no answer (the honest sender retries, a hijacker learns nothing).
+      if (from !== this.coordinator && !(await this.handedOverTo(from))) {
+        this.log('inform-not-handed-over', { from: from.slice(-6) })
+        return
+      }
+      if (!this.isMember()) return
       this.coordinator = from
+      this.handover = null
       this.lastHeardAt = this.o.now()
       this.status()
       return await this.post(from, { t: 'ack', re: m.id })
     }
-    // A coordinator accepts only if it is alone (its own merge reply may have been lost) or this is
-    // the pool it just tried to merge into and nobody has joined it since.
+    // A coordinator accepts only the pool it just tried to merge into (its merge reply may have been
+    // lost), and only if nobody has joined it since.
     const recent = this.lastMergeAttempt
     const joinedIt = recent !== null && recent.target === from && this.o.now() - recent.at < 3 * this.o.replyTimeoutMs && this.pool.length === recent.size
-    if (this.role === 'coordinator' && (this.pool.length === 1 || joinedIt)) {
+    if (this.role === 'coordinator' && joinedIt) {
       this.becomeMemberOf(from)
       return await this.post(from, { t: 'ack', re: m.id })
     }
@@ -646,17 +676,70 @@ export class PoolAgent {
       this.finish({ status: 'committed', cid: m.cid, blockId: '', size: 0, formedByMe: false })
       return
     }
-    if (m.code === 'already-voted') {
-      // Trust only what this voter's own strand read says (D-13): a recorded cid means sent.
-      const recorded = (await this.o.findRecordedVote?.().catch(() => null)) ?? null
-      // the role can change during the await; the cast defeats TS's narrowing to 'member'
-      if ((this.role as 'coordinator' | 'member' | 'done') === 'done') return
-      if (recorded !== null) this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
-      else this.finish({ status: 'stopped', reason: 'already-voted' })
-      return
-    }
+    if (m.code === 'already-voted') { await this.checkAlreadyVotedClaim(from); return }
     this.revertToSolo(`formation failed: ${m.reason ?? 'unknown'}`)
   }
+
+  /**
+   * `already-voted` is a hint (CR-01): any former, honest or not, can send it. Only this voter's own
+   * strand read is proof. Poll it for a bounded time (replication of an earlier vote may lag); a
+   * recorded cid means sent. Otherwise refuse the claimant from now on and keep pooling alone.
+   */
+  private async checkAlreadyVotedClaim (from: string): Promise<void> {
+    if (this.checkingClaim) return
+    this.checkingClaim = true
+    try {
+      let recorded: string | null = null
+      const find = this.o.findRecordedVote
+      if (find !== undefined) {
+        const until = Date.now() + 4 * this.o.replyTimeoutMs
+        for (;;) {
+          recorded = await find().catch(() => null)
+          if (recorded !== null || this.stopped || this.isDone()) break
+          const left = until - Date.now()
+          if (left <= 0) break
+          await sleep(Math.min(ALREADY_VOTED_POLL_MS, left))
+        }
+      }
+      if (this.stopped || this.isDone()) return
+      if (recorded !== null) {
+        this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
+        return
+      }
+      this.excluded.add(from)
+      this.log('already-voted-unconfirmed', { from: from.slice(-6) })
+      if (this.isMember() && this.coordinator === from) this.revertToSolo('already-voted claim not confirmed by the strand')
+    } finally {
+      this.checkingClaim = false
+    }
+  }
+
+  private onHandover (from: string, m: Extract<PoolMessage, { t: 'handover' }>): void {
+    if (!this.isMember() || this.coordinator !== from || typeof m.to !== 'string' || m.to === this.me || this.excluded.has(m.to)) return
+    this.handover = { from, to: m.to }
+    this.lastHeardAt = this.o.now()
+    for (const wake of [...this.handoverWaiters]) wake()
+  }
+
+  /** Wait (briefly) until my current coordinator has handed me over to `to`. */
+  private async handedOverTo (to: string): Promise<boolean> {
+    const until = Date.now() + this.o.replyTimeoutMs * 0.75
+    for (;;) {
+      if (!this.isMember() || this.stopped) return false
+      if (this.handover !== null && this.handover.from === this.coordinator && this.handover.to === to) return true
+      const left = until - Date.now()
+      if (left <= 0) return false
+      await new Promise<void>((resolve) => {
+        const wake = (): void => { clearTimeout(timer); this.handoverWaiters.delete(wake); resolve() }
+        const timer = setTimeout(wake, left)
+        this.handoverWaiters.add(wake)
+      })
+    }
+  }
+
+  // Role reads through methods: TS would otherwise keep a narrowing across an await.
+  private isMember (): boolean { return this.role === 'member' }
+  private isDone (): boolean { return this.role === 'done' }
 
   // -------------------------------------------------------------------------------------------
   // outbound
@@ -701,3 +784,5 @@ export class PoolAgent {
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+/** how often an `already-voted` claim is re-checked against the strand while it is unconfirmed */
+const ALREADY_VOTED_POLL_MS = 500

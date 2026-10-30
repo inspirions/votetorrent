@@ -11,8 +11,11 @@
  *      never sees the vote (user decision);
  *   4. run a PoolAgent: present / merge / inform through the rendezvous; when a block of at least
  *      3 forms, check it and sign consent with the voting key (one fingerprint prompt per block);
- *   5. record the block cid per ballot. A ballot whose pool reports this voter as already voted
- *      re-reads the strand once and reports sent only when its row is there (D-12, D-13).
+ *   5. record the block cid per ballot. Another voter's "you already voted" is only a hint: the
+ *      agent waits a bounded time for this voter's own strand row, then either reports sent (the row
+ *      is there) or keeps pooling without that voter. Only this phone's OWN failed commit (it formed
+ *      the block and the commit named its registrant) stops a ballot as already voted; that ballot
+ *      re-reads the strand once and reports sent only when its row is there (D-12, CR-01).
  *
  * Ballots pool in parallel (each has its own topic), but consent prompts are serialized: Android
  * can show only one BiometricPrompt at a time. A ballot whose pool is still too small when voting
@@ -98,8 +101,10 @@ function toStatus(s: PoolAgentStatus): BallotSendStatus | null {
 }
 
 /**
- * Map a finished pool agent to the ballot's status. An agent that stopped 'already-voted' is re-checked
- * against the strand once: a readable row means sent, anything else is not-sent (D-12, D-13).
+ * Map a finished pool agent to the ballot's status. An agent stops 'already-voted' only when this
+ * phone formed the block and its own commit named this voter as a duplicate (a peer's claim never
+ * stops it, CR-01). It is re-checked against the strand once: a readable row means sent, anything
+ * else is not-sent.
  */
 export async function statusForOutcome(outcome: PoolOutcome, recheckRecordedVote: () => Promise<string | null>): Promise<BallotSendStatus> {
 	if (outcome.status === 'committed') return {phase: 'sent', cid: outcome.cid};

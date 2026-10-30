@@ -262,6 +262,7 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
   this.timeout(30_000)
 
   interface Run {
+    hijackReplies: string[]
     outcomes: PoolOutcome[]
     commits: Array<{ block: FormedPoolBlock, signatures: ConsentSignature[] }>
     rendezvous: PoolRendezvous
@@ -281,6 +282,14 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     quietMs?: number
     preVoted?: number[]
     preVotedReadable?: boolean
+    /** the duplicate's earlier row becomes readable only this long after the failed commit */
+    readableAfterMs?: number
+    /** a dishonest former: the first commit holding this voter's signature claims it already voted */
+    lieAbout?: number
+    /** a peer that knows this voter's vote ciphertext keeps sending it inform + already-voted */
+    hijack?: number
+    /** per-agent delay before run() starts */
+    startDelayMs?: number[]
     ladder?: boolean | boolean[]
     rungDwellTicks?: number
     ladderMaxMs?: number
@@ -299,6 +308,28 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     const commitAt: number[] = []
     const startedAt = Date.now()
     const deadlineAt = Date.now() + (opts.deadlineMs ?? 20_000)
+    let lied = false
+    let hijacking = opts.hijack !== undefined
+    const hijacker = createPoolIdentity()
+    const hijackClient = createInMemoryRendezvousClient(rendezvous, 'transport-hijacker')
+    const hijackReplies: string[] = []
+    const drainHijacker = async (): Promise<void> => {
+      const r = await hijackClient.call(poolRequests.poll(hijacker, 0, Date.now()))
+      if (r.t === 'envelopes') for (const e of r.list) hijackReplies.push(openPoolEnvelope<{ t: string }>(hijacker, e).body.t)
+    }
+    const hijackLoop = (async () => {
+      if (opts.hijack === undefined) return
+      const victim = voters[opts.hijack]!
+      const hold = bytesToHex(sha256(utf8ToBytes(victim.contribution.voteCiphertext)))
+      for (let n = 0; hijacking; n++) {
+        const to = victim.identity.peerId
+        await hijackClient.call(poolRequests.send(sealPoolEnvelope(hijacker, to, { t: 'inform', id: `hijack-${n}`, topic: poolTopic(ballot), size: 9, hold })))
+        await hijackClient.call(poolRequests.send(sealPoolEnvelope(hijacker, to, { t: 'outcome', topic: poolTopic(ballot), committed: false, reason: 'already voted', code: 'already-voted' })))
+        await new Promise(resolve => setTimeout(resolve, 50))
+        await drainHijacker()
+      }
+      await drainHijacker()
+    })()
     const outcomes = await Promise.all(voters.map(async (v, i) => {
       const controller = new AbortController()
       const inner = createInMemoryRendezvousClient(rendezvous, `transport-${i}`)
@@ -327,9 +358,15 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
         commit: async (block, signatures) => {
           commitCalls++
           commitAt.push(Date.now())
+          const liar = opts.lieAbout === undefined ? undefined : voters[opts.lieAbout]!.contribution.voterEntry.registrantId
+          if (!lied && liar !== undefined && signatures.some(s => s.registrantId === liar)) {
+            lied = true
+            return { ok: false, reason: 'a voter already voted', duplicateRegistrants: [liar] }
+          }
           if (signatures.some(s => committedRegistrants.has(s.registrantId))) {
             const duplicateRegistrants = signatures.map(s => s.registrantId).filter(r => committedRegistrants.has(r))
             if (opts.preVotedReadable === true) for (const r of duplicateRegistrants) readable.add(r)
+            if (opts.readableAfterMs !== undefined) setTimeout(() => { for (const r of duplicateRegistrants) readable.add(r) }, opts.readableAfterMs)
             return { ok: false, reason: 'a voter already voted', duplicateRegistrants }
           }
           for (const s of signatures) committedRegistrants.add(s.registrantId)
@@ -351,10 +388,14 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
         deadlineAt,
         onStatus: (s) => { if (opts.abortWhenMember === i && s.phase === 'member') controller.abort() }
       })
+      const delay = opts.startDelayMs?.[i] ?? 0
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
       return await agent.run(controller.signal)
     }))
+    hijacking = false
+    await hijackLoop
     rendezvous.close()
-    return { outcomes, commits, rendezvous, commitCalls, logs, requests, discoveryCalls, startedAt, deadlineAt, commitAt }
+    return { hijackReplies, outcomes, commits, rendezvous, commitCalls, logs, requests, discoveryCalls, startedAt, deadlineAt, commitAt }
   }
 
   it('five voters converge on ONE block of five; every signature verifies; each learns the cid', async () => {
@@ -440,18 +481,62 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
       })
     }
 
-    it('a member that already voted is dropped at commit; the other four commit ONE block of four', async () => {
+    const unconfirmed = (run: Run, k: number) => run.logs.filter(l => l.i === k && l.event === 'solo' && l.detail?.why === 'already-voted claim not confirmed by the strand')
+
+    it('a member that already voted is dropped at commit; the other four commit ONE block of four; with no row readable it keeps pooling (CR-01)', async () => {
       const voters = [0, 1, 2, 3, 4].map(makeVoter)
       const k = highest(voters)
       const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000 })
       dropsOne(run, voters, k)
-      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
+      // The claim is a hint: unconfirmed by its own strand read, k goes back to pooling (alone here) until voting closes.
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'deadline' })
+      expect(unconfirmed(run, k)).to.have.length(1)
     })
 
-    it('a former that already voted stops; the rest re-pool without it', async () => {
+    it('CR-01 (b) a dishonest former\'s already-voted with no recorded row: the member reverts to solo, refuses that former, and never rejoins it', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { lieAbout: k, deadlineMs: 12_000 })
+      dropsOne(run, voters, k)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'deadline' })
+      expect(unconfirmed(run, k)).to.have.length(1)
+      const formerIndex = run.outcomes.findIndex(o => o.status === 'committed' && o.formedByMe)
+      const former = voters[formerIndex]!.identity.peerId.slice(-6)
+      const claim = run.logs.find(l => l.i === k && l.event === 'already-voted-unconfirmed')
+      expect(claim?.detail?.from).to.equal(former)
+      const after = run.logs.indexOf(unconfirmed(run, k)[0]!)
+      expect(run.logs.slice(after).filter(l => l.i === k && l.event === 'member-of' && l.detail?.coordinator === former)).to.deep.equal([])
+    })
+
+    it('CR-01 (c) an honest duplicate whose row becomes readable DURING the bounded wait ends committed with that cid', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], readableAfterMs: 600, deadlineMs: 12_000 })
+      expect(run.outcomes[k]).to.deep.equal({
+        status: 'committed', cid: 'prevoted-cid-' + voters[k]!.contribution.voterEntry.registrantId, blockId: '', size: 0, formedByMe: false
+      })
+      expect(unconfirmed(run, k)).to.deep.equal([])
+      dropsOne(run, voters, k)
+    })
+
+    it('CR-01 (a) a peer that knows my vote ciphertext cannot re-parent me or stop me: I commit with the honest pool', async () => {
+      const voters = [0, 1, 2].map(makeVoter)
+      const run = await runAgents(voters, { hijack: 0, deadlineMs: 12_000 })
+      expect(run.commits).to.have.length(1)
+      expect(run.commits[0]!.block.registrantIds).to.include(voters[0]!.contribution.voterEntry.registrantId)
+      const cid = run.commits[0]!.block.cid
+      expect(run.outcomes.every(o => o.status === 'committed' && o.cid === cid)).to.equal(true)
+      // the victim never joined the hijacker and never acked it (it answered with refusals, or not at all)
+      expect(run.hijackReplies).to.not.include('ack')
+      expect(run.logs.filter(l => l.i === 0 && l.event === 'already-voted-unconfirmed')).to.deep.equal([])
+    })
+
+    it('a former that already voted stops (its own commit is evidence, not a peer\'s claim); the rest re-pool without it', async () => {
       const voters = [0, 1, 2, 3, 4].map(makeVoter)
       const k = lowest(voters)
-      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000 })
+      // k (lowest peer id) presents alone on the plain topic first, so every other voter merges into it: k forms
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000, ladder: false, startDelayMs: voters.map((_, i) => (i === k ? 0 : 300)) })
+      expect(run.logs.some(l => l.i === k && l.event === 'forming')).to.equal(true)
       dropsOne(run, voters, k)
       expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
     })
@@ -462,8 +547,8 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
       const run = await runAgents(voters, { preVoted: [k], deadlineMs: 3_000 })
       expect(run.commits).to.deep.equal([])
       expect(run.commitCalls).to.equal(1)
-      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
-      voters.forEach((_, i) => { if (i !== k) expect(run.outcomes[i]).to.deep.equal({ status: 'stopped', reason: 'deadline' }) })
+      // k's claim stays unconfirmed (no row readable), so it pools on alone; nobody stops 'already-voted'
+      expect(run.outcomes).to.deep.equal(Array(3).fill({ status: 'stopped', reason: 'deadline' }))
       expect(run.logs.filter(l => l.event === 'solo' && l.detail?.why === 'commit failed')).to.deep.equal([])
     })
 
@@ -597,6 +682,138 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
         expect(reply).to.deep.equal({ t: 'coordinators', list: [] })
       }
     })
+  })
+})
+
+// A hand-driven peer on the rendezvous: it presents, sends sealed messages and waits for replies,
+// so one real PoolAgent can be tested against a coordinator that does exactly what the test says.
+interface Inbound { from: string, body: { t: string, id?: string, re?: string, [k: string]: unknown } }
+function scriptedPeer (rv: PoolRendezvous, name: string) {
+  const identity = createPoolIdentity()
+  const client = createInMemoryRendezvousClient(rv, name)
+  const inbox: Inbound[] = []
+  const peer = {
+    identity,
+    inbox,
+    async present (topic: string, size: number) { return await client.call(poolRequests.present(identity, topic, size, Date.now())) },
+    async send (to: string, body: unknown) { await client.call(poolRequests.send(sealPoolEnvelope(identity, to, body))) },
+    async drain (waitMs: number) {
+      const r = await client.call(poolRequests.poll(identity, waitMs, Date.now()))
+      if (r.t === 'envelopes') for (const e of r.list) inbox.push(openPoolEnvelope(identity, e) as Inbound)
+    },
+    /** the next message matching `pred`, or null after `timeoutMs` */
+    async next (pred: (m: Inbound) => boolean, timeoutMs = 5_000): Promise<Inbound | null> {
+      const until = Date.now() + timeoutMs
+      for (;;) {
+        const i = inbox.findIndex(pred)
+        if (i >= 0) return inbox.splice(i, 1)[0]!
+        const left = until - Date.now()
+        if (left <= 0) return null
+        await peer.drain(Math.min(100, left))
+      }
+    }
+  }
+  return peer
+}
+type ScriptedPeer = ReturnType<typeof scriptedPeer>
+const holdOfVoter = (v: TestVoter): string => bytesToHex(sha256(utf8ToBytes(v.contribution.voteCiphertext)))
+
+/**
+ * One real agent `a` (plain topic, no ladder) and a scripted coordinator `c` presenting a bigger
+ * pool: `a` merges into `c`, `c` answers `merged` and informs, `a` acks. Returns with `a` a member of `c`.
+ */
+async function memberOfScripted (opts: Partial<ConstructorParameters<typeof PoolAgent>[0]> = {}) {
+  const rv = new PoolRendezvous()
+  const a = makeVoter(0)
+  const c = scriptedPeer(rv, 'transport-c')
+  const logs: Array<{ event: string, detail?: Record<string, unknown> }> = []
+  let signCalls = 0
+  const controller = new AbortController()
+  const topic = poolTopic(ballot)
+  await c.present(topic, 4)
+  const agent = new PoolAgent({
+    identity: a.identity,
+    rendezvous: createInMemoryRendezvousClient(rv, 'transport-a'),
+    ballot,
+    contribution: a.contribution,
+    signConsent: async (digest) => { signCalls++; return signDigestP256(digest, a.priv) },
+    commit: async () => ({ ok: true }),
+    log: (event, detail) => { logs.push({ event, detail }) },
+    ladder: false,
+    quietMs: 60_000,
+    presentIntervalMs: 60,
+    replyTimeoutMs: 400,
+    informAttempts: 2,
+    signTimeoutMs: 1_500,
+    memberTimeoutMs: 30_000,
+    pollWaitMs: 200,
+    formLeadMs: 0,
+    deadlineAt: Date.now() + 25_000,
+    ...opts
+  })
+  const running = agent.run(controller.signal)
+  const merge = await c.next(m => m.body.t === 'merge')
+  if (merge === null) throw new Error('the agent never merged into the scripted coordinator')
+  await c.send(a.identity.peerId, { t: 'merged', re: merge.body.id, size: 5 })
+  await c.send(a.identity.peerId, { t: 'inform', id: 'c-inform-1', topic, size: 5, hold: holdOfVoter(a) })
+  const ack = await c.next(m => m.body.t === 'ack' && m.body.re === 'c-inform-1')
+  if (ack === null) throw new Error('the agent never acked the scripted coordinator')
+  const stop = async (): Promise<PoolOutcome> => { controller.abort(); const o = await running; rv.close(); return o }
+  return { rv, a, c, logs, agent, running, stop, topic, signCalls: () => signCalls }
+}
+
+describe('pool: a member\'s coordinator, and already-voted as a hint (CR-01)', function () {
+  this.timeout(30_000)
+
+  it('a member re-parents only to the coordinator its own coordinator handed it over to', async () => {
+    const h = await memberOfScripted()
+    try {
+      const d = scriptedPeer(h.rv, 'transport-d')
+      // d knows my hold (it saw my ciphertext in some formation) but nobody handed me to it: no answer
+      await d.send(h.a.identity.peerId, { t: 'inform', id: 'd-1', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect(await d.next(m => m.body.re === 'd-1', 800)).to.equal(null)
+      expect(h.logs.some(l => l.event === 'inform-not-handed-over')).to.equal(true)
+      // my coordinator merges away into d and hands me over: now d's inform is acked
+      await h.c.send(h.a.identity.peerId, { t: 'handover', topic: h.topic, to: d.identity.peerId })
+      await d.send(h.a.identity.peerId, { t: 'inform', id: 'd-2', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect((await d.next(m => m.body.re === 'd-2', 2_000))?.body.t).to.equal('ack')
+      // and the old coordinator can no longer speak for me
+      const e = scriptedPeer(h.rv, 'transport-e')
+      await h.c.send(h.a.identity.peerId, { t: 'handover', topic: h.topic, to: e.identity.peerId })
+      await e.send(h.a.identity.peerId, { t: 'inform', id: 'e-1', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect(await e.next(m => m.body.re === 'e-1', 800)).to.equal(null)
+    } finally {
+      expect(await h.stop()).to.deep.equal({ status: 'stopped', reason: 'aborted' })
+    }
+  })
+
+  it('an unconfirmed already-voted from my coordinator: I wait, revert to solo, and never merge into it again', async () => {
+    const h = await memberOfScripted({ findRecordedVote: async () => null })
+    try {
+      const startedAt = Date.now()
+      await h.c.send(h.a.identity.peerId, { t: 'outcome', topic: h.topic, committed: false, reason: 'already voted', code: 'already-voted' })
+      const until = Date.now() + 5_000
+      while (!h.logs.some(l => l.event === 'solo') && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 50))
+      const solo = h.logs.find(l => l.event === 'solo')
+      expect(solo?.detail?.why).to.equal('already-voted claim not confirmed by the strand')
+      // the bounded wait (4 x replyTimeoutMs) ran before giving up
+      expect(Date.now() - startedAt).to.be.at.least(4 * 400 - 50)
+      // c is still listed with a bigger pool, but this agent never merges into it again
+      expect(await h.c.next(m => m.body.t === 'merge', 1_500)).to.equal(null)
+    } finally {
+      expect(await h.stop()).to.deep.equal({ status: 'stopped', reason: 'aborted' })
+    }
+  })
+
+  it('an already-voted whose row shows up during the wait ends committed with that cid', async () => {
+    let rowAt = Infinity
+    const h = await memberOfScripted({ findRecordedVote: async () => (Date.now() >= rowAt ? 'bafy-recorded-earlier' : null) })
+    rowAt = Date.now() + 700
+    await h.c.send(h.a.identity.peerId, { t: 'outcome', topic: h.topic, committed: false, reason: 'already voted', code: 'already-voted' })
+    const outcome = await h.running
+    h.rv.close()
+    expect(outcome).to.deep.equal({ status: 'committed', cid: 'bafy-recorded-earlier', blockId: '', size: 0, formedByMe: false })
+    expect(h.logs.some(l => l.event === 'solo')).to.equal(false)
   })
 })
 
