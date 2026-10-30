@@ -1,24 +1,39 @@
 /**
- * vote-send-flow.test.ts — the Send button's wiring (spike 102): it refuses before any prompt when
- * the phone has no network or no rendezvous, opens the sealed record once, signs consent with the
- * voting key through the producer, dials the FIRST joined address, and maps every failure to a
- * closed kind.
+ * vote-send-flow.test.ts — the Send button's wiring (spike 102, R3): it refuses before any prompt
+ * when the phone has no network or no rendezvous, tries EVERY joined address in order until one
+ * answers (a failover client over lazily built per-address clients), probes with a throwaway pool
+ * key before the first fingerprint prompt, reports the distinct `rendezvous-unreachable` kind when
+ * nothing answers, opens the sealed record once, signs consent with the voting key through the
+ * producer, and maps every failure to a closed kind.
  */
 jest.mock('@votetorrent/attestation-native', () => ({}));
 jest.mock('../vote-receipt', () => ({revealVoteReceipt: jest.fn()}));
-jest.mock('@votetorrent/vote-engine/rn', () => ({createLibp2pRendezvousClient: jest.fn(() => ({call: jest.fn()}))}));
+jest.mock('@votetorrent/vote-engine/rn', () => ({
+	createLibp2pRendezvousClient: jest.fn(),
+	createPoolIdentity: jest.fn(() => ({peerId: 'probe-pool-id'})),
+	poolRequests: {
+		poll: jest.fn((identity: {peerId: string}, waitMs: number, now: number) => ({t: 'poll', waitMs, as: identity.peerId, ts: now, sig: 'test'})),
+	},
+	// the REAL failover, from the vote-engine source (type-only imports, so Babel strips them)
+	createFailoverRendezvousClient: jest.fn(
+		jest.requireActual('../../../../../packages/vote-engine/src/pool/pool-failover').createFailoverRendezvousClient,
+	),
+}));
 jest.mock('../vote-sending', () => ({sendSavedVote: jest.fn()}));
 jest.mock('../vote-casting', () => ({digestBytesFromBase64Url: jest.fn(() => new Uint8Array(32).fill(7))}));
 jest.mock('../attestation-producer', () => ({resolveVoteSigningProducer: jest.fn((p: unknown) => p)}));
 
 import {revealVoteReceipt} from '../vote-receipt';
-import {createLibp2pRendezvousClient} from '@votetorrent/vote-engine/rn';
+import {createFailoverRendezvousClient, createLibp2pRendezvousClient, createPoolIdentity, poolRequests} from '@votetorrent/vote-engine/rn';
 import {sendSavedVote} from '../vote-sending';
 import {runVoteSendFlow} from '../vote-send-flow';
 import type {VoteSendFlowDeps} from '../vote-send-flow';
 
 const prompt = {title: 't', subtitle: 's', negativeButton: 'n'};
 const control = {dialProtocol: jest.fn(), handle: jest.fn()};
+const FIRST = 'dial:/ip4/1.2.3.4/tcp/1/ws/p2p/first';
+const SECOND = 'dial:/ip4/5.6.7.8/tcp/1/ws/p2p/second';
+let clients: Record<string, {call: jest.Mock}>;
 const record = {v: 1, electionId: 'e1', electionRevision: 1, savedAt: '', votes: [], voter: {}};
 
 function deps(over: Partial<VoteSendFlowDeps> = {}): VoteSendFlowDeps {
@@ -39,6 +54,11 @@ function deps(over: Partial<VoteSendFlowDeps> = {}): VoteSendFlowDeps {
 
 beforeEach(() => {
 	jest.clearAllMocks();
+	clients = {
+		[FIRST]: {call: jest.fn(async () => ({t: 'envelopes', list: []}))},
+		[SECOND]: {call: jest.fn(async () => ({t: 'envelopes', list: []}))},
+	};
+	(createLibp2pRendezvousClient as jest.Mock).mockImplementation((_c: unknown, target: unknown) => clients[target as string]);
 	(revealVoteReceipt as jest.Mock).mockResolvedValue({kind: 'ok', record});
 	(sendSavedVote as jest.Mock).mockResolvedValue({ok: true, ballots: [{ballotId: 'b1', status: {phase: 'sent', cid: 'c1'}}]});
 });
@@ -49,7 +69,9 @@ describe('runVoteSendFlow (spike 102)', () => {
 		expect(await runVoteSendFlow(d)).toEqual({kind: 'done', ballots: [{ballotId: 'b1', status: {phase: 'sent', cid: 'c1'}}]});
 		expect(revealVoteReceipt).toHaveBeenCalledTimes(1);
 		expect(revealVoteReceipt).toHaveBeenCalledWith('e1', d.envelope, prompt);
-		expect(createLibp2pRendezvousClient).toHaveBeenCalledWith(control, 'dial:/ip4/1.2.3.4/tcp/1/ws/p2p/first');
+		expect(createLibp2pRendezvousClient).toHaveBeenCalledTimes(1);
+		expect(createLibp2pRendezvousClient).toHaveBeenCalledWith(control, FIRST);
+		expect(clients[SECOND]!.call).not.toHaveBeenCalled();
 		expect((sendSavedVote as jest.Mock).mock.calls[0][0].record).toBe(record);
 	});
 
@@ -76,5 +98,70 @@ describe('runVoteSendFlow (spike 102)', () => {
 		expect(await runVoteSendFlow(deps())).toEqual({kind: 'voting-closed'});
 		(sendSavedVote as jest.Mock).mockRejectedValueOnce(new Error('boom: raw'));
 		expect(await runVoteSendFlow(deps())).toEqual({kind: 'failed'});
+	});
+});
+
+describe('every joined address (R3, D-30)', () => {
+	const order = (m: unknown) => (m as jest.Mock).mock.invocationCallOrder[0]!;
+
+	it('fails over to the next address and then sticks to it', async () => {
+		clients[FIRST]!.call.mockRejectedValue(new Error('dial failed'));
+		expect((await runVoteSendFlow(deps())).kind).toBe('done');
+		expect(createLibp2pRendezvousClient).toHaveBeenLastCalledWith(control, SECOND);
+		const rendezvous = (sendSavedVote as jest.Mock).mock.calls[0][0].rendezvous as {call: (r: unknown) => Promise<unknown>};
+		await rendezvous.call({t: 'poll'});
+		expect(clients[FIRST]!.call).toHaveBeenCalledTimes(1);
+		expect(clients[SECOND]!.call).toHaveBeenCalledTimes(2);
+	});
+
+	it('reports rendezvous-unreachable before any prompt when no address answers', async () => {
+		clients[FIRST]!.call.mockRejectedValue(new Error('a'));
+		clients[SECOND]!.call.mockRejectedValue(new Error('b'));
+		const d = deps();
+		expect(await runVoteSendFlow(d)).toEqual({kind: 'rendezvous-unreachable'});
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
+		expect(d.getEngine).not.toHaveBeenCalled();
+		expect((d.producer as unknown as {signDeviceKeyDigest: jest.Mock}).signDeviceKeyDigest).not.toHaveBeenCalled();
+		expect(sendSavedVote).not.toHaveBeenCalled();
+	});
+
+	it('probes with a throwaway pool key before the first prompt', async () => {
+		const d = deps();
+		await runVoteSendFlow(d);
+		expect(createPoolIdentity).toHaveBeenCalledTimes(1);
+		const identity = (createPoolIdentity as jest.Mock).mock.results[0]!.value;
+		expect(poolRequests.poll).toHaveBeenCalledWith(identity, 0, 1);
+		expect(order(poolRequests.poll)).toBeLessThan(order(revealVoteReceipt));
+		expect((d.producer as unknown as {signDeviceKeyDigest: jest.Mock}).signDeviceKeyDigest).not.toHaveBeenCalled();
+		expect(createFailoverRendezvousClient).toHaveBeenCalledTimes(1);
+	});
+
+	it('counts an error reply as reached: continues and never builds the second address', async () => {
+		clients[FIRST]!.call.mockResolvedValue({t: 'error', reason: 'not allowed'});
+		expect((await runVoteSendFlow(deps())).kind).toBe('done');
+		expect(revealVoteReceipt).toHaveBeenCalledTimes(1);
+		expect(createLibp2pRendezvousClient).toHaveBeenCalledTimes(1);
+	});
+
+	it('skips an address whose dial target cannot be built; none left is no-rendezvous with no prompt', async () => {
+		const d = deps({toDialTarget: (a) => { if (a.includes('first')) throw new Error('bad'); return `dial:${a}`; }});
+		expect((await runVoteSendFlow(d)).kind).toBe('done');
+		expect(createLibp2pRendezvousClient).toHaveBeenCalledTimes(1);
+		expect(createLibp2pRendezvousClient).toHaveBeenCalledWith(control, SECOND);
+		jest.clearAllMocks();
+		expect(await runVoteSendFlow(deps({toDialTarget: () => { throw new Error('bad'); }}))).toEqual({kind: 'no-rendezvous'});
+		expect(createLibp2pRendezvousClient).not.toHaveBeenCalled();
+		expect(poolRequests.poll).not.toHaveBeenCalled();
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
+	});
+
+	it('returns canceled without a prompt when the card leaves during the probe', async () => {
+		const controller = new AbortController();
+		clients[FIRST]!.call.mockImplementation(async () => {
+			controller.abort();
+			return {t: 'envelopes', list: []};
+		});
+		expect(await runVoteSendFlow(deps({signal: controller.signal}))).toEqual({kind: 'canceled'});
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
 	});
 });
