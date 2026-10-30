@@ -383,22 +383,64 @@ typed result and none reports failure by throwing.
 
 ### 7.1 Block Merkle tree
 
-`buildBlockTree(rows, scope)` takes the committed `VoteBlock` rows of one
-election (`scope.electionId`) and one revision (`scope.electionRevision`),
-in any order.
+`buildBlockTree(rows, scope, authorization)` takes the committed
+`VoteBlock` rows of one election (`scope.electionId`) and one revision
+(`scope.electionRevision`), in any order. `authorization` is required:
+`{ voterRows, registrants, associations, timeline, ballots }`, the
+replicated `VoteBlockVoter` rows, the `Registrant` and `Association` rows,
+the revision timeline (`votingStarts`, epoch ms) and the revision's ballot
+templates. These are the same public inputs the comprehensive validation
+(section 7.3) reads. Because the root depends on them only where several
+rows name one `Cid`, every party that passes the same public rows gets the
+same root. An authorization that cannot be read (a field that is not an
+array, a `votingStarts` that is not a finite number, an unreadable ballot,
+two ballots with one id) refuses the tree as `malformed-input`. A hostile
+item inside one of its row lists authorizes nothing and never refuses.
+`finalBlockTree(rows, scope, authorization, timeline, nowMs)` takes the same
+input.
 
 - **Row policy (tolerant).** One bad row never refuses the tree. The rows
   are selected by `selectBlockRows`, which the comprehensive validation
   (section 7.3) uses too, so both judge the same rows:
   - A row that is not shaped like a block is set aside as `malformed-row`.
-  - Rows that share a `Cid` or an `Id` are reduced to one. The preferred
-    row is the one whose `Cid` is the digest of its own `Ciphertext`
-    (`blockCidOf`, the `cid(Digest(Ciphertext))` check, which needs no
-    key), then the one whose `canonicalJson([Cid, Id, BallotId,
-    EntryCount, TemplateDigest, VoterRegistrantIds, Ciphertext])` has the
-    lowest UTF-8 bytes. Rows are taken in that order, and a row whose
-    `Cid` or `Id` is already taken is set aside as `duplicate-block`. The
-    `Id` check needs the key, so it cannot rank rows here.
+  - Rows that share an `Id` but not a `Cid` are separate blocks, and each
+    gets its own leaf. The validation judges each one on the consent rows
+    that name its own `Cid`, so a forged row that reuses an honest `Id`
+    fails its own checks and is excluded from the tally (section 7.4). The
+    honest row keeps its leaf and its status.
+  - Rows that share a `Cid` are reduced to one, because a leaf is named by
+    its `Cid`. The kept row is chosen in this order:
+    1. An **authenticated** row. That is a row where all of these hold:
+       - its `Cid` is the digest of its own `Ciphertext` (`blockCidOf`,
+         the `cid(Digest(Ciphertext))` check, which needs no key);
+       - its `VoterRegistrantIds` is a JSON array of non-empty ids in
+         strictly ascending order, as long as `EntryCount`;
+       - its `TemplateDigest` is the template digest of its ballot;
+       - every listed registrant has a `VoteBlockVoter` row naming this
+         `Cid` that `judgeBlockVoters` accepts. For that row, the block
+         columns agree, the consent signature verifies over
+         `Digest('VoteBlockVoter', ElectionId, ElectionRevision, BallotId,
+         Cid, Id, RegistrantId, DeviceKey)`, and the registrant and the
+         device key pass the Registrant and Association rule of section
+         7.3.
+
+       These are all of the validation's block checks that need no key,
+       except the cross-block one. `judgeBlockVoters` is the same function
+       the validation uses, so the two cannot disagree about which voter is
+       authenticated.
+    2. Among authenticated rows, the one with the most listed voters.
+    3. Then a row whose `Cid` is the digest of its own `Ciphertext`.
+    4. Then the lowest UTF-8 bytes of `canonicalJson([Cid, Id, BallotId,
+       EntryCount, TemplateDigest, VoterRegistrantIds, Ciphertext])`.
+
+    The other rows of that `Cid` are set aside as `duplicate-block`. When
+    no row of the `Cid` is authenticated, rules 3 and 4 decide, and the
+    kept row is invalid under the validation anyway. Signatures are checked
+    only for a `Cid` that more than one row names, so a tree with no
+    collision costs no signature check. The consent digest and the P-256
+    check (`blockConsentDigest`, `verifyBlockConsent`) make the same calls
+    as the pool's `consentDigest` and the schema's `verifySigP256`. Tests
+    pin that parity, so the block tree stays on the `./browser` entry.
   - The tree is built over the kept rows. The set-aside rows are returned
     in `tree.rejected` as `{ cid, reason, detail }`, ascending by `cid`
     and carrying no input position, so the result does not depend on the
@@ -461,7 +503,7 @@ Who stores, caches and publishes the root is open (section 7.5).
 
 ### 7.2 Voter slice checks
 
-`sliceChecks(receipt, rows, voterRows, anchor?, release?)` lets a voter
+`sliceChecks(receipt, rows, voterRows, anchor?, release?, authorization?)` lets a voter
 check its own slice of the committed blocks. The receipt holds the
 election id and revision, the voter's plaintext vote entries with their
 nonces (one per ballot), and the voter's signed voter entry. It holds no
@@ -485,11 +527,15 @@ the order of `SLICE_CHECK_IDS`:
   after the release the `Id` is the digest of the payload too.
 - `under-root`: the leaf hash is recomputed from the voter's own block row
   and checked against the anchor's root, with the supplied proof or with
-  a tree built from the supplied rows.
+  a tree built from the supplied rows. Building that tree needs the block
+  tree's authorization (section 7.1) besides `voterRows`. Without one,
+  the tree is never built. A supplied proof is then checked by
+  `verifyInclusion` alone, and with no proof `under-root` is
+  `not-applicable` (`no-authorization`).
 
 Each result has one of four statuses: `pass`, `fail` (with a reason code
 and a detail), `pending-key-release` and `not-applicable` (reason
-`no-block` or `no-root`). The ballot verdict is `fail` if any check
+`no-block`, `no-root` or `no-authorization`). The ballot verdict is `fail` if any check
 fails, `pass` if all four pass with nothing left pending, and
 `incomplete` otherwise.
 
@@ -629,9 +675,13 @@ grouped as the source groups them:
 - Report level: `voter-row-without-block` (info), `voter-row-forged`,
   and `malformed-row` and
   `duplicate-block` for the rows the block-tree row policy (section 7.1)
-  set aside. A set-aside row is not a block of the report and never adds
-  a finding to another block; the blocks of the report are exactly the
-  leaves of the block tree.
+  set aside. The validation selects them with its own `voterRows`,
+  `registrants`, `associations`, `timeline` and `ballots` as the
+  authorization. A set-aside row is not a block of the report and never
+  adds a finding to another block, and the blocks of the report are
+  exactly the leaves of the block tree. `duplicate-block` now means only
+  an exact `Cid` collision. Rows that share only an `Id` are separate
+  blocks, each with its own findings.
 - Block, after the release: `block-does-not-open`, `id-mismatch`,
   `payload-count-mismatch`, `not-a-payload`, `counts-differ`,
   `voter-count-mismatch`, `not-canonical-order`, `duplicate-vote`,
@@ -744,13 +794,33 @@ settle them:
 - A clock the writer cannot choose. The final-root gate uses the caller's
   clock.
 - The voter screens for slice-check and validation results.
-- Which of two rows sharing a `Cid` or an `Id` is genuine, before the
-  key release. The row policy of section 7.1 prefers a row whose `Cid`
-  matches its ciphertext and then the lowest bytes. A forged row that
-  copies an honest block's ciphertext (so its `Cid` matches) or reuses its
-  `Id` with a self-consistent `Cid`, and sorts first, displaces the honest
-  row. Telling them apart needs the consent rows and P-256 verification,
-  which the block tree does not take.
+- Closed (T-65-05-03): which of two rows sharing a `Cid` or an `Id` is
+  genuine, before the key release. Rows that share an `Id` under different
+  `Cid`s are now separate leaves, and the validation judges each one.
+  Among rows that share a `Cid`, the authenticated row wins (section 7.1).
+  So these forged rows no longer displace an honest block:
+  - a row that copies an honest ciphertext under another `Id` or voter
+    list;
+  - a row that reuses an honest `Id` under its own `Cid`;
+  - a row that lists only some of the honest voters;
+  - a row that changes only `TemplateDigest`.
+
+  One bounded case remains. A forged row can copy the honest ciphertext,
+  `Id` and voter list, and add a registrant whose own registered and
+  associated device key signs consent over the honest `Cid` and `Id`. That
+  row has more authenticated voters, so it is kept. After the release it
+  fails the payload checks and is excluded, so the honest block's votes
+  are excluded, not counted. Before the release the true list is inside
+  the ciphertext, so nothing can tell the two rows apart. The attack needs
+  all of the following:
+  - a replica that bypasses the schema (the `Cid` primary key refuses the
+    second row);
+  - a registered voter willing to sign;
+  - that voter's one `VoteBlockVoter` row for the ballot, because the
+    primary key is `(ElectionId, BallotId, RegistrantId)`.
+
+  If that voter also votes elsewhere, both of its blocks are
+  `registrant-in-two-blocks`.
 
 [SEC 1 v2.0]: #5-references
 [SEC 2 v2.0]: #5-references
