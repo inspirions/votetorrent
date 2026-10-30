@@ -1,0 +1,402 @@
+// tally-tree.ts — R8 (D-80, D-81): the tally tree over one election revision's committed VoteBlocks (65-08).
+//
+// Role:
+//   - doc/election.md "Election tallied": "a tally tree, corresponding to the Merkle tree of hashes of the
+//     blocks, but including a histogram of results at each level". Every node of the R5 block tree has a
+//     tally node. A leaf holds the histogram of ONE block's valid decrypted answers. A parent holds the
+//     canonical sum of its two children. The root histogram is the raw outcome.
+//
+// Format contract (third parties must be able to reproduce this byte for byte):
+//   - Node hash: sha256(0x03 || merkleNodeHash || utf8(canonicalJson(histogram))). The merkle hash enters as its
+//     32 raw bytes, the same way R5 concatenates child hashes. R5 uses 0x00 (leaf) and 0x01 (node); 0x02 is left
+//     unused on purpose, so a tally hash can never pose as a merkle hash.
+//   - Histogram: { ballots: { [ballotId]: { votes, invalid, excluded, questions, unsupported } } }, only ballots
+//     present in the subtree. `valid` = votes - invalid - excluded is derived and never stored. A `select`
+//     question is { answered, options }: `answered` is the number of valid votes that answered it, and
+//     `options` has EVERY template option code, zero-initialised, with the number of valid votes choosing it.
+//     A blank is (valid - answered), derived. `answered` exists because a multi-select question
+//     (optionRange.max > 1) cannot recover it from the option counts.
+//   - Empty set: size 0, no nodes, root = tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} }).
+//   - The tally is plain JSON data. It carries counts and public block columns only: no vote entry, nonce,
+//     registrant id or key, and nothing that is not JSON.
+//
+// D-81: a VoteAnswer holds a sorted, de-duplicated option set, so only `select` questions (type absent or
+// 'select') can be histogrammed faithfully. Every other question type (rank, score, text, unknown) is reported
+// under `unsupported` with the number of valid votes that answered it, and never under `questions`.
+//
+// BLOCK-LEVEL POLICY (D-82). A block whose R7 status is 'invalid' is NOT tallied. That status means some error
+// finding has no voteIndex: Cid or Id mismatch, the block does not open, a payload shape or count error, a
+// consent or voter-entry signature failure, an unknown ballot or template mismatch, a voter-row defect, or a
+// registrant in two blocks. Its leaf still exists, because the tally tree mirrors every R5 leaf: that keeps the
+// R5 root unchanged and every branch checkable. Its declared EntryCount counts in `votes` and in `excluded`.
+// Its option counts are zero, and the leaf lists the block-level error codes in `excludedFor`.
+// Why: a block-level error means R7 could not show that the block holds what was committed, that its voters
+// consented to it, or that its votes belong to it alone. Counting its votes would let a hostile writer or
+// replica inject, or count twice, votes that no valid consent backs. Dropping them silently would hide them.
+// Counting them as `excluded` keeps votes = valid + invalid + excluded exact at every node, and puts the
+// excluded volume in the published outcome, where the spec's discrepancy margin can use it. The excluded count
+// is the declared EntryCount that the R5 leaf commits to, so every leaf's `votes` can be checked against its own
+// leafData without a key. Per-vote errors inside an otherwise valid block (D-71) only move that vote to
+// `invalid`. Info findings never exclude anything.
+//
+// Out of scope (D-80, spec "Q:" items): signing tally nodes, TSA timestamps, storage or caching, write-in or
+// free-text normalisation, and the completion notification. R8 is not time-gated and never reads a clock.
+//
+// The election secret: R8 never reads it. buildTallyTree hands the release straight to validateElectionBlocks,
+// which checks it, copies it and zero-fills the copy.
+//
+// Rules: results are typed unions and nothing here reports failure by raising an error. Histograms are built
+// from Maps and materialised with Object.fromEntries, and every read is an own-property read, because question
+// and option codes are template strings that may spell `__proto__` or `constructor`. Pure for Hermes and the
+// browser-adjacent engine: noble-backed relative imports only, no Node-only globals, no logging, no clock, no
+// randomness.
+
+import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
+import { BLOCK_TREE_EMPTY_ROOT, type BlockTree } from './block-tree.js'
+import type { ElectionValidationResult, ValidationCode } from './validate-blocks.js'
+import type { AnswerCheckBallot } from './answer-checks.js'
+import { canonicalJson } from '../voting/canonical.js'
+
+export const TALLY_TREE_DOMAIN = 'vt-tally-tree/1' as const
+
+const TALLY_PREFIX = 0x03
+
+/** One `select` question. Blank = (ballot valid) - answered: derived, never stored. */
+export interface TallyQuestionCounts {
+  /** valid votes that answered this question */
+  answered: number
+  /** EVERY template option code, zero-initialised; valid votes choosing it */
+  options: Record<string, number>
+}
+
+export interface TallyBallotCounts {
+  /** committed entries = sum of R5 leaf entryCount */
+  votes: number
+  /** per-vote invalid (D-71) inside tallied blocks */
+  invalid: number
+  /** entries of blocks excluded at block level */
+  excluded: number
+  /** select questions only; {} if the template is unknown */
+  questions: Record<string, TallyQuestionCounts>
+  /** D-81: every non-select question code, zero-initialised; valid votes that answered it */
+  unsupported: Record<string, number>
+}
+
+export interface TallyHistogram { ballots: Record<string, TallyBallotCounts> }
+
+export type TallyLeafDisposition = 'tallied' | 'excluded'
+
+export interface TallyLeaf {
+  /** = R5 leaf index */
+  index: number
+  blockCid: string
+  ballotId: string
+  entryCount: number
+  /** = R5 blockLeafData (public block columns only) */
+  leafData: string
+  disposition: TallyLeafDisposition
+  /** [] when tallied; else the block's error codes WITHOUT voteIndex, sorted by byString, unique */
+  excludedFor: readonly ValidationCode[]
+}
+
+export interface TallyNode {
+  /** identical to BlockTree.nodes[index] */
+  index: number
+  range: readonly [number, number]
+  left?: number
+  right?: number
+  /** = BlockTree.nodes[index].hash (R5, unchanged) */
+  merkleHash: string
+  /** leaf: one ballot; parent: addHistograms(left, right) */
+  histogram: TallyHistogram
+  /** tallyNodeHash(merkleHash, histogram) */
+  hash: string
+}
+
+/** Plain JSON data: no functions, no Uint8Array, no vote entries, nonces or registrant ids. Survives a JSON round trip. */
+export interface TallyTree {
+  format: 'vt-tally-tree/1'
+  electionId: string
+  electionRevision: number
+  /** the R5 root (BLOCK_TREE_EMPTY_ROOT when size 0) */
+  blockRoot: string
+  /** last node's hash; size 0: tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} }) */
+  root: string
+  size: number
+  /** the root histogram: the raw outcome */
+  histogram: TallyHistogram
+  /** R5 leaf order (ascending UTF-8 bytes of Cid) */
+  leaves: readonly TallyLeaf[]
+  /** R5 node order (post-order, root last); [] when size 0 */
+  nodes: readonly TallyNode[]
+}
+
+export type TallyTreeRefusal =
+  | 'malformed-input' | 'not-released' | 'inconsistent-inputs'
+  | 'malformed-row' | 'duplicate-block' | 'mixed-election' | 'mixed-revision'
+  | 'invalid-secret' | 'secret-mismatch'
+
+export type ReleasedValidation = Extract<ElectionValidationResult, { ok: true }>
+
+export type TallyTreeResult = { ok: true, tally: TallyTree } | { ok: false, reason: TallyTreeRefusal, detail: string }
+
+type Rec = Record<string, unknown>
+
+const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+const own = (obj: object, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key)
+
+const isRec = (v: unknown): v is Rec => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+const isHex64 = (s: unknown): s is string => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s)
+
+const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
+
+/** A plain object whose keys are the Map's keys sorted by byString; own data properties, `__proto__` included. */
+function sortedRecord<V> (map: Map<string, V>): Record<string, V> {
+  return Object.fromEntries([...map.entries()].sort((a, b) => byString(a[0], b[0])))
+}
+
+/** hex(sha256(0x03 || hexToBytes(merkleHash) || utf8(canonicalJson(histogram)))). Precondition: 64 lowercase hex, well-formed histogram. */
+export function tallyNodeHash (merkleHash: string, histogram: TallyHistogram): string {
+  return bytesToHex(sha256(concatBytes(Uint8Array.of(TALLY_PREFIX), hexToBytes(merkleHash), utf8ToBytes(canonicalJson(histogram)))))
+}
+
+function sumRecords (a: Record<string, number> | undefined, b: Record<string, number> | undefined): Record<string, number> {
+  const out = new Map<string, number>()
+  for (const side of [a, b]) {
+    if (side === undefined) continue
+    for (const k of Object.keys(side)) out.set(k, (out.get(k) ?? 0) + (own(side, k) ? side[k]! : 0))
+  }
+  return sortedRecord(out)
+}
+
+function mergeBallot (x: TallyBallotCounts | undefined, y: TallyBallotCounts | undefined): TallyBallotCounts {
+  const questions = new Map<string, TallyQuestionCounts>()
+  const codes = new Set<string>([...Object.keys(x?.questions ?? {}), ...Object.keys(y?.questions ?? {})])
+  for (const code of codes) {
+    const qx = x !== undefined && own(x.questions, code) ? x.questions[code] : undefined
+    const qy = y !== undefined && own(y.questions, code) ? y.questions[code] : undefined
+    questions.set(code, { answered: (qx?.answered ?? 0) + (qy?.answered ?? 0), options: sumRecords(qx?.options, qy?.options) })
+  }
+  return {
+    excluded: (x?.excluded ?? 0) + (y?.excluded ?? 0),
+    invalid: (x?.invalid ?? 0) + (y?.invalid ?? 0),
+    questions: sortedRecord(questions),
+    unsupported: sumRecords(x?.unsupported, y?.unsupported),
+    votes: (x?.votes ?? 0) + (y?.votes ?? 0)
+  }
+}
+
+/** Canonical elementwise sum; key union; fresh objects (never aliases or mutates its inputs). Precondition: well-formed histograms. */
+export function addHistograms (a: TallyHistogram, b: TallyHistogram): TallyHistogram {
+  const ballots = new Map<string, TallyBallotCounts>()
+  const ids = new Set<string>([...Object.keys(a.ballots), ...Object.keys(b.ballots)])
+  for (const id of ids) {
+    ballots.set(id, mergeBallot(own(a.ballots, id) ? a.ballots[id] : undefined, own(b.ballots, id) ? b.ballots[id] : undefined))
+  }
+  return { ballots: sortedRecord(ballots) }
+}
+
+interface WorkQuestion { answered: number, options: Map<string, number> }
+interface WorkBallot {
+  votes: number
+  invalid: number
+  excluded: number
+  questions: Map<string, WorkQuestion>
+  unsupported: Map<string, number>
+}
+
+type Refusal = { ok: false, reason: TallyTreeRefusal, detail: string }
+const refuse = (reason: TallyTreeRefusal, detail: string): Refusal => ({ ok: false, reason, detail })
+
+/** Zero counts; with a template, every select question and option, and every other question code. */
+function ballotSkeleton (ballot: AnswerCheckBallot | undefined): WorkBallot {
+  const w: WorkBallot = { votes: 0, invalid: 0, excluded: 0, questions: new Map(), unsupported: new Map() }
+  if (ballot === undefined) return w
+  for (const q of ballot.questions) {
+    if (w.questions.has(q.code) || w.unsupported.has(q.code)) continue
+    if (q.type === undefined || q.type === 'select') {
+      const options = new Map<string, number>()
+      for (const o of q.options) options.set(o.code, 0)
+      w.questions.set(q.code, { answered: 0, options })
+    } else {
+      w.unsupported.set(q.code, 0)
+    }
+  }
+  return w
+}
+
+function materialise (w: WorkBallot): TallyBallotCounts {
+  const questions = new Map<string, TallyQuestionCounts>()
+  for (const [code, q] of w.questions) questions.set(code, { answered: q.answered, options: sortedRecord(q.options) })
+  return { excluded: w.excluded, invalid: w.invalid, questions: sortedRecord(questions), unsupported: sortedRecord(w.unsupported), votes: w.votes }
+}
+
+function checkBallots (ballots: unknown): { ok: true, byId: Map<string, AnswerCheckBallot> } | Refusal {
+  if (!Array.isArray(ballots)) return refuse('malformed-input', 'ballots must be an array')
+  const byId = new Map<string, AnswerCheckBallot>()
+  for (let i = 0; i < ballots.length; i++) {
+    const b: unknown = ballots[i]
+    if (!isRec(b)) return refuse('malformed-input', `ballot ${i}: not an object`)
+    if (typeof b.id !== 'string') return refuse('malformed-input', `ballot ${i}: id must be a string`)
+    if (byId.has(b.id)) return refuse('malformed-input', `ballot ${b.id} appears twice`)
+    if (!Array.isArray(b.questions)) return refuse('malformed-input', `ballot ${b.id}: questions must be an array`)
+    for (const q of b.questions as unknown[]) {
+      if (!isRec(q) || typeof q.code !== 'string') return refuse('malformed-input', `ballot ${b.id}: a question has no string code`)
+      if (q.type !== undefined && typeof q.type !== 'string') return refuse('malformed-input', `ballot ${b.id}: question ${q.code} has a non-string type`)
+      if (!Array.isArray(q.options)) return refuse('malformed-input', `ballot ${b.id}: question ${q.code} options must be an array`)
+      for (const o of q.options as unknown[]) {
+        if (!isRec(o) || typeof o.code !== 'string') return refuse('malformed-input', `ballot ${b.id}: question ${q.code} has an option without a string code`)
+      }
+    }
+    byId.set(b.id, b as unknown as AnswerCheckBallot)
+  }
+  return { ok: true, byId }
+}
+
+/** Counts one valid, canonical entry into the ballot. Returns a detail string when the entry cannot be placed. */
+function countEntry (w: WorkBallot, entry: unknown): string | null {
+  if (!isRec(entry) || !Array.isArray(entry.answers)) return 'a valid vote has no answers array'
+  for (const a of entry.answers as unknown[]) {
+    if (!isRec(a) || typeof a.questionCode !== 'string' || !Array.isArray(a.optionCodes)) return 'a valid vote has a malformed answer'
+    for (const o of a.optionCodes as unknown[]) if (typeof o !== 'string') return 'a valid vote has a non-string option code'
+    const q = w.questions.get(a.questionCode)
+    if (q !== undefined) {
+      q.answered++
+      for (const o of a.optionCodes as string[]) {
+        const n = q.options.get(o)
+        if (n === undefined) return `a valid vote names option ${o} that question ${a.questionCode} lacks`
+        q.options.set(o, n + 1)
+      }
+    } else if (w.unsupported.has(a.questionCode)) {
+      w.unsupported.set(a.questionCode, w.unsupported.get(a.questionCode)! + 1)
+    } else {
+      return `a valid vote names question ${a.questionCode} that the template lacks`
+    }
+  }
+  return null
+}
+
+function leafHistogram (leafBallotId: string, entryCount: number, finding: Rec, ballotsById: Map<string, AnswerCheckBallot>):
+{ ok: true, counts: TallyBallotCounts, disposition: TallyLeafDisposition, excludedFor: ValidationCode[] } | Refusal {
+  const template = ballotsById.get(leafBallotId)
+  const w = ballotSkeleton(template)
+  w.votes = entryCount
+  if (finding.status === 'invalid') {
+    w.excluded = entryCount
+    const codes = new Set<string>()
+    if (Array.isArray(finding.findings)) {
+      for (const f of finding.findings as unknown[]) {
+        if (isRec(f) && f.severity === 'error' && f.voteIndex === undefined && typeof f.code === 'string') codes.add(f.code)
+      }
+    }
+    return { ok: true, counts: materialise(w), disposition: 'excluded', excludedFor: [...codes].sort(byString) as ValidationCode[] }
+  }
+  if (finding.status !== 'valid') return refuse('inconsistent-inputs', `block ${String(finding.blockCid)} is ${String(finding.status)}, not released`)
+  if (!Array.isArray(finding.votes) || finding.votes.length !== entryCount) {
+    return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: ${Array.isArray(finding.votes) ? finding.votes.length : 'no'} verdicts for ${entryCount} entries`)
+  }
+  for (const v of finding.votes as unknown[]) {
+    if (!isRec(v)) return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: a verdict is not an object`)
+    if (v.status === 'invalid') { w.invalid++; continue }
+    if (v.status !== 'valid') return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: unknown verdict status`)
+    if (template === undefined) return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: valid votes on ballot ${leafBallotId} that has no template`)
+    const bad = countEntry(w, v.entry)
+    if (bad !== null) return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: ${bad}`)
+  }
+  return { ok: true, counts: materialise(w), disposition: 'tallied', excludedFor: [] }
+}
+
+/** Builds the tally from an R5 tree and a RELEASED R7 report (no second decryption). */
+export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationResult, ballots: readonly AnswerCheckBallot[]): TallyTreeResult {
+  const t: unknown = tree
+  const v: unknown = validation
+  if (!isRec(t) || !Array.isArray(t.leaves) || !Array.isArray(t.nodes)) return refuse('malformed-input', 'tree must be an object with leaves and nodes arrays')
+  if (!isRec(v) || v.ok !== true || !Array.isArray(v.blocks)) return refuse('malformed-input', 'validation must be an ok report with a blocks array')
+  const checked = checkBallots(ballots)
+  if (!checked.ok) return checked
+  if (v.released !== true) return refuse('not-released', 'the report was produced without the election key')
+  if (v.electionId !== t.electionId || v.electionRevision !== t.electionRevision) {
+    return refuse('inconsistent-inputs', 'the report and the tree are for different elections or revisions')
+  }
+  const leaves = t.leaves as unknown[]
+  const nodes = t.nodes as unknown[]
+  if (nodes.length !== (leaves.length === 0 ? 0 : 2 * leaves.length - 1)) return refuse('malformed-input', 'tree nodes do not fit its leaves')
+  if (typeof t.electionId !== 'string' || !Number.isSafeInteger(t.electionRevision) || !isHex64(t.root)) {
+    return refuse('malformed-input', 'tree scope or root is malformed')
+  }
+
+  const findings = new Map<string, Rec>()
+  for (const f of v.blocks as unknown[]) {
+    if (!isRec(f) || typeof f.blockCid !== 'string') return refuse('inconsistent-inputs', 'a block finding has no Cid')
+    if (findings.has(f.blockCid)) return refuse('inconsistent-inputs', `two findings for Cid ${f.blockCid}`)
+    findings.set(f.blockCid, f)
+  }
+
+  const outLeaves: TallyLeaf[] = []
+  const leafHist: TallyHistogram[] = []
+  for (let i = 0; i < leaves.length; i++) {
+    const l: unknown = leaves[i]
+    if (!isRec(l) || typeof l.cid !== 'string' || typeof l.ballotId !== 'string' || typeof l.leafData !== 'string' || !isCount(l.entryCount)) {
+      return refuse('malformed-input', `tree leaf ${i} is malformed`)
+    }
+    const finding = findings.get(l.cid)
+    if (finding === undefined) return refuse('inconsistent-inputs', `no finding for Cid ${l.cid}`)
+    const h = leafHistogram(l.ballotId, l.entryCount, finding, checked.byId)
+    if (!h.ok) return h
+    leafHist.push({ ballots: Object.fromEntries([[l.ballotId, h.counts]]) })
+    outLeaves.push({
+      index: i, blockCid: l.cid, ballotId: l.ballotId, entryCount: l.entryCount, leafData: l.leafData,
+      disposition: h.disposition, excludedFor: h.excludedFor
+    })
+  }
+
+  const outNodes: TallyNode[] = []
+  for (let i = 0; i < nodes.length; i++) {
+    const n: unknown = nodes[i]
+    if (!isRec(n) || !Array.isArray(n.range) || n.range.length !== 2 || !isHex64(n.hash)) return refuse('malformed-input', `tree node ${i} is malformed`)
+    const lo = n.range[0] as unknown
+    const hi = n.range[1] as unknown
+    if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi)) return refuse('malformed-input', `tree node ${i} has a malformed range`)
+    let histogram: TallyHistogram
+    const node: TallyNode = { index: i, range: [lo as number, hi as number], merkleHash: n.hash, histogram: { ballots: {} }, hash: '' }
+    if ((hi as number) - (lo as number) === 1) {
+      const h = leafHist[lo as number]
+      if (h === undefined) return refuse('malformed-input', `tree node ${i} names a leaf that does not exist`)
+      histogram = addHistograms(h, { ballots: {} })
+    } else {
+      const left = n.left as unknown
+      const right = n.right as unknown
+      if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right) || (left as number) < 0 || (right as number) < 0 || (left as number) >= i || (right as number) >= i) {
+        return refuse('malformed-input', `tree node ${i} has malformed children`)
+      }
+      histogram = addHistograms(outNodes[left as number]!.histogram, outNodes[right as number]!.histogram)
+      node.left = left as number
+      node.right = right as number
+    }
+    node.histogram = histogram
+    node.hash = tallyNodeHash(n.hash, histogram)
+    outNodes.push(node)
+  }
+
+  const size = leaves.length
+  const blockRoot = size === 0 ? BLOCK_TREE_EMPTY_ROOT : outNodes[outNodes.length - 1]!.merkleHash
+  const histogram: TallyHistogram = size === 0 ? { ballots: {} } : addHistograms(outNodes[outNodes.length - 1]!.histogram, { ballots: {} })
+  const root = size === 0 ? tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} }) : outNodes[outNodes.length - 1]!.hash
+  return {
+    ok: true,
+    tally: {
+      format: TALLY_TREE_DOMAIN,
+      electionId: t.electionId,
+      electionRevision: t.electionRevision as number,
+      blockRoot,
+      root,
+      size,
+      histogram,
+      leaves: outLeaves,
+      nodes: outNodes
+    }
+  }
+}
