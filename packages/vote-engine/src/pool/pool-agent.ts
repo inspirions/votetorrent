@@ -14,6 +14,8 @@
 //     `informAttempts` times before the member is dropped from the pool.
 //   * A member signs only after checkFormedPoolBlock passes; one refusal or silence drops that
 //     member and the rest carry on (the doc reverts the whole merge; spike 102's deviation kept).
+//   * A member the commit names as already voted is dropped and the rest re-form (or keep
+//     presenting below the minimum); it is not a whole-pool revert to solo.
 //   * Pools order strictly by (size desc, peer id asc), so two coordinators never merge into each
 //     other at once.
 //
@@ -33,6 +35,7 @@ import {
   type ConsentSignature,
   type FormedPoolBlock,
   type PoolBallot,
+  type PoolCommitResult,
   type PoolContribution
 } from './pool-block.js'
 
@@ -47,7 +50,7 @@ export interface PoolAgentOptions {
   /** sign a consent digest with the voting key (Association.DeviceKey); returns compact low-S hex */
   signConsent: (digest: string) => Promise<string>
   /** write the block and its voter rows in one transaction */
-  commit: (block: FormedPoolBlock, signatures: ConsentSignature[]) => Promise<{ ok: true } | { ok: false, reason: string }>
+  commit: (block: FormedPoolBlock, signatures: ConsentSignature[]) => Promise<PoolCommitResult>
   /**
    * The cid of the block this voter's vote is already recorded in (its replicated VoteBlockVoter
    * row), or null. Checked before pooling and again whenever this voter has signed a block, so a
@@ -89,7 +92,7 @@ export type PoolAgentStatus =
 
 export type PoolOutcome =
   | { status: 'committed', cid: string, blockId: string, size: number, formedByMe: boolean }
-  | { status: 'stopped', reason: 'deadline' | 'aborted' }
+  | { status: 'stopped', reason: 'deadline' | 'aborted' | 'already-voted' }
 
 type PoolMessage =
   | { t: 'merge', id: string, topic: string, contributions: PoolContribution[] }
@@ -99,7 +102,7 @@ type PoolMessage =
   | { t: 'ack', re: string }
   | { t: 'form', id: string, topic: string, block: FormedPoolBlock }
   | { t: 'sign', re: string, signature: ConsentSignature }
-  | { t: 'outcome', topic: string, committed: boolean, cid?: string, reason?: string }
+  | { t: 'outcome', topic: string, committed: boolean, cid?: string, reason?: string, code?: 'already-voted' }
 
 const holdOf = (voteCiphertext: string): string => bytesToHex(sha256(utf8ToBytes(voteCiphertext)))
 const better = (a: { size: number, peerId: string }, b: { size: number, peerId: string }): boolean =>
@@ -338,7 +341,6 @@ export class PoolAgent {
           return r?.t === 'refuse' ? r.reason : r?.t === 'sign' ? 'invalid signature' : 'no answer'
         })
         this.log('form-refused-by', { members: refusers.map(c => c.member.slice(-6)), reasons })
-        const gone = refusers.map(c => c.member)
         // doc/election.md's open question on repeat offenders: a member dropped here would otherwise
         // merge straight back in and stall the pool again. An invalid signature is refused from now
         // on; any other refusal or silence (a slow fingerprint, a state mismatch) gets one more try.
@@ -346,15 +348,8 @@ export class PoolAgent {
           const drops = (this.formationDrops.get(c.member) ?? 0) + 1
           this.formationDrops.set(c.member, drops)
           if (reasons[k] === 'invalid signature' || drops >= 2) { this.excluded.add(c.member); this.excluded.add(c.voterEntry.registrantId) }
-          this.confirmed.delete(c.member)
         })
-        this.pool = this.pool.filter(c => !gone.includes(c.member))
-        for (const c of this.pool) {
-          if (c.member !== this.me) void this.post(c.member, { t: 'inform', id: this.nextId(), topic: this.topic, size: this.pool.length, hold: holdOf(c.voteCiphertext), dropped: gone })
-        }
-        for (const g of gone) void this.post(g, { t: 'outcome', topic: this.topic, committed: false, reason: 'dropped at formation' })
-        this.lastGrowthAt = this.o.now()
-        this.status()
+        this.dropMembers(refusers, { reason: 'dropped at formation' })
         return
       }
       const signatures: ConsentSignature[] = [
@@ -369,11 +364,51 @@ export class PoolAgent {
         return
       }
       this.log('commit-failed', { reason: result.reason })
-      for (const c of others) void this.post(c.member, { t: 'outcome', topic: this.topic, committed: false, reason: 'the block did not commit' })
-      this.revertToSolo('commit failed')
+      // Only identified pool members may be dropped: the list is input from the commit.
+      const named = new Set(result.duplicateRegistrants ?? [])
+      const dup = this.pool.filter(c => named.has(c.voterEntry.registrantId))
+      if (dup.length === 0) {
+        for (const c of others) void this.post(c.member, { t: 'outcome', topic: this.topic, committed: false, reason: 'the block did not commit' })
+        this.revertToSolo('commit failed')
+        return
+      }
+      if (dup.some(c => c.member === this.me)) {
+        // The former is itself the duplicate: tell everyone, then stop (or report its recorded cid).
+        await Promise.all(others.map(async c => await this.post(c.member, dup.includes(c)
+          ? { t: 'outcome', topic: this.topic, committed: false, reason: 'already voted', code: 'already-voted' }
+          : { t: 'outcome', topic: this.topic, committed: false, reason: 'the former already voted' })))
+        const recorded = (await this.o.findRecordedVote?.().catch(() => null)) ?? null
+        if (recorded !== null) this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
+        else this.finish({ status: 'stopped', reason: 'already-voted' })
+        return
+      }
+      // Never let a registrant that already voted merge back in and stall the pool again.
+      for (const c of dup) { this.excluded.add(c.member); this.excluded.add(c.voterEntry.registrantId) }
+      this.log('commit-duplicate', { count: dup.length, size: this.pool.length - dup.length })
+      this.dropMembers(dup, { reason: 'already voted', code: 'already-voted' })
     } finally {
       if (this.role !== 'done') this.busy = false
     }
+  }
+
+  /**
+   * Remove `gone` from the pool: tell the survivors who was dropped, tell the dropped through an
+   * `outcome`, and restart the quiet window. The pool re-forms once it is at least `minSize` again.
+   */
+  private dropMembers (gone: PoolContribution[], outcome: { reason: string, code?: 'already-voted' }): void {
+    const goneIds = gone.map(c => c.member)
+    for (const c of gone) this.confirmed.delete(c.member)
+    this.pool = this.pool.filter(c => !goneIds.includes(c.member))
+    for (const c of this.pool) {
+      if (c.member !== this.me) void this.post(c.member, { t: 'inform', id: this.nextId(), topic: this.topic, size: this.pool.length, hold: holdOf(c.voteCiphertext), dropped: goneIds })
+    }
+    for (const g of goneIds) {
+      void this.post(g, outcome.code === undefined
+        ? { t: 'outcome', topic: this.topic, committed: false, reason: outcome.reason }
+        : { t: 'outcome', topic: this.topic, committed: false, reason: outcome.reason, code: outcome.code })
+    }
+    this.lastGrowthAt = this.o.now()
+    this.status()
   }
 
   private async abandon (reason: 'deadline' | 'aborted'): Promise<void> {
@@ -449,7 +484,7 @@ export class PoolAgent {
       case 'merge': await this.onMerge(from, m); return
       case 'inform': await this.onInform(from, m); return
       case 'form': await this.onForm(from, m); return
-      case 'outcome': this.onOutcome(from, m)
+      case 'outcome': await this.onOutcome(from, m)
     }
   }
 
@@ -522,10 +557,18 @@ export class PoolAgent {
     this.status()
   }
 
-  private onOutcome (from: string, m: Extract<PoolMessage, { t: 'outcome' }>): void {
+  private async onOutcome (from: string, m: Extract<PoolMessage, { t: 'outcome' }>): Promise<void> {
     if (this.role !== 'member' || this.coordinator !== from) return
     if (m.committed && typeof m.cid === 'string' && m.cid === this.signedCid) {
       this.finish({ status: 'committed', cid: m.cid, blockId: '', size: 0, formedByMe: false })
+      return
+    }
+    if (m.code === 'already-voted') {
+      // Trust only what this voter's own strand read says (D-13): a recorded cid means sent.
+      const recorded = (await this.o.findRecordedVote?.().catch(() => null)) ?? null
+      if (this.role === 'done') return
+      if (recorded !== null) this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
+      else this.finish({ status: 'stopped', reason: 'already-voted' })
       return
     }
     this.revertToSolo(`formation failed: ${m.reason ?? 'unknown'}`)

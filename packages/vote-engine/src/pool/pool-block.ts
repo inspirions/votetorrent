@@ -9,7 +9,7 @@
 // VoteBlockVoter CHECKs: block id/cid shape, voter list frozen, one vote per registrant per
 // ballot, the signature over Digest('VoteBlockVoter', …), the voting window, the association).
 
-import type { Database } from '@quereus/quereus'
+import type { Database, SqlValue } from '@quereus/quereus'
 import type { ElectionBlockPayload, ElectionKeyRecord } from '@votetorrent/vote-core'
 import { cid, digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
 import { serializeBlockCiphertext } from '../crypto/index.js'
@@ -170,7 +170,7 @@ export async function commitPoolBlock (
   ballot: PoolBallot,
   signatures: readonly ConsentSignature[],
   clock: { nowMs: number, now: string }
-): Promise<{ ok: true } | { ok: false, reason: string }> {
+): Promise<PoolCommitResult> {
   if (signatures.length !== block.registrantIds.length) return { ok: false, reason: 'not every member signed' }
   await db.exec('BEGIN')
   try {
@@ -196,6 +196,54 @@ export async function commitPoolBlock (
     return { ok: true }
   } catch (err) {
     try { await db.exec('ROLLBACK') } catch { /* the failed commit already rolled back */ }
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+    const reason = err instanceof Error ? err.message : String(err)
+    if (classifyCommitFailure(reason) !== 'duplicate-voter') return { ok: false, reason }
+    // Name who collided: one point lookup per registrant (no IN list), after ROLLBACK so the read
+    // sees committed rows only. A row whose BlockCid is another block's is a voter who already voted.
+    const duplicateRegistrants: string[] = []
+    for (const registrantId of block.registrantIds) {
+      try {
+        const row = await firstRow(
+          db,
+          'select BlockCid from VoteBlockVoter where ElectionId = :e and BallotId = :b and RegistrantId = :reg',
+          { e: ballot.electionKey.electionId, b: ballot.ballotId, reg: registrantId }
+        )
+        if (typeof row?.BlockCid === 'string' && row.BlockCid !== block.cid) duplicateRegistrants.push(registrantId)
+      } catch { /* a failed lookup means "not found" for this registrant only */ }
+    }
+    if (duplicateRegistrants.length === 0) duplicateRegistrants.push(...registrantsNamedInCommitError(reason, block.registrantIds))
+    return { ok: false, reason, duplicateRegistrants }
   }
+}
+
+async function firstRow (db: Database, sql: string, params: Record<string, SqlValue>): Promise<Record<string, SqlValue> | undefined> {
+  for await (const row of db.eval(sql, params)) return row as Record<string, SqlValue>
+  return undefined
+}
+
+/** `duplicateRegistrants` is present only when the failure classified as 'duplicate-voter'. */
+export type PoolCommitResult = { ok: true } | { ok: false, reason: string, duplicateRegistrants?: string[] }
+
+/**
+ * A commit error caused by a voter who already has a VoteBlockVoter row: the local UNIQUE failure
+ * or the distributed "key ... is already taken" (both shapes recorded by spike 101).
+ */
+export function classifyCommitFailure (message: string): 'duplicate-voter' | 'other' {
+  if (/UNIQUE constraint failed: VoteBlockVoter\./.test(message)) return 'duplicate-voter'
+  if (/Tree collection [^\s]*\/VoteBlockVoter: key .* is already taken/.test(message)) return 'duplicate-voter'
+  return 'other'
+}
+
+/**
+ * The registrants of `registrantIds` that the error text names as a key component, framed exactly
+ * as `\u0002<id>\u0000` (as 6-character escape text, or as the literal control characters). Exact
+ * framing keeps `b-reg-1` from matching inside `b-reg-15`; no pattern is built from the id.
+ */
+export function registrantsNamedInCommitError (message: string, registrantIds: readonly string[]): string[] {
+  const out: string[] = []
+  for (const id of registrantIds) {
+    if (out.includes(id)) continue
+    if (message.includes('\\u0002' + id + '\\u0000') || message.includes('\u0002' + id + '\u0000')) out.push(id)
+  }
+  return out
 }
