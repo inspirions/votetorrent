@@ -136,7 +136,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
   it('BT-4 known-answer vector (literal derived from refRoot, not from buildBlockTree)', () => {
     const rs = [row('cid-a', { EntryCount: 3 }), row('cid-b', { EntryCount: 4, BallotId: 'ballot-b' }), row('cid-c', { EntryCount: 5 })]
     // Derived once from refRoot over these three rows.
-    const KAT = '__KAT__'
+    const KAT = '2548e71a5de11d7275dac46f6fbade8bb2241af96383e5f6f6fbdd7b24a705f7'
     expect(refRoot(rs)).to.equal(KAT)
     expect(build(rs).root).to.equal(KAT)
   })
@@ -160,8 +160,6 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     const p = t.proofFor(t.leaves[2]!.cid)
     expect(p.ok).to.equal(true)
     if (p.ok) {
-      const shortened: BlockInclusionProof = { leafIndex: 1, treeSize: 2, path: [p.proof.path[1]!] }
-      void shortened
       const forged: BlockInclusionProof = { leafIndex: p.proof.leafIndex, treeSize: p.proof.treeSize, path: p.proof.path.slice(1) }
       expect(verifyInclusion(inner.hash, forged, t.root)).to.deep.equal({ ok: false, reason: 'malformed-proof' })
     }
@@ -217,7 +215,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     const bad = { ok: false, reason: 'malformed-proof' }
     expect(malformed({ ...proof, path: proof.path.map((s, i) => i === 0 ? { ...s, side: s.side === 'left' ? 'right' : 'left' } : s) })).to.deep.equal(bad)
     expect(malformed({ ...proof, leafIndex: proof.leafIndex === 0 ? 1 : proof.leafIndex - 1 })).to.deep.equal(bad)
-    expect(malformed({ ...proof, treeSize: proof.treeSize + 1 })).to.deep.equal(bad)
+    expect(malformed({ ...proof, treeSize: proof.treeSize - 1 })).to.deep.equal(bad)
     expect(malformed({ ...proof, treeSize: 0 })).to.deep.equal(bad)
     expect(malformed({ ...proof, path: proof.path.slice(1) })).to.deep.equal(bad)
     expect(malformed({ ...proof, path: [...proof.path, proof.path[0]] })).to.deep.equal(bad)
