@@ -2397,7 +2397,7 @@ SPEC CHECKSUMS:
   NitroImage: 9f433e6cdbb63847b978853eee1da04af99f1254
   NitroModules: 08aff3b1a45badb71cf10d8f2d9cfb4e87cb468e
   PromisesObjC: 752c3227f599e3467650e47ea36f433eeb10c273
-  QuickCrypto: 6b5d93a21587132a807c8d8179ba68532bcdfd9b
+  QuickCrypto: 4fcd479bad2e1fc00c49eef8e60a5096a6cb22ea
   RCT-Folly: d173e541eeb78cad5c81011c1bbf62d5b86b9778
   RCTDeprecation: 1dce662386078170e119b89c1600db1b6e3d42f6
   RCTRequired: b5a9168b680baa2cda4f6b4764d10b6e58368b25
