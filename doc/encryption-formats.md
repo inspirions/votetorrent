@@ -605,8 +605,17 @@ After the release these totals equal the tally root of section 7.4,
 summed over the ballots: `entries` its `votes`, `invalid` its
 `invalid`, `excluded` its `excluded`, and `valid` its derived valid
 count. Refusals are `malformed-input`, `mixed-election`,
-`mixed-revision`, `invalid-secret` and `secret-mismatch`. The secret
-rules are those of section 7.2.
+`mixed-revision`, `invalid-secret` and `secret-mismatch`.
+
+The secret rule differs from section 7.2 in one point. As there, the
+caller obtains the election secret, holds it and zero-fills it after the
+call, and the secret is checked against the joint public key before
+anything opens (`invalid-secret` or `secret-mismatch` refuse the whole
+report). Unlike the slice checks, the validation works on a private copy
+of the secret, which it zero-fills in a `finally` block whatever the
+outcome. The caller's array is never modified and never retained, and
+the report holds no byte array. `buildTallyTree` hands the release
+straight to the validation and never reads the secret itself.
 
 Every finding has a code and a severity, `error` or `info`. The codes,
 grouped as the source groups them:
