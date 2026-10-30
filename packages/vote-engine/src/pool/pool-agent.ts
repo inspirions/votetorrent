@@ -289,6 +289,12 @@ export class PoolAgent {
       this.lastPresentTopic = topic
       list = await this.discovery.present(topic, this.pool.length, presentAt)
       this.count('present')
+      // This agent became a member while the present was on its way (IN-06): the withdraw that
+      // becomeMemberOf sent may have reached the rendezvous first, leaving it listed. Withdraw again.
+      if (this.role !== 'coordinator') {
+        void this.discovery.withdraw(topic, this.o.now()).catch(() => undefined)
+        return
+      }
       if (this.onPlain()) {
         if (this.plainAt === null) this.plainAt = this.o.now()
       } else {

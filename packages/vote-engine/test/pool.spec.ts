@@ -839,6 +839,61 @@ describe('pool: a member\'s coordinator, and already-voted as a hint (CR-01)', f
   })
 })
 
+describe('pool: no stale listing after a coordinator turns member mid-present (IN-06)', function () {
+  this.timeout(30_000)
+  const nap = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+  it('a present that lands after the agent became a member is withdrawn again', async () => {
+    const rv = new PoolRendezvous()
+    const a = makeVoter(0)
+    const c = scriptedPeer(rv, 'transport-c')
+    const topic = poolTopic(ballot)
+    await c.present(topic, 4)
+    // every present reaches the rendezvous 300 ms after the agent sends it
+    const real = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'transport-a-discovery'), a.identity)
+    let presentStarts = 0
+    const discovery: PoolDiscovery = {
+      async present (t, size, now) { presentStarts++; await nap(300); return await real.present(t, size, now) },
+      async withdraw (t, now) { await real.withdraw(t, now) }
+    }
+    const controller = new AbortController()
+    const running = new PoolAgent({
+      identity: a.identity,
+      rendezvous: createInMemoryRendezvousClient(rv, 'transport-a'),
+      discovery,
+      ballot,
+      contribution: a.contribution,
+      signConsent: async (digest) => signDigestP256(digest, a.priv),
+      commit: async () => ({ ok: true }),
+      ladder: false,
+      quietMs: 60_000,
+      presentIntervalMs: 60,
+      replyTimeoutMs: 400,
+      informAttempts: 2,
+      memberTimeoutMs: 30_000,
+      pollWaitMs: 200,
+      formLeadMs: 0,
+      deadlineAt: Date.now() + 20_000
+    }).run(controller.signal)
+    try {
+      // the agent tries to merge into c; c's `merged` reply is "lost" (never sent)
+      expect(await c.next(m => m.body.t === 'merge')).to.not.equal(null)
+      const startsAtMerge = presentStarts
+      while (presentStarts === startsAtMerge) await nap(10)
+      // c's inform reaches the agent while its next present is still on the way to the rendezvous
+      await c.send(a.identity.peerId, { t: 'inform', id: 'c-1', topic, size: 5, hold: holdOfVoter(a) })
+      expect((await c.next(m => m.body.re === 'c-1', 2_000))?.body.t).to.equal('ack')
+      await nap(700)
+      const listed = await createInMemoryRendezvousClient(rv, 'probe').call(poolRequests.present(createPoolIdentity(), topic, 1, Date.now()))
+      expect(listed).to.deep.equal({ t: 'coordinators', list: [{ peerId: c.identity.peerId, size: 4 }] })
+    } finally {
+      controller.abort()
+      await running
+      rv.close()
+    }
+  })
+})
+
 describe('pool: a duplicated form costs one consent prompt (WR-01)', function () {
   this.timeout(30_000)
 
