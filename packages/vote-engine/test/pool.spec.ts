@@ -16,6 +16,7 @@ import {
   PoolAgent,
   PoolRendezvous,
   checkFormedPoolBlock,
+  commitPoolBlock,
   consentDigest,
   createInMemoryRendezvousClient,
   ed25519PublicKeyFromPeerId,
@@ -35,6 +36,7 @@ import {
   type PoolIdentity,
   type PoolOutcome
 } from '../src/pool/index.js'
+import * as poolBlock from '../src/pool/pool-block.js'
 import { fromBase64url, toBase64url } from '../src/pool/pool-codec.js'
 import type { VoterEntry } from '../src/voting/index.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
@@ -244,17 +246,28 @@ describe('pool (spike 102): rendezvous', () => {
 describe('pool (spike 102): agents negotiate through the rendezvous', function () {
   this.timeout(30_000)
 
-  interface Run { outcomes: PoolOutcome[], commits: Array<{ block: FormedPoolBlock, signatures: ConsentSignature[] }>, rendezvous: PoolRendezvous }
+  interface Run {
+    outcomes: PoolOutcome[]
+    commits: Array<{ block: FormedPoolBlock, signatures: ConsentSignature[] }>
+    rendezvous: PoolRendezvous
+    commitCalls: number
+    logs: Array<{ i: number, event: string, detail?: Record<string, unknown> }>
+  }
 
   async function runAgents (voters: TestVoter[], opts: {
     deadlineMs?: number
     abortWhenMember?: number
     badSigner?: number
     quietMs?: number
+    preVoted?: number[]
+    preVotedReadable?: boolean
   } = {}): Promise<Run> {
     const rendezvous = new PoolRendezvous()
     const commits: Run['commits'] = []
-    const committedRegistrants = new Set<string>()
+    const committedRegistrants = new Set<string>((opts.preVoted ?? []).map(i => voters[i]!.contribution.voterEntry.registrantId))
+    const readable = new Set<string>()
+    const logs: Run['logs'] = []
+    let commitCalls = 0
     const deadlineAt = Date.now() + (opts.deadlineMs ?? 20_000)
     const outcomes = await Promise.all(voters.map(async (v, i) => {
       const controller = new AbortController()
@@ -265,12 +278,20 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
         contribution: v.contribution,
         signConsent: async (digest) => (opts.badSigner === i ? 'aa'.repeat(64) : signDigestP256(digest, v.priv)),
         commit: async (block, signatures) => {
-          if (signatures.some(s => committedRegistrants.has(s.registrantId))) return { ok: false, reason: 'a voter already voted' }
+          commitCalls++
+          if (signatures.some(s => committedRegistrants.has(s.registrantId))) {
+            const duplicateRegistrants = signatures.map(s => s.registrantId).filter(r => committedRegistrants.has(r))
+            if (opts.preVotedReadable === true) for (const r of duplicateRegistrants) readable.add(r)
+            return { ok: false, reason: 'a voter already voted', duplicateRegistrants }
+          }
           for (const s of signatures) committedRegistrants.add(s.registrantId)
           commits.push({ block, signatures })
           return { ok: true }
         },
-        findRecordedVote: async () => commits.find(c => c.signatures.some(s => s.registrantId === v.contribution.voterEntry.registrantId))?.block.cid ?? null,
+        findRecordedVote: async () => readable.has(v.contribution.voterEntry.registrantId)
+          ? `prevoted-cid-${v.contribution.voterEntry.registrantId}`
+          : commits.find(c => c.signatures.some(s => s.registrantId === v.contribution.voterEntry.registrantId))?.block.cid ?? null,
+        log: (event, detail) => { logs.push({ i, event, detail }) },
         quietMs: opts.quietMs ?? 400,
         presentIntervalMs: 60,
         replyTimeoutMs: 400,
@@ -285,7 +306,7 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
       return await agent.run(controller.signal)
     }))
     rendezvous.close()
-    return { outcomes, commits, rendezvous }
+    return { outcomes, commits, rendezvous, commitCalls, logs }
   }
 
   it('five voters converge on ONE block of five; every signature verifies; each learns the cid', async () => {
@@ -353,5 +374,144 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     const run = await runAgents(voters)
     expect(run.commits).to.have.length(1)
     expect(run.rendezvous.stats.send).to.be.greaterThan(0)
+  })
+
+  describe('a duplicate voter at commit (R1)', () => {
+    const highest = (vs: TestVoter[]) => vs.reduce((m, v, i) => (v.identity.peerId > vs[m]!.identity.peerId ? i : m), 0)
+    const lowest = (vs: TestVoter[]) => vs.reduce((m, v, i) => (v.identity.peerId < vs[m]!.identity.peerId ? i : m), 0)
+    const dropsOne = (run: Run, voters: TestVoter[], k: number): void => {
+      const kReg = voters[k]!.contribution.voterEntry.registrantId
+      expect(run.commits).to.have.length(1)
+      expect(run.commits[0]!.block.registrantIds).to.have.length(4)
+      expect(run.commits[0]!.block.registrantIds).to.not.include(kReg)
+      const cid = run.commits[0]!.block.cid
+      voters.forEach((_, i) => {
+        if (i === k) return
+        const o = run.outcomes[i]!
+        expect(o.status === 'committed' && o.cid === cid, `voter ${i}`).to.equal(true)
+      })
+    }
+
+    it('a member that already voted is dropped at commit; the other four commit ONE block of four', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000 })
+      dropsOne(run, voters, k)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
+    })
+
+    it('a former that already voted stops; the rest re-pool without it', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = lowest(voters)
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000 })
+      dropsOne(run, voters, k)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
+    })
+
+    it('three voters, one already voted: no whole-pool dissolve, the two left keep presenting to the deadline', async () => {
+      const voters = [0, 1, 2].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 3_000 })
+      expect(run.commits).to.deep.equal([])
+      expect(run.commitCalls).to.equal(1)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
+      voters.forEach((_, i) => { if (i !== k) expect(run.outcomes[i]).to.deep.equal({ status: 'stopped', reason: 'deadline' }) })
+      expect(run.logs.filter(l => l.event === 'solo' && l.detail?.why === 'commit failed')).to.deep.equal([])
+    })
+
+    it('D-13: a dropped member whose row becomes readable ends committed with that cid', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], preVotedReadable: true, deadlineMs: 12_000 })
+      expect(run.outcomes[k]).to.deep.equal({
+        status: 'committed', cid: 'prevoted-cid-' + voters[k]!.contribution.voterEntry.registrantId, blockId: '', size: 0, formedByMe: false
+      })
+      dropsOne(run, voters, k)
+    })
+  })
+})
+
+describe('pool: a duplicate voter at commit (R1) - classification and the commit lookup', () => {
+  const LOCAL = 'UNIQUE constraint failed: VoteBlockVoter.ElectionId, VoteBlockVoter.BallotId, VoteBlockVoter.RegistrantId'
+  // the spike 101 text carries the control markers as 6-character escape text
+  const framed = (id: string): string => '\\u0002' + id + '\\u0000'
+  const distributedMessageNaming = (id: string): string =>
+    `Error during query on table 'VoteBlockVoter': Query failed: Tree collection default/app/VoteBlockVoter: key "${framed('election-1')}${framed('b-ballot-1')}${framed(id)}" is already taken`
+
+  it('classifies both literal shapes as a duplicate voter and nothing else', () => {
+    expect(poolBlock.classifyCommitFailure(LOCAL)).to.equal('duplicate-voter')
+    expect(poolBlock.classifyCommitFailure(distributedMessageNaming('b-reg-5'))).to.equal('duplicate-voter')
+    expect(poolBlock.classifyCommitFailure('CHECK constraint failed: WithinVotingWindow')).to.equal('other')
+    expect(poolBlock.classifyCommitFailure('UNIQUE constraint failed: VoteBlock.Cid')).to.equal('other')
+    expect(poolBlock.classifyCommitFailure('')).to.equal('other')
+  })
+
+  it('names a registrant only by an exact frame (b-reg-1 is not inside b-reg-15)', () => {
+    const ids = ['b-reg-1', 'b-reg-15', 'b-reg-2']
+    expect(poolBlock.registrantsNamedInCommitError(distributedMessageNaming('b-reg-15'), ids)).to.deep.equal(['b-reg-15'])
+    const literal = `key "\u0002election-1\u0000\u0002b\u0000\u0002b-reg-15\u0000" is already taken`
+    expect(poolBlock.registrantsNamedInCommitError(literal, ids)).to.deep.equal(['b-reg-15'])
+    expect(poolBlock.registrantsNamedInCommitError(distributedMessageNaming('somebody-else'), ids)).to.deep.equal([])
+    expect(poolBlock.registrantsNamedInCommitError('registrant b-reg-2 collided', ids)).to.deep.equal([])
+  })
+
+  const voters = [0, 1, 2].map(makeVoter)
+  const block = formPoolBlock(voters.map(v => v.contribution), ballot)
+  const signatures: ConsentSignature[] = block.registrantIds.map(registrantId => ({ registrantId, deviceKey: 'dk', signature: 'aa'.repeat(64) }))
+  const clock = { nowMs: Date.now(), now: new Date().toISOString() }
+  const dup = block.registrantIds[1]!
+
+  function stub (failure: Error | null, found: Record<string, string>) {
+    const execs: Array<{ sql: string, params?: Record<string, unknown> }> = []
+    const evals: Array<{ sql: string, params?: Record<string, unknown> }> = []
+    const db = {
+      async exec (sql: string, params?: Record<string, unknown>) {
+        execs.push({ sql, params })
+        if (failure !== null && /insert into VoteBlockVoter/.test(sql) && params?.reg === dup) throw failure
+      },
+      async * eval (sql: string, params?: Record<string, unknown>) {
+        evals.push({ sql, params })
+        const cid = found[params?.reg as string]
+        if (cid !== undefined) yield { BlockCid: cid }
+      }
+    } as unknown as Database
+    return { db, execs, evals }
+  }
+
+  it('local UNIQUE: rolls back, then looks each registrant up with one point query and names the colliding one', async () => {
+    const s = stub(new Error(LOCAL), { [dup]: 'bafy-earlier' })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [dup] })
+    const rollbackAt = s.execs.findIndex(e => e.sql === 'ROLLBACK')
+    expect(rollbackAt).to.be.greaterThan(-1)
+    expect(s.evals).to.have.length(block.registrantIds.length)
+    for (const e of s.evals) {
+      expect(e.sql).to.match(/RegistrantId = :reg/)
+      expect(e.sql).to.not.match(/ in \(/i)
+    }
+  })
+
+  it('distributed shape, no row readable yet: falls back to the framed key text', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), {})
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [dup] })
+  })
+
+  it('duplicate shape, no row and nobody named: an empty list', async () => {
+    const s = stub(new Error(LOCAL), {})
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [] })
+  })
+
+  it('any other failure: no duplicateRegistrants key and no lookup', async () => {
+    const s = stub(new Error('CHECK constraint failed: WithinVotingWindow'), { [dup]: 'bafy-earlier' })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: 'CHECK constraint failed: WithinVotingWindow' })
+    expect(s.evals).to.have.length(0)
+  })
+
+  it('a lookup row holding this block\'s own cid is not a duplicate', async () => {
+    const s = stub(new Error(LOCAL), { [dup]: block.cid })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [] })
   })
 })
