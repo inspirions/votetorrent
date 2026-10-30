@@ -385,10 +385,30 @@ typed result and none reports failure by throwing.
 
 `buildBlockTree(rows, scope)` takes the committed `VoteBlock` rows of one
 election (`scope.electionId`) and one revision (`scope.electionRevision`),
-in any order. It refuses, with a typed reason, a row that is not shaped
-like a block (`malformed-row`), a repeated `Cid` or `Id`
-(`duplicate-block`), a row of another election (`mixed-election`) and a
-row of another revision (`mixed-revision`).
+in any order.
+
+- **Row policy (tolerant).** One bad row never refuses the tree. The rows
+  are selected by `selectBlockRows`, which the comprehensive validation
+  (section 7.3) uses too, so both judge the same rows:
+  - A row that is not shaped like a block is set aside as `malformed-row`.
+  - Rows that share a `Cid` or an `Id` are reduced to one. The preferred
+    row is the one whose `Cid` is the digest of its own `Ciphertext`
+    (`blockCidOf`, the `cid(Digest(Ciphertext))` check, which needs no
+    key), then the one whose `canonicalJson([Cid, Id, BallotId,
+    EntryCount, TemplateDigest, VoterRegistrantIds, Ciphertext])` has the
+    lowest UTF-8 bytes. Rows are taken in that order, and a row whose
+    `Cid` or `Id` is already taken is set aside as `duplicate-block`. The
+    `Id` check needs the key, so it cannot rank rows here.
+  - The tree is built over the kept rows. The set-aside rows are returned
+    in `tree.rejected` as `{ cid, reason, detail }`, ascending by `cid`
+    and carrying no input position, so the result does not depend on the
+    input order.
+  - Only a row of another election (`mixed-election`) or another revision
+    (`mixed-revision`) refuses the whole tree: rows are selected per
+    election revision, so such a row is a caller error. The scope is
+    checked before the shape, so a foreign row refuses even when it is
+    also malformed. A `rows` value that is not an array is
+    `malformed-row`.
 
 - **Leaf data.** The exact string
   `canonicalJson([ElectionId, ElectionRevision, BallotId, Id, Cid,
@@ -538,7 +558,11 @@ grouped as the source groups them:
   `voter-row-mismatch`, `voter-row-duplicate`, `voter-row-unlisted`,
   `voter-row-missing`, `consent-signature-invalid`,
   `registrant-in-two-blocks`.
-- Report level: `voter-row-without-block` (info).
+- Report level: `voter-row-without-block` (info), and `malformed-row` and
+  `duplicate-block` for the rows the block-tree row policy (section 7.1)
+  set aside. A set-aside row is not a block of the report and never adds
+  a finding to another block; the blocks of the report are exactly the
+  leaves of the block tree.
 - Block, after the release: `block-does-not-open`, `id-mismatch`,
   `payload-count-mismatch`, `not-a-payload`, `counts-differ`,
   `voter-count-mismatch`, `not-canonical-order`, `duplicate-vote`,
@@ -558,6 +582,10 @@ grouped as the source groups them:
 
 `buildTallyTree` runs the block tree, the validation and the tally in
 that order and needs the released secret (`not-released` otherwise).
+Because both the block tree and the validation follow the tolerant row
+policy of section 7.1, a malformed or duplicate row never prevents the
+tally of the other blocks; it is listed in `blockTree.rejected` and in the
+validation's report-level findings.
 `tallyTreeFrom` does the same from an existing tree and validation
 report. The tally tree has one node for every node of the block tree, in
 the same order, so the block-tree root is unchanged by the tally.
@@ -615,6 +643,13 @@ settle them:
 - A clock the writer cannot choose. The final-root gate uses the caller's
   clock.
 - The voter screens for slice-check and validation results.
+- Which of two rows sharing a `Cid` or an `Id` is genuine, before the
+  key release. The row policy of section 7.1 prefers a row whose `Cid`
+  matches its ciphertext and then the lowest bytes. A forged row that
+  copies an honest block's ciphertext (so its `Cid` matches) or reuses its
+  `Id` with a self-consistent `Cid`, and sorts first, displaces the honest
+  row. Telling them apart needs the consent rows and P-256 verification,
+  which the block tree does not take.
 
 [SEC 1 v2.0]: #5-references
 [SEC 2 v2.0]: #5-references

@@ -408,11 +408,10 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
       const flipped = { ...proof.proof, path: proof.proof.path.map((s, i) => (i === 0 ? { ...s, side: s.side === 'left' ? 'right' as const : 'left' as const } : s)) }
       expect(failReason(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root, proof: flipped }), 0, 'under-root'))).to.equal('malformed-proof')
     })
-    it('a duplicate row refuses the tree; rows of another election are ignored', () => {
-      const dup = [...rows, { ...set.blocks[1]!.row }]
-      const r = chk(sliceChecks(set.receipts[0]!, dup, voterRows, anchor), 0, 'under-root')
-      expect(failReason(r)).to.equal('tree-refused')
-      if (r.status === 'fail') expect(r.detail).to.contain('duplicate-block')
+    it('a duplicate or malformed row of another block no longer refuses the tree (WR-06); rows of another election are ignored', () => {
+      const dup = [...rows, { ...set.blocks[1]!.row }, { ...set.blocks[1]!.row, Cid: 'NOT-BASE32' }, null]
+      const r = chk(sliceChecks(set.receipts[0]!, dup as SliceBlockRow[], voterRows, anchor), 0, 'under-root')
+      expect(r.status).to.equal('pass')
       const foreign = [...rows, { ...set.blocks[1]!.row, ElectionId: 'another-election', Cid: 'foreign-cid' }]
       expect(chk(sliceChecks(set.receipts[0]!, foreign, voterRows, anchor), 0, 'under-root').status).to.equal('pass')
     })

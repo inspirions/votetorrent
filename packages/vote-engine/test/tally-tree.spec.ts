@@ -644,7 +644,13 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     expect(reason(buildTallyTree(input({ release: null })))).to.equal('not-released')
     const wrong = { secretKey: secp256k1.utils.randomSecretKey(), jointPublicKey: release.jointPublicKey }
     expect(reason(buildTallyTree(input({ release: wrong })))).to.equal('secret-mismatch')
-    expect(reason(buildTallyTree(input({ rows: [...set.rows, set.rows[0]] })))).to.equal('duplicate-block')
+    // WR-06: a duplicate or malformed row is set aside, so the tally still exists and equals the clean one
+    const clean: any = buildTallyTree(input())
+    const noisy: any = buildTallyTree(input({ rows: [...set.rows, set.rows[0], null, { ...set.rows[1]!, Cid: 'NOT-BASE32' }] }))
+    expect(noisy.ok, JSON.stringify(noisy)).to.equal(true)
+    expect(noisy.tally.root).to.equal(clean.tally.root)
+    expect(noisy.blockTree.rejected.map((x: any) => x.reason)).to.deep.equal(['malformed-row', 'malformed-row', 'duplicate-block'])
+    expect(noisy.validation.findings.map((f: any) => f.code)).to.deep.equal(['malformed-row', 'malformed-row', 'duplicate-block'])
     expect(reason(buildTallyTree(input({ rows: [...set.rows, { ...set.rows[0]!, Cid: 'bzz', Id: 'zz', ElectionId: 'other' }] })))).to.equal('mixed-election')
     expect(reason(buildTallyTree(input({ rows: 'x' })))).to.equal('malformed-row')
     expect(reason(buildTallyTree(null as any))).to.equal('malformed-input')

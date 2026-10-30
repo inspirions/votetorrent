@@ -476,14 +476,16 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(fb.findings[0].registrantId).to.equal(mine[2]!.RegistrantId)
     })
 
+    const t0 = (): any => set.blocks[0]!
     it('unknown ballot and malformed rows', () => {
       const b2 = set.blocks[2]!
       expectOnly(run({ ballots: ballotsOpt.filter(b => b.id !== 'ballot-b') }), b2.row.Cid, 'unknown-ballot')
-      const nul = run({ rows: [...set.rows, null] })
-      expect(nul.blocks).to.have.length(5)
-      const nb = nul.blocks.find((b: any) => b.blockCid === '')
-      expect(nb).to.deep.include({ status: 'invalid', declaredEntries: 0 })
-      expect(codesOf(nb)).to.deep.equal(['malformed-row'])
+      // WR-06: a malformed row is a report-level finding, never a block, and touches no other block
+      const nul = run({ rows: [...set.rows, null, { ...t0().row, Cid: 'NOT-BASE32', Id: 'x' }] })
+      expect(nul.blocks).to.have.length(4)
+      for (const b of nul.blocks) expect(b.findings).to.deep.equal([])
+      expect(nul.findings.map((f: any) => [f.code, f.blockCid])).to.deep.equal([['malformed-row', ''], ['malformed-row', 'NOT-BASE32']])
+      expect(nul.totals.blocks).to.equal(4)
       const t = target()
       const bad = run(withRow({ Ciphertext: 7 }))
       const bb = bf(bad, t.row.Cid)
@@ -506,9 +508,19 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(f[0].registrantId).to.equal(vs[0]!.voterEntry.registrantId)
       expect(bf(r, b.row.Cid).status).to.equal('invalid')
     }
+    // WR-06: a second copy is set aside at report level; the block itself keeps no finding
     const dup = run({ rows: [...set.rows, set.rows[0]] })
     expect(dup.totals.blocks).to.equal(4)
-    expect(codesOf(bf(dup, set.rows[0]!.Cid))).to.deep.equal(['duplicate-block'])
+    expect(codesOf(bf(dup, set.rows[0]!.Cid))).to.deep.equal([])
+    expect(dup.findings.map((f: any) => [f.code, f.blockCid, f.severity])).to.deep.equal([['duplicate-block', set.rows[0]!.Cid, 'error']])
+    // a forged row with the honest block's Cid but a ciphertext that does not hash to it never displaces it
+    const forged = { ...set.rows[0]!, Id: '0-forged', Ciphertext: set.rows[1]!.Ciphertext }
+    for (const rows of [[forged, ...set.rows], [...set.rows, forged]]) {
+      const fr = runR({ rows })
+      expect(bf(fr, set.rows[0]!.Cid).status).to.equal('valid')
+      expect(bf(fr, set.rows[0]!.Cid).blockId).to.equal(set.rows[0]!.Id)
+      expect(fr.findings.map((f: any) => f.code)).to.deep.equal(['duplicate-block'])
+    }
     const orphan = run({ voterRows: [...set.voterRows, { ...set.voterRows[0]!, BlockCid: 'nope' }] })
     expect(orphan.findings).to.have.length(1)
     expect(orphan.findings[0]).to.deep.include({ code: 'voter-row-without-block', severity: 'info', blockCid: 'nope' })

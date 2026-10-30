@@ -23,6 +23,10 @@
 // private copy and zero-fills it in a finally block. The caller's array is never modified and never retained,
 // and the report holds no byte array.
 //
+// Row policy (WR-06): the block rows are selected by R5's selectBlockRows, so R7 judges exactly the rows R5
+// makes leaves of. A malformed row and the non-preferred row of a shared Cid or Id are report-level findings
+// (`malformed-row`, `duplicate-block`) and are not blocks of the report; they never touch another block.
+//
 // Rules: the report is deterministic for any input order and the function never reports failure by raising an
 // error; every primitive that can fail on hostile input is wrapped and mapped to a typed finding. Pure for
 // Hermes and the browser: noble-backed relative imports only, no Node-only globals, no logging, no clock, no
@@ -30,6 +34,7 @@
 
 import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { validateVoteEntryAgainstBallot, type AnswerCheckBallot, type FindingSeverity } from './answer-checks.js'
+import { selectBlockRows } from './block-tree.js'
 import { checkElectionSecret, openCommittedBlock } from './open-committed-block.js'
 import { checkPoolPayloadShape, consentDigest, poolBlockCid, poolBlockId, type PoolBallot } from '../pool/pool-block.js'
 import { canonicalJson } from '../voting/canonical.js'
@@ -37,11 +42,12 @@ import { ballotTemplateDigest, voterEntryDigest, VOTER_ENTRY_KEYS, type VoteEntr
 import { verifySigP256 } from '../database/initialize.js'
 
 export const VALIDATION_CODES = Object.freeze([
-  // block, no key needed
+  // block, no key needed ('malformed-row' is also block-level for a kept row with no Ciphertext text)
   'malformed-row', 'duplicate-block', 'cid-mismatch', 'voter-list-malformed', 'voter-list-not-canonical',
   'entry-count-mismatch', 'unknown-ballot', 'template-mismatch', 'voter-row-mismatch', 'voter-row-duplicate',
   'voter-row-unlisted', 'voter-row-missing', 'consent-signature-invalid', 'registrant-in-two-blocks',
-  // report level (not tied to a validated block)
+  // report level (not tied to a validated block); 'malformed-row' and 'duplicate-block' also land here for
+  // rows the R5 selection set aside
   'voter-row-without-block',
   // block, after release
   'block-does-not-open', 'id-mismatch', 'payload-count-mismatch',
@@ -97,7 +103,7 @@ export interface BlockFinding {
 }
 
 export interface ValidationTotals {
-  /** BlockFinding count (duplicate Cids collapse to one) */
+  /** BlockFinding count = the R5 leaf count (rows set aside are report-level findings, not blocks) */
   blocks: number
   /** per block: payload.votes.length if opened, else declaredEntries */
   entries: number
@@ -155,7 +161,7 @@ export type ElectionValidationResult =
     released: boolean
     /** ascending by UTF-8 bytes of Cid */
     blocks: readonly BlockFinding[]
-    /** report-level only (voter-row-without-block) */
+    /** report-level only: rows set aside by the R5 selection, then voter-row-without-block */
     findings: readonly ValidationFinding[]
     totals: ValidationTotals
   }
@@ -232,7 +238,6 @@ interface Work {
   row: Rec | null
   cid: string
   key: string
-  dup: boolean
   fs: ValidationFinding[]
   id: string
   ballotId: string
@@ -307,22 +312,20 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     keepSecret(secret)
   }
 
-  // group rows
-  const works: Work[] = []
-  const groups = new Map<string, Rec[]>()
-  for (const row of input.rows as unknown[]) {
-    if (isRec(row) && isNonEmpty(row.Cid)) {
-      const g = groups.get(row.Cid)
-      if (g === undefined) groups.set(row.Cid, [row])
-      else g.push(row)
-    } else {
-      works.push(newWork(isRec(row) ? row : null, isRec(row) && isStr(row.Cid) ? row.Cid : '', false))
-    }
+  // WR-06: the same rows R5 makes leaves of; the rest are report-level findings
+  const selection = selectBlockRows(input.rows as unknown[], { electionId, electionRevision: revision })
+  if (!selection.ok) {
+    return selection.reason === 'mixed-election' || selection.reason === 'mixed-revision'
+      ? refuse(selection.reason, selection.detail)
+      : refuse('malformed-input', selection.detail)
   }
-  for (const [cid, g] of groups) {
-    const ordered = [...g].sort((a, b) => byString(rowKey(a), rowKey(b)))
-    works.push(newWork(ordered[0]!, cid, ordered.length > 1))
-  }
+  const works: Work[] = selection.accepted.map(row => newWork(row as Rec, (row as Rec).Cid as string))
+  const setAside: ValidationFinding[] = selection.rejected.map(r => ({
+    blockCid: r.cid,
+    code: r.reason,
+    severity: 'error' as const,
+    detail: `a block row was set aside: ${r.detail}`
+  }))
 
   // voter rows by BlockCid
   const voterByCid = new Map<string, Rec[]>()
@@ -367,7 +370,6 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     w.ballotId = row.BallotId
     w.revision = rev
     w.ready = true
-    if (w.dup) add(w, 'duplicate-block', 'two rows carry this Cid')
     try {
       if (poolBlockCid(row.Ciphertext) !== row.Cid) add(w, 'cid-mismatch', 'the Cid is not the digest of the ciphertext')
     } catch {
@@ -591,12 +593,12 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
       ...(regOf(v) !== '' ? { registrantId: regOf(v) } : {})
     })
   }
-  return { ok: true, electionId, electionRevision: revision, released, blocks, findings: orphans, totals }
+  return { ok: true, electionId, electionRevision: revision, released, blocks, findings: [...setAside, ...orphans], totals }
 }
 
-function newWork (row: Rec | null, cid: string, dup: boolean): Work {
+function newWork (row: Rec | null, cid: string): Work {
   return {
-    row, cid, key: rowKey(row), dup, fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, ready: false,
+    row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, ready: false,
     payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0
   }
 }

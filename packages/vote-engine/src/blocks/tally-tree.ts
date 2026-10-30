@@ -415,8 +415,8 @@ export type BuildTallyTreeResult =
   | { ok: false, reason: TallyTreeRefusal, detail: string }
 
 /**
- * buildBlockTree + validateElectionBlocks + tallyTreeFrom. R5 runs first, so duplicate, mixed-scope and malformed
- * rows are refused before any decryption. The release goes only to validateElectionBlocks, which checks the
+ * buildBlockTree + validateElectionBlocks + tallyTreeFrom. R5 runs first, so mixed-scope rows are refused before any
+ * decryption; malformed and duplicate rows are set aside by both R5 and R7 (WR-06) and the rest is tallied. The release goes only to validateElectionBlocks, which checks the
  * secret, copies it and zero-fills the copy; R8 never reads it. A caller who already holds an R7 report should
  * call tallyTreeFrom, to avoid decrypting twice.
  */
