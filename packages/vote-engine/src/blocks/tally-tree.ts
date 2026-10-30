@@ -53,8 +53,8 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { BLOCK_TREE_EMPTY_ROOT, buildBlockTree, type BlockTree } from './block-tree.js'
-import { validateElectionBlocks, type ElectionValidationResult, type ValidationBlockRow, type ValidationCode, type ValidationRelease, type ValidationVoterRow } from './validate-blocks.js'
+import { BLOCK_TREE_EMPTY_ROOT, blockLeafHash, blockNodeHash, buildBlockTree, type BlockTree } from './block-tree.js'
+import { VALIDATION_CODES, validateElectionBlocks, type ElectionValidationResult, type ValidationBlockRow, type ValidationCode, type ValidationRelease, type ValidationVoterRow } from './validate-blocks.js'
 import type { AnswerCheckBallot } from './answer-checks.js'
 import { canonicalJson } from '../voting/canonical.js'
 
@@ -432,4 +432,230 @@ export function buildTallyTree (input: TallyTreeInput): BuildTallyTreeResult {
   const tallied = tallyTreeFrom(built.tree, validation, input.ballots)
   if (!tallied.ok) return tallied
   return { ok: true, tally: tallied.tally, blockTree: built.tree, validation }
+}
+
+export type TallyVerifyFailure =
+  | 'malformed-tally' | 'shape-mismatch' | 'leaf-mismatch' | 'merkle-hash-mismatch'
+  | 'histogram-mismatch' | 'tally-hash-mismatch' | 'root-mismatch'
+
+export type TallyVerifyResult =
+  | { ok: true }
+  | { ok: false, reason: TallyVerifyFailure, detail: string, nodeIndex?: number, leafIndex?: number }
+
+type VerifyFailure = Extract<TallyVerifyResult, { ok: false }>
+
+function vfail (reason: TallyVerifyFailure, detail: string, where: { nodeIndex?: number, leafIndex?: number } = {}): VerifyFailure {
+  return { ok: false, reason, detail, ...where }
+}
+
+/** Largest power of two strictly below n (n >= 2), the R5 split rule. */
+function splitPoint (n: number): number {
+  let k = 1
+  while (k * 2 < n) k *= 2
+  return k
+}
+
+function compareUtf8 (a: string, b: string): number {
+  const x = utf8ToBytes(a)
+  const y = utf8ToBytes(b)
+  const n = Math.min(x.length, y.length)
+  for (let i = 0; i < n; i++) {
+    const d = x[i]! - y[i]!
+    if (d !== 0) return d
+  }
+  return x.length - y.length
+}
+
+/** The post-order node list R5 produces for `size` leaves. */
+function expectedShape (size: number): Array<{ range: [number, number], left?: number, right?: number }> {
+  const out: Array<{ range: [number, number], left?: number, right?: number }> = []
+  const build = (lo: number, hi: number): number => {
+    let entry: { range: [number, number], left?: number, right?: number }
+    if (hi - lo === 1) {
+      entry = { range: [lo, hi] }
+    } else {
+      const k = splitPoint(hi - lo)
+      const left = build(lo, lo + k)
+      const right = build(lo + k, hi)
+      entry = { range: [lo, hi], left, right }
+    }
+    out.push(entry)
+    return out.length - 1
+  }
+  if (size > 0) build(0, size)
+  return out
+}
+
+function exactKeys (o: Rec, keys: readonly string[]): boolean {
+  const have = Object.keys(o).sort(byString)
+  return have.length === keys.length && keys.every((k, i) => have[i] === k)
+}
+
+const get = (o: Rec, k: string): unknown => (own(o, k) ? o[k] : undefined)
+
+function isCountMap (v: unknown): v is Record<string, number> {
+  return isRec(v) && Object.keys(v).every(k => isCount(get(v, k)))
+}
+
+function isWellFormedBallot (b: unknown): b is TallyBallotCounts {
+  if (!isRec(b) || !exactKeys(b, ['excluded', 'invalid', 'questions', 'unsupported', 'votes'])) return false
+  if (!isCount(b.votes) || !isCount(b.invalid) || !isCount(b.excluded)) return false
+  if (!isCountMap(b.unsupported) || !isRec(b.questions)) return false
+  return Object.keys(b.questions).every(code => {
+    const q = get(b.questions as Rec, code)
+    return isRec(q) && exactKeys(q, ['answered', 'options']) && isCount(q.answered) && isCountMap(q.options)
+  })
+}
+
+function isWellFormedHistogram (h: unknown): h is TallyHistogram {
+  if (!isRec(h) || !exactKeys(h, ['ballots']) || !isRec(h.ballots)) return false
+  return Object.keys(h.ballots).every(id => isWellFormedBallot(get(h.ballots as Rec, id)))
+}
+
+/** Why a leaf histogram is not one a block of this size and disposition could have produced; null when fine. */
+function leafBoundProblem (h: TallyHistogram, leaf: TallyLeaf): string | null {
+  const ids = Object.keys(h.ballots)
+  if (ids.length !== 1 || ids[0] !== leaf.ballotId) return 'a leaf histogram must hold exactly its own ballot'
+  const b = get(h.ballots, leaf.ballotId) as TallyBallotCounts
+  if (b.votes !== leaf.entryCount) return 'leaf votes differ from the committed entry count'
+  if (b.invalid + b.excluded > b.votes) return 'invalid and excluded exceed the votes'
+  const valid = b.votes - b.invalid - b.excluded
+  const counts: Array<[string, number, number]> = []
+  for (const code of Object.keys(b.unsupported)) counts.push([`unsupported ${code}`, get(b.unsupported, code) as number, valid])
+  for (const code of Object.keys(b.questions)) {
+    const q = get(b.questions, code) as TallyQuestionCounts
+    counts.push([`question ${code} answered`, q.answered, valid])
+    for (const o of Object.keys(q.options)) counts.push([`question ${code} option ${o}`, get(q.options, o) as number, q.answered])
+  }
+  for (const [what, n, bound] of counts) if (n > bound) return `${what} exceeds its bound`
+  if (leaf.disposition === 'tallied') {
+    if (b.excluded !== 0) return 'a tallied leaf cannot have excluded entries'
+  } else {
+    if (b.excluded !== b.votes || b.invalid !== 0) return 'an excluded leaf must exclude every entry'
+    if (counts.some(([, n]) => n !== 0)) return 'an excluded leaf must hold no counts'
+  }
+  return null
+}
+
+function checkTallyFormat (tally: unknown): VerifyFailure | null {
+  const bad = (detail: string): VerifyFailure => vfail('malformed-tally', detail)
+  if (!isRec(tally)) return bad('the tally is not an object')
+  if (tally.format !== TALLY_TREE_DOMAIN) return bad('unknown tally format')
+  if (typeof tally.electionId !== 'string' || tally.electionId === '') return bad('electionId must be a non-empty string')
+  if (!isCount(tally.electionRevision)) return bad('electionRevision must be a non-negative safe integer')
+  if (!isHex64(tally.blockRoot) || !isHex64(tally.root)) return bad('blockRoot and root must be 64 lowercase hex characters')
+  if (!isCount(tally.size)) return bad('size must be a non-negative safe integer')
+  if (!Array.isArray(tally.leaves) || tally.leaves.length !== tally.size) return bad('leaves must be an array of length size')
+  if (!Array.isArray(tally.nodes) || tally.nodes.length !== (tally.size === 0 ? 0 : 2 * tally.size - 1)) return bad('nodes must be an array of length 2*size-1')
+  if (!isWellFormedHistogram(tally.histogram)) return bad('the root histogram is malformed')
+  for (let i = 0; i < tally.leaves.length; i++) {
+    const l: unknown = tally.leaves[i]
+    if (!isRec(l)) return bad(`leaf ${i} is not an object`)
+    if (!Number.isSafeInteger(l.index)) return bad(`leaf ${i}: index must be an integer`)
+    if (typeof l.blockCid !== 'string' || typeof l.ballotId !== 'string' || typeof l.leafData !== 'string') return bad(`leaf ${i}: blockCid, ballotId and leafData must be strings`)
+    if (!isCount(l.entryCount) || l.entryCount < 1) return bad(`leaf ${i}: entryCount must be a safe integer >= 1`)
+    if (l.disposition !== 'tallied' && l.disposition !== 'excluded') return bad(`leaf ${i}: unknown disposition`)
+    if (!Array.isArray(l.excludedFor) || !l.excludedFor.every(c => typeof c === 'string' && (VALIDATION_CODES as readonly string[]).includes(c))) {
+      return bad(`leaf ${i}: excludedFor must hold validation codes`)
+    }
+  }
+  for (let i = 0; i < tally.nodes.length; i++) {
+    const n: unknown = tally.nodes[i]
+    if (!isRec(n)) return bad(`node ${i} is not an object`)
+    if (!Number.isSafeInteger(n.index)) return bad(`node ${i}: index must be an integer`)
+    if (!Array.isArray(n.range) || n.range.length !== 2 || !Number.isSafeInteger(n.range[0]) || !Number.isSafeInteger(n.range[1])) return bad(`node ${i}: range must be two integers`)
+    if (n.left !== undefined && !Number.isSafeInteger(n.left)) return bad(`node ${i}: left must be an integer`)
+    if (n.right !== undefined && !Number.isSafeInteger(n.right)) return bad(`node ${i}: right must be an integer`)
+    if (!isHex64(n.merkleHash) || !isHex64(n.hash)) return bad(`node ${i}: merkleHash and hash must be 64 lowercase hex characters`)
+    if (!isWellFormedHistogram(n.histogram)) return bad(`node ${i}: histogram is malformed`)
+  }
+  return null
+}
+
+/**
+ * Recomputes every node of an untrusted tally and reports the first failure with its index. Order: format
+ * (before any hashing), shape (leaf order, node order, ranges and children as R5 builds them), leaf data and
+ * disposition rules, then per node in index order the R5 merkle hash, the histogram (a leaf's own bounds, a
+ * parent's sum of its children) and the 0x03 tally hash, and last the root. Never throws.
+ *
+ * What a pass proves: every histogram, every merkle hash and every tally hash is consistent and the branch
+ * from each leaf to the root holds, which is doc/election.md "Validate every Tally and Merkle tree node". What
+ * it does NOT prove: that the leaf histograms match the decrypted blocks. That needs the released key, and the
+ * check is buildTallyTree over the rows and a comparison of the roots.
+ */
+export function verifyTallyTree (tally: unknown): TallyVerifyResult {
+  try {
+    return verifyChecked(tally)
+  } catch {
+    return vfail('malformed-tally', 'the tally could not be read')
+  }
+}
+
+function verifyChecked (input: unknown): TallyVerifyResult {
+  const format = checkTallyFormat(input)
+  if (format !== null) return format
+  const tally = input as unknown as TallyTree
+  const leaves = tally.leaves
+  const nodes = tally.nodes
+
+  // shape
+  for (let i = 0; i < leaves.length; i++) {
+    if (leaves[i]!.index !== i) return vfail('shape-mismatch', `leaf ${i} carries index ${leaves[i]!.index}`, { leafIndex: i })
+    if (i > 0 && compareUtf8(leaves[i - 1]!.blockCid, leaves[i]!.blockCid) >= 0) {
+      return vfail('shape-mismatch', `leaf ${i} is not after leaf ${i - 1} in Cid order`, { leafIndex: i })
+    }
+  }
+  const shape = expectedShape(leaves.length)
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    const want = shape[i]!
+    if (n.index !== i || n.range[0] !== want.range[0] || n.range[1] !== want.range[1] || n.left !== want.left || n.right !== want.right) {
+      return vfail('shape-mismatch', `node ${i} is not where the block tree puts it`, { nodeIndex: i })
+    }
+  }
+
+  // leaf data and disposition rules
+  for (let i = 0; i < leaves.length; i++) {
+    const l = leaves[i]!
+    const bad = (detail: string): VerifyFailure => vfail('leaf-mismatch', `leaf ${i}: ${detail}`, { leafIndex: i })
+    let parsed: unknown
+    try { parsed = JSON.parse(l.leafData) } catch { return bad('leafData is not JSON') }
+    if (!Array.isArray(parsed) || parsed.length !== 6 || canonicalJson(parsed) !== l.leafData) return bad('leafData is not the canonical leaf tuple')
+    const [electionId, electionRevision, ballotId, , cid, entryCount] = parsed as unknown[]
+    if (electionId !== tally.electionId || electionRevision !== tally.electionRevision) return bad('leafData names another election or revision')
+    if (ballotId !== l.ballotId || cid !== l.blockCid || entryCount !== l.entryCount) return bad('leafData differs from the leaf fields')
+    if (l.disposition === 'tallied' ? l.excludedFor.length !== 0 : l.excludedFor.length === 0) return bad('excludedFor does not fit the disposition')
+  }
+
+  // nodes
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]!
+    if (n.range[1] - n.range[0] === 1) {
+      const leaf = leaves[n.range[0]]!
+      if (n.merkleHash !== blockLeafHash(leaf.leafData)) return vfail('merkle-hash-mismatch', `leaf node ${i}: merkle hash is not the leaf hash`, { nodeIndex: i })
+      const problem = leafBoundProblem(n.histogram, leaf)
+      if (problem !== null) return vfail('histogram-mismatch', `leaf node ${i}: ${problem}`, { nodeIndex: i })
+    } else {
+      const left = nodes[n.left!]!
+      const right = nodes[n.right!]!
+      if (n.merkleHash !== blockNodeHash(left.merkleHash, right.merkleHash)) return vfail('merkle-hash-mismatch', `node ${i}: merkle hash is not the hash of its children`, { nodeIndex: i })
+      if (canonicalJson(n.histogram) !== canonicalJson(addHistograms(left.histogram, right.histogram))) {
+        return vfail('histogram-mismatch', `node ${i}: histogram is not the sum of its children`, { nodeIndex: i })
+      }
+    }
+    if (n.hash !== tallyNodeHash(n.merkleHash, n.histogram)) return vfail('tally-hash-mismatch', `node ${i}: hash is not the tally hash`, { nodeIndex: i })
+  }
+
+  // root
+  if (nodes.length === 0) {
+    if (tally.blockRoot !== BLOCK_TREE_EMPTY_ROOT) return vfail('root-mismatch', 'blockRoot is not the empty root')
+    if (canonicalJson(tally.histogram) !== canonicalJson({ ballots: {} })) return vfail('root-mismatch', 'the empty tally must have an empty histogram')
+    if (tally.root !== tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} })) return vfail('root-mismatch', 'root is not the empty tally hash')
+    return { ok: true }
+  }
+  const last = nodes[nodes.length - 1]!
+  if (tally.blockRoot !== last.merkleHash) return vfail('root-mismatch', 'blockRoot is not the last node merkle hash')
+  if (tally.root !== last.hash) return vfail('root-mismatch', 'root is not the last node hash')
+  if (canonicalJson(tally.histogram) !== canonicalJson(last.histogram)) return vfail('root-mismatch', 'the root histogram is not the last node histogram')
+  return { ok: true }
 }
