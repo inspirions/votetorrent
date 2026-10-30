@@ -638,7 +638,13 @@ grouped as the source groups them:
   `duplicate-voter`, `voter-list-mismatch`, `voter-entry-scope-mismatch`,
   `voter-entry-malformed`, `voter-entry-signature-invalid`,
   `voter-entry-ballot-missing`, `voter-entry-device-key-mismatch`.
-- Per vote, after the release: `vote-does-not-open`, `vote-not-json`.
+- Per vote, after the release: `vote-does-not-open`, `vote-not-json`
+  (the decrypted text does not parse, or has no canonical form), and
+  `vote-not-canonical` (info): the decrypted text parses but is not the
+  canonical JSON of its entry. A Voter encrypts the canonical form, so
+  any other text is a client fingerprint inside the block that weakens
+  unlinkability. The vote is still judged on its entry and counts if it
+  is valid.
 - Per vote, the answer codes: `malformed-ballot`, `malformed-entry`,
   `wrong-election`, `wrong-revision`, `wrong-ballot`,
   `template-digest-mismatch`, `bad-nonce`, `answers-not-sorted`,

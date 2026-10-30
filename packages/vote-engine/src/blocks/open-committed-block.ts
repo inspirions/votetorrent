@@ -38,7 +38,18 @@ export type ElectionSecretCheck =
   | { ok: false, reason: 'invalid-secret' | 'secret-mismatch', detail: string }
 
 export type OpenedBlockVote =
-  | { ok: true, index: number, entry: unknown, entryJson: string }
+  | {
+    ok: true
+    index: number
+    entry: unknown
+    /** canonicalJson(entry) */
+    entryJson: string
+    /**
+     * IN-07: v:2 only, whether the decrypted text was already canonicalJson(entry). A Voter encrypts the canonical
+     * form; any other text is a client fingerprint inside a block (D-23 unlinkability). Always true for v:1.
+     */
+    canonical: boolean
+  }
   | { ok: false, index: number, reason: 'vote-does-not-open' | 'vote-not-json', detail: string }
 
 export type OpenCommittedBlockFailure =
@@ -99,20 +110,29 @@ function openVotes (row: CommittedBlockRow, secretKey: Uint8Array, electionKey: 
         out.push({ ok: false, index, reason: 'vote-does-not-open', detail: `${o.reason}: ${o.detail}` })
         return
       }
+      let entry: unknown
       try {
-        const entry: unknown = JSON.parse(o.voteEntryJson)
-        out.push({ ok: true, index, entry, entryJson: canonicalJson(entry) })
+        entry = JSON.parse(o.voteEntryJson)
       } catch (error) {
-        out.push({ ok: false, index, reason: 'vote-not-json', detail: `a decrypted vote is not canonical JSON: ${error instanceof Error ? error.message : 'unreadable'}` })
+        out.push({ ok: false, index, reason: 'vote-not-json', detail: `a decrypted vote is not JSON: ${error instanceof Error ? error.message : 'unreadable'}` })
+        return
       }
+      let entryJson: string
+      try {
+        entryJson = canonicalJson(entry)
+      } catch (error) {
+        out.push({ ok: false, index, reason: 'vote-not-json', detail: `a decrypted vote has no canonical JSON form: ${error instanceof Error ? error.message : 'unreadable'}` })
+        return
+      }
+      out.push({ ok: true, index, entry, entryJson, canonical: entryJson === o.voteEntryJson })
     })
     return out
   }
   payload.votes.forEach((entry, index) => {
     try {
-      out.push({ ok: true, index, entry, entryJson: canonicalJson(entry) })
+      out.push({ ok: true, index, entry, entryJson: canonicalJson(entry), canonical: true })
     } catch (error) {
-      out.push({ ok: false, index, reason: 'vote-not-json', detail: `a clear vote is not canonical JSON: ${error instanceof Error ? error.message : 'unreadable'}` })
+      out.push({ ok: false, index, reason: 'vote-not-json', detail: `a clear vote has no canonical JSON form: ${error instanceof Error ? error.message : 'unreadable'}` })
     }
   })
   return out

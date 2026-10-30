@@ -866,6 +866,36 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     })
   })
 
+  it('VB-14 (IN-07) a non-canonical decrypted vote is flagged (info) and still judged; a non-JSON one names the parse failure', () => {
+    const e = makeFixtureElection({ ballotIds: ['ballot-a'] })
+    const ballot = e.ballots[0]!
+    const plain = [0, 1, 2].map(i => makeFixtureVoter(e, ballot, i))
+    const v1 = plain[1]!
+    const loose = encryptVoteEntry(e.electionKey, 'ballot-a', JSON.stringify(v1.voteEntry, null, 1))
+    const v2 = plain[2]!
+    const notJson = encryptVoteEntry(e.electionKey, 'ballot-a', '{"v":1,')
+    const voters = [
+      plain[0]!,
+      { ...v1, voteCiphertext: loose, contribution: { ...v1.contribution, voteCiphertext: loose } },
+      { ...v2, voteCiphertext: notJson, contribution: { ...v2.contribution, voteCiphertext: notJson } }
+    ]
+    const fx = makeCommittedBlock(e, ballot, voters)
+    const r: any = validateElectionBlocks({
+      scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [optional(ballot.template)], ...fixtureAuthorization(voters),
+      release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey }
+    } as any)
+    assertTotals(r)
+    const b = r.blocks[0]
+    expect(b.status).to.equal('valid')
+    const flagged = b.findings.filter((f: any) => f.code === 'vote-not-canonical')
+    expect(flagged).to.have.length(1)
+    expect(flagged[0]).to.deep.include({ severity: 'info' })
+    expect(b.votes.find((v: any) => v.index === flagged[0].voteIndex).status).to.equal('valid')
+    const nj = b.findings.find((f: any) => f.code === 'vote-not-json')
+    expect(nj.detail).to.match(/^a decrypted vote is not JSON: /)
+    expect(r.totals).to.include({ valid: 2, invalid: 1 })
+  })
+
   it('VB-11 finding order inside a block is fixed', () => {
     const t = set.blocks[0]!
     const mine = set.voterRows.filter(v => v.BlockCid === t.row.Cid)

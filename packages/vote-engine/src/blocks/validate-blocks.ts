@@ -72,8 +72,8 @@ export const VALIDATION_CODES = Object.freeze([
   'not-a-payload', 'counts-differ', 'voter-count-mismatch', 'not-canonical-order', 'duplicate-vote', 'duplicate-voter',
   'voter-list-mismatch', 'voter-entry-scope-mismatch',
   'voter-entry-malformed', 'voter-entry-signature-invalid', 'voter-entry-ballot-missing', 'voter-entry-device-key-mismatch',
-  // per vote, after release
-  'vote-does-not-open', 'vote-not-json',
+  // per vote, after release ('vote-not-canonical' is info: IN-07)
+  'vote-does-not-open', 'vote-not-json', 'vote-not-canonical',
   // per vote, the answer-checks codes, repeated literally so the union stays closed and greppable
   'malformed-ballot', 'malformed-entry', 'wrong-election', 'wrong-revision', 'wrong-ballot', 'template-digest-mismatch',
   'bad-nonce', 'answers-not-sorted', 'duplicate-question', 'unknown-question', 'empty-answer', 'unknown-option',
@@ -84,7 +84,7 @@ export const VALIDATION_CODES = Object.freeze([
 export type ValidationCode = typeof VALIDATION_CODES[number]
 
 /** Severity 'info' exactly for these; every other code is 'error'. */
-export const VALIDATION_INFO_CODES = Object.freeze(['voter-row-without-block', 'blank-required', 'unsupported-question-type'] as const)
+export const VALIDATION_INFO_CODES = Object.freeze(['voter-row-without-block', 'vote-not-canonical', 'blank-required', 'unsupported-question-type'] as const)
 
 export interface ValidationFinding {
   /** '' only for a row whose Cid is not a string */
@@ -652,6 +652,10 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
           add(w, ov.reason, ov.detail, { voteIndex: ov.index })
           w.votes.push({ index: ov.index, status: 'invalid', codes: [ov.reason] })
           continue
+        }
+        if (!ov.canonical) {
+          // IN-07: the vote still counts; the non-canonical text is a client fingerprint inside the block (D-23)
+          add(w, 'vote-not-canonical', 'the decrypted vote text is not the canonical JSON of its entry', { voteIndex: ov.index })
         }
         if (known === undefined) {
           add(w, 'unknown-ballot', 'no ballot template matches the block BallotId', { voteIndex: ov.index })
