@@ -43,3 +43,6 @@ export * from './voting/index.js'
 // Spike 102: vote pools (block negotiation through the authority's rendezvous). Named-export
 // barrel; see src/pool/index.ts.
 export * from './pool/index.js'
+// Phase 65 Plan 05 (D-50/D-51): the R5 block Merkle tree. Named-export barrel; see
+// src/blocks/index.ts. rn-entry and browser-entry exposure is decided in 65-09 (D-52).
+export * from './blocks/index.js'

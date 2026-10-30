@@ -87,7 +87,9 @@ export async function attachPoolRendezvous (libp2p: Libp2pLike, rendezvous: Pool
 /**
  * A voter's client for a rendezvous reachable at `target` (whatever the node's `dialProtocol`
  * accepts: a PeerId, a Multiaddr or a Multiaddr list — built by the caller, which owns libp2p).
- * One stream per request. A failed dial or a timeout throws; an `error` reply is returned.
+ * One stream per request. A failed dial or a timeout throws; an `error` reply is returned. A throw
+ * after the request frame was sent carries `requestSent: true`: the host may have acted on it, so a
+ * failover must not resend it elsewhere (pool-failover.ts).
  */
 export function createLibp2pRendezvousClient (libp2p: Libp2pLike, target: unknown, options: { requestTimeoutMs?: number } = {}): PoolRendezvousClient {
   const requestTimeoutMs = options.requestTimeoutMs ?? 8_000
@@ -100,7 +102,11 @@ export function createLibp2pRendezvousClient (libp2p: Libp2pLike, target: unknow
         const stream = await libp2p.dialProtocol(target, POOL_RENDEZVOUS_PROTOCOL, { signal: controller.signal, runOnLimitedConnection: true })
         try {
           sendFrame(stream, request)
-          return await readFrame(stream, timeoutMs) as RendezvousReply
+          try {
+            return await readFrame(stream, timeoutMs) as RendezvousReply
+          } catch (err) {
+            throw Object.assign(err instanceof Error ? err : new Error(String(err)), { requestSent: true as const })
+          }
         } finally {
           try { await stream.close() } catch { /* best effort */ }
         }

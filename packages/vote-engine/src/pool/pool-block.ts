@@ -9,7 +9,7 @@
 // VoteBlockVoter CHECKs: block id/cid shape, voter list frozen, one vote per registrant per
 // ballot, the signature over Digest('VoteBlockVoter', …), the voting window, the association).
 
-import type { Database } from '@quereus/quereus'
+import type { Database, SqlValue } from '@quereus/quereus'
 import type { ElectionBlockPayload, ElectionKeyRecord } from '@votetorrent/vote-core'
 import { cid, digestFields, resolveHasher, resolveOutputEncoder } from '@optimystic/quereus-plugin-crypto'
 import { serializeBlockCiphertext } from '../crypto/index.js'
@@ -121,6 +121,48 @@ export type PoolBlockCheck = { ok: true } | { ok: false, reason: string }
 const sameOrder = (a: readonly unknown[], b: readonly unknown[]): boolean =>
   a.length === b.length && a.every((x, i) => canonicalJson(x) === canonicalJson(b[i]))
 
+export type PoolPayloadShapeCode =
+  | 'not-a-payload' | 'counts-differ' | 'voter-count-mismatch' | 'not-canonical-order'
+  | 'duplicate-vote' | 'duplicate-voter' | 'voter-list-mismatch' | 'voter-entry-scope-mismatch'
+
+export type PoolPayloadShapeCheck =
+  | { ok: true }
+  | { ok: false, code: PoolPayloadShapeCode, stage: 'structure' | 'records', reason: string }
+
+/**
+ * Payload structure + record checks shared by checkFormedPoolBlock (member side) and R7 (validator
+ * side). Accepts v:1 and v:2 payloads (no version check; checkFormedPoolBlock keeps its own v:2
+ * check). `reason` is the legacy checkFormedPoolBlock string. `scope` adds the voter-entry
+ * election/revision check. May throw only where the legacy code did (a non-JSON value inside the
+ * arrays); R7 wraps the call.
+ */
+export function checkPoolPayloadShape (
+  payload: ElectionBlockPayload, registrantIds: readonly string[], scope?: { electionId: string, revision: number }
+): PoolPayloadShapeCheck {
+  const p = payload
+  const fail = (code: PoolPayloadShapeCode, stage: 'structure' | 'records', reason: string): PoolPayloadShapeCheck => ({ ok: false, code, stage, reason })
+  if (p === null || typeof p !== 'object' || !Array.isArray(p.votes) || !Array.isArray(p.voterRecords)) {
+    return fail('not-a-payload', 'structure', 'the block is not a pool block')
+  }
+  if (p.votes.length !== p.voterRecords.length) return fail('counts-differ', 'structure', 'vote and voter counts differ')
+  if (p.votes.length !== registrantIds.length) return fail('voter-count-mismatch', 'structure', 'the voter list does not match the entries')
+  if (!sameOrder(p.votes, sortByCanonicalBytes(p.votes)) || !sameOrder(p.voterRecords, sortByCanonicalBytes(p.voterRecords))) {
+    return fail('not-canonical-order', 'structure', 'the entries are not in canonical order')
+  }
+  if (new Set(p.votes as string[]).size !== p.votes.length) return fail('duplicate-vote', 'records', 'a vote appears twice')
+  const ids = (p.voterRecords as VoterEntry[]).map(r => r?.registrantId)
+  if (new Set(ids).size !== ids.length) return fail('duplicate-voter', 'records', 'a voter appears twice')
+  if (canonicalJson([...ids].sort()) !== canonicalJson(registrantIds)) return fail('voter-list-mismatch', 'records', 'the voter list does not match the entries')
+  if (scope !== undefined) {
+    for (const r of p.voterRecords as VoterEntry[]) {
+      if (r?.electionId !== scope.electionId || r?.electionRevision !== scope.revision) {
+        return fail('voter-entry-scope-mismatch', 'records', 'a voter entry is for another election or revision')
+      }
+    }
+  }
+  return { ok: true }
+}
+
 /**
  * What a member checks before it signs a formed block. Every refusal names its reason (the former
  * relays it to the pool); a member never signs a block that fails any of these.
@@ -129,23 +171,14 @@ export function checkFormedPoolBlock (block: FormedPoolBlock, mine: PoolContribu
   const p = block.payload
   if (p?.v !== 2 || !Array.isArray(p.votes) || !Array.isArray(p.voterRecords)) return { ok: false, reason: 'the block is not a pool block' }
   if (block.templateDigest !== ballot.templateDigest) return { ok: false, reason: 'the block names another ballot template' }
-  if (p.votes.length !== p.voterRecords.length) return { ok: false, reason: 'vote and voter counts differ' }
-  if (p.votes.length !== block.registrantIds.length) return { ok: false, reason: 'the voter list does not match the entries' }
-  if (!sameOrder(p.votes, sortByCanonicalBytes(p.votes)) || !sameOrder(p.voterRecords, sortByCanonicalBytes(p.voterRecords))) {
-    return { ok: false, reason: 'the entries are not in canonical order' }
-  }
+  // The shared shape is computed once. Its structure failures are reported before the member's own
+  // entry checks and its record failures after them: exactly the legacy first-failure order.
+  const shape = checkPoolPayloadShape(p, block.registrantIds, { electionId: ballot.electionKey.electionId, revision: ballot.electionKey.revision })
+  if (!shape.ok && shape.stage === 'structure') return { ok: false, reason: shape.reason }
   if (p.votes.filter(v => v === mine.voteCiphertext).length !== 1) return { ok: false, reason: 'my vote is missing or altered' }
   const myEntry = canonicalJson(mine.voterEntry)
   if (p.voterRecords.filter(r => canonicalJson(r) === myEntry).length !== 1) return { ok: false, reason: 'my voter entry is missing or altered' }
-  if (new Set(p.votes as string[]).size !== p.votes.length) return { ok: false, reason: 'a vote appears twice' }
-  const ids = (p.voterRecords as VoterEntry[]).map(r => r?.registrantId)
-  if (new Set(ids).size !== ids.length) return { ok: false, reason: 'a voter appears twice' }
-  if (canonicalJson([...ids].sort()) !== canonicalJson(block.registrantIds)) return { ok: false, reason: 'the voter list does not match the entries' }
-  for (const r of p.voterRecords as VoterEntry[]) {
-    if (r?.electionId !== ballot.electionKey.electionId || r?.electionRevision !== ballot.electionKey.revision) {
-      return { ok: false, reason: 'a voter entry is for another election or revision' }
-    }
-  }
+  if (!shape.ok) return { ok: false, reason: shape.reason }
   if (poolBlockId(p) !== block.blockId) return { ok: false, reason: 'the block id is not the digest of the payload' }
   let rederived: string
   try {
@@ -170,7 +203,7 @@ export async function commitPoolBlock (
   ballot: PoolBallot,
   signatures: readonly ConsentSignature[],
   clock: { nowMs: number, now: string }
-): Promise<{ ok: true } | { ok: false, reason: string }> {
+): Promise<PoolCommitResult> {
   if (signatures.length !== block.registrantIds.length) return { ok: false, reason: 'not every member signed' }
   await db.exec('BEGIN')
   try {
@@ -196,6 +229,63 @@ export async function commitPoolBlock (
     return { ok: true }
   } catch (err) {
     try { await db.exec('ROLLBACK') } catch { /* the failed commit already rolled back */ }
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+    const reason = err instanceof Error ? err.message : String(err)
+    if (classifyCommitFailure(reason) !== 'duplicate-voter') return { ok: false, reason }
+    // Name who collided: one point lookup per registrant (no IN list), after ROLLBACK so the read
+    // sees committed rows only. Each lookup has three outcomes (WR-03): a row of ANOTHER block (that
+    // voter already voted), a row of THIS block (the distributed commit landed but threw: that voter
+    // is in this very block), or unknown (no row yet, or the lookup threw).
+    const duplicateRegistrants: string[] = []
+    const unknown: string[] = []
+    for (const registrantId of block.registrantIds) {
+      try {
+        const row = await firstRow(
+          db,
+          'select BlockCid from VoteBlockVoter where ElectionId = :e and BallotId = :b and RegistrantId = :reg',
+          { e: ballot.electionKey.electionId, b: ballot.ballotId, reg: registrantId }
+        )
+        if (typeof row?.BlockCid !== 'string') unknown.push(registrantId)
+        else if (row.BlockCid !== block.cid) duplicateRegistrants.push(registrantId)
+        // else: this block's own row, never a duplicate
+      } catch {
+        unknown.push(registrantId)
+      }
+    }
+    // The error text may name the colliding key; it is believed only for registrants the lookups
+    // could not place, never over positive evidence that the row is this block's.
+    if (duplicateRegistrants.length === 0) duplicateRegistrants.push(...registrantsNamedInCommitError(reason, unknown))
+    return { ok: false, reason, duplicateRegistrants }
   }
+}
+
+async function firstRow (db: Database, sql: string, params: Record<string, SqlValue>): Promise<Record<string, SqlValue> | undefined> {
+  for await (const row of db.eval(sql, params)) return row as Record<string, SqlValue>
+  return undefined
+}
+
+/** `duplicateRegistrants` is present only when the failure classified as 'duplicate-voter'. */
+export type PoolCommitResult = { ok: true } | { ok: false, reason: string, duplicateRegistrants?: string[] }
+
+/**
+ * A commit error caused by a voter who already has a VoteBlockVoter row: the local UNIQUE failure
+ * or the distributed "key ... is already taken" (both shapes recorded by spike 101).
+ */
+export function classifyCommitFailure (message: string): 'duplicate-voter' | 'other' {
+  if (/UNIQUE constraint failed: VoteBlockVoter\./.test(message)) return 'duplicate-voter'
+  if (/Tree collection [^\s]*\/VoteBlockVoter: key .* is already taken/.test(message)) return 'duplicate-voter'
+  return 'other'
+}
+
+/**
+ * The registrants of `registrantIds` that the error text names as a key component, framed exactly
+ * as `\u0002<id>\u0000` (as 6-character escape text, or as the literal control characters). Exact
+ * framing keeps `b-reg-1` from matching inside `b-reg-15`; no pattern is built from the id.
+ */
+export function registrantsNamedInCommitError (message: string, registrantIds: readonly string[]): string[] {
+  const out: string[] = []
+  for (const id of registrantIds) {
+    if (out.includes(id)) continue
+    if (message.includes('\\u0002' + id + '\\u0000') || message.includes('\u0002' + id + '\u0000')) out.push(id)
+  }
+  return out
 }

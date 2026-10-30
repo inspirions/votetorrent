@@ -10,12 +10,15 @@ import { Database } from '@quereus/quereus'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/curves/utils.js'
 import { ed25519 } from '@noble/curves/ed25519.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { registerDbPlugins } from '../src/database/initialize.js'
 import { encryptVoteEntry, openElectionBlock, openVoteEntries } from '../src/key-release/index.js'
 import {
   PoolAgent,
   PoolRendezvous,
   checkFormedPoolBlock,
+  commitPoolBlock,
   consentDigest,
   createInMemoryRendezvousClient,
   ed25519PublicKeyFromPeerId,
@@ -32,9 +35,24 @@ import {
   type FormedPoolBlock,
   type PoolBallot,
   type PoolContribution,
+  poolTopic,
+  type PoolDiscovery,
+  type RendezvousRequest,
+  type RendezvousReply,
   type PoolIdentity,
+  type PoolAgentOptions,
   type PoolOutcome
 } from '../src/pool/index.js'
+import * as poolBlock from '../src/pool/pool-block.js'
+import {
+  POOL_LADDER_DWELL_PRESENTS,
+  POOL_LADDER_MAX_MS,
+  POOL_LADDER_RUNG_BITS,
+  POOL_TOPIC_MAX_CHARS,
+  ladderBucket,
+  ladderTopic,
+  rendezvousDiscovery
+} from '../src/pool/pool-discovery.js'
 import { fromBase64url, toBase64url } from '../src/pool/pool-codec.js'
 import type { VoterEntry } from '../src/voting/index.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
@@ -244,48 +262,144 @@ describe('pool (spike 102): rendezvous', () => {
 describe('pool (spike 102): agents negotiate through the rendezvous', function () {
   this.timeout(30_000)
 
-  interface Run { outcomes: PoolOutcome[], commits: Array<{ block: FormedPoolBlock, signatures: ConsentSignature[] }>, rendezvous: PoolRendezvous }
+  interface Run {
+    hijackReplies: string[]
+    outcomes: PoolOutcome[]
+    commits: Array<{ block: FormedPoolBlock, signatures: ConsentSignature[] }>
+    rendezvous: PoolRendezvous
+    commitCalls: number
+    logs: Array<{ i: number, event: string, detail?: Record<string, unknown> }>
+    requests: Array<{ i: number, t: string, topic: string, at: number }>
+    discoveryCalls: Array<{ i: number, t: string, topic: string, at: number }>
+    startedAt: number
+    deadlineAt: number
+    commitAt: number[]
+  }
 
   async function runAgents (voters: TestVoter[], opts: {
     deadlineMs?: number
     abortWhenMember?: number
     badSigner?: number
     quietMs?: number
+    preVoted?: number[]
+    preVotedReadable?: boolean
+    /** the duplicate's earlier row becomes readable only this long after the failed commit */
+    readableAfterMs?: number
+    /** a dishonest former: the first commit holding this voter's signature claims it already voted */
+    lieAbout?: number
+    /** a peer that knows this voter's vote ciphertext keeps sending it inform + already-voted */
+    hijack?: number
+    /** per-agent delay before run() starts */
+    startDelayMs?: number[]
+    /** spread LAST into every agent's options (explicit undefined included) */
+    extra?: Partial<PoolAgentOptions>
+    ladder?: boolean | boolean[]
+    rungDwellTicks?: number
+    ladderMaxMs?: number
+    formLeadMs?: number
+    presentIntervalMs?: number
+    injectDiscovery?: boolean
   } = {}): Promise<Run> {
     const rendezvous = new PoolRendezvous()
     const commits: Run['commits'] = []
-    const committedRegistrants = new Set<string>()
+    const committedRegistrants = new Set<string>((opts.preVoted ?? []).map(i => voters[i]!.contribution.voterEntry.registrantId))
+    const readable = new Set<string>()
+    const logs: Run['logs'] = []
+    let commitCalls = 0
+    const requests: Run['requests'] = []
+    const discoveryCalls: Run['discoveryCalls'] = []
+    const commitAt: number[] = []
+    const startedAt = Date.now()
     const deadlineAt = Date.now() + (opts.deadlineMs ?? 20_000)
+    let lied = false
+    let hijacking = opts.hijack !== undefined
+    const hijacker = createPoolIdentity()
+    const hijackClient = createInMemoryRendezvousClient(rendezvous, 'transport-hijacker')
+    const hijackReplies: string[] = []
+    const drainHijacker = async (): Promise<void> => {
+      const r = await hijackClient.call(poolRequests.poll(hijacker, 0, Date.now()))
+      if (r.t === 'envelopes') for (const e of r.list) hijackReplies.push(openPoolEnvelope<{ t: string }>(hijacker, e).body.t)
+    }
+    const hijackLoop = (async () => {
+      if (opts.hijack === undefined) return
+      const victim = voters[opts.hijack]!
+      const hold = bytesToHex(sha256(utf8ToBytes(victim.contribution.voteCiphertext)))
+      for (let n = 0; hijacking; n++) {
+        const to = victim.identity.peerId
+        await hijackClient.call(poolRequests.send(sealPoolEnvelope(hijacker, to, { t: 'inform', id: `hijack-${n}`, topic: poolTopic(ballot), size: 9, hold })))
+        await hijackClient.call(poolRequests.send(sealPoolEnvelope(hijacker, to, { t: 'outcome', topic: poolTopic(ballot), committed: false, reason: 'already voted', code: 'already-voted' })))
+        await new Promise(resolve => setTimeout(resolve, 50))
+        await drainHijacker()
+      }
+      await drainHijacker()
+    })()
     const outcomes = await Promise.all(voters.map(async (v, i) => {
       const controller = new AbortController()
+      const inner = createInMemoryRendezvousClient(rendezvous, `transport-${i}`)
+      const recorder = {
+        async call (request: RendezvousRequest, extraWaitMs?: number): Promise<RendezvousReply> {
+          if (request.t === 'present' || request.t === 'withdraw') requests.push({ i, t: request.t, topic: request.topic, at: Date.now() })
+          return await inner.call(request, extraWaitMs)
+        }
+      }
+      const plainDiscovery = rendezvousDiscovery(createInMemoryRendezvousClient(rendezvous, `transport-${i}`), v.identity)
+      const discovery: PoolDiscovery = {
+        async present (topic, size, now) { discoveryCalls.push({ i, t: 'present', topic, at: Date.now() }); return await plainDiscovery.present(topic, size, now) },
+        async withdraw (topic, now) { discoveryCalls.push({ i, t: 'withdraw', topic, at: Date.now() }); await plainDiscovery.withdraw(topic, now) }
+      }
+      const ladderOpt = Array.isArray(opts.ladder) ? opts.ladder[i] : opts.ladder
       const agent = new PoolAgent({
         identity: v.identity,
-        rendezvous: createInMemoryRendezvousClient(rendezvous, `transport-${i}`),
+        rendezvous: recorder,
+        ...(opts.injectDiscovery === true ? { discovery } : {}),
+        ...(ladderOpt !== undefined ? { ladder: ladderOpt } : {}),
+        ...(opts.rungDwellTicks !== undefined ? { rungDwellTicks: opts.rungDwellTicks } : {}),
+        ...(opts.ladderMaxMs !== undefined ? { ladderMaxMs: opts.ladderMaxMs } : {}),
         ballot,
         contribution: v.contribution,
         signConsent: async (digest) => (opts.badSigner === i ? 'aa'.repeat(64) : signDigestP256(digest, v.priv)),
         commit: async (block, signatures) => {
-          if (signatures.some(s => committedRegistrants.has(s.registrantId))) return { ok: false, reason: 'a voter already voted' }
+          commitCalls++
+          commitAt.push(Date.now())
+          const liar = opts.lieAbout === undefined ? undefined : voters[opts.lieAbout]!.contribution.voterEntry.registrantId
+          if (!lied && liar !== undefined && signatures.some(s => s.registrantId === liar)) {
+            lied = true
+            return { ok: false, reason: 'a voter already voted', duplicateRegistrants: [liar] }
+          }
+          if (signatures.some(s => committedRegistrants.has(s.registrantId))) {
+            const duplicateRegistrants = signatures.map(s => s.registrantId).filter(r => committedRegistrants.has(r))
+            if (opts.preVotedReadable === true) for (const r of duplicateRegistrants) readable.add(r)
+            if (opts.readableAfterMs !== undefined) setTimeout(() => { for (const r of duplicateRegistrants) readable.add(r) }, opts.readableAfterMs)
+            return { ok: false, reason: 'a voter already voted', duplicateRegistrants }
+          }
           for (const s of signatures) committedRegistrants.add(s.registrantId)
           commits.push({ block, signatures })
           return { ok: true }
         },
-        findRecordedVote: async () => commits.find(c => c.signatures.some(s => s.registrantId === v.contribution.voterEntry.registrantId))?.block.cid ?? null,
+        findRecordedVote: async () => readable.has(v.contribution.voterEntry.registrantId)
+          ? `prevoted-cid-${v.contribution.voterEntry.registrantId}`
+          : commits.find(c => c.signatures.some(s => s.registrantId === v.contribution.voterEntry.registrantId))?.block.cid ?? null,
+        log: (event, detail) => { logs.push({ i, event, detail }) },
         quietMs: opts.quietMs ?? 400,
-        presentIntervalMs: 60,
+        presentIntervalMs: opts.presentIntervalMs ?? 60,
         replyTimeoutMs: 400,
         informAttempts: 2,
         signTimeoutMs: 1_500,
         memberTimeoutMs: 3_000,
         pollWaitMs: 200,
-        formLeadMs: 0,
+        formLeadMs: opts.formLeadMs ?? 0,
         deadlineAt,
-        onStatus: (s) => { if (opts.abortWhenMember === i && s.phase === 'member') controller.abort() }
+        onStatus: (s) => { if (opts.abortWhenMember === i && s.phase === 'member') controller.abort() },
+        ...opts.extra
       })
+      const delay = opts.startDelayMs?.[i] ?? 0
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
       return await agent.run(controller.signal)
     }))
+    hijacking = false
+    await hijackLoop
     rendezvous.close()
-    return { outcomes, commits, rendezvous }
+    return { hijackReplies, outcomes, commits, rendezvous, commitCalls, logs, requests, discoveryCalls, startedAt, deadlineAt, commitAt }
   }
 
   it('five voters converge on ONE block of five; every signature verifies; each learns the cid', async () => {
@@ -302,6 +416,24 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     const run = await runAgents([0, 1].map(makeVoter), { deadlineMs: 2_000 })
     expect(run.commits).to.deep.equal([])
     expect(run.outcomes).to.deep.equal([{ status: 'stopped', reason: 'deadline' }, { status: 'stopped', reason: 'deadline' }])
+  })
+
+  it('IN-01 minSize below the floor is clamped after the options spread: two voters with minSize 2 still never form', async () => {
+    const run = await runAgents([0, 1].map(makeVoter), { deadlineMs: 2_000, extra: { minSize: 2 } })
+    expect(run.commits).to.deep.equal([])
+    expect(run.outcomes).to.deep.equal([{ status: 'stopped', reason: 'deadline' }, { status: 'stopped', reason: 'deadline' }])
+  })
+
+  it('IN-01 an explicit undefined ladder / rungDwellTicks takes the defaults: the lone coordinator still climbs 2-bit, 1-bit, plain', async () => {
+    const v = makeVoter(0)
+    const run = await runAgents([v], { quietMs: 5_000, deadlineMs: 1_500, extra: { ladder: undefined, rungDwellTicks: undefined } })
+    const topics = run.requests.filter(r => r.i === 0 && r.t === 'present').map(r => r.topic)
+    const plain = poolTopic(ballot)
+    const hold = bytesToHex(sha256(utf8ToBytes(v.contribution.voteCiphertext)))
+    expect(topics.length).to.be.at.least(8)
+    expect(topics.slice(0, 3)).to.deep.equal(Array(3).fill(ladderTopic(plain, 2, [hold])))
+    expect(topics.slice(3, 6)).to.deep.equal(Array(3).fill(ladderTopic(plain, 1, [hold])))
+    expect(topics.slice(6)).to.deep.equal(Array(topics.length - 6).fill(plain))
   })
 
   it('a member that goes silent after merging is dropped after retries; the other four still commit', async () => {
@@ -353,5 +485,629 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     const run = await runAgents(voters)
     expect(run.commits).to.have.length(1)
     expect(run.rendezvous.stats.send).to.be.greaterThan(0)
+  })
+
+  describe('a duplicate voter at commit (R1)', () => {
+    const highest = (vs: TestVoter[]) => vs.reduce((m, v, i) => (v.identity.peerId > vs[m]!.identity.peerId ? i : m), 0)
+    const lowest = (vs: TestVoter[]) => vs.reduce((m, v, i) => (v.identity.peerId < vs[m]!.identity.peerId ? i : m), 0)
+    const dropsOne = (run: Run, voters: TestVoter[], k: number): void => {
+      const kReg = voters[k]!.contribution.voterEntry.registrantId
+      expect(run.commits).to.have.length(1)
+      expect(run.commits[0]!.block.registrantIds).to.have.length(4)
+      expect(run.commits[0]!.block.registrantIds).to.not.include(kReg)
+      const cid = run.commits[0]!.block.cid
+      voters.forEach((_, i) => {
+        if (i === k) return
+        const o = run.outcomes[i]!
+        expect(o.status === 'committed' && o.cid === cid, `voter ${i}`).to.equal(true)
+      })
+    }
+
+    const unconfirmed = (run: Run, k: number) => run.logs.filter(l => l.i === k && l.event === 'solo' && l.detail?.why === 'already-voted claim not confirmed by the strand')
+
+    it('a member that already voted is dropped at commit; the other four commit ONE block of four; with no row readable it keeps pooling (CR-01)', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000 })
+      dropsOne(run, voters, k)
+      // The claim is a hint: unconfirmed by its own strand read, k goes back to pooling (alone here) until voting closes.
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'deadline' })
+      expect(unconfirmed(run, k)).to.have.length(1)
+    })
+
+    it('CR-01 (b) a dishonest former\'s already-voted with no recorded row: the member reverts to solo, refuses that former, and never rejoins it', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { lieAbout: k, deadlineMs: 12_000 })
+      dropsOne(run, voters, k)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'deadline' })
+      expect(unconfirmed(run, k)).to.have.length(1)
+      const formerIndex = run.outcomes.findIndex(o => o.status === 'committed' && o.formedByMe)
+      const former = voters[formerIndex]!.identity.peerId.slice(-6)
+      const claim = run.logs.find(l => l.i === k && l.event === 'already-voted-unconfirmed')
+      expect(claim?.detail?.from).to.equal(former)
+      const after = run.logs.indexOf(unconfirmed(run, k)[0]!)
+      expect(run.logs.slice(after).filter(l => l.i === k && l.event === 'member-of' && l.detail?.coordinator === former)).to.deep.equal([])
+    })
+
+    it('CR-01 (c) an honest duplicate whose row becomes readable DURING the bounded wait ends committed with that cid', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], readableAfterMs: 600, deadlineMs: 12_000 })
+      expect(run.outcomes[k]).to.deep.equal({
+        status: 'committed', cid: 'prevoted-cid-' + voters[k]!.contribution.voterEntry.registrantId, blockId: '', size: 0, formedByMe: false
+      })
+      expect(unconfirmed(run, k)).to.deep.equal([])
+      dropsOne(run, voters, k)
+    })
+
+    it('CR-01 (a) a peer that knows my vote ciphertext cannot re-parent me or stop me: I commit with the honest pool', async () => {
+      const voters = [0, 1, 2].map(makeVoter)
+      const run = await runAgents(voters, { hijack: 0, deadlineMs: 12_000 })
+      expect(run.commits).to.have.length(1)
+      expect(run.commits[0]!.block.registrantIds).to.include(voters[0]!.contribution.voterEntry.registrantId)
+      const cid = run.commits[0]!.block.cid
+      expect(run.outcomes.every(o => o.status === 'committed' && o.cid === cid)).to.equal(true)
+      // the victim never joined the hijacker and never acked it (it answered with refusals, or not at all)
+      expect(run.hijackReplies).to.not.include('ack')
+      expect(run.logs.filter(l => l.i === 0 && l.event === 'already-voted-unconfirmed')).to.deep.equal([])
+    })
+
+    it('a former that already voted stops (its own commit is evidence, not a peer\'s claim); the rest re-pool without it', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = lowest(voters)
+      // k (lowest peer id) presents alone on the plain topic first, so every other voter merges into it: k forms
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 12_000, ladder: false, startDelayMs: voters.map((_, i) => (i === k ? 0 : 300)) })
+      expect(run.logs.some(l => l.i === k && l.event === 'forming')).to.equal(true)
+      dropsOne(run, voters, k)
+      expect(run.outcomes[k]).to.deep.equal({ status: 'stopped', reason: 'already-voted' })
+    })
+
+    it('three voters, one already voted: no whole-pool dissolve, the two left keep presenting to the deadline', async () => {
+      const voters = [0, 1, 2].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], deadlineMs: 3_000 })
+      expect(run.commits).to.deep.equal([])
+      expect(run.commitCalls).to.equal(1)
+      // k's claim stays unconfirmed (no row readable), so it pools on alone; nobody stops 'already-voted'
+      expect(run.outcomes).to.deep.equal(Array(3).fill({ status: 'stopped', reason: 'deadline' }))
+      expect(run.logs.filter(l => l.event === 'solo' && l.detail?.why === 'commit failed')).to.deep.equal([])
+    })
+
+    it('D-13: a dropped member whose row becomes readable ends committed with that cid', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const k = highest(voters)
+      const run = await runAgents(voters, { preVoted: [k], preVotedReadable: true, deadlineMs: 12_000 })
+      expect(run.outcomes[k]).to.deep.equal({
+        status: 'committed', cid: 'prevoted-cid-' + voters[k]!.contribution.voterEntry.registrantId, blockId: '', size: 0, formedByMe: false
+      })
+      dropsOne(run, voters, k)
+    })
+  })
+
+  describe('discovery and the topic ladder (R2)', () => {
+    const plain = poolTopic(ballot)
+    const holdOf1 = (v: TestVoter): string => bytesToHex(sha256(utf8ToBytes(v.contribution.voteCiphertext)))
+    const presentsOf = (run: Run, i: number): string[] => run.requests.filter(r => r.i === i && r.t === 'present').map(r => r.topic)
+    const withdrawsOf = (run: Run, i: number): string[] => run.requests.filter(r => r.i === i && r.t === 'withdraw').map(r => r.topic)
+    const blockSizes = (run: Run): number[] => run.commits.map(c => c.block.registrantIds.length)
+
+    function votersInBuckets (n: number, sameBucket: boolean): TestVoter[] {
+      for (let tries = 0; tries < 400; tries++) {
+        const out: TestVoter[] = []
+        const seen = new Set<string>()
+        for (let k = 0; k < n * 40 && out.length < n; k++) {
+          const v = makeVoter(out.length)
+          const b = ladderBucket([holdOf1(v)], 2)
+          if (sameBucket ? (out.length === 0 || b === ladderBucket([holdOf1(out[0]!)], 2)) : !seen.has(b)) { out.push(v); seen.add(b) }
+        }
+        if (out.length === n) return out
+      }
+      throw new Error('could not build voters in the requested buckets')
+    }
+
+    it('R2-1 a lone coordinator climbs 2-bit, 1-bit, then plain: its 7th present is the first on the plain topic, and it never narrows', async () => {
+      const v = makeVoter(0)
+      const run = await runAgents([v], { quietMs: 5_000, deadlineMs: 1_500 })
+      const topics = presentsOf(run, 0)
+      const hold = holdOf1(v)
+      expect(topics.length).to.be.at.least(8)
+      expect(topics.slice(0, 3)).to.deep.equal(Array(3).fill(ladderTopic(plain, 2, [hold])))
+      expect(topics.slice(3, 6)).to.deep.equal(Array(3).fill(ladderTopic(plain, 1, [hold])))
+      expect(topics.slice(6)).to.deep.equal(Array(topics.length - 6).fill(plain))
+      expect(run.outcomes[0]).to.deep.equal({ status: 'stopped', reason: 'deadline' })
+    })
+
+    it('R2-2 the hard cap forces the plain topic', async () => {
+      const run = await runAgents([makeVoter(0)], { rungDwellTicks: 1_000, ladderMaxMs: 300, quietMs: 5_000, deadlineMs: 1_200 })
+      const rows = run.requests.filter(r => r.t === 'present')
+      const firstPlain = rows.findIndex(r => r.topic === plain)
+      expect(firstPlain).to.be.greaterThan(0)
+      const before = rows.slice(0, firstPlain).map(r => r.topic)
+      expect(before.every(t => t.includes('/h/2:'))).to.equal(true)
+      const wait = rows[firstPlain]!.at - run.startedAt
+      expect(wait).to.be.at.least(300)
+      expect(wait).to.be.below(900)
+    })
+
+    it('R2-3 the plain topic is reached by deadlineAt - 2*formLeadMs', async () => {
+      const run = await runAgents([makeVoter(0)], { rungDwellTicks: 1_000, ladderMaxMs: 15_000, quietMs: 5_000, formLeadMs: 200, deadlineMs: 1_000 })
+      const firstPlain = run.requests.find(r => r.t === 'present' && r.topic === plain)
+      expect(firstPlain).to.not.equal(undefined)
+      expect(firstPlain!.at).to.be.at.least(run.deadlineAt - 400)
+      expect(firstPlain!.at).to.be.at.most(run.deadlineAt - 400 + 300)
+    })
+
+    it('R2-4 three voters with the ladder on still form ONE block of three (D-23)', async () => {
+      const voters = [0, 1, 2].map(makeVoter)
+      const run = await runAgents(voters)
+      expect(blockSizes(run)).to.deep.equal([3])
+      expect(run.outcomes.every(o => o.status === 'committed')).to.equal(true)
+      voters.forEach((_, i) => expect(presentsOf(run, i)[0]).to.contain('/h/2:'))
+    })
+
+    it('R2-5 three voters in ONE 2-bit bucket merge on their rung, still reach plain before forming, and form ONE block of three', async () => {
+      const voters = votersInBuckets(3, true)
+      const run = await runAgents(voters)
+      expect(blockSizes(run)).to.deep.equal([3])
+      const former = run.outcomes.findIndex(o => o.status === 'committed' && o.formedByMe)
+      expect(former).to.be.at.least(0)
+      const firstPlain = run.requests.find(r => r.i === former && r.t === 'present' && r.topic === plain)
+      expect(firstPlain).to.not.equal(undefined)
+      expect(run.commitAt[0]!).to.be.at.least(firstPlain!.at)
+    })
+
+    it('R2-6 three voters in three different 2-bit buckets still merge into ONE block (messages carry the plain topic)', async () => {
+      const voters = votersInBuckets(3, false)
+      const run = await runAgents(voters)
+      expect(blockSizes(run)).to.deep.equal([3])
+      expect(new Set(voters.map((_, i) => presentsOf(run, i)[0])).size).to.equal(3)
+    })
+
+    it('R2-7 five voters with the ladder on converge on ONE block of five', async () => {
+      const voters = [0, 1, 2, 3, 4].map(makeVoter)
+      const run = await runAgents(voters)
+      expect(blockSizes(run)).to.deep.equal([5])
+      const cid = run.commits[0]!.block.cid
+      expect(run.outcomes.every(o => o.status === 'committed' && o.cid === cid)).to.equal(true)
+      voters.forEach((_, i) => expect(presentsOf(run, i)[0]).to.contain('/h/2:'))
+    })
+
+    it('R2-8 ladder:false agents (the old plain-topic behaviour) and ladder agents on one PoolRendezvous form ONE block', async () => {
+      const five = [0, 1, 2, 3, 4].map(makeVoter)
+      const a = await runAgents(five, { ladder: [false, true, false, true, true] })
+      expect(blockSizes(a)).to.deep.equal([5])
+      for (const i of [0, 2]) expect(presentsOf(a, i).every(t => t === plain)).to.equal(true)
+      for (const i of [1, 3, 4]) expect(presentsOf(a, i).some(t => t.includes('/h/2:'))).to.equal(true)
+      const three = [0, 1, 2].map(makeVoter)
+      const b = await runAgents(three, { ladder: [false, false, true] })
+      expect(blockSizes(b)).to.deep.equal([3])
+    })
+
+    it('R2-9 an injected PoolDiscovery carries every present and withdraw; the rendezvous client carries only the mailbox (D-20)', async () => {
+      const run = await runAgents([0, 1, 2].map(makeVoter), { injectDiscovery: true })
+      expect(blockSizes(run)).to.deep.equal([3])
+      expect(run.discoveryCalls.filter(c => c.t === 'present').length).to.be.greaterThan(0)
+      expect(run.requests).to.have.length(0)
+    })
+
+    it('R2-10 every topic presented on is withdrawn: afterwards nobody is listed on any of them', async () => {
+      const run = await runAgents([0, 1, 2, 3, 4].map(makeVoter))
+      const all = new Set<string>()
+      for (let i = 0; i < 5; i++) {
+        const w = new Set(withdrawsOf(run, i))
+        for (const t of new Set(presentsOf(run, i))) { all.add(t); expect(w.has(t), `agent ${i} withdrew ${t}`).to.equal(true) }
+      }
+      const probe = createInMemoryRendezvousClient(run.rendezvous, 'probe')
+      for (const t of all) {
+        const reply = await probe.call(poolRequests.present(createPoolIdentity(), t, 1, Date.now()))
+        expect(reply).to.deep.equal({ t: 'coordinators', list: [] })
+      }
+    })
+  })
+})
+
+// A hand-driven peer on the rendezvous: it presents, sends sealed messages and waits for replies,
+// so one real PoolAgent can be tested against a coordinator that does exactly what the test says.
+interface Inbound { from: string, body: { t: string, id?: string, re?: string, [k: string]: unknown } }
+function scriptedPeer (rv: PoolRendezvous, name: string) {
+  const identity = createPoolIdentity()
+  const client = createInMemoryRendezvousClient(rv, name)
+  const inbox: Inbound[] = []
+  const peer = {
+    identity,
+    inbox,
+    async present (topic: string, size: number) { return await client.call(poolRequests.present(identity, topic, size, Date.now())) },
+    async send (to: string, body: unknown) { await client.call(poolRequests.send(sealPoolEnvelope(identity, to, body))) },
+    async drain (waitMs: number) {
+      const r = await client.call(poolRequests.poll(identity, waitMs, Date.now()))
+      if (r.t === 'envelopes') for (const e of r.list) inbox.push(openPoolEnvelope(identity, e) as Inbound)
+    },
+    /** the next message matching `pred`, or null after `timeoutMs` */
+    async next (pred: (m: Inbound) => boolean, timeoutMs = 5_000): Promise<Inbound | null> {
+      const until = Date.now() + timeoutMs
+      for (;;) {
+        const i = inbox.findIndex(pred)
+        if (i >= 0) return inbox.splice(i, 1)[0]!
+        const left = until - Date.now()
+        if (left <= 0) return null
+        await peer.drain(Math.min(100, left))
+      }
+    }
+  }
+  return peer
+}
+type ScriptedPeer = ReturnType<typeof scriptedPeer>
+const holdOfVoter = (v: TestVoter): string => bytesToHex(sha256(utf8ToBytes(v.contribution.voteCiphertext)))
+
+/**
+ * One real agent `a` (plain topic, no ladder) and a scripted coordinator `c` presenting a bigger
+ * pool: `a` merges into `c`, `c` answers `merged` and informs, `a` acks. Returns with `a` a member of `c`.
+ */
+async function memberOfScripted (opts: Partial<ConstructorParameters<typeof PoolAgent>[0]> = {}) {
+  const rv = new PoolRendezvous()
+  const a = makeVoter(0)
+  const c = scriptedPeer(rv, 'transport-c')
+  const logs: Array<{ event: string, detail?: Record<string, unknown> }> = []
+  let signCalls = 0
+  const controller = new AbortController()
+  const topic = poolTopic(ballot)
+  await c.present(topic, 4)
+  const agent = new PoolAgent({
+    identity: a.identity,
+    rendezvous: createInMemoryRendezvousClient(rv, 'transport-a'),
+    ballot,
+    contribution: a.contribution,
+    signConsent: async (digest) => { signCalls++; return signDigestP256(digest, a.priv) },
+    commit: async () => ({ ok: true }),
+    log: (event, detail) => { logs.push({ event, detail }) },
+    ladder: false,
+    quietMs: 60_000,
+    presentIntervalMs: 60,
+    replyTimeoutMs: 400,
+    informAttempts: 2,
+    signTimeoutMs: 1_500,
+    memberTimeoutMs: 30_000,
+    pollWaitMs: 200,
+    formLeadMs: 0,
+    deadlineAt: Date.now() + 25_000,
+    ...opts
+  })
+  const running = agent.run(controller.signal)
+  const merge = await c.next(m => m.body.t === 'merge')
+  if (merge === null) throw new Error('the agent never merged into the scripted coordinator')
+  await c.send(a.identity.peerId, { t: 'merged', re: merge.body.id, size: 5 })
+  await c.send(a.identity.peerId, { t: 'inform', id: 'c-inform-1', topic, size: 5, hold: holdOfVoter(a) })
+  const ack = await c.next(m => m.body.t === 'ack' && m.body.re === 'c-inform-1')
+  if (ack === null) throw new Error('the agent never acked the scripted coordinator')
+  const stop = async (): Promise<PoolOutcome> => { controller.abort(); const o = await running; rv.close(); return o }
+  return { rv, a, c, logs, agent, running, stop, topic, signCalls: () => signCalls }
+}
+
+describe('pool: a member\'s coordinator, and already-voted as a hint (CR-01)', function () {
+  this.timeout(30_000)
+
+  it('a member re-parents only to the coordinator its own coordinator handed it over to', async () => {
+    const h = await memberOfScripted()
+    try {
+      const d = scriptedPeer(h.rv, 'transport-d')
+      // d knows my hold (it saw my ciphertext in some formation) but nobody handed me to it: no answer
+      await d.send(h.a.identity.peerId, { t: 'inform', id: 'd-1', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect(await d.next(m => m.body.re === 'd-1', 800)).to.equal(null)
+      expect(h.logs.some(l => l.event === 'inform-not-handed-over')).to.equal(true)
+      // my coordinator merges away into d and hands me over: now d's inform is acked
+      await h.c.send(h.a.identity.peerId, { t: 'handover', topic: h.topic, to: d.identity.peerId })
+      await d.send(h.a.identity.peerId, { t: 'inform', id: 'd-2', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect((await d.next(m => m.body.re === 'd-2', 2_000))?.body.t).to.equal('ack')
+      // and the old coordinator can no longer speak for me
+      const e = scriptedPeer(h.rv, 'transport-e')
+      await h.c.send(h.a.identity.peerId, { t: 'handover', topic: h.topic, to: e.identity.peerId })
+      await e.send(h.a.identity.peerId, { t: 'inform', id: 'e-1', topic: h.topic, size: 9, hold: holdOfVoter(h.a) })
+      expect(await e.next(m => m.body.re === 'e-1', 800)).to.equal(null)
+    } finally {
+      expect(await h.stop()).to.deep.equal({ status: 'stopped', reason: 'aborted' })
+    }
+  })
+
+  it('an unconfirmed already-voted from my coordinator: I wait, revert to solo, and never merge into it again', async () => {
+    const h = await memberOfScripted({ findRecordedVote: async () => null })
+    try {
+      const startedAt = Date.now()
+      await h.c.send(h.a.identity.peerId, { t: 'outcome', topic: h.topic, committed: false, reason: 'already voted', code: 'already-voted' })
+      const until = Date.now() + 5_000
+      while (!h.logs.some(l => l.event === 'solo') && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 50))
+      const solo = h.logs.find(l => l.event === 'solo')
+      expect(solo?.detail?.why).to.equal('already-voted claim not confirmed by the strand')
+      // the bounded wait (4 x replyTimeoutMs) ran before giving up
+      expect(Date.now() - startedAt).to.be.at.least(4 * 400 - 50)
+      // c is still listed with a bigger pool, but this agent never merges into it again
+      expect(await h.c.next(m => m.body.t === 'merge', 1_500)).to.equal(null)
+    } finally {
+      expect(await h.stop()).to.deep.equal({ status: 'stopped', reason: 'aborted' })
+    }
+  })
+
+  it('an already-voted whose row shows up during the wait ends committed with that cid', async () => {
+    let rowAt = Infinity
+    const h = await memberOfScripted({ findRecordedVote: async () => (Date.now() >= rowAt ? 'bafy-recorded-earlier' : null) })
+    rowAt = Date.now() + 700
+    await h.c.send(h.a.identity.peerId, { t: 'outcome', topic: h.topic, committed: false, reason: 'already voted', code: 'already-voted' })
+    const outcome = await h.running
+    h.rv.close()
+    expect(outcome).to.deep.equal({ status: 'committed', cid: 'bafy-recorded-earlier', blockId: '', size: 0, formedByMe: false })
+    expect(h.logs.some(l => l.event === 'solo')).to.equal(false)
+  })
+})
+
+describe('pool: no stale listing after a coordinator turns member mid-present (IN-06)', function () {
+  this.timeout(30_000)
+  const nap = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+  it('a present that lands after the agent became a member is withdrawn again', async () => {
+    const rv = new PoolRendezvous()
+    const a = makeVoter(0)
+    const c = scriptedPeer(rv, 'transport-c')
+    const topic = poolTopic(ballot)
+    await c.present(topic, 4)
+    // every present reaches the rendezvous 300 ms after the agent sends it
+    const real = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'transport-a-discovery'), a.identity)
+    let presentStarts = 0
+    const discovery: PoolDiscovery = {
+      async present (t, size, now) { presentStarts++; await nap(300); return await real.present(t, size, now) },
+      async withdraw (t, now) { await real.withdraw(t, now) }
+    }
+    const controller = new AbortController()
+    const running = new PoolAgent({
+      identity: a.identity,
+      rendezvous: createInMemoryRendezvousClient(rv, 'transport-a'),
+      discovery,
+      ballot,
+      contribution: a.contribution,
+      signConsent: async (digest) => signDigestP256(digest, a.priv),
+      commit: async () => ({ ok: true }),
+      ladder: false,
+      quietMs: 60_000,
+      presentIntervalMs: 60,
+      replyTimeoutMs: 400,
+      informAttempts: 2,
+      memberTimeoutMs: 30_000,
+      pollWaitMs: 200,
+      formLeadMs: 0,
+      deadlineAt: Date.now() + 20_000
+    }).run(controller.signal)
+    try {
+      // the agent tries to merge into c; c's `merged` reply is "lost" (never sent)
+      expect(await c.next(m => m.body.t === 'merge')).to.not.equal(null)
+      const startsAtMerge = presentStarts
+      while (presentStarts === startsAtMerge) await nap(10)
+      // c's inform reaches the agent while its next present is still on the way to the rendezvous
+      await c.send(a.identity.peerId, { t: 'inform', id: 'c-1', topic, size: 5, hold: holdOfVoter(a) })
+      expect((await c.next(m => m.body.re === 'c-1', 2_000))?.body.t).to.equal('ack')
+      await nap(700)
+      const listed = await createInMemoryRendezvousClient(rv, 'probe').call(poolRequests.present(createPoolIdentity(), topic, 1, Date.now()))
+      expect(listed).to.deep.equal({ t: 'coordinators', list: [{ peerId: c.identity.peerId, size: 4 }] })
+    } finally {
+      controller.abort()
+      await running
+      rv.close()
+    }
+  })
+})
+
+describe('pool: a duplicated form costs one consent prompt (WR-01)', function () {
+  this.timeout(30_000)
+
+  it('the same coordinator sending the same form twice gets the same signature twice from ONE signConsent call', async () => {
+    let calls = 0
+    let priv: Uint8Array | null = null
+    const h = await memberOfScripted({
+      signConsent: async (digest) => { calls++; await new Promise(resolve => setTimeout(resolve, 300)); return signDigestP256(digest, priv!) }
+    })
+    priv = h.a.priv
+    try {
+      const block = formPoolBlock([h.a.contribution, makeVoter(1).contribution, makeVoter(2).contribution], ballot)
+      // the second copy arrives while the first prompt is still open (a failover resend), and a third after it answered
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-1', topic: h.topic, block })
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-2', topic: h.topic, block })
+      const first = await h.c.next(m => m.body.re === 'f-1', 3_000)
+      const second = await h.c.next(m => m.body.re === 'f-2', 3_000)
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-3', topic: h.topic, block })
+      const third = await h.c.next(m => m.body.re === 'f-3', 3_000)
+      expect([first?.body.t, second?.body.t, third?.body.t]).to.deep.equal(['sign', 'sign', 'sign'])
+      expect(second?.body.signature).to.deep.equal(first?.body.signature)
+      expect(third?.body.signature).to.deep.equal(first?.body.signature)
+      expect(calls).to.equal(1)
+      // a different block is a different consent: it prompts again
+      const other = formPoolBlock([h.a.contribution, makeVoter(3).contribution, makeVoter(4).contribution], ballot)
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-4', topic: h.topic, block: other })
+      expect((await h.c.next(m => m.body.re === 'f-4', 3_000))?.body.t).to.equal('sign')
+      expect(calls).to.equal(2)
+    } finally {
+      await h.stop()
+    }
+  })
+})
+
+describe('pool: a duplicate voter at commit (R1) - classification and the commit lookup', () => {
+  const LOCAL = 'UNIQUE constraint failed: VoteBlockVoter.ElectionId, VoteBlockVoter.BallotId, VoteBlockVoter.RegistrantId'
+  // the spike 101 text carries the control markers as 6-character escape text
+  const framed = (id: string): string => '\\u0002' + id + '\\u0000'
+  const distributedMessageNaming = (id: string): string =>
+    `Error during query on table 'VoteBlockVoter': Query failed: Tree collection default/app/VoteBlockVoter: key "${framed('election-1')}${framed('b-ballot-1')}${framed(id)}" is already taken`
+
+  it('classifies both literal shapes as a duplicate voter and nothing else', () => {
+    expect(poolBlock.classifyCommitFailure(LOCAL)).to.equal('duplicate-voter')
+    expect(poolBlock.classifyCommitFailure(distributedMessageNaming('b-reg-5'))).to.equal('duplicate-voter')
+    expect(poolBlock.classifyCommitFailure('CHECK constraint failed: WithinVotingWindow')).to.equal('other')
+    expect(poolBlock.classifyCommitFailure('UNIQUE constraint failed: VoteBlock.Cid')).to.equal('other')
+    expect(poolBlock.classifyCommitFailure('')).to.equal('other')
+  })
+
+  it('names a registrant only by an exact frame (b-reg-1 is not inside b-reg-15)', () => {
+    const ids = ['b-reg-1', 'b-reg-15', 'b-reg-2']
+    expect(poolBlock.registrantsNamedInCommitError(distributedMessageNaming('b-reg-15'), ids)).to.deep.equal(['b-reg-15'])
+    const literal = `key "\u0002election-1\u0000\u0002b\u0000\u0002b-reg-15\u0000" is already taken`
+    expect(poolBlock.registrantsNamedInCommitError(literal, ids)).to.deep.equal(['b-reg-15'])
+    expect(poolBlock.registrantsNamedInCommitError(distributedMessageNaming('somebody-else'), ids)).to.deep.equal([])
+    expect(poolBlock.registrantsNamedInCommitError('registrant b-reg-2 collided', ids)).to.deep.equal([])
+  })
+
+  const voters = [0, 1, 2].map(makeVoter)
+  const block = formPoolBlock(voters.map(v => v.contribution), ballot)
+  const signatures: ConsentSignature[] = block.registrantIds.map(registrantId => ({ registrantId, deviceKey: 'dk', signature: 'aa'.repeat(64) }))
+  const clock = { nowMs: Date.now(), now: new Date().toISOString() }
+  const dup = block.registrantIds[1]!
+
+  function stub (failure: Error | null, found: Record<string, string>) {
+    const execs: Array<{ sql: string, params?: Record<string, unknown> }> = []
+    const evals: Array<{ sql: string, params?: Record<string, unknown> }> = []
+    const db = {
+      async exec (sql: string, params?: Record<string, unknown>) {
+        execs.push({ sql, params })
+        if (failure !== null && /insert into VoteBlockVoter/.test(sql) && params?.reg === dup) throw failure
+      },
+      async * eval (sql: string, params?: Record<string, unknown>) {
+        evals.push({ sql, params })
+        const cid = found[params?.reg as string]
+        if (cid !== undefined) yield { BlockCid: cid }
+      }
+    } as unknown as Database
+    return { db, execs, evals }
+  }
+
+  it('local UNIQUE: rolls back, then looks each registrant up with one point query and names the colliding one', async () => {
+    const s = stub(new Error(LOCAL), { [dup]: 'bafy-earlier' })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [dup] })
+    const rollbackAt = s.execs.findIndex(e => e.sql === 'ROLLBACK')
+    expect(rollbackAt).to.be.greaterThan(-1)
+    expect(s.evals).to.have.length(block.registrantIds.length)
+    for (const e of s.evals) {
+      expect(e.sql).to.match(/RegistrantId = :reg/)
+      expect(e.sql).to.not.match(/ in \(/i)
+    }
+  })
+
+  it('distributed shape, no row readable yet: falls back to the framed key text', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), {})
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [dup] })
+  })
+
+  it('duplicate shape, no row and nobody named: an empty list', async () => {
+    const s = stub(new Error(LOCAL), {})
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [] })
+  })
+
+  it('any other failure: no duplicateRegistrants key and no lookup', async () => {
+    const s = stub(new Error('CHECK constraint failed: WithinVotingWindow'), { [dup]: 'bafy-earlier' })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: 'CHECK constraint failed: WithinVotingWindow' })
+    expect(s.evals).to.have.length(0)
+  })
+
+  it('WR-03 a distributed commit that landed but threw: the text names a member whose row holds THIS block\'s cid, so it is not a duplicate', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), Object.fromEntries(block.registrantIds.map(r => [r, block.cid])))
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [] })
+  })
+
+  it('WR-03 the text fallback still names a member whose lookup threw (unknown), but never one proven to be in this block', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), {})
+    const evalOrig = (s.db as unknown as { eval: (sql: string, p?: Record<string, unknown>) => AsyncGenerator<unknown> }).eval
+    ;(s.db as unknown as { eval: unknown }).eval = async function * (sql: string, params?: Record<string, unknown>) {
+      if (params?.reg === dup) throw new Error('lookup failed')
+      yield * evalOrig(sql, params)
+    }
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [dup] })
+  })
+
+  it('a lookup row holding this block\'s own cid is not a duplicate', async () => {
+    const s = stub(new Error(LOCAL), { [dup]: block.cid })
+    const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
+    expect(r).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [] })
+  })
+})
+
+describe('pool: discovery interface and ladder topics (R2)', function () {
+  this.timeout(10_000)
+  const holdOfCt = (ct: string): string => bytesToHex(sha256(utf8ToBytes(ct)))
+  const holds = [0, 1, 2].map(i => holdOfCt(makeVoter(i).contribution.voteCiphertext))
+  const base = 'vt-pool/1/e/1/b/t'
+
+  it('D-1 ladderTopic builds the 2-bit, 1-bit and plain topics', () => {
+    expect(ladderTopic(base, 2, holds)).to.match(/^vt-pool\/1\/e\/1\/b\/t\/h\/2:[0-3]$/)
+    expect(ladderTopic(base, 1, holds)).to.match(/^vt-pool\/1\/e\/1\/b\/t\/h\/1:[01]$/)
+    expect(ladderTopic(base, 0, holds)).to.equal(base)
+  })
+
+  it('D-2 the bucket is order-independent and equals the bucket of the smallest hold', () => {
+    const perms = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [1, 0, 2]]
+    const topics = perms.map(p => ladderTopic(base, 2, p.map(i => holds[i]!)))
+    expect(new Set(topics).size).to.equal(1)
+    const min = [...holds].sort()[0]!
+    expect(ladderTopic(base, 2, holds)).to.equal(ladderTopic(base, 2, [min]))
+  })
+
+  it('D-3 the bucket is the first bits of sha256(utf8(smallest hold))', () => {
+    for (const h of holds) {
+      const first = sha256(utf8ToBytes(h))[0]!
+      expect(ladderBucket([h], 2)).to.equal((first >> 6).toString(16))
+      expect(ladderBucket([h], 1)).to.equal((first >> 7).toString(16))
+      expect(Number(ladderBucket([h], 1))).to.equal(Number(ladderBucket([h], 2)) >> 1)
+    }
+    expect(() => ladderBucket(holds, 0)).to.throw(RangeError)
+    expect(() => ladderBucket(holds, 5)).to.throw(RangeError)
+  })
+
+  it('D-4 a topic that would pass 512 characters, or an empty hold list, gives the plain topic', () => {
+    const long = 'x'.repeat(POOL_TOPIC_MAX_CHARS - 3)
+    expect(ladderTopic(long, 2, holds)).to.equal(long)
+    expect(ladderTopic(base, 2, [])).to.equal(base)
+  })
+
+  it('D-5 the adapter lists the OTHER coordinators on the exact topic only', async () => {
+    const rv = new PoolRendezvous()
+    try {
+      const [a, b, c] = [createPoolIdentity(), createPoolIdentity(), createPoolIdentity()]
+      const da = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'ta'), a)
+      const db = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tb'), b)
+      const dc = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tc'), c)
+      const topicA = ladderTopic(base, 2, holds)
+      expect(await da.present(topicA, 2, Date.now())).to.deep.equal([])
+      await db.present(base, 1, Date.now())
+      expect(await dc.present(topicA, 1, Date.now())).to.deep.equal([{ peerId: a.peerId, size: 2 }])
+    } finally { rv.close() }
+  })
+
+  it('D-6 present throws the reply reason on an error reply', async () => {
+    const rv = new PoolRendezvous({ isAllowed: () => false })
+    try {
+      const d = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'x'), createPoolIdentity())
+      let message = ''
+      try { await d.present(base, 1, Date.now()) } catch (e) { message = (e as Error).message }
+      expect(message).to.equal('not allowed')
+    } finally { rv.close() }
+  })
+
+  it('D-7 withdraw removes the caller from that topic', async () => {
+    const rv = new PoolRendezvous()
+    try {
+      const [a, c] = [createPoolIdentity(), createPoolIdentity()]
+      const da = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'ta'), a)
+      const dc = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tc'), c)
+      const topicA = ladderTopic(base, 2, holds)
+      await da.present(topicA, 1, Date.now())
+      await da.withdraw(topicA, Date.now())
+      expect(await dc.present(topicA, 1, Date.now())).to.deep.equal([])
+    } finally { rv.close() }
+  })
+
+  it('D-8 the ladder constants', () => {
+    expect([...POOL_LADDER_RUNG_BITS]).to.deep.equal([2, 1])
+    expect(POOL_LADDER_DWELL_PRESENTS).to.equal(3)
+    expect(POOL_LADDER_MAX_MS).to.equal(15_000)
+    expect(POOL_TOPIC_MAX_CHARS).to.equal(512)
   })
 })

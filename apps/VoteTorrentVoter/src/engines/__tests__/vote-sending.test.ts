@@ -12,7 +12,7 @@ import {
 	verifySigP256,
 	type PoolRendezvousClient,
 } from '@votetorrent/vote-engine/rn';
-import {sendSavedVote, type BallotSendStatus, type VoteSendingPort, type VoteSentStore} from '../vote-sending';
+import {sendSavedVote, statusForOutcome, type BallotSendStatus, type VoteSendingPort, type VoteSentStore} from '../vote-sending';
 import type {VoteRecord} from '../vote-record-vault';
 
 const electionSecret = secp256k1.utils.randomSecretKey();
@@ -158,5 +158,103 @@ describe('sendSavedVote (spike 102)', () => {
 		const noKey = fakeStrand(Date.now() + 60_000);
 		expect(await sendSavedVote({...base, port: {...noKey.port, readElectionKey: async () => null}})).toEqual({ok: false, reason: 'election-key-missing'});
 		expect(await sendSavedVote({...base, port: {...noKey.port, readVotingClose: async () => null}})).toEqual({ok: false, reason: 'window-unreadable'});
+	});
+});
+
+// 'already-voted' reaches here only from this phone's OWN failed commit as the block's former; a
+// peer's already-voted claim is a hint the agent checks and never stops on (CR-01).
+describe('statusForOutcome (R1 already voted, own commit)', () => {
+	const committed = {status: 'committed', cid: 'c1', blockId: 'b', size: 3, formedByMe: true} as const;
+	const stopped = (reason: string) => ({status: 'stopped', reason}) as never;
+
+	it('maps committed, deadline and aborted without re-reading the strand', async () => {
+		const recheck = jest.fn(async () => 'never');
+		expect(await statusForOutcome(committed, recheck)).toEqual({phase: 'sent', cid: 'c1'});
+		expect(await statusForOutcome(stopped('deadline'), recheck)).toEqual({phase: 'not-sent', reason: 'voting-closed'});
+		expect(await statusForOutcome(stopped('aborted'), recheck)).toEqual({phase: 'not-sent', reason: 'stopped'});
+		expect(recheck).not.toHaveBeenCalled();
+	});
+
+	it('already-voted with a readable row is sent with that cid, re-read exactly once', async () => {
+		const recheck = jest.fn(async () => 'cid-x');
+		expect(await statusForOutcome(stopped('already-voted'), recheck)).toEqual({phase: 'sent', cid: 'cid-x'});
+		expect(recheck).toHaveBeenCalledTimes(1);
+	});
+
+	it('already-voted with no readable row, or a failing read, is not-sent already-voted', async () => {
+		expect(await statusForOutcome(stopped('already-voted'), async () => null)).toEqual({phase: 'not-sent', reason: 'already-voted'});
+		expect(await statusForOutcome(stopped('already-voted'), async () => { throw new Error('strand down'); })).toEqual({phase: 'not-sent', reason: 'already-voted'});
+	});
+});
+
+// 65-01 truth 7, end to end: one voter's vote is already on the strand under another block, but the
+// row is not readable from this phone yet (replication lag). Its pool's commit names it a duplicate.
+describe('sendSavedVote (R1 already voted, end to end)', () => {
+	jest.setTimeout(30_000);
+
+	function laggedStrand(closesAt: number, dupRegistrant: string, rowBecomesReadable: boolean) {
+		const strand = fakeStrand(closesAt);
+		let refused = false;
+		const port: VoteSendingPort = {
+			...strand.port,
+			commit: async (block, ballot, signatures, nowMs) => {
+				if (signatures.some(s => s.registrantId === dupRegistrant)) {
+					refused = true;
+					return {ok: false, reason: 'already voted', duplicateRegistrants: [dupRegistrant]};
+				}
+				return strand.port.commit(block, ballot, signatures, nowMs);
+			},
+			findRecordedVote: async (e, ballotId, registrantId) => {
+				if (registrantId === dupRegistrant) return rowBecomesReadable && refused ? `cid-elsewhere-${ballotId}` : null;
+				return strand.port.findRecordedVote(e, ballotId, registrantId);
+			},
+		};
+		return {...strand, port};
+	}
+
+	async function runFour(rowBecomesReadable: boolean) {
+		const rv = new PoolRendezvous();
+		const voters = [10, 11, 12, 13].map(makeVoter);
+		const dup = voters[3]!.record.voter.registrantId;
+		const strand = laggedStrand(Date.now() + 9_000, dup, rowBecomesReadable);
+		const stores = voters.map(() => memorySentStore());
+		const results = await Promise.all(voters.map((v, i) => sendSavedVote({
+			port: strand.port, sentStore: stores[i]!, record: v.record, rendezvous: clientFor(rv, v.phone),
+			signConsent: signWith(v.priv), nowMs: () => Date.now(), agentOptions: fastAgent,
+		})));
+		rv.close();
+		return {results, stores, strand};
+	}
+
+	it('with no readable row the duplicate is not-sent and its sent store stays unwritten; the other three send', async () => {
+		const {results, stores, strand} = await runFour(false);
+		for (const i of [0, 1, 2]) {
+			const r = results[i]!;
+			expect(r.ok).toBe(true);
+			if (r.ok) expect(r.ballots.map(b => b.status.phase)).toEqual(['sent', 'sent']);
+			expect(Object.keys(stores[i]!.data[ELECTION] ?? {}).sort()).toEqual(BALLOTS);
+		}
+		const dup = results[3]!;
+		expect(dup.ok).toBe(true);
+		if (dup.ok) {
+			for (const b of dup.ballots) {
+				expect(b.status.phase).toBe('not-sent');
+				expect(['already-voted', 'voting-closed']).toContain((b.status as {reason: string}).reason);
+			}
+		}
+		expect(stores[3]!.data[ELECTION]).toBeUndefined();
+		for (const b of BALLOTS) expect(strand.commits.filter(c => c.ballotId === b)).toEqual([{ballotId: b, size: 3}]);
+	});
+
+	it('when the row becomes readable during the check, the duplicate reports sent and records that cid', async () => {
+		const {results, stores} = await runFour(true);
+		const dup = results[3]!;
+		expect(dup.ok).toBe(true);
+		if (dup.ok) expect(dup.ballots).toEqual(BALLOTS.map(ballotId => ({ballotId, status: {phase: 'sent', cid: `cid-elsewhere-${ballotId}`}})));
+		expect(stores[3]!.data[ELECTION]).toEqual(Object.fromEntries(BALLOTS.map(b => [b, `cid-elsewhere-${b}`])));
+		for (const i of [0, 1, 2]) {
+			const r = results[i]!;
+			if (r.ok) expect(r.ballots.map(b => b.status.phase)).toEqual(['sent', 'sent']);
+		}
 	});
 });

@@ -14,6 +14,19 @@
 //     `informAttempts` times before the member is dropped from the pool.
 //   * A member signs only after checkFormedPoolBlock passes; one refusal or silence drops that
 //     member and the rest carry on (the doc reverts the whole merge; spike 102's deviation kept).
+//   * A member the commit names as already voted is dropped and the rest re-form (or keep
+//     presenting below the minimum); it is not a whole-pool revert to solo.
+//   * An `already-voted` outcome from a coordinator is a HINT, never a verdict (CR-01): the member
+//     waits a bounded time for its own strand read to show the row. A recorded cid means sent;
+//     otherwise it refuses that coordinator from now on and keeps pooling alone.
+//   * A member re-parents only to its current coordinator, or to the one that coordinator handed
+//     it over to (`handover`, sent when the coordinator itself merges away). Knowing a member's
+//     vote ciphertext (every co-member of a formation sees it) is not enough.
+//   * Discovery goes through a `PoolDiscovery` (the Authority rendezvous by default). A coordinator
+//     climbs from a 2-bit and a 1-bit pool-hash bucket topic to the plain topic, per doc/election.md
+//     "Pool Merging". That is client-side only: the server keys opaque topics. The plain topic is
+//     reached within min(15 s, quietMs) and before the deadline's form lead, and a pool forms on the
+//     quiet rule only after one quiet window on the plain topic. The parameters are ASSUMED (D-23).
 //   * Pools order strictly by (size desc, peer id asc), so two coordinators never merge into each
 //     other at once.
 //
@@ -33,8 +46,17 @@ import {
   type ConsentSignature,
   type FormedPoolBlock,
   type PoolBallot,
+  type PoolCommitResult,
   type PoolContribution
 } from './pool-block.js'
+import {
+  rendezvousDiscovery,
+  ladderTopic,
+  POOL_LADDER_RUNG_BITS,
+  POOL_LADDER_DWELL_PRESENTS,
+  POOL_LADDER_MAX_MS,
+  type PoolDiscovery
+} from './pool-discovery.js'
 
 export const POOL_MIN_BLOCK_SIZE = 3
 
@@ -47,7 +69,7 @@ export interface PoolAgentOptions {
   /** sign a consent digest with the voting key (Association.DeviceKey); returns compact low-S hex */
   signConsent: (digest: string) => Promise<string>
   /** write the block and its voter rows in one transaction */
-  commit: (block: FormedPoolBlock, signatures: ConsentSignature[]) => Promise<{ ok: true } | { ok: false, reason: string }>
+  commit: (block: FormedPoolBlock, signatures: ConsentSignature[]) => Promise<PoolCommitResult>
   /**
    * The cid of the block this voter's vote is already recorded in (its replicated VoteBlockVoter
    * row), or null. Checked before pooling and again whenever this voter has signed a block, so a
@@ -75,6 +97,14 @@ export interface PoolAgentOptions {
   /** voting closes: stop (vote unsent) at this time; a pool at minSize forms `formLeadMs` before */
   deadlineAt?: number
   formLeadMs?: number
+  /** how this coordinator finds others; default `rendezvousDiscovery(rendezvous, identity)`. `rendezvous` still carries the mailbox. */
+  discovery?: PoolDiscovery
+  /** the specific-then-general topic ladder (doc/election.md "Pool Merging"); default true. false presents only on the plain topic. */
+  ladder?: boolean
+  /** successful presents per rung before widening is considered (default POOL_LADDER_DWELL_PRESENTS) */
+  rungDwellTicks?: number
+  /** the plain topic is reached at most this long after run() starts (default min(POOL_LADDER_MAX_MS, quietMs), clamped to POOL_LADDER_MAX_MS) */
+  ladderMaxMs?: number
   now?: () => number
   log?: (event: string, detail?: Record<string, unknown>) => void
   onStatus?: (status: PoolAgentStatus) => void
@@ -89,7 +119,7 @@ export type PoolAgentStatus =
 
 export type PoolOutcome =
   | { status: 'committed', cid: string, blockId: string, size: number, formedByMe: boolean }
-  | { status: 'stopped', reason: 'deadline' | 'aborted' }
+  | { status: 'stopped', reason: 'deadline' | 'aborted' | 'already-voted' }
 
 type PoolMessage =
   | { t: 'merge', id: string, topic: string, contributions: PoolContribution[] }
@@ -99,7 +129,9 @@ type PoolMessage =
   | { t: 'ack', re: string }
   | { t: 'form', id: string, topic: string, block: FormedPoolBlock }
   | { t: 'sign', re: string, signature: ConsentSignature }
-  | { t: 'outcome', topic: string, committed: boolean, cid?: string, reason?: string }
+  | { t: 'outcome', topic: string, committed: boolean, cid?: string, reason?: string, code?: 'already-voted' }
+  /** the sender (this member's coordinator) merged into `to`: accept `to`'s inform from now on */
+  | { t: 'handover', topic: string, to: string }
 
 const holdOf = (voteCiphertext: string): string => bytesToHex(sha256(utf8ToBytes(voteCiphertext)))
 const better = (a: { size: number, peerId: string }, b: { size: number, peerId: string }): boolean =>
@@ -114,10 +146,19 @@ function isContribution (c: unknown): c is PoolContribution {
 }
 
 export class PoolAgent {
-  private readonly o: Required<Omit<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus'>> & Pick<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus'>
+  private readonly o: Required<Omit<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus' | 'discovery'>> & Pick<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus' | 'discovery'>
   private readonly me: string
   private readonly topic: string
   private readonly myHold: string
+  private readonly discovery: PoolDiscovery
+  /** index into POOL_LADDER_RUNG_BITS; POOL_LADDER_RUNG_BITS.length means the plain topic. Only ever grows. */
+  private rungIndex = 0
+  private rungPresents = 0
+  private runStartedAt: number
+  /** when this pool first became visible on the plain topic; null until then (always set with the ladder off) */
+  private plainAt: number | null
+  private readonly presentedTopics = new Set<string>()
+  private lastPresentTopic: string | null = null
   private role: 'coordinator' | 'member' | 'done' = 'coordinator'
   private pool: PoolContribution[]
   private coordinator: string | null = null
@@ -137,35 +178,54 @@ export class PoolAgent {
   private stopped = false
   private seq = 0
   private readonly pending = new Map<string, { from: string, resolve: (m: PoolMessage | null) => void, timer: ReturnType<typeof setTimeout> }>()
+  /** the coordinator this member's current coordinator handed it over to, if any */
+  private handover: { from: string, to: string } | null = null
+  private readonly handoverWaiters = new Set<() => void>()
+  /** an `already-voted` claim is being checked against the strand */
+  private checkingClaim = false
+  /** the consent given (or being given) for the last form: one prompt per coordinator and block */
+  private consent: { from: string, digest: string, signature: Promise<string> } | null = null
   /** observability: message counts by type, sent and received */
   readonly counts: Record<string, number> = {}
 
   constructor (options: PoolAgentOptions) {
     if (options.contribution.member !== options.identity.peerId) throw new Error('PoolAgent: the contribution must name this agent\'s peer id')
+    // Defaults per field with `??`, AFTER the spread (IN-01): an explicit `undefined` takes the
+    // default, and nothing in `options` can lower minSize below POOL_MIN_BLOCK_SIZE.
+    const quietMs = options.quietMs ?? 20_000
+    const dwell = options.rungDwellTicks ?? POOL_LADDER_DWELL_PRESENTS
     this.o = {
+      ...options,
       minSize: Math.max(POOL_MIN_BLOCK_SIZE, options.minSize ?? POOL_MIN_BLOCK_SIZE),
-      capacity: 16,
-      quietMs: 20_000,
-      presentIntervalMs: 1_000,
-      replyTimeoutMs: 5_000,
-      informAttempts: 3,
-      signTimeoutMs: 120_000,
-      memberTimeoutMs: 60_000,
-      pollWaitMs: 2_000,
-      formLeadMs: 60_000,
-      now: () => Date.now(),
-      ...options
+      capacity: options.capacity ?? 16,
+      quietMs,
+      presentIntervalMs: options.presentIntervalMs ?? 1_000,
+      replyTimeoutMs: options.replyTimeoutMs ?? 5_000,
+      informAttempts: options.informAttempts ?? 3,
+      signTimeoutMs: options.signTimeoutMs ?? 120_000,
+      memberTimeoutMs: options.memberTimeoutMs ?? 60_000,
+      pollWaitMs: options.pollWaitMs ?? 2_000,
+      formLeadMs: options.formLeadMs ?? 60_000,
+      now: options.now ?? (() => Date.now()),
+      ladder: options.ladder ?? true,
+      rungDwellTicks: Number.isFinite(dwell) ? Math.max(1, Math.floor(dwell)) : POOL_LADDER_DWELL_PRESENTS,
+      ladderMaxMs: Math.min(POOL_LADDER_MAX_MS, options.ladderMaxMs ?? quietMs)
     } as PoolAgent['o']
+    this.discovery = options.discovery ?? rendezvousDiscovery(options.rendezvous, options.identity)
     if (this.o.capacity < this.o.minSize) this.o.capacity = this.o.minSize
     this.me = options.identity.peerId
     this.topic = poolTopic(options.ballot)
     this.myHold = holdOf(options.contribution.voteCiphertext)
     this.pool = [options.contribution]
     this.lastGrowthAt = this.o.now()
+    this.runStartedAt = this.lastGrowthAt
+    if (!this.o.ladder) this.rungIndex = POOL_LADDER_RUNG_BITS.length
+    this.plainAt = this.o.ladder ? null : this.lastGrowthAt
   }
 
   /** Pool until this vote is in a committed block, voting closes, or `signal` aborts. */
   async run (signal?: AbortSignal): Promise<PoolOutcome> {
+    this.runStartedAt = this.o.now()
     const polling = this.pollLoop()
     try {
       this.status()
@@ -184,6 +244,7 @@ export class PoolAgent {
       this.stopped = true
       for (const [, p] of this.pending) { clearTimeout(p.timer); p.resolve(null) }
       this.pending.clear()
+      for (const wake of [...this.handoverWaiters]) wake()
       await this.withdraw()
       await polling
     }
@@ -208,11 +269,43 @@ export class PoolAgent {
     if (this.role !== 'coordinator' || this.busy) return
     if (this.shouldForm()) { await this.form(); return }
     let list: CoordinatorListing[]
+    const presentAt = this.o.now()
+    if (!this.onPlain() && (presentAt - this.runStartedAt >= this.o.ladderMaxMs ||
+      (this.o.deadlineAt !== undefined && presentAt >= this.o.deadlineAt - 2 * this.o.formLeadMs))) {
+      const why = presentAt - this.runStartedAt >= this.o.ladderMaxMs ? 'cap' : 'deadline'
+      this.rungIndex = POOL_LADDER_RUNG_BITS.length
+      this.rungPresents = 0
+      this.log('ladder-widen', { to: 'plain', why })
+    }
+    const topic = this.presentTopic()
+    if (this.lastPresentTopic !== null && this.lastPresentTopic !== topic) {
+      const old = this.lastPresentTopic
+      this.presentedTopics.delete(old)
+      void this.discovery.withdraw(old, presentAt).catch(() => undefined)
+    }
     try {
-      const reply = await this.o.rendezvous.call(poolRequests.present(this.o.identity, this.topic, this.pool.length, this.o.now()))
+      // Record the topic before the call: a present that fails after reaching the server must still be withdrawn.
+      this.presentedTopics.add(topic)
+      this.lastPresentTopic = topic
+      list = await this.discovery.present(topic, this.pool.length, presentAt)
       this.count('present')
-      if (reply.t !== 'coordinators') throw new Error(reply.t === 'error' ? reply.reason : 'unexpected reply')
-      list = reply.list
+      // This agent became a member while the present was on its way (IN-06): the withdraw that
+      // becomeMemberOf sent may have reached the rendezvous first, leaving it listed. Withdraw again.
+      if (this.role !== 'coordinator') {
+        void this.discovery.withdraw(topic, this.o.now()).catch(() => undefined)
+        return
+      }
+      if (this.onPlain()) {
+        if (this.plainAt === null) this.plainAt = this.o.now()
+      } else {
+        this.rungPresents++
+        const seen = list.reduce((n, c) => n + c.size, 0) + this.pool.length
+        if (this.rungPresents >= this.o.rungDwellTicks && seen < this.o.minSize) {
+          this.rungIndex++
+          this.rungPresents = 0
+          this.log('ladder-widen', { to: this.onPlain() ? 'plain' : POOL_LADDER_RUNG_BITS[this.rungIndex], why: 'few' })
+        }
+      }
     } catch (err) {
       this.log('present-failed', { message: err instanceof Error ? err.message : String(err) })
       return
@@ -220,9 +313,22 @@ export class PoolAgent {
     if (this.role !== 'coordinator' || this.busy) return
     const mine = { size: this.pool.length, peerId: this.me }
     const best = list
-      .filter(c => better(c, mine) && c.size + this.pool.length <= this.o.capacity)
+      .filter(c => !this.excluded.has(c.peerId) && better(c, mine) && c.size + this.pool.length <= this.o.capacity)
       .sort((a, b) => (better(a, b) ? -1 : 1))[0]
     if (best !== undefined) await this.mergeInto(best.peerId)
+  }
+
+  private onPlain (): boolean {
+    return this.rungIndex >= POOL_LADDER_RUNG_BITS.length
+  }
+
+  /**
+   * The topic to present on. A rung topic is for present/withdraw ONLY: protocol messages carry the
+   * plain poolTopic, or a cross-rung merge would be refused as "not pooling this ballot".
+   */
+  private presentTopic (): string {
+    if (this.onPlain()) return this.topic
+    return ladderTopic(this.topic, POOL_LADDER_RUNG_BITS[this.rungIndex]!, this.pool.map(c => holdOf(c.voteCiphertext)))
   }
 
   private shouldForm (): boolean {
@@ -231,8 +337,10 @@ export class PoolAgent {
     // coordinator yet and would refuse the form as "not my coordinator" (measured, run product-2).
     if (!this.pool.every(c => c.member === this.me || this.confirmed.has(c.member))) return false
     const now = this.o.now()
+    // The quiet rule also needs one full quiet window on the PLAIN topic: otherwise a trio sharing a
+    // bucket forms on its rung while voters in other buckets are still waiting on plain.
     return this.pool.length >= this.o.capacity ||
-      now - this.lastGrowthAt >= this.o.quietMs ||
+      (this.plainAt !== null && now - Math.max(this.lastGrowthAt, this.plainAt) >= this.o.quietMs) ||
       (this.o.deadlineAt !== undefined && now >= this.o.deadlineAt - this.o.formLeadMs)
   }
 
@@ -248,10 +356,14 @@ export class PoolAgent {
   }
 
   private becomeMemberOf (coordinator: string): void {
+    // The members of the pool given away learn who holds them now; nobody else can re-parent them.
+    const handed = this.pool.filter(c => c.member !== this.me)
     this.confirmed.clear()
     this.role = 'member'
     this.coordinator = coordinator
+    this.handover = null
     this.pool = []
+    for (const c of handed) void this.post(c.member, { t: 'handover', topic: this.topic, to: coordinator })
     this.lastHeardAt = this.o.now()
     void this.withdraw()
     this.log('member-of', { coordinator: coordinator.slice(-6) })
@@ -262,6 +374,7 @@ export class PoolAgent {
     this.confirmed.clear()
     this.role = 'coordinator'
     this.coordinator = null
+    this.handover = null
     this.pool = [this.o.contribution]
     this.lastGrowthAt = this.o.now()
     this.busy = false
@@ -338,7 +451,6 @@ export class PoolAgent {
           return r?.t === 'refuse' ? r.reason : r?.t === 'sign' ? 'invalid signature' : 'no answer'
         })
         this.log('form-refused-by', { members: refusers.map(c => c.member.slice(-6)), reasons })
-        const gone = refusers.map(c => c.member)
         // doc/election.md's open question on repeat offenders: a member dropped here would otherwise
         // merge straight back in and stall the pool again. An invalid signature is refused from now
         // on; any other refusal or silence (a slow fingerprint, a state mismatch) gets one more try.
@@ -346,15 +458,8 @@ export class PoolAgent {
           const drops = (this.formationDrops.get(c.member) ?? 0) + 1
           this.formationDrops.set(c.member, drops)
           if (reasons[k] === 'invalid signature' || drops >= 2) { this.excluded.add(c.member); this.excluded.add(c.voterEntry.registrantId) }
-          this.confirmed.delete(c.member)
         })
-        this.pool = this.pool.filter(c => !gone.includes(c.member))
-        for (const c of this.pool) {
-          if (c.member !== this.me) void this.post(c.member, { t: 'inform', id: this.nextId(), topic: this.topic, size: this.pool.length, hold: holdOf(c.voteCiphertext), dropped: gone })
-        }
-        for (const g of gone) void this.post(g, { t: 'outcome', topic: this.topic, committed: false, reason: 'dropped at formation' })
-        this.lastGrowthAt = this.o.now()
-        this.status()
+        this.dropMembers(refusers, { reason: 'dropped at formation' })
         return
       }
       const signatures: ConsentSignature[] = [
@@ -369,11 +474,51 @@ export class PoolAgent {
         return
       }
       this.log('commit-failed', { reason: result.reason })
-      for (const c of others) void this.post(c.member, { t: 'outcome', topic: this.topic, committed: false, reason: 'the block did not commit' })
-      this.revertToSolo('commit failed')
+      // Only identified pool members may be dropped: the list is input from the commit.
+      const named = new Set(result.duplicateRegistrants ?? [])
+      const dup = this.pool.filter(c => named.has(c.voterEntry.registrantId))
+      if (dup.length === 0) {
+        for (const c of others) void this.post(c.member, { t: 'outcome', topic: this.topic, committed: false, reason: 'the block did not commit' })
+        this.revertToSolo('commit failed')
+        return
+      }
+      if (dup.some(c => c.member === this.me)) {
+        // The former is itself the duplicate: tell everyone, then stop (or report its recorded cid).
+        await Promise.all(others.map(async c => await this.post(c.member, dup.includes(c)
+          ? { t: 'outcome', topic: this.topic, committed: false, reason: 'already voted', code: 'already-voted' }
+          : { t: 'outcome', topic: this.topic, committed: false, reason: 'the former already voted' })))
+        const recorded = (await this.o.findRecordedVote?.().catch(() => null)) ?? null
+        if (recorded !== null) this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
+        else this.finish({ status: 'stopped', reason: 'already-voted' })
+        return
+      }
+      // Never let a registrant that already voted merge back in and stall the pool again.
+      for (const c of dup) { this.excluded.add(c.member); this.excluded.add(c.voterEntry.registrantId) }
+      this.log('commit-duplicate', { count: dup.length, size: this.pool.length - dup.length })
+      this.dropMembers(dup, { reason: 'already voted', code: 'already-voted' })
     } finally {
       if (this.role !== 'done') this.busy = false
     }
+  }
+
+  /**
+   * Remove `gone` from the pool: tell the survivors who was dropped, tell the dropped through an
+   * `outcome`, and restart the quiet window. The pool re-forms once it is at least `minSize` again.
+   */
+  private dropMembers (gone: PoolContribution[], outcome: { reason: string, code?: 'already-voted' }): void {
+    const goneIds = gone.map(c => c.member)
+    for (const c of gone) this.confirmed.delete(c.member)
+    this.pool = this.pool.filter(c => !goneIds.includes(c.member))
+    for (const c of this.pool) {
+      if (c.member !== this.me) void this.post(c.member, { t: 'inform', id: this.nextId(), topic: this.topic, size: this.pool.length, hold: holdOf(c.voteCiphertext), dropped: goneIds })
+    }
+    for (const g of goneIds) {
+      void this.post(g, outcome.code === undefined
+        ? { t: 'outcome', topic: this.topic, committed: false, reason: outcome.reason }
+        : { t: 'outcome', topic: this.topic, committed: false, reason: outcome.reason, code: outcome.code })
+    }
+    this.lastGrowthAt = this.o.now()
+    this.status()
   }
 
   private async abandon (reason: 'deadline' | 'aborted'): Promise<void> {
@@ -396,9 +541,12 @@ export class PoolAgent {
   // inbound
 
   private async withdraw (): Promise<void> {
-    try {
-      await this.o.rendezvous.call(poolRequests.withdraw(this.o.identity, this.topic, this.o.now()))
-    } catch { /* best effort: the rendezvous expires stale coordinators anyway */ }
+    // Clear before awaiting, so a present that lands meanwhile is not lost. Every rung presented on is withdrawn.
+    const topics = [...this.presentedTopics]
+    this.presentedTopics.clear()
+    this.lastPresentTopic = null
+    // best effort: the rendezvous expires stale coordinators anyway
+    await Promise.all(topics.map(async (t) => await this.discovery.withdraw(t, this.o.now()).catch(() => undefined)))
   }
 
   private async pollLoop (): Promise<void> {
@@ -449,7 +597,8 @@ export class PoolAgent {
       case 'merge': await this.onMerge(from, m); return
       case 'inform': await this.onInform(from, m); return
       case 'form': await this.onForm(from, m); return
-      case 'outcome': this.onOutcome(from, m)
+      case 'outcome': await this.onOutcome(from, m); return
+      case 'handover': this.onHandover(from, m)
     }
   }
 
@@ -477,20 +626,30 @@ export class PoolAgent {
       if (this.role === 'member' && this.coordinator === from) this.revertToSolo('dropped by the coordinator')
       return
     }
-    // The sender must prove it holds MY contribution (a digest of my vote ciphertext), so nobody
-    // can talk a member out of its pool by claiming to be its new coordinator.
+    if (this.excluded.has(from)) return await this.post(from, { t: 'refuse', re: m.id, reason: 'refused here before' })
+    // The sender must hold MY contribution (a digest of my vote ciphertext). That alone is not
+    // enough (CR-01): every co-member of a formation has seen my ciphertext.
     if (m.hold !== this.myHold) return await this.post(from, { t: 'refuse', re: m.id, reason: 'you do not hold my vote' })
     if (this.role === 'member') {
+      // Only my coordinator, or the one it handed me over to. The handover usually arrives just
+      // after the new coordinator's first inform, so wait a little for it; an inform nobody handed
+      // over gets no answer (the honest sender retries, a hijacker learns nothing).
+      if (from !== this.coordinator && !(await this.handedOverTo(from))) {
+        this.log('inform-not-handed-over', { from: from.slice(-6) })
+        return
+      }
+      if (!this.isMember()) return
       this.coordinator = from
+      this.handover = null
       this.lastHeardAt = this.o.now()
       this.status()
       return await this.post(from, { t: 'ack', re: m.id })
     }
-    // A coordinator accepts only if it is alone (its own merge reply may have been lost) or this is
-    // the pool it just tried to merge into and nobody has joined it since.
+    // A coordinator accepts only the pool it just tried to merge into (its merge reply may have been
+    // lost), and only if nobody has joined it since.
     const recent = this.lastMergeAttempt
     const joinedIt = recent !== null && recent.target === from && this.o.now() - recent.at < 3 * this.o.replyTimeoutMs && this.pool.length === recent.size
-    if (this.role === 'coordinator' && (this.pool.length === 1 || joinedIt)) {
+    if (this.role === 'coordinator' && joinedIt) {
       this.becomeMemberOf(from)
       return await this.post(from, { t: 'ack', re: m.id })
     }
@@ -506,11 +665,18 @@ export class PoolAgent {
       this.lastHeardAt = this.o.now()
       return await this.post(from, { t: 'refuse', re: m.id, reason: check.reason })
     }
-    this.o.onStatus?.({ phase: 'signing' })
     const mine = this.o.contribution.voterEntry
+    const digest = consentDigest(m.block, this.o.ballot, mine.registrantId, mine.deviceKey)
+    // The same form from the same coordinator (a failover resend, a retried request) reuses the one
+    // consent this voter gave or is giving, never a second prompt (WR-01). The digest binds the
+    // block's cid and id, so another block always prompts.
+    if (this.consent === null || this.consent.from !== from || this.consent.digest !== digest) {
+      this.o.onStatus?.({ phase: 'signing' })
+      this.consent = { from, digest, signature: this.o.signConsent(digest) }
+    }
     let signature: string
     try {
-      signature = await this.o.signConsent(consentDigest(m.block, this.o.ballot, mine.registrantId, mine.deviceKey))
+      signature = await this.consent.signature
     } catch {
       this.lastHeardAt = this.o.now()
       return await this.post(from, { t: 'refuse', re: m.id, reason: 'the voter declined to sign' })
@@ -522,14 +688,76 @@ export class PoolAgent {
     this.status()
   }
 
-  private onOutcome (from: string, m: Extract<PoolMessage, { t: 'outcome' }>): void {
+  private async onOutcome (from: string, m: Extract<PoolMessage, { t: 'outcome' }>): Promise<void> {
     if (this.role !== 'member' || this.coordinator !== from) return
     if (m.committed && typeof m.cid === 'string' && m.cid === this.signedCid) {
       this.finish({ status: 'committed', cid: m.cid, blockId: '', size: 0, formedByMe: false })
       return
     }
+    if (m.code === 'already-voted') { await this.checkAlreadyVotedClaim(from); return }
     this.revertToSolo(`formation failed: ${m.reason ?? 'unknown'}`)
   }
+
+  /**
+   * `already-voted` is a hint (CR-01): any former, honest or not, can send it. Only this voter's own
+   * strand read is proof. Poll it for a bounded time (replication of an earlier vote may lag); a
+   * recorded cid means sent. Otherwise refuse the claimant from now on and keep pooling alone.
+   */
+  private async checkAlreadyVotedClaim (from: string): Promise<void> {
+    if (this.checkingClaim) return
+    this.checkingClaim = true
+    try {
+      let recorded: string | null = null
+      const find = this.o.findRecordedVote
+      if (find !== undefined) {
+        const until = Date.now() + 4 * this.o.replyTimeoutMs
+        for (;;) {
+          recorded = await find().catch(() => null)
+          if (recorded !== null || this.stopped || this.isDone()) break
+          const left = until - Date.now()
+          if (left <= 0) break
+          await sleep(Math.min(ALREADY_VOTED_POLL_MS, left))
+        }
+      }
+      if (this.stopped || this.isDone()) return
+      if (recorded !== null) {
+        this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
+        return
+      }
+      this.excluded.add(from)
+      this.log('already-voted-unconfirmed', { from: from.slice(-6) })
+      if (this.isMember() && this.coordinator === from) this.revertToSolo('already-voted claim not confirmed by the strand')
+    } finally {
+      this.checkingClaim = false
+    }
+  }
+
+  private onHandover (from: string, m: Extract<PoolMessage, { t: 'handover' }>): void {
+    if (!this.isMember() || this.coordinator !== from || typeof m.to !== 'string' || m.to === this.me || this.excluded.has(m.to)) return
+    this.handover = { from, to: m.to }
+    this.lastHeardAt = this.o.now()
+    for (const wake of [...this.handoverWaiters]) wake()
+  }
+
+  /** Wait (briefly) until my current coordinator has handed me over to `to`. */
+  private async handedOverTo (to: string): Promise<boolean> {
+    const until = Date.now() + this.o.replyTimeoutMs * 0.75
+    for (;;) {
+      if (!this.isMember() || this.stopped) return false
+      if (this.handover !== null && this.handover.from === this.coordinator && this.handover.to === to) return true
+      const left = until - Date.now()
+      if (left <= 0) return false
+      await new Promise<void>((resolve) => {
+        const wake = (): void => { clearTimeout(timer); this.handoverWaiters.delete(wake); resolve() }
+        const timer = setTimeout(wake, left)
+        this.handoverWaiters.add(wake)
+      })
+    }
+  }
+
+  // Role reads through methods: TS would otherwise keep a narrowing across an await.
+  private isMember (): boolean { return this.role === 'member' }
+  private isDone (): boolean { return this.role === 'done' }
 
   // -------------------------------------------------------------------------------------------
   // outbound
@@ -574,3 +802,5 @@ export class PoolAgent {
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+/** how often an `already-voted` claim is re-checked against the strand while it is unconfirmed */
+const ALREADY_VOTED_POLL_MS = 500

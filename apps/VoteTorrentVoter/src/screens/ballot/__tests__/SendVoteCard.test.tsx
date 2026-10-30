@@ -83,6 +83,7 @@ describe('SendVoteCard', () => {
 			['no-network', "This phone isn't connected to an election network yet"],
 			['canceled', 'Sending was cancelled'],
 			['failed', "We couldn't send your vote"],
+			['rendezvous-unreachable', "We couldn't send your vote"],
 		] as const) {
 			(runVoteSendFlow as jest.Mock).mockResolvedValueOnce({kind});
 			await mount(['b1']);

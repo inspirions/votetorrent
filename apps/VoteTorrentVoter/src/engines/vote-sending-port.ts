@@ -5,6 +5,8 @@
  *
  * The block commit goes through vote-engine's `commitPoolBlock` (one transaction: VoteBlock plus
  * every VoteBlockVoter row); the schema's CHECKs are the judge of the block, not this file.
+ * `commitPoolBlock`'s result, including any `duplicateRegistrants` named after a duplicate-voter
+ * failure, passes through untouched to the pool agent.
  */
 import type {Database, SqlValue} from '@quereus/quereus';
 import {commitPoolBlock} from '@votetorrent/vote-engine/rn';

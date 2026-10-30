@@ -55,6 +55,61 @@ export { H16, toCanonicalDatetime, nowCanonicalDatetime, fromCanonicalDatetime }
 
 export type { DbFactory, EngineContext } from './types.js'
 
+// The R5 block Merkle tree: SHA-256 over public VoteBlock columns, for the dashboard's recomputation
+// of the root. A Cid that several rows name is resolved by consent authentication (T-65-05-03), with the
+// crypto plugin's digest and P-256 verify (already in this graph through database/initialize.ts).
+// Imported from the module file and NOT from the blocks barrel, because the barrel also carries R6-R8.
+export {
+	BLOCK_TREE_DOMAIN,
+	BLOCK_TREE_EMPTY_ROOT,
+	blockLeafData,
+	voterListDigest,
+	blockLeafHash,
+	blockNodeHash,
+	isBase32Cid,
+	blockCidOf,
+	selectBlockRows,
+	buildBlockTree,
+	verifyInclusion,
+	blockTreeStatus,
+	finalBlockTree,
+	blockConsentDigest,
+	verifyBlockConsent,
+	blockAuthorizer,
+	judgeBlockVoters
+} from './blocks/block-tree.js'
+export type {
+	BlockTreeRow,
+	BlockTreeScope,
+	BlockTreeLeaf,
+	BlockTreeNode,
+	BlockProofStep,
+	BlockInclusionProof,
+	BlockProofResult,
+	BlockTree,
+	BlockTreeRefusal,
+	BlockTreeRejectReason,
+	BlockTreeRejection,
+	BlockRowSelection,
+	BlockTreeResult,
+	InclusionCheck,
+	BlockTreeTimeline,
+	BlockTreeStatus,
+	FinalBlockTreeResult,
+	BlockVoterRow,
+	BlockRegistrantRow,
+	BlockAssociationRow,
+	BlockAuthorizationTimeline,
+	BlockAuthorization,
+	BlockConsentScope,
+	BlockAuthorizer,
+	BlockVoterProblemCode,
+	BlockVoterProblem,
+	BlockVoterRepresentative,
+	BlockVoterExtra,
+	BlockVoterJudgement
+} from './blocks/block-tree.js'
+
 // -----------------------------------------------------------------------
 // DELIBERATELY NOT EXPORTED (enforced by test/browser-entry-purity.spec.ts)
 // -----------------------------------------------------------------------
@@ -72,3 +127,5 @@ export type { DbFactory, EngineContext } from './types.js'
 //   is read-only (D-01: panel actions are step 3, explicitly OUT) and
 //   because the outline's binding cross-plan contract 2 fixes the
 //   dashboard's only engine-class import as UserEngine.
+// - The R6-R8 functions (slice checks, validation, tally tree) — they import election-block.ts, which
+//   reaches `@noble/curves/secp256k1.js`, outside the 7-entry allowlist, and the dashboard has no consumer.
