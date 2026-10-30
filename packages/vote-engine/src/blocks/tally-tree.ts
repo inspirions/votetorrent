@@ -28,15 +28,17 @@
 // finding has no voteIndex: Cid or Id mismatch, the block does not open, a payload shape or count error, a
 // consent or voter-entry signature failure, an unknown ballot or template mismatch, a voter-row defect, or a
 // registrant in two blocks. Its leaf still exists, because the tally tree mirrors every R5 leaf: that keeps the
-// R5 root unchanged and every branch checkable. Its declared EntryCount counts in `votes` and in `excluded`.
+// R5 root unchanged and every branch checkable. Its R7 attestedEntries counts in `votes` and in `excluded`
+// (WR-04): min(EntryCount, listed voters, listed voters with an authenticated voter row). An invalid block is
+// untrusted, so its declared EntryCount alone (up to 2^53 - 1) must not inflate the excluded volume.
 // Its option counts are zero, and the leaf lists the block-level error codes in `excludedFor`.
 // Why: a block-level error means R7 could not show that the block holds what was committed, that its voters
 // consented to it, or that its votes belong to it alone. Counting its votes would let a hostile writer or
 // replica inject, or count twice, votes that no valid consent backs. Dropping them silently would hide them.
 // Counting them as `excluded` keeps votes = valid + invalid + excluded exact at every node, and puts the
-// excluded volume in the published outcome, where the spec's discrepancy margin can use it. The excluded count
-// is the declared EntryCount that the R5 leaf commits to, so every leaf's `votes` can be checked against its own
-// leafData without a key. Per-vote errors inside an otherwise valid block (D-71) only move that vote to
+// excluded volume in the published outcome, where the spec's discrepancy margin can use it. A tallied leaf's
+// `votes` equals the EntryCount its leafData commits to; an excluded leaf's is at most that. Every sum is checked
+// to stay a safe integer; otherwise the tally is refused (`count-overflow`) rather than emitted unverifiable. Per-vote errors inside an otherwise valid block (D-71) only move that vote to
 // `invalid`. Info findings never exclude anything.
 //
 // Out of scope (D-80, spec "Q:" items): signing tally nodes, TSA timestamps, storage or caching, write-in or
@@ -74,7 +76,7 @@ export interface TallyQuestionCounts {
 }
 
 export interface TallyBallotCounts {
-  /** committed entries = sum of R5 leaf entryCount */
+  /** tallied leaves: their EntryCount; excluded leaves: their R7 attestedEntries (WR-04) */
   votes: number
   /** per-vote invalid (D-71) inside tallied blocks */
   invalid: number
@@ -136,7 +138,7 @@ export interface TallyTree {
 }
 
 export type TallyTreeRefusal =
-  | 'malformed-input' | 'not-released' | 'inconsistent-inputs'
+  | 'malformed-input' | 'not-released' | 'inconsistent-inputs' | 'count-overflow'
   | 'malformed-row' | 'duplicate-block' | 'mixed-election' | 'mixed-revision'
   | 'invalid-secret' | 'secret-mismatch'
 
@@ -288,7 +290,12 @@ function leafHistogram (leafBallotId: string, entryCount: number, finding: Rec, 
   const w = ballotSkeleton(template)
   w.votes = entryCount
   if (finding.status === 'invalid') {
-    w.excluded = entryCount
+    const attested = finding.attestedEntries
+    if (!isCount(attested) || attested > entryCount) {
+      return refuse('inconsistent-inputs', `block ${String(finding.blockCid)}: attestedEntries must be a count no larger than the entry count`)
+    }
+    w.votes = attested
+    w.excluded = attested
     const codes = new Set<string>()
     if (Array.isArray(finding.findings)) {
       for (const f of finding.findings as unknown[]) {
@@ -376,6 +383,7 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
         return refuse('malformed-input', `tree node ${i} has malformed children`)
       }
       histogram = addHistograms(outNodes[left as number]!.histogram, outNodes[right as number]!.histogram)
+      if (!isWellFormedHistogram(histogram)) return refuse('count-overflow', `tree node ${i}: a count is no longer a safe integer`)
       entry.left = left as number
       entry.right = right as number
     }
@@ -531,7 +539,9 @@ function leafBoundProblem (h: TallyHistogram, leaf: TallyLeaf): string | null {
   const ids = Object.keys(h.ballots)
   if (ids.length !== 1 || ids[0] !== leaf.ballotId) return 'a leaf histogram must hold exactly its own ballot'
   const b = get(h.ballots, leaf.ballotId) as TallyBallotCounts
-  if (b.votes !== leaf.entryCount) return 'leaf votes differ from the committed entry count'
+  if (leaf.disposition === 'tallied' ? b.votes !== leaf.entryCount : b.votes > leaf.entryCount) {
+    return leaf.disposition === 'tallied' ? 'leaf votes differ from the committed entry count' : 'excluded votes exceed the committed entry count'
+  }
   if (b.invalid + b.excluded > b.votes) return 'invalid and excluded exceed the votes'
   const valid = b.votes - b.invalid - b.excluded
   const counts: Array<[string, number, number]> = []

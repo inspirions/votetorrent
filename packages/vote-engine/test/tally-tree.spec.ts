@@ -128,7 +128,7 @@ function verdictsFor (ballotId: string, blockNo: number, n: number): any[] {
 
 const blockFinding = (r: any, over: any = {}): any => ({
   blockCid: r.Cid, blockId: r.Id, ballotId: r.BallotId, payloadVersion: 2, status: 'valid', declaredEntries: r.EntryCount,
-  votes: [], findings: [], ...over
+  attestedEntries: r.EntryCount, votes: [], findings: [], ...over
 })
 
 const report = (blocks: any[], over: any = {}): any => ({
@@ -354,6 +354,27 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     expect(reason(go(s.tree, s.validation))).to.equal('ok')
   })
 
+  it('TH-7 (WR-04) excluded leaves count attestedEntries; a sum past 2^53 - 1 is refused, never emitted', () => {
+    const invalid = (r: any, attested: unknown): any => blockFinding(r, {
+      status: 'invalid', attestedEntries: attested, findings: [{ blockCid: r.Cid, code: 'consent-signature-invalid', severity: 'error', detail: 'x' }]
+    })
+    const big = [row('bca', 'ballot-a', Number.MAX_SAFE_INTEGER), row('bcb', 'ballot-a', Number.MAX_SAFE_INTEGER)]
+    const built = buildBlockTree(big, scope)
+    if (!built.ok) throw new Error('tree')
+    const few: any = tallyTreeFrom(built.tree, report(big.map(r => invalid(r, 2))), templates())
+    expect(few.ok, JSON.stringify(few)).to.equal(true)
+    expect(few.tally.histogram.ballots['ballot-a']).to.include({ votes: 4, excluded: 4 })
+    expect(verifyTallyTree(few.tally)).to.deep.equal({ ok: true })
+    const over: any = tallyTreeFrom(built.tree, report(big.map(r => invalid(r, Number.MAX_SAFE_INTEGER))), templates())
+    expect(over).to.deep.include({ ok: false, reason: 'count-overflow' })
+    for (const bad of [undefined, -1, 1.5, '2', Number.MAX_SAFE_INTEGER + 2]) {
+      const one = [row('bca', 'ballot-a', 3)]
+      const t = buildBlockTree(one, scope)
+      if (!t.ok) throw new Error('tree')
+      expect(tallyTreeFrom(t.tree, report([invalid(one[0], bad === Number.MAX_SAFE_INTEGER + 2 ? 4 : bad)]), templates()), String(bad)).to.deep.include({ ok: false, reason: 'inconsistent-inputs' })
+    }
+  })
+
   it('TH-6 hostile codes and the empty tree', () => {
     const before = Object.getOwnPropertyNames(Object.prototype).sort()
     const template: any = makeFixtureTemplate('ballot-a', {
@@ -402,7 +423,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
 // ---- Part 2: committed fixture blocks ----
 
 /** The spec's own count, straight from each fixture block's voters and the template. Never calls the module. */
-function naiveTally (blocks: any[], ballots: any[], excludedCids: Set<string> = new Set(), invalidEntries: Set<any> = new Set()): any {
+function naiveTally (blocks: any[], ballots: any[], excludedCids: Set<string> | Map<string, number> = new Set(), invalidEntries: Set<any> = new Set()): any {
   const out: any = {}
   for (const b of blocks) {
     const id = b.row.BallotId
@@ -420,8 +441,14 @@ function naiveTally (blocks: any[], ballots: any[], excludedCids: Set<string> = 
       out[id] = { votes: 0, invalid: 0, excluded: 0, questions, unsupported }
     }
     const acc = out[id]
+    if (excludedCids.has(b.row.Cid)) {
+      // WR-04: an excluded block counts its attested entries (a Map gives them; a Set means all of them)
+      const n = excludedCids instanceof Map ? excludedCids.get(b.row.Cid)! : b.row.EntryCount
+      acc.votes += n
+      acc.excluded += n
+      continue
+    }
     acc.votes += b.row.EntryCount
-    if (excludedCids.has(b.row.Cid)) { acc.excluded += b.row.EntryCount; continue }
     for (const v of b.voters) {
       if (invalidEntries.has(v.voteEntry)) { acc.invalid++; continue }
       for (const a of v.voteEntry.answers) {
@@ -463,7 +490,10 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       const sums: any = {}
       for (let i = lo; i < hi; i++) {
         const l = tally.leaves[i]
-        sums[l.ballotId] = (sums[l.ballotId] ?? 0) + l.entryCount
+        const leafNode = tally.nodes.find((x: any) => x.range[0] === i && x.range[1] === i + 1)
+        const counted = l.disposition === 'tallied' ? l.entryCount : leafNode.histogram.ballots[l.ballotId].votes
+        if (l.disposition !== 'tallied') expect(counted).to.be.at.most(l.entryCount)
+        sums[l.ballotId] = (sums[l.ballotId] ?? 0) + counted
       }
       expect(Object.keys(n.histogram.ballots).sort()).to.deep.equal(Object.keys(sums).sort())
       for (const [id, b] of Object.entries<any>(n.histogram.ballots)) {
@@ -582,10 +612,12 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
           expect(l.excludedFor).to.include('consent-signature-invalid')
         } else expect(l.disposition).to.equal('tallied')
       })
-      const expected = naiveTally(set.blocks, ballots, new Set([victim.row.Cid]))
+      // WR-04: 3 of the 4 listed voters still carry authenticated consent, so 3 entries are excluded
+      expect(r.validation.blocks.find((b: any) => b.blockCid === victim.row.Cid).attestedEntries).to.equal(3)
+      const expected = naiveTally(set.blocks, ballots, new Map([[victim.row.Cid, 3]]))
       checkInvariants(r.tally, expected)
-      expect(r.tally.histogram.ballots['ballot-a'].excluded).to.equal(victim.row.EntryCount)
-      expect(r.tally.histogram.ballots['ballot-a'].votes).to.equal(3 + 4 + 3)
+      expect(r.tally.histogram.ballots['ballot-a'].excluded).to.equal(3)
+      expect(r.tally.histogram.ballots['ballot-a'].votes).to.equal(3 + 3 + 3)
     })
 
     it('TB-4b a missing voter row excludes its block', () => {
@@ -596,7 +628,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       const leaf = r.tally.leaves.find((l: any) => l.blockCid === victim.row.Cid)
       expect(leaf.disposition).to.equal('excluded')
       expect(leaf.excludedFor).to.include('voter-row-missing')
-      checkInvariants(r.tally, naiveTally(set.blocks, ballots, new Set([victim.row.Cid])))
+      checkInvariants(r.tally, naiveTally(set.blocks, ballots, new Map([[victim.row.Cid, 2]])))
     })
 
     it('TB-4c a registrant in two blocks excludes both', () => {
@@ -639,9 +671,23 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     expect(leafOf(forged.row.Cid).excludedFor).to.not.include('registrant-in-two-blocks')
     for (const b of set.blocks) expect(leafOf(b.row.Cid).disposition).to.equal('tallied')
     expect(r.validation.findings.map((f: any) => f.code)).to.deep.equal(['voter-row-forged'])
+    // WR-04: no voter of the forged block is authenticated, so it excludes nothing
+    expect(r.tally.nodes.find((n: any) => n.range[1] - n.range[0] === 1 && r.tally.leaves[n.range[0]].blockCid === forged.row.Cid).histogram.ballots['ballot-a']).to.include({ votes: 0, excluded: 0 })
     const clean = naiveTally(set.blocks, ballots)
     const got = r.tally.histogram.ballots['ballot-a']
     expect(got.questions).to.deep.equal(clean.ballots['ballot-a'].questions)
+  })
+
+  it('TB-4e (WR-04) a hostile EntryCount cannot inflate the excluded volume or break the verifier', () => {
+    const ballot = set.election.ballots[0]!
+    const strangers = [0, 1, 2].map(i => makeFixtureVoter(set.election, ballot, 400 + i))
+    const huge = makeCommittedBlock(set.election, ballot, strangers)
+    const rows = [...set.rows, { ...huge.row, EntryCount: Number.MAX_SAFE_INTEGER }, { ...huge.row, Cid: 'bhugecopy', EntryCount: Number.MAX_SAFE_INTEGER }]
+    const r: any = buildTallyTree(input({ rows, voterRows: [...set.voterRows, ...huge.voterRows] }))
+    expect(r.ok, JSON.stringify(r)).to.equal(true)
+    expect(r.tally.histogram.ballots['ballot-a'].excluded).to.equal(0)
+    expect(verifyTallyTree(r.tally)).to.deep.equal({ ok: true })
+    expect(verifyTallyTree(JSON.parse(JSON.stringify(r.tally)))).to.deep.equal({ ok: true })
   })
 
   it('TB-5 determinism for any input order and for bigint columns', () => {

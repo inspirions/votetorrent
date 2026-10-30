@@ -114,6 +114,11 @@ export interface BlockFinding {
   status: 'valid' | 'invalid' | 'not-decryptable-yet'
   /** normalised EntryCount, 0 when unreadable */
   declaredEntries: number
+  /**
+   * WR-04: min(declaredEntries, listed voters, listed voters with an authenticated voter row). The volume an
+   * excluded block may count: what the evidence supports, never the attacker-declared EntryCount alone.
+   */
+  attestedEntries: number
   /** [] before release or when the block did not open */
   votes: readonly VoteVerdict[]
   /** every finding of this block, block-level and per-vote */
@@ -668,6 +673,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
       payloadVersion: w.payloadVersion,
       status: blockLevelError ? 'invalid' : released ? 'valid' : 'not-decryptable-yet',
       declaredEntries: w.declared,
+      attestedEntries: Math.min(w.declared, w.list === null ? 0 : w.list.length, w.authenticated.size),
       votes: w.votes,
       findings: w.fs
     }

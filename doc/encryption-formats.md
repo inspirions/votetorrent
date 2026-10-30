@@ -585,7 +585,10 @@ The answer policy for one decrypted vote against its ballot template:
 - Invalid votes are counted apart from valid ones and are never dropped.
 
 The report has one finding record per block (ascending by UTF-8 bytes of
-`Cid`), a verdict per vote, report-level findings and totals. The totals
+`Cid`), a verdict per vote, report-level findings and totals. Each block
+record carries `declaredEntries` (the `EntryCount`) and
+`attestedEntries`, the smallest of `EntryCount`, the number of listed
+voters and the number of listed voters with an authenticated voter row. The totals
 satisfy `valid + invalid + undecryptable = entries`, where `entries`
 counts a block's payload votes if it opened and its declared
 `EntryCount` otherwise. Refusals are `malformed-input`, `mixed-election`,
@@ -645,9 +648,19 @@ the same order, so the block-tree root is unchanged by the tally.
   `votes - invalid - excluded`.
 - **Leaf.** The histogram of one block: its valid decrypted select
   answers; its invalid votes counted apart under `invalid`. A block that
-  validation marks `invalid` is not tallied: its declared `EntryCount`
-  goes under `votes` and `excluded`, its option counts stay zero, and the
-  leaf lists the block-level error codes in `excludedFor`.
+  validation marks `invalid` is not tallied: its option counts stay zero,
+  the leaf lists the block-level error codes in `excludedFor`, and its
+  `attestedEntries` from the validation goes under `votes` and
+  `excluded`. `attestedEntries` is the smallest of the declared
+  `EntryCount`, the number of listed voters and the number of listed
+  voters with an authenticated voter row (section 7.3). An invalid block
+  is untrusted, so its declared `EntryCount` alone (up to 2^53 - 1) must
+  not inflate the excluded volume. A tallied leaf's `votes` equals the
+  `EntryCount` its leaf data commits to; an excluded leaf's is at most
+  that.
+- **Overflow.** Every count of every node must stay a safe integer. A sum
+  that would pass 2^53 - 1 refuses the tally with `count-overflow`, so no
+  tally is ever emitted that its own verifier would reject.
 - **Parent.** The canonical sum of the two children: the union of keys,
   every count added, keys sorted.
 - **Unsupported types.** Every question whose type is not `select`
