@@ -1,0 +1,602 @@
+// validate-blocks.ts — R7 (D-70, D-71): comprehensive validation of every committed VoteBlock of one election
+// revision (65-07).
+//
+// Role:
+//   - doc/election.md "Validation", comprehensive level: anyone can recompute that every block is well formed,
+//     that every voter consented, and that every vote is a legal answer to its ballot.
+//
+// Two phases:
+//   - No key: Cid re-derived from the ciphertext, the registrant list canonical and as long as EntryCount, the
+//     template digest, the VoteBlockVoter rows one-for-one with the list, every consent signature, and a
+//     registrant in at most one block per ballot. Every block is then `not-decryptable-yet`, which is a status
+//     of its own and not a failure.
+//   - After key release (a caller-held secret): every block is opened with openCommittedBlock, the payload is
+//     checked (id, count, the shared checkPoolPayloadShape, every voter entry), and every vote is opened and
+//     judged against its ballot template by validateVoteEntryAgainstBallot (D-71). Valid votes carry their
+//     VoteEntry for the R8 tally; invalid votes are counted apart.
+//
+// Why decryptElectionBlocks is not called: it zero-fills the reconstructed secret before the per-vote layer can
+// be opened. Research option A: the CALLER holds the secret, and the block layer is opened by the same
+// openElectionBlock primitive through openCommittedBlock.
+//
+// Secret rule: the secret is checked against the joint key before anything opens. The function works on a
+// private copy and zero-fills it in a finally block. The caller's array is never modified and never retained,
+// and the report holds no byte array.
+//
+// Rules: the report is deterministic for any input order and the function never reports failure by raising an
+// error; every primitive that can fail on hostile input is wrapped and mapped to a typed finding. Pure for
+// Hermes and the browser: noble-backed relative imports only, no Node-only globals, no logging, no clock, no
+// randomness.
+
+import { utf8ToBytes } from '@noble/hashes/utils.js'
+import { validateVoteEntryAgainstBallot, type AnswerCheckBallot, type FindingSeverity } from './answer-checks.js'
+import { checkElectionSecret, openCommittedBlock } from './open-committed-block.js'
+import { checkPoolPayloadShape, consentDigest, poolBlockCid, poolBlockId, type PoolBallot } from '../pool/pool-block.js'
+import { canonicalJson } from '../voting/canonical.js'
+import { ballotTemplateDigest, voterEntryDigest, VOTER_ENTRY_KEYS, type VoteEntry } from '../voting/vote-entries.js'
+import { verifySigP256 } from '../database/initialize.js'
+
+export const VALIDATION_CODES = Object.freeze([
+  // block, no key needed
+  'malformed-row', 'duplicate-block', 'cid-mismatch', 'voter-list-malformed', 'voter-list-not-canonical',
+  'entry-count-mismatch', 'unknown-ballot', 'template-mismatch', 'voter-row-mismatch', 'voter-row-duplicate',
+  'voter-row-unlisted', 'voter-row-missing', 'consent-signature-invalid', 'registrant-in-two-blocks',
+  // report level (not tied to a validated block)
+  'voter-row-without-block',
+  // block, after release
+  'block-does-not-open', 'id-mismatch', 'payload-count-mismatch',
+  'not-a-payload', 'counts-differ', 'voter-count-mismatch', 'not-canonical-order', 'duplicate-vote', 'duplicate-voter',
+  'voter-list-mismatch', 'voter-entry-scope-mismatch',
+  'voter-entry-malformed', 'voter-entry-signature-invalid', 'voter-entry-ballot-missing', 'voter-entry-device-key-mismatch',
+  // per vote, after release
+  'vote-does-not-open', 'vote-not-json',
+  // per vote, the answer-checks codes, repeated literally so the union stays closed and greppable
+  'malformed-ballot', 'malformed-entry', 'wrong-election', 'wrong-revision', 'wrong-ballot', 'template-digest-mismatch',
+  'bad-nonce', 'answers-not-sorted', 'duplicate-question', 'unknown-question', 'empty-answer', 'unknown-option',
+  'duplicate-option', 'options-not-sorted', 'too-many-options', 'below-minimum',
+  'blank-required', 'unsupported-question-type'
+] as const)
+
+export type ValidationCode = typeof VALIDATION_CODES[number]
+
+/** Severity 'info' exactly for these; every other code is 'error'. */
+export const VALIDATION_INFO_CODES = Object.freeze(['voter-row-without-block', 'blank-required', 'unsupported-question-type'] as const)
+
+export interface ValidationFinding {
+  /** '' only for a row whose Cid is not a string */
+  blockCid: string
+  code: ValidationCode
+  severity: FindingSeverity
+  detail: string
+  /** index into the opened payload.votes (payload order) */
+  voteIndex?: number
+  registrantId?: string
+  questionCode?: string
+  optionCode?: string
+}
+
+export type VoteVerdict =
+  | { index: number, status: 'valid', entry: VoteEntry }
+  | { index: number, status: 'invalid', codes: readonly ValidationCode[] }
+
+export interface BlockFinding {
+  /** '' where the row field is unreadable */
+  blockCid: string
+  blockId: string
+  ballotId: string
+  /** null before release or when the block did not open */
+  payloadVersion: 1 | 2 | null
+  /** invalid iff any 'error' finding WITHOUT a voteIndex */
+  status: 'valid' | 'invalid' | 'not-decryptable-yet'
+  /** normalised EntryCount, 0 when unreadable */
+  declaredEntries: number
+  /** [] before release or when the block did not open */
+  votes: readonly VoteVerdict[]
+  /** every finding of this block, block-level and per-vote */
+  findings: readonly ValidationFinding[]
+}
+
+export interface ValidationTotals {
+  /** BlockFinding count (duplicate Cids collapse to one) */
+  blocks: number
+  /** per block: payload.votes.length if opened, else declaredEntries */
+  entries: number
+  valid: number
+  invalid: number
+  /** entries of blocks not opened (before release, or block-does-not-open, or malformed-row) */
+  undecryptable: number
+}
+
+export interface ValidationBlockRow {
+  Cid: string
+  Id: string
+  ElectionId: string
+  ElectionRevision: number | bigint
+  BallotId: string
+  TemplateDigest: string
+  EntryCount: number | bigint
+  VoterRegistrantIds: string
+  Ciphertext: string
+}
+
+export interface ValidationVoterRow {
+  ElectionId: string
+  BallotId: string
+  RegistrantId: string
+  BlockCid: string
+  BlockId: string
+  ElectionRevision: number | bigint
+  DeviceKey: string
+  Signature: string
+}
+
+/** Caller-held secret (for example KeyReleaseEngine.reconstructElectionKey). The caller zero-fills its own array. */
+export interface ValidationRelease {
+  secretKey: Uint8Array
+  jointPublicKey: string
+}
+
+export interface ValidateElectionBlocksInput {
+  scope: { electionId: string, electionRevision: number }
+  rows: readonly ValidationBlockRow[]
+  voterRows: readonly ValidationVoterRow[]
+  /** the revision's ballot templates, keyed by id */
+  ballots: readonly AnswerCheckBallot[]
+  release?: ValidationRelease | null
+}
+
+export type ValidationRefusal = 'malformed-input' | 'mixed-election' | 'mixed-revision' | 'invalid-secret' | 'secret-mismatch'
+
+export type ElectionValidationResult =
+  | {
+    ok: true
+    electionId: string
+    electionRevision: number
+    released: boolean
+    /** ascending by UTF-8 bytes of Cid */
+    blocks: readonly BlockFinding[]
+    /** report-level only (voter-row-without-block) */
+    findings: readonly ValidationFinding[]
+    totals: ValidationTotals
+  }
+  | { ok: false, reason: ValidationRefusal, detail: string }
+
+type Rec = Record<string, unknown>
+
+const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+function byBytes (a: string, b: string): number {
+  const x = utf8ToBytes(a)
+  const y = utf8ToBytes(b)
+  const n = Math.min(x.length, y.length)
+  for (let i = 0; i < n; i++) {
+    const d = x[i]! - y[i]!
+    if (d !== 0) return d
+  }
+  return x.length - y.length
+}
+
+const isRec = (v: unknown): v is Rec => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+function normaliseInt (value: unknown): number | null {
+  if (typeof value === 'bigint') {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) return null
+    return Number(value)
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  return null
+}
+
+/** A stable text key of one row, safe for bigint and odd values; used only to order and tie-break. */
+function rowKey (row: unknown): string {
+  if (!isRec(row)) return `<${typeof row}>`
+  try {
+    return Object.keys(row).sort(byString).map(k => {
+      const v = row[k]
+      return `${k}=${typeof v === 'string' ? JSON.stringify(v) : `${typeof v}:${String(v)}`}`
+    }).join('|')
+  } catch {
+    return '<unreadable>'
+  }
+}
+
+function sameKeys (obj: Rec, expected: readonly string[]): boolean {
+  const keys = Object.keys(obj).sort(byString)
+  return keys.length === expected.length && keys.every((k, i) => k === expected[i])
+}
+
+const isStr = (v: unknown): v is string => typeof v === 'string'
+const isNonEmpty = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+
+/** Why a decrypted voter record is not shaped like a VoterEntry, or null when it is. */
+function voterRecordProblem (r: unknown): string | null {
+  if (!isRec(r)) return 'the voter entry is not an object'
+  if (!sameKeys(r, VOTER_ENTRY_KEYS)) return 'the voter entry does not have exactly the voter entry fields'
+  if (r.v !== 1) return 'the voter entry version is not 1'
+  for (const k of ['electionId', 'registrantId', 'privateCid', 'deviceKey', 'signature'] as const) {
+    if (!isStr(r[k])) return `the voter entry field ${k} is not a string`
+  }
+  if (typeof r.electionRevision !== 'number' || !Number.isSafeInteger(r.electionRevision)) return 'the voter entry electionRevision is not a safe integer'
+  if (r.publicCid !== null && !isStr(r.publicCid)) return 'the voter entry publicCid is neither a string nor null'
+  if (r.attestationCid !== null && !isStr(r.attestationCid)) return 'the voter entry attestationCid is neither a string nor null'
+  if (!Array.isArray(r.ballots)) return 'the voter entry ballots is not an array'
+  for (const b of r.ballots) {
+    if (!isRec(b) || !sameKeys(b, ['ballotId', 'templateDigest']) || !isStr(b.ballotId) || !isStr(b.templateDigest)) {
+      return 'a voter entry ballot is not a ballotId and templateDigest pair'
+    }
+  }
+  return null
+}
+
+interface Work {
+  row: Rec | null
+  cid: string
+  key: string
+  dup: boolean
+  fs: ValidationFinding[]
+  id: string
+  ballotId: string
+  declared: number
+  ended: boolean
+  list: string[] | null
+  ready: boolean
+  payloadVersion: 1 | 2 | null
+  opened: boolean
+  votes: VoteVerdict[]
+  entries: number
+  revision: number
+}
+
+function refuse (reason: ValidationRefusal, detail: string): ElectionValidationResult {
+  return { ok: false, reason, detail }
+}
+
+/** Validate every committed block of one election revision. Pure; never raises. */
+export function validateElectionBlocks (input: ValidateElectionBlocksInput): ElectionValidationResult {
+  let secret: Uint8Array | null = null
+  try {
+    return validateInner(input, (s) => { secret = s })
+  } catch {
+    return refuse('malformed-input', 'the validation input could not be read')
+  } finally {
+    if (secret !== null) (secret as Uint8Array).fill(0)
+  }
+}
+
+function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint8Array) => void): ElectionValidationResult {
+  if (!isRec(input)) return refuse('malformed-input', 'the input is not an object')
+  const scopeIn = input.scope as unknown
+  if (!isRec(scopeIn) || !isNonEmpty(scopeIn.electionId) || normaliseInt(scopeIn.electionRevision) === null || typeof scopeIn.electionRevision !== 'number') {
+    return refuse('malformed-input', 'scope needs a non-empty electionId and a non-negative integer electionRevision')
+  }
+  const electionId = scopeIn.electionId
+  const revision = scopeIn.electionRevision
+  if (!Array.isArray(input.rows)) return refuse('malformed-input', 'rows is not an array')
+  if (!Array.isArray(input.voterRows)) return refuse('malformed-input', 'voterRows is not an array')
+  if (!Array.isArray(input.ballots)) return refuse('malformed-input', 'ballots is not an array')
+  const ballotsById = new Map<string, { ballot: AnswerCheckBallot, digest: string }>()
+  for (const b of input.ballots as unknown[]) {
+    if (!isRec(b) || !isStr(b.id) || !Array.isArray(b.questions)) return refuse('malformed-input', 'a ballot is not readable')
+    if (ballotsById.has(b.id)) return refuse('malformed-input', 'two ballots share one id')
+    try {
+      ballotsById.set(b.id, { ballot: b as unknown as AnswerCheckBallot, digest: ballotTemplateDigest(b as never, revision) })
+    } catch {
+      return refuse('malformed-input', 'a ballot template digest cannot be computed')
+    }
+  }
+  const rel = input.release as unknown
+  if (rel !== undefined && rel !== null && (!isRec(rel) || !(rel.secretKey instanceof Uint8Array) || !isStr(rel.jointPublicKey))) {
+    return refuse('malformed-input', 'release needs a secretKey byte array and a jointPublicKey string')
+  }
+
+  // scope: rows of another election or revision refuse the whole report
+  for (const row of input.rows as unknown[]) {
+    if (!isRec(row)) continue
+    if (isStr(row.ElectionId) && row.ElectionId !== electionId) return refuse('mixed-election', 'a block row belongs to another election')
+    const rr = normaliseInt(row.ElectionRevision)
+    if (rr !== null && rr !== revision) return refuse('mixed-revision', 'a block row belongs to another election revision')
+  }
+
+  // release: check the secret first, then work on a private copy
+  const electionKey = { electionId, revision, jointPublicKey: isRec(rel) ? (rel.jointPublicKey as string) : '' }
+  let secret: Uint8Array | null = null
+  if (isRec(rel)) {
+    const ok = checkElectionSecret(rel.secretKey as Uint8Array, electionKey)
+    if (!ok.ok) return refuse(ok.reason, ok.detail)
+    secret = Uint8Array.from(rel.secretKey as Uint8Array)
+    keepSecret(secret)
+  }
+
+  // group rows
+  const works: Work[] = []
+  const groups = new Map<string, Rec[]>()
+  for (const row of input.rows as unknown[]) {
+    if (isRec(row) && isNonEmpty(row.Cid)) {
+      const g = groups.get(row.Cid)
+      if (g === undefined) groups.set(row.Cid, [row])
+      else g.push(row)
+    } else {
+      works.push(newWork(isRec(row) ? row : null, isRec(row) && isStr(row.Cid) ? row.Cid : '', false))
+    }
+  }
+  for (const [cid, g] of groups) {
+    const ordered = [...g].sort((a, b) => byString(rowKey(a), rowKey(b)))
+    works.push(newWork(ordered[0]!, cid, ordered.length > 1))
+  }
+
+  // voter rows by BlockCid
+  const voterByCid = new Map<string, Rec[]>()
+  const voterRowList: Rec[] = []
+  for (const v of input.voterRows as unknown[]) {
+    if (!isRec(v)) continue
+    voterRowList.push(v)
+    const bc = isStr(v.BlockCid) ? v.BlockCid : ''
+    const g = voterByCid.get(bc)
+    if (g === undefined) voterByCid.set(bc, [v])
+    else g.push(v)
+  }
+  const regOf = (v: Rec): string => (isStr(v.RegistrantId) ? v.RegistrantId : '')
+  const voterOrder = (a: Rec, b: Rec): number => byString(regOf(a), regOf(b)) || byString(rowKey(a), rowKey(b))
+  const deviceKeys = new Map<string, Map<string, string>>()
+
+  const add = (w: Work, code: ValidationCode, detail: string, extra: { voteIndex?: number, registrantId?: string, questionCode?: string, optionCode?: string } = {}): void => {
+    const severity: FindingSeverity = (VALIDATION_INFO_CODES as readonly string[]).includes(code) ? 'info' : 'error'
+    w.fs.push({ blockCid: w.cid, code, severity, detail, ...extra })
+  }
+
+  // no-key checks, per block
+  for (const w of works) {
+    const row = w.row
+    if (row === null) {
+      add(w, 'malformed-row', 'the block row is not an object')
+      w.ended = true
+      continue
+    }
+    if (isStr(row.Id)) w.id = row.Id
+    if (isStr(row.BallotId)) w.ballotId = row.BallotId
+    const count = normaliseInt(row.EntryCount)
+    w.declared = count ?? 0
+    const rev = normaliseInt(row.ElectionRevision)
+    if (!isNonEmpty(row.Cid) || !isNonEmpty(row.Id) || !isNonEmpty(row.BallotId) || !isStr(row.ElectionId) ||
+      !isStr(row.TemplateDigest) || !isStr(row.VoterRegistrantIds) || !isStr(row.Ciphertext) || count === null || count < 1 || rev === null) {
+      add(w, 'malformed-row', 'the block row is missing a column or holds an unreadable value')
+      w.ended = true
+      continue
+    }
+    w.id = row.Id
+    w.ballotId = row.BallotId
+    w.revision = rev
+    w.ready = true
+    if (w.dup) add(w, 'duplicate-block', 'two rows carry this Cid')
+    try {
+      if (poolBlockCid(row.Ciphertext) !== row.Cid) add(w, 'cid-mismatch', 'the Cid is not the digest of the ciphertext')
+    } catch {
+      add(w, 'cid-mismatch', 'the Cid cannot be derived from the ciphertext')
+    }
+    let list: string[] | null = null
+    try {
+      const parsed: unknown = JSON.parse(row.VoterRegistrantIds)
+      if (Array.isArray(parsed) && parsed.every(isNonEmpty)) list = parsed as string[]
+    } catch { /* unreadable list */ }
+    w.list = list
+    if (list === null) {
+      add(w, 'voter-list-malformed', 'the voter list is not a JSON array of registrant ids')
+    } else {
+      if (!list.every((x, i) => i === 0 || byString(list![i - 1]!, x) < 0)) add(w, 'voter-list-not-canonical', 'the voter list is not in ascending order')
+      if (count !== list.length) add(w, 'entry-count-mismatch', `EntryCount ${count} differs from the ${list.length} listed voters`)
+    }
+    const known = ballotsById.get(row.BallotId)
+    if (known === undefined) add(w, 'unknown-ballot', 'no ballot template matches the block BallotId')
+    else if (row.TemplateDigest !== known.digest) add(w, 'template-mismatch', 'the block TemplateDigest is not the ballot template digest')
+
+    // consent rows of this block
+    const mine = [...(voterByCid.get(w.cid) ?? [])].sort(voterOrder)
+    const seen = new Set<string>()
+    const keyOf = new Map<string, string>()
+    // consentDigest reads only electionId, revision and ballotId from this ballot
+    const poolBallot: PoolBallot = {
+      electionKey: { electionId: row.ElectionId, revision: rev, jointPublicKey: isRec(rel) ? (rel.jointPublicKey as string) : '' },
+      ballotId: row.BallotId,
+      templateDigest: row.TemplateDigest
+    }
+    for (const v of mine) {
+      const reg = regOf(v)
+      if (reg === '') {
+        add(w, 'voter-row-mismatch', 'a voter row has no RegistrantId')
+        continue
+      }
+      if (v.ElectionId !== row.ElectionId || normaliseInt(v.ElectionRevision) !== rev || v.BallotId !== row.BallotId || v.BlockId !== row.Id) {
+        add(w, 'voter-row-mismatch', 'a voter row disagrees with its block on election, revision, ballot or block id', { registrantId: reg })
+      }
+      if (seen.has(reg)) {
+        add(w, 'voter-row-duplicate', 'a registrant has two voter rows for this block', { registrantId: reg })
+        continue
+      }
+      seen.add(reg)
+      if (isStr(v.DeviceKey)) keyOf.set(reg, v.DeviceKey)
+      if (list !== null && !list.includes(reg)) add(w, 'voter-row-unlisted', 'a voter row names a registrant the block does not list', { registrantId: reg })
+      let signed = false
+      try {
+        signed = isStr(v.DeviceKey) && isStr(v.Signature) &&
+          verifySigP256(consentDigest({ cid: row.Cid, blockId: row.Id }, poolBallot, reg, v.DeviceKey), v.Signature, v.DeviceKey)
+      } catch { signed = false }
+      if (!signed) add(w, 'consent-signature-invalid', 'the consent signature does not verify over the consent digest', { registrantId: reg })
+    }
+    if (list !== null) {
+      for (const reg of [...list].sort(byString)) {
+        if (!seen.has(reg)) add(w, 'voter-row-missing', 'a listed registrant has no voter row', { registrantId: reg })
+      }
+    }
+    deviceKeys.set(w.cid, keyOf)
+  }
+
+  // cross-block: a registrant in two blocks of one ballot
+  const placed = new Map<string, Map<string, Work[]>>()
+  for (const w of works) {
+    if (!w.ready || w.list === null) continue
+    let byReg = placed.get(w.ballotId)
+    if (byReg === undefined) { byReg = new Map(); placed.set(w.ballotId, byReg) }
+    for (const reg of new Set(w.list)) {
+      const g = byReg.get(reg)
+      if (g === undefined) byReg.set(reg, [w])
+      else g.push(w)
+    }
+  }
+  for (const w of works) {
+    if (!w.ready || w.list === null) continue
+    for (const reg of [...new Set(w.list)].sort(byString)) {
+      const g = placed.get(w.ballotId)?.get(reg)
+      if (g === undefined || g.length < 2) continue
+      const others = g.filter(o => o !== w).map(o => o.cid).sort(byBytes)
+      add(w, 'registrant-in-two-blocks', `the registrant is also listed in block ${others.join(', ')}`, { registrantId: reg })
+    }
+  }
+
+  // after release: open and judge
+  if (secret !== null) {
+    for (const w of works) {
+      if (!w.ready || w.row === null) continue
+      const row = w.row
+      const known = ballotsById.get(w.ballotId)
+      const res = openCommittedBlock({
+        Cid: w.cid, Id: w.id, ElectionId: row.ElectionId as string, ElectionRevision: w.revision,
+        BallotId: w.ballotId, Ciphertext: row.Ciphertext as string
+      }, secret, electionKey)
+      if (!res.ok) {
+        add(w, 'block-does-not-open', `${res.reason}: ${res.detail}`)
+        continue
+      }
+      w.opened = true
+      w.payloadVersion = res.payloadVersion
+      const payload = res.payload
+      w.entries = payload.votes.length
+      try {
+        if (poolBlockId(payload) !== w.id) add(w, 'id-mismatch', 'the block Id is not the digest of the payload')
+      } catch {
+        add(w, 'id-mismatch', 'the block Id cannot be derived from the payload')
+      }
+      if (payload.votes.length !== w.declared) add(w, 'payload-count-mismatch', `the payload holds ${payload.votes.length} votes; EntryCount is ${w.declared}`)
+      let shapeOk = false
+      try {
+        const shape = checkPoolPayloadShape(payload, w.list ?? [], { electionId, revision })
+        if (shape.ok) shapeOk = true
+        else add(w, shape.code, shape.reason)
+      } catch {
+        add(w, 'not-a-payload', 'the payload cannot be checked for its shape')
+      }
+      if (shapeOk && payload.v === 1) {
+        const seenVotes = new Set<string>()
+        let repeated = false
+        for (const vote of payload.votes) {
+          try {
+            const text = canonicalJson(vote)
+            if (seenVotes.has(text)) repeated = true
+            seenVotes.add(text)
+          } catch { /* an unreadable clear vote is reported by its own verdict */ }
+        }
+        if (repeated) add(w, 'duplicate-vote', 'a clear vote appears twice')
+      }
+      const keyOf = deviceKeys.get(w.cid) ?? new Map<string, string>()
+      for (const r of payload.voterRecords as unknown[]) {
+        const problem = voterRecordProblem(r)
+        if (problem !== null) {
+          add(w, 'voter-entry-malformed', problem, isRec(r) && isStr(r.registrantId) ? { registrantId: r.registrantId } : {})
+          continue
+        }
+        const rec = r as unknown as { registrantId: string, deviceKey: string, signature: string, ballots: Array<{ ballotId: string, templateDigest: string }> }
+        let signed = false
+        try {
+          signed = verifySigP256(voterEntryDigest(r as never), rec.signature, rec.deviceKey)
+        } catch { signed = false }
+        if (!signed) add(w, 'voter-entry-signature-invalid', 'the voter entry signature does not verify', { registrantId: rec.registrantId })
+        if (!rec.ballots.some(b => b.ballotId === w.ballotId && b.templateDigest === (row.TemplateDigest as string))) {
+          add(w, 'voter-entry-ballot-missing', 'the voter entry does not list this ballot and template', { registrantId: rec.registrantId })
+        }
+        const rowKeyHex = keyOf.get(rec.registrantId)
+        if (rowKeyHex !== undefined && rowKeyHex !== rec.deviceKey) {
+          add(w, 'voter-entry-device-key-mismatch', 'the voter entry device key differs from the consent row device key', { registrantId: rec.registrantId })
+        }
+      }
+      for (const ov of res.votes) {
+        if (!ov.ok) {
+          add(w, ov.reason, ov.detail, { voteIndex: ov.index })
+          w.votes.push({ index: ov.index, status: 'invalid', codes: [ov.reason] })
+          continue
+        }
+        if (known === undefined) {
+          add(w, 'unknown-ballot', 'no ballot template matches the block BallotId', { voteIndex: ov.index })
+          w.votes.push({ index: ov.index, status: 'invalid', codes: ['unknown-ballot'] })
+          continue
+        }
+        let verdict: ReturnType<typeof validateVoteEntryAgainstBallot>
+        try {
+          verdict = validateVoteEntryAgainstBallot(ov.entry, known.ballot, { electionId, electionRevision: revision, ballotId: w.ballotId, templateDigest: known.digest })
+        } catch {
+          verdict = { valid: false, findings: [{ code: 'malformed-entry', severity: 'error', detail: 'the vote entry cannot be checked' }] }
+        }
+        const errorCodes: ValidationCode[] = []
+        for (const f of verdict.findings) {
+          add(w, f.code, f.detail, {
+            voteIndex: ov.index,
+            ...(f.questionCode !== undefined ? { questionCode: f.questionCode } : {}),
+            ...(f.optionCode !== undefined ? { optionCode: f.optionCode } : {})
+          })
+          if (f.severity === 'error') errorCodes.push(f.code)
+        }
+        w.votes.push(verdict.valid ? { index: ov.index, status: 'valid', entry: verdict.entry } : { index: ov.index, status: 'invalid', codes: errorCodes })
+      }
+    }
+  }
+
+  // report
+  const released = secret !== null
+  const ordered = [...works].sort((a, b) => byBytes(a.cid, b.cid) || byString(a.key, b.key))
+  const blocks: BlockFinding[] = ordered.map(w => {
+    const blockLevelError = w.fs.some(f => f.severity === 'error' && f.voteIndex === undefined)
+    return {
+      blockCid: w.cid,
+      blockId: w.id,
+      ballotId: w.ballotId,
+      payloadVersion: w.payloadVersion,
+      status: blockLevelError ? 'invalid' : released ? 'valid' : 'not-decryptable-yet',
+      declaredEntries: w.declared,
+      votes: w.votes,
+      findings: w.fs
+    }
+  })
+  const totals: ValidationTotals = { blocks: blocks.length, entries: 0, valid: 0, invalid: 0, undecryptable: 0 }
+  for (const w of ordered) {
+    if (w.opened) {
+      totals.entries += w.entries
+      for (const v of w.votes) {
+        if (v.status === 'valid') totals.valid++
+        else totals.invalid++
+      }
+    } else {
+      totals.entries += w.declared
+      totals.undecryptable += w.declared
+    }
+  }
+  const known = new Set(works.map(w => w.cid))
+  const orphans: ValidationFinding[] = []
+  for (const v of [...voterRowList].sort((a, b) => byBytes(isStr(a.BlockCid) ? a.BlockCid : '', isStr(b.BlockCid) ? b.BlockCid : '') || voterOrder(a, b))) {
+    const bc = isStr(v.BlockCid) ? v.BlockCid : ''
+    if (known.has(bc)) continue
+    if (v.ElectionId !== electionId || normaliseInt(v.ElectionRevision) !== revision) continue
+    orphans.push({
+      blockCid: bc,
+      code: 'voter-row-without-block',
+      severity: 'info',
+      detail: 'a voter row names a block that has no row',
+      ...(regOf(v) !== '' ? { registrantId: regOf(v) } : {})
+    })
+  }
+  return { ok: true, electionId, electionRevision: revision, released, blocks, findings: orphans, totals }
+}
+
+function newWork (row: Rec | null, cid: string, dup: boolean): Work {
+  return {
+    row, cid, key: rowKey(row), dup, fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, ready: false,
+    payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0
+  }
+}
