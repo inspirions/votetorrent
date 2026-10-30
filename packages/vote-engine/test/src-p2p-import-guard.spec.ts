@@ -213,6 +213,12 @@ const x = require('libp2p')
     const resolutions: Record<string, string> = rootPackageJson.resolutions ?? {}
 
     expect(devDeps['@serfab/cadre-core'], 'devDependencies @serfab/cadre-core must equal root resolutions').to.equal(resolutions['@serfab/cadre-core'])
-    expect(devDeps['@optimystic/db-p2p'], 'devDependencies @optimystic/db-p2p must equal root resolutions').to.equal(resolutions['@optimystic/db-p2p'])
+    // The root may wrap db-p2p in the one deliberate yarn patch (2026-10-28, commit-proof memo):
+    // `patch:@optimystic/db-p2p@npm%3A1.19.0#~/.yarn/patches/...`. The lock then holds on the version
+    // inside the descriptor, which the vote-engine devDependency must name as `^<version>`.
+    const rootDbP2p = resolutions['@optimystic/db-p2p'] ?? ''
+    const patched = /^patch:@optimystic\/db-p2p@npm%3A(\d+\.\d+\.\d+)#/.exec(rootDbP2p)
+    const expectedDbP2p = patched ? `^${patched[1]}` : rootDbP2p
+    expect(devDeps['@optimystic/db-p2p'], 'devDependencies @optimystic/db-p2p must equal root resolutions (patch unwrapped)').to.equal(expectedDbP2p)
   })
 })

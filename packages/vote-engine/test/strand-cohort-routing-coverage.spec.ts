@@ -165,6 +165,13 @@ const DIRECT_ONLY_LISTEN_MARKER = 'listenAddrs' + ": ['/ip4/0.0.0.0/tcp/0/ws']"
 const IDENTIFY_PUSH_IMPORT_MARKER = 'identify, identify' + 'Push'
 const IDENTIFY_PUSH_SERVICE_MARKER = 'identifyPush' + ': identifyPush('
 const DB_P2P_PATCH_PREFIX = '@optimystic-db-p2p-npm-'
+// The one deliberate db-p2p yarn-patch (outer 94857f7b, 2026-10-28): it memoizes commit-proof claim
+// verification so a node stops re-verifying the same Ed25519 signatures on every read-repair. Any
+// OTHER db-p2p patch file is still a silent re-add and fails the assertions below.
+const ALLOWED_DB_P2P_PATCH = '@optimystic-db-p2p-npm-1.19.0-votetorrent.patch'
+const ALLOWED_DB_P2P_PATCH_MARKER = 'VoteTorrent patch: ' + 'memoize'
+// A GSD phase-plan number as it would appear in an emitted string (e.g. 41-04).
+const GSD_PLAN_NUMBER = /\b\d{2,3}-\d{2,3}\b/
 const DB_P2P_RESOLUTION_KEY_FRAGMENT = '@optimystic/db-p2p'
 const PATCH_PROTOCOL_MARKER = 'patch' + ':'
 
@@ -278,6 +285,14 @@ function findDbP2pPatchFile (): string | undefined {
   if (!existsSync(YARN_PATCHES_DIR)) return undefined
   const entries = readdirSync(YARN_PATCHES_DIR)
   return entries.find((f) => f.startsWith(DB_P2P_PATCH_PREFIX) && f.endsWith('.patch'))
+}
+
+/** Every committed @optimystic/db-p2p yarn-patch file except the one allowed patch. */
+function findUnexpectedDbP2pPatchFiles (): string[] {
+  if (!existsSync(YARN_PATCHES_DIR)) return []
+  return readdirSync(YARN_PATCHES_DIR).filter(
+    (f) => f.startsWith(DB_P2P_PATCH_PREFIX) && f.endsWith('.patch') && f !== ALLOWED_DB_P2P_PATCH
+  )
 }
 
 /**
@@ -462,7 +477,7 @@ describe('P2P-11/41-04: strand-cohort NoValidAddressesError fix — app-side par
 })
 
 describe('P2P-11/41-06: FRET strand-discovery negotiation gap — malformed // id double-slash fix present; p2p-fret patch dropped for bare ^0.6.0 (260715-keg)', () => {
-  it('the db-p2p yarn-patch is RETIRED — its fixes now ship upstream, and no patch may silently re-appear', () => {
+  it('only the commit-proof memo db-p2p yarn-patch exists — the 41-04/41-06 fixes ship upstream, and no other patch may silently re-appear', () => {
     // RETIRED 2026-08-05 (was: "the committed @optimystic/db-p2p patch corrects the malformed //
     // id double-slash for BOTH identify and identifyPush").
     //
@@ -479,13 +494,22 @@ describe('P2P-11/41-06: FRET strand-discovery negotiation gap — malformed // i
     //
     // What remains here is the direction that can still regress: a silent RE-ADD. This mirrors the
     // p2p-fret assertion immediately below, which has guarded exactly that since 260715-keg.
+    // Since 2026-10-28 one deliberate patch is allowed (ALLOWED_DB_P2P_PATCH, an unrelated
+    // commit-proof memo); it must still carry its own marker, so a different hunk under its name fails.
     expect(
-      findDbP2pPatchFile(),
-      `Expected NO ${DB_P2P_PATCH_PREFIX}*.patch file under ${YARN_PATCHES_DIR} — the db-p2p ` +
-      'fixes are upstream as of >= 0.16.3 (identifyPush) and the repo consumes 0.18.0 unpatched. ' +
+      findUnexpectedDbP2pPatchFiles(),
+      `Expected NO ${DB_P2P_PATCH_PREFIX}*.patch file under ${YARN_PATCHES_DIR} other than ` +
+      `${ALLOWED_DB_P2P_PATCH} — the identifyPush/protocolPrefix fixes are upstream as of >= 0.16.3. ` +
       'A re-added patch means someone re-pinned an older db-p2p or re-introduced a local hunk: ' +
       'verify against the installed dist assertion in this file before restoring any patch-content check.'
-    ).to.equal(undefined)
+    ).to.deep.equal([])
+    const allowed = findDbP2pPatchFile()
+    if (allowed !== undefined) {
+      expect(
+        readFileSync(join(YARN_PATCHES_DIR, allowed), 'utf8').includes(ALLOWED_DB_P2P_PATCH_MARKER),
+        `Expected ${allowed} to be the commit-proof memo patch (marker "${ALLOWED_DB_P2P_PATCH_MARKER}")`
+      ).to.equal(true)
+    }
   })
 
   it('260715-keg: NO p2p-fret yarn-patch exists under .yarn/patches/ (patch dropped in favor of ^0.6.0)', () => {
@@ -537,28 +561,36 @@ describe('P2P-11/41-06: FRET strand-discovery negotiation gap — malformed // i
     // 'no runtime line carries a GSD phase number' assertion earlier in this file scans
     // CadreNodeProvider.tsx and replication-proof-runner.ts directly. This assertion now guards the
     // only remaining way a patch could re-introduce one — the patch coming back at all.
+    // A patch WAS deliberately re-added (ALLOWED_DB_P2P_PATCH, 2026-10-28), so the added-code-line
+    // scan is restored: patch comments may carry phase markers by convention, but an added CODE line
+    // must never put one in a string a node would log or throw.
+    expect(findUnexpectedDbP2pPatchFiles(), 'Expected no db-p2p patch beyond the allowed one').to.deep.equal([])
     const dbP2pPatchFile = findDbP2pPatchFile()
+    if (dbP2pPatchFile === undefined) return
+    const addedCode = readFileSync(join(YARN_PATCHES_DIR, dbP2pPatchFile), 'utf8')
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+      .map((l) => l.slice(1))
+    const offenders = runtimeLines(addedCode.join('\n')).filter((l) => GSD_PLAN_NUMBER.test(l))
     expect(
-      dbP2pPatchFile,
-      `Expected NO ${DB_P2P_PATCH_PREFIX}*.patch file. If a patch is deliberately re-added, restore ` +
-      'the added-code-line phase-number scan along with it — patch comments may carry phase markers ' +
-      'by convention, but an added CODE line must never put one in a string a node would log or throw.'
-    ).to.equal(undefined)
+      offenders,
+      `Expected no added code line of ${dbP2pPatchFile} to carry a GSD phase number; found: ${JSON.stringify(offenders)}`
+    ).to.have.length(0)
   })
 })
 
 describe('P2P-11/41-08: FRET strand registrar-skew — runOnLimitedConnection fix carried by p2p-fret ^0.6.0 upstream; db-p2p patch also retired (260715-keg)', () => {
-  it('260715-keg: NO yarn-patch survives for either db-p2p or p2p-fret — both fixes are upstream', () => {
+  it('260715-keg: no p2p-fret yarn-patch and no db-p2p patch beyond the commit-proof memo — both fixes are upstream', () => {
     // RETIRED 2026-08-05 (was: 'the db-p2p half ... is the only surviving "prior patch present"
     // assertion'). It is no longer surviving: the db-p2p patch was dropped alongside the move to
     // an unpatched 0.18.0, so both halves of this pair are now upstream-carried. See the retirement
     // note on the first test in this describe block.
     expect(
-      findDbP2pPatchFile(),
-      `Expected NO ${DB_P2P_PATCH_PREFIX}*.patch file — the 41-04 identifyPush and 41-06 ` +
-      'single-slash protocolPrefix fixes ship in db-p2p >= 0.16.3; the installed-dist assertion ' +
-      'in this file is what verifies they are actually present'
-    ).to.equal(undefined)
+      findUnexpectedDbP2pPatchFiles(),
+      `Expected NO ${DB_P2P_PATCH_PREFIX}*.patch file other than ${ALLOWED_DB_P2P_PATCH} — the 41-04 ` +
+      'identifyPush and 41-06 single-slash protocolPrefix fixes ship in db-p2p >= 0.16.3; the ' +
+      'installed-dist assertion in this file is what verifies they are actually present'
+    ).to.deep.equal([])
 
     // The p2p-fret patch (41-06 async-completeness + 41-08 runOnLimitedConnection) is RETIRED —
     // that fix now lives upstream in p2p-fret ^0.6.0's openRpcStream(), not in a local patch file.
