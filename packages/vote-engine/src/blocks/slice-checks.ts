@@ -274,7 +274,7 @@ export function sliceChecks (
     const built = treeOverRows()
     if (!built.ok) return fail('under-root', 'tree-refused', `${built.reason}: ${built.detail}`)
     const proof = built.tree.proofFor(block.Cid)
-    if (!proof.ok) return fail('under-root', 'not-under-root', 'the block is not among the rows the tree was built from')
+    if (!proof.ok) return fail('under-root', 'not-under-root', 'the block is not among the rows the tree covers')
     return verdict(verifyInclusion(leafHash, proof.proof, anchor.root))
   }
 
