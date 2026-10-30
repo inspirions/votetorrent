@@ -16,6 +16,11 @@
 //     member and the rest carry on (the doc reverts the whole merge; spike 102's deviation kept).
 //   * A member the commit names as already voted is dropped and the rest re-form (or keep
 //     presenting below the minimum); it is not a whole-pool revert to solo.
+//   * Discovery goes through a `PoolDiscovery` (the Authority rendezvous by default). A coordinator
+//     climbs from a 2-bit and a 1-bit pool-hash bucket topic to the plain topic, per doc/election.md
+//     "Pool Merging". That is client-side only: the server keys opaque topics. The plain topic is
+//     reached within min(15 s, quietMs) and before the deadline's form lead, and a pool forms on the
+//     quiet rule only after one quiet window on the plain topic. The parameters are ASSUMED (D-23).
 //   * Pools order strictly by (size desc, peer id asc), so two coordinators never merge into each
 //     other at once.
 //
@@ -38,6 +43,14 @@ import {
   type PoolCommitResult,
   type PoolContribution
 } from './pool-block.js'
+import {
+  rendezvousDiscovery,
+  ladderTopic,
+  POOL_LADDER_RUNG_BITS,
+  POOL_LADDER_DWELL_PRESENTS,
+  POOL_LADDER_MAX_MS,
+  type PoolDiscovery
+} from './pool-discovery.js'
 
 export const POOL_MIN_BLOCK_SIZE = 3
 
@@ -78,6 +91,14 @@ export interface PoolAgentOptions {
   /** voting closes: stop (vote unsent) at this time; a pool at minSize forms `formLeadMs` before */
   deadlineAt?: number
   formLeadMs?: number
+  /** how this coordinator finds others; default `rendezvousDiscovery(rendezvous, identity)`. `rendezvous` still carries the mailbox. */
+  discovery?: PoolDiscovery
+  /** the specific-then-general topic ladder (doc/election.md "Pool Merging"); default true. false presents only on the plain topic. */
+  ladder?: boolean
+  /** successful presents per rung before widening is considered (default POOL_LADDER_DWELL_PRESENTS) */
+  rungDwellTicks?: number
+  /** the plain topic is reached at most this long after run() starts (default min(POOL_LADDER_MAX_MS, quietMs), clamped to POOL_LADDER_MAX_MS) */
+  ladderMaxMs?: number
   now?: () => number
   log?: (event: string, detail?: Record<string, unknown>) => void
   onStatus?: (status: PoolAgentStatus) => void
@@ -117,10 +138,19 @@ function isContribution (c: unknown): c is PoolContribution {
 }
 
 export class PoolAgent {
-  private readonly o: Required<Omit<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus'>> & Pick<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus'>
+  private readonly o: Required<Omit<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus' | 'discovery'>> & Pick<PoolAgentOptions, 'deadlineAt' | 'log' | 'onStatus' | 'discovery'>
   private readonly me: string
   private readonly topic: string
   private readonly myHold: string
+  private readonly discovery: PoolDiscovery
+  /** index into POOL_LADDER_RUNG_BITS; POOL_LADDER_RUNG_BITS.length means the plain topic. Only ever grows. */
+  private rungIndex = 0
+  private rungPresents = 0
+  private runStartedAt: number
+  /** when this pool first became visible on the plain topic; null until then (always set with the ladder off) */
+  private plainAt: number | null
+  private readonly presentedTopics = new Set<string>()
+  private lastPresentTopic: string | null = null
   private role: 'coordinator' | 'member' | 'done' = 'coordinator'
   private pool: PoolContribution[]
   private coordinator: string | null = null
@@ -157,18 +187,27 @@ export class PoolAgent {
       pollWaitMs: 2_000,
       formLeadMs: 60_000,
       now: () => Date.now(),
+      ladder: true,
+      rungDwellTicks: POOL_LADDER_DWELL_PRESENTS,
       ...options
     } as PoolAgent['o']
+    this.o.rungDwellTicks = Math.max(1, Math.floor(this.o.rungDwellTicks))
+    this.o.ladderMaxMs = Math.min(POOL_LADDER_MAX_MS, options.ladderMaxMs ?? this.o.quietMs)
+    this.discovery = options.discovery ?? rendezvousDiscovery(options.rendezvous, options.identity)
     if (this.o.capacity < this.o.minSize) this.o.capacity = this.o.minSize
     this.me = options.identity.peerId
     this.topic = poolTopic(options.ballot)
     this.myHold = holdOf(options.contribution.voteCiphertext)
     this.pool = [options.contribution]
     this.lastGrowthAt = this.o.now()
+    this.runStartedAt = this.lastGrowthAt
+    if (!this.o.ladder) this.rungIndex = POOL_LADDER_RUNG_BITS.length
+    this.plainAt = this.o.ladder ? null : this.lastGrowthAt
   }
 
   /** Pool until this vote is in a committed block, voting closes, or `signal` aborts. */
   async run (signal?: AbortSignal): Promise<PoolOutcome> {
+    this.runStartedAt = this.o.now()
     const polling = this.pollLoop()
     try {
       this.status()
@@ -211,11 +250,37 @@ export class PoolAgent {
     if (this.role !== 'coordinator' || this.busy) return
     if (this.shouldForm()) { await this.form(); return }
     let list: CoordinatorListing[]
+    const presentAt = this.o.now()
+    if (!this.onPlain() && (presentAt - this.runStartedAt >= this.o.ladderMaxMs ||
+      (this.o.deadlineAt !== undefined && presentAt >= this.o.deadlineAt - 2 * this.o.formLeadMs))) {
+      const why = presentAt - this.runStartedAt >= this.o.ladderMaxMs ? 'cap' : 'deadline'
+      this.rungIndex = POOL_LADDER_RUNG_BITS.length
+      this.rungPresents = 0
+      this.log('ladder-widen', { to: 'plain', why })
+    }
+    const topic = this.presentTopic()
+    if (this.lastPresentTopic !== null && this.lastPresentTopic !== topic) {
+      const old = this.lastPresentTopic
+      this.presentedTopics.delete(old)
+      void this.discovery.withdraw(old, presentAt).catch(() => undefined)
+    }
     try {
-      const reply = await this.o.rendezvous.call(poolRequests.present(this.o.identity, this.topic, this.pool.length, this.o.now()))
+      // Record the topic before the call: a present that fails after reaching the server must still be withdrawn.
+      this.presentedTopics.add(topic)
+      this.lastPresentTopic = topic
+      list = await this.discovery.present(topic, this.pool.length, presentAt)
       this.count('present')
-      if (reply.t !== 'coordinators') throw new Error(reply.t === 'error' ? reply.reason : 'unexpected reply')
-      list = reply.list
+      if (this.onPlain()) {
+        if (this.plainAt === null) this.plainAt = this.o.now()
+      } else {
+        this.rungPresents++
+        const seen = list.reduce((n, c) => n + c.size, 0) + this.pool.length
+        if (this.rungPresents >= this.o.rungDwellTicks && seen < this.o.minSize) {
+          this.rungIndex++
+          this.rungPresents = 0
+          this.log('ladder-widen', { to: this.onPlain() ? 'plain' : POOL_LADDER_RUNG_BITS[this.rungIndex], why: 'few' })
+        }
+      }
     } catch (err) {
       this.log('present-failed', { message: err instanceof Error ? err.message : String(err) })
       return
@@ -228,14 +293,29 @@ export class PoolAgent {
     if (best !== undefined) await this.mergeInto(best.peerId)
   }
 
+  private onPlain (): boolean {
+    return this.rungIndex >= POOL_LADDER_RUNG_BITS.length
+  }
+
+  /**
+   * The topic to present on. A rung topic is for present/withdraw ONLY: protocol messages carry the
+   * plain poolTopic, or a cross-rung merge would be refused as "not pooling this ballot".
+   */
+  private presentTopic (): string {
+    if (this.onPlain()) return this.topic
+    return ladderTopic(this.topic, POOL_LADDER_RUNG_BITS[this.rungIndex]!, this.pool.map(c => holdOf(c.voteCiphertext)))
+  }
+
   private shouldForm (): boolean {
     if (this.pool.length < this.o.minSize || this.pendingInforms > 0) return false
     // doc/election.md: inform, ack, then form. A member merged a moment ago has not heard from this
     // coordinator yet and would refuse the form as "not my coordinator" (measured, run product-2).
     if (!this.pool.every(c => c.member === this.me || this.confirmed.has(c.member))) return false
     const now = this.o.now()
+    // The quiet rule also needs one full quiet window on the PLAIN topic: otherwise a trio sharing a
+    // bucket forms on its rung while voters in other buckets are still waiting on plain.
     return this.pool.length >= this.o.capacity ||
-      now - this.lastGrowthAt >= this.o.quietMs ||
+      (this.plainAt !== null && now - Math.max(this.lastGrowthAt, this.plainAt) >= this.o.quietMs) ||
       (this.o.deadlineAt !== undefined && now >= this.o.deadlineAt - this.o.formLeadMs)
   }
 
@@ -431,9 +511,12 @@ export class PoolAgent {
   // inbound
 
   private async withdraw (): Promise<void> {
-    try {
-      await this.o.rendezvous.call(poolRequests.withdraw(this.o.identity, this.topic, this.o.now()))
-    } catch { /* best effort: the rendezvous expires stale coordinators anyway */ }
+    // Clear before awaiting, so a present that lands meanwhile is not lost. Every rung presented on is withdrawn.
+    const topics = [...this.presentedTopics]
+    this.presentedTopics.clear()
+    this.lastPresentTopic = null
+    // best effort: the rendezvous expires stale coordinators anyway
+    await Promise.all(topics.map(async (t) => await this.discovery.withdraw(t, this.o.now()).catch(() => undefined)))
   }
 
   private async pollLoop (): Promise<void> {
