@@ -10,6 +10,8 @@ import { Database } from '@quereus/quereus'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/curves/utils.js'
 import { ed25519 } from '@noble/curves/ed25519.js'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { registerDbPlugins } from '../src/database/initialize.js'
 import { encryptVoteEntry, openElectionBlock, openVoteEntries } from '../src/key-release/index.js'
 import {
@@ -37,6 +39,15 @@ import {
   type PoolOutcome
 } from '../src/pool/index.js'
 import * as poolBlock from '../src/pool/pool-block.js'
+import {
+  POOL_LADDER_DWELL_PRESENTS,
+  POOL_LADDER_MAX_MS,
+  POOL_LADDER_RUNG_BITS,
+  POOL_TOPIC_MAX_CHARS,
+  ladderBucket,
+  ladderTopic,
+  rendezvousDiscovery
+} from '../src/pool/pool-discovery.js'
 import { fromBase64url, toBase64url } from '../src/pool/pool-codec.js'
 import type { VoterEntry } from '../src/voting/index.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
@@ -513,5 +524,87 @@ describe('pool: a duplicate voter at commit (R1) - classification and the commit
     const s = stub(new Error(LOCAL), { [dup]: block.cid })
     const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)
     expect(r).to.deep.equal({ ok: false, reason: LOCAL, duplicateRegistrants: [] })
+  })
+})
+
+describe('pool: discovery interface and ladder topics (R2)', function () {
+  this.timeout(10_000)
+  const holdOfCt = (ct: string): string => bytesToHex(sha256(utf8ToBytes(ct)))
+  const holds = [0, 1, 2].map(i => holdOfCt(makeVoter(i).contribution.voteCiphertext))
+  const base = 'vt-pool/1/e/1/b/t'
+
+  it('D-1 ladderTopic builds the 2-bit, 1-bit and plain topics', () => {
+    expect(ladderTopic(base, 2, holds)).to.match(/^vt-pool\/1\/e\/1\/b\/t\/h\/2:[0-3]$/)
+    expect(ladderTopic(base, 1, holds)).to.match(/^vt-pool\/1\/e\/1\/b\/t\/h\/1:[01]$/)
+    expect(ladderTopic(base, 0, holds)).to.equal(base)
+  })
+
+  it('D-2 the bucket is order-independent and equals the bucket of the smallest hold', () => {
+    const perms = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [1, 0, 2]]
+    const topics = perms.map(p => ladderTopic(base, 2, p.map(i => holds[i]!)))
+    expect(new Set(topics).size).to.equal(1)
+    const min = [...holds].sort()[0]!
+    expect(ladderTopic(base, 2, holds)).to.equal(ladderTopic(base, 2, [min]))
+  })
+
+  it('D-3 the bucket is the first bits of sha256(utf8(smallest hold))', () => {
+    for (const h of holds) {
+      const first = sha256(utf8ToBytes(h))[0]!
+      expect(ladderBucket([h], 2)).to.equal((first >> 6).toString(16))
+      expect(ladderBucket([h], 1)).to.equal((first >> 7).toString(16))
+      expect(Number(ladderBucket([h], 1))).to.equal(Number(ladderBucket([h], 2)) >> 1)
+    }
+    expect(() => ladderBucket(holds, 0)).to.throw(RangeError)
+    expect(() => ladderBucket(holds, 5)).to.throw(RangeError)
+  })
+
+  it('D-4 a topic that would pass 512 characters, or an empty hold list, gives the plain topic', () => {
+    const long = 'x'.repeat(POOL_TOPIC_MAX_CHARS - 3)
+    expect(ladderTopic(long, 2, holds)).to.equal(long)
+    expect(ladderTopic(base, 2, [])).to.equal(base)
+  })
+
+  it('D-5 the adapter lists the OTHER coordinators on the exact topic only', async () => {
+    const rv = new PoolRendezvous()
+    try {
+      const [a, b, c] = [createPoolIdentity(), createPoolIdentity(), createPoolIdentity()]
+      const da = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'ta'), a)
+      const db = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tb'), b)
+      const dc = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tc'), c)
+      const topicA = ladderTopic(base, 2, holds)
+      expect(await da.present(topicA, 2, Date.now())).to.deep.equal([])
+      await db.present(base, 1, Date.now())
+      expect(await dc.present(topicA, 1, Date.now())).to.deep.equal([{ peerId: a.peerId, size: 2 }])
+    } finally { rv.close() }
+  })
+
+  it('D-6 present throws the reply reason on an error reply', async () => {
+    const rv = new PoolRendezvous({ isAllowed: () => false })
+    try {
+      const d = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'x'), createPoolIdentity())
+      let message = ''
+      try { await d.present(base, 1, Date.now()) } catch (e) { message = (e as Error).message }
+      expect(message).to.equal('not allowed')
+    } finally { rv.close() }
+  })
+
+  it('D-7 withdraw removes the caller from that topic', async () => {
+    const rv = new PoolRendezvous()
+    try {
+      const [a, c] = [createPoolIdentity(), createPoolIdentity()]
+      const da = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'ta'), a)
+      const dc = rendezvousDiscovery(createInMemoryRendezvousClient(rv, 'tc'), c)
+      const topicA = ladderTopic(base, 2, holds)
+      await da.present(topicA, 1, Date.now())
+      await da.withdraw(topicA, Date.now())
+      expect(await dc.present(topicA, 1, Date.now())).to.deep.equal([])
+    } finally { rv.close() }
+  })
+
+  it('D-8 the ladder constants', () => {
+    expect([...POOL_LADDER_RUNG_BITS]).to.deep.equal([2, 1])
+    expect(POOL_LADDER_DWELL_PRESENTS).to.equal(3)
+    expect(POOL_LADDER_MAX_MS).to.equal(15_000)
+    expect(POOL_TOPIC_MAX_CHARS).to.equal(512)
   })
 })
