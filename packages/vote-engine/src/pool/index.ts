@@ -32,3 +32,5 @@ export type { PoolRendezvousClient, PoolRendezvousOptions, CoordinatorListing, R
 export { POOL_RENDEZVOUS_PROTOCOL, attachPoolRendezvous, createLibp2pRendezvousClient } from './pool-wire.js'
 export { createFailoverRendezvousClient } from './pool-failover.js'
 export type { FailoverRendezvousClient } from './pool-failover.js'
+export { rendezvousDiscovery, ladderBucket, ladderTopic, POOL_LADDER_RUNG_BITS, POOL_LADDER_DWELL_PRESENTS, POOL_LADDER_MAX_MS, POOL_TOPIC_MAX_CHARS } from './pool-discovery.js'
+export type { PoolDiscovery } from './pool-discovery.js'
