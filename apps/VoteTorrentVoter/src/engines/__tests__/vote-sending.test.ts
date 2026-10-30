@@ -12,7 +12,7 @@ import {
 	verifySigP256,
 	type PoolRendezvousClient,
 } from '@votetorrent/vote-engine/rn';
-import {sendSavedVote, type BallotSendStatus, type VoteSendingPort, type VoteSentStore} from '../vote-sending';
+import {sendSavedVote, statusForOutcome, type BallotSendStatus, type VoteSendingPort, type VoteSentStore} from '../vote-sending';
 import type {VoteRecord} from '../vote-record-vault';
 
 const electionSecret = secp256k1.utils.randomSecretKey();
@@ -158,5 +158,29 @@ describe('sendSavedVote (spike 102)', () => {
 		const noKey = fakeStrand(Date.now() + 60_000);
 		expect(await sendSavedVote({...base, port: {...noKey.port, readElectionKey: async () => null}})).toEqual({ok: false, reason: 'election-key-missing'});
 		expect(await sendSavedVote({...base, port: {...noKey.port, readVotingClose: async () => null}})).toEqual({ok: false, reason: 'window-unreadable'});
+	});
+});
+
+describe('statusForOutcome (R1 already voted)', () => {
+	const committed = {status: 'committed', cid: 'c1', blockId: 'b', size: 3, formedByMe: true} as const;
+	const stopped = (reason: string) => ({status: 'stopped', reason}) as never;
+
+	it('maps committed, deadline and aborted without re-reading the strand', async () => {
+		const recheck = jest.fn(async () => 'never');
+		expect(await statusForOutcome(committed, recheck)).toEqual({phase: 'sent', cid: 'c1'});
+		expect(await statusForOutcome(stopped('deadline'), recheck)).toEqual({phase: 'not-sent', reason: 'voting-closed'});
+		expect(await statusForOutcome(stopped('aborted'), recheck)).toEqual({phase: 'not-sent', reason: 'stopped'});
+		expect(recheck).not.toHaveBeenCalled();
+	});
+
+	it('already-voted with a readable row is sent with that cid, re-read exactly once', async () => {
+		const recheck = jest.fn(async () => 'cid-x');
+		expect(await statusForOutcome(stopped('already-voted'), recheck)).toEqual({phase: 'sent', cid: 'cid-x'});
+		expect(recheck).toHaveBeenCalledTimes(1);
+	});
+
+	it('already-voted with no readable row, or a failing read, is not-sent already-voted', async () => {
+		expect(await statusForOutcome(stopped('already-voted'), async () => null)).toEqual({phase: 'not-sent', reason: 'already-voted'});
+		expect(await statusForOutcome(stopped('already-voted'), async () => { throw new Error('strand down'); })).toEqual({phase: 'not-sent', reason: 'already-voted'});
 	});
 });
