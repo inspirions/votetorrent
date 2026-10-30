@@ -54,8 +54,11 @@ function row (cid: string, overrides: Partial<Record<keyof BlockTreeRow, unknown
   } as BlockTreeRow
 }
 
+/** A base32 Cid-shaped name (IN-05: 'b' then [a-z2-7]); digits 0-9 map to letters a-j. */
+const b32 = (i: number): string => `bcid${String(i).padStart(3, '0').replace(/[0-9]/g, d => 'abcdefghij'[Number(d)]!)}`
+
 function rows (n: number): BlockTreeRow[] {
-  return Array.from({ length: n }, (_, i) => row(`cid-${String(i).padStart(3, '0')}`, { EntryCount: 3 + i }))
+  return Array.from({ length: n }, (_, i) => row(b32(i), { EntryCount: 3 + i }))
 }
 
 // ---- independent reference ----
@@ -99,10 +102,10 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
   })
 
   it('BT-2 single leaf: root is the leaf hash and the proof is empty', () => {
-    const r = row('only')
+    const r = row('bonly')
     const t = build([r])
     expect(t.root).to.equal(bytesToHex(refLeaf(r)))
-    const p = t.proofFor('only')
+    const p = t.proofFor('bonly')
     expect(p.ok).to.equal(true)
     if (p.ok) {
       expect(p.proof.path).to.have.length(0)
@@ -141,9 +144,9 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
   }
 
   it('BT-4 known-answer vector (literal derived from refRoot, not from buildBlockTree)', () => {
-    const rs = [row('cid-a', { EntryCount: 3 }), row('cid-b', { EntryCount: 4, BallotId: 'ballot-b' }), row('cid-c', { EntryCount: 5 })]
+    const rs = [row('bcida', { EntryCount: 3 }), row('bcidb', { EntryCount: 4, BallotId: 'ballot-b' }), row('bcidc', { EntryCount: 5 })]
     // Derived once from refRoot over these three rows.
-    const KAT = 'dd88a42e9c939d89afaea6912ed4f068201a9e4c2305d8e6c341f15f65318e87'
+    const KAT = '166290c3235661a64a245a66b6fc694c9e0715fa4a890698f671a22f83a3fd2e'
     expect(refRoot(rs)).to.equal(KAT)
     expect(build(rs).root).to.equal(KAT)
   })
@@ -183,10 +186,20 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     }
   })
 
-  it('BT-8 leaves order by UTF-8 bytes, not UTF-16 code units', () => {
-    const t = build([row('a\u{1F600}'), row('a！')])
-    expect(t.leaves.map(l => l.cid)).to.deep.equal(['a！', 'a\u{1F600}'])
-    expect(t.root).to.equal(refRoot([row('a\u{1F600}'), row('a！')]))
+  it('BT-8 leaves order by the bytes of the base32 Cid; a shorter prefix sorts first', () => {
+    const t = build([row('bza'), row('b2z'), row('bz')])
+    expect(t.leaves.map(l => l.cid)).to.deep.equal(['b2z', 'bz', 'bza'])
+    expect(t.root).to.equal(refRoot([row('bza'), row('b2z'), row('bz')]))
+  })
+
+  it('BT-8b (IN-05) a Cid outside the base32 CID alphabet is malformed, so leaf order is total', () => {
+    // two distinct lone surrogates both encode to U+FFFD and would compare equal byte-wise
+    for (const cid of ['a\u{1F600}', 'b\uD800', 'b\uDC00', 'bA', 'bcid-a', 'b', 'Bcida', 'bcid1', 'bcid8', 'bcid=', ' bcida']) {
+      const r = buildBlockTree([row(cid)], SCOPE)
+      expect(r, JSON.stringify(cid)).to.deep.include({ ok: false, reason: 'malformed-row' })
+      if (!r.ok) expect(r.detail).to.contain('Cid')
+    }
+    expect(buildBlockTree([row('bafkreiabc234567')], SCOPE).ok).to.equal(true)
   })
 
   it('BT-9 tamper: changed leaf fields change the root; bad proofs return typed results and never throw', () => {
@@ -199,7 +212,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     expect(mutate('EntryCount', 99)).to.not.equal(base.root)
     expect(mutate('BallotId', 'ballot-z')).to.not.equal(base.root)
     expect(mutate('Id', 'id-changed')).to.not.equal(base.root)
-    expect(mutate('Cid', 'cid-changed')).to.not.equal(base.root)
+    expect(mutate('Cid', 'bcidchanged')).to.not.equal(base.root)
     // IN-08: the frozen voter list and the template column are bound too
     expect(mutate('TemplateDigest', 'template-digest-z')).to.not.equal(base.root)
     expect(mutate('VoterRegistrantIds', '["r1","r2","r9"]')).to.not.equal(base.root)
@@ -207,7 +220,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     const revTree = buildBlockTree(revCopy, { electionId: EID, electionRevision: 2 })
     // other rows are revision 1 so the scope refuses; the leaf data itself carries the revision
     expect(revTree.ok).to.equal(false)
-    expect(blockLeafData(row('c'))).to.not.equal(blockLeafData(row('c', { ElectionRevision: 2 })))
+    expect(blockLeafData(row('bc'))).to.not.equal(blockLeafData(row('bc', { ElectionRevision: 2 })))
 
     const leaf = base.leaves[3]!
     const pr = base.proofFor(leaf.cid)
@@ -244,32 +257,32 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
       if (r.ok) throw new Error('expected refusal')
       return r
     }
-    expect(refusal([row('a'), row('a', { Id: 'other' })]).reason).to.equal('duplicate-block')
-    expect(refusal([row('a', { Id: 'same' }), row('b', { Id: 'same' })]).reason).to.equal('duplicate-block')
-    expect(refusal([row('a'), row('b', { ElectionId: 'elsewhere' })]).reason).to.equal('mixed-election')
-    expect(refusal([row('a'), row('b', { ElectionRevision: 2 })]).reason).to.equal('mixed-revision')
+    expect(refusal([row('ba'), row('ba', { Id: 'other' })]).reason).to.equal('duplicate-block')
+    expect(refusal([row('ba', { Id: 'same' }), row('bb', { Id: 'same' })]).reason).to.equal('duplicate-block')
+    expect(refusal([row('ba'), row('bb', { ElectionId: 'elsewhere' })]).reason).to.equal('mixed-election')
+    expect(refusal([row('ba'), row('bb', { ElectionRevision: 2 })]).reason).to.equal('mixed-revision')
     for (const field of ['Cid', 'Id', 'ElectionId', 'BallotId']) {
-      const missing = refusal([row('a', { [field]: undefined })])
+      const missing = refusal([row('ba', { [field]: undefined })])
       expect(missing.reason).to.equal('malformed-row')
       expect(missing.detail).to.contain(field)
-      expect(refusal([row('a', { [field]: '' })]).reason).to.equal('malformed-row')
+      expect(refusal([row('ba', { [field]: '' })]).reason).to.equal('malformed-row')
     }
     for (const field of ['TemplateDigest', 'VoterRegistrantIds']) {
-      const missing = refusal([row('a', { [field]: undefined })])
+      const missing = refusal([row('ba', { [field]: undefined })])
       expect(missing.reason).to.equal('malformed-row')
       expect(missing.detail).to.contain(field)
-      expect(refusal([row('a', { [field]: 7 })]).reason).to.equal('malformed-row')
+      expect(refusal([row('ba', { [field]: 7 })]).reason).to.equal('malformed-row')
     }
-    expect(refusal([row('a', { EntryCount: 0 })]).detail).to.contain('EntryCount')
-    expect(refusal([row('a', { ElectionRevision: 1.5 })]).detail).to.contain('ElectionRevision')
-    expect(refusal([row('a', { ElectionRevision: -1 })]).reason).to.equal('malformed-row')
-    expect(refusal([row('a', { EntryCount: Number.MAX_SAFE_INTEGER + 1 })]).reason).to.equal('malformed-row')
-    expect(refusal([row('a', { EntryCount: BigInt(Number.MAX_SAFE_INTEGER) + 1n })]).reason).to.equal('malformed-row')
+    expect(refusal([row('ba', { EntryCount: 0 })]).detail).to.contain('EntryCount')
+    expect(refusal([row('ba', { ElectionRevision: 1.5 })]).detail).to.contain('ElectionRevision')
+    expect(refusal([row('ba', { ElectionRevision: -1 })]).reason).to.equal('malformed-row')
+    expect(refusal([row('ba', { EntryCount: Number.MAX_SAFE_INTEGER + 1 })]).reason).to.equal('malformed-row')
+    expect(refusal([row('ba', { EntryCount: BigInt(Number.MAX_SAFE_INTEGER) + 1n })]).reason).to.equal('malformed-row')
     expect(refusal([null]).reason).to.equal('malformed-row')
     expect(refusal('nope').reason).to.equal('malformed-row')
 
-    const withBig = [row('a', { ElectionRevision: 1n, EntryCount: 3n }), row('b')]
-    const withNum = [row('a'), row('b')]
+    const withBig = [row('ba', { ElectionRevision: 1n, EntryCount: 3n }), row('bb')]
+    const withNum = [row('ba'), row('bb')]
     expect(build(withBig).root).to.equal(build(withNum).root)
   })
 
@@ -294,7 +307,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     const late = finalBlockTree(rs, SCOPE, tl, 2000)
     expect(late.ok).to.equal(true)
     if (late.ok) { expect(late.final).to.equal(true); expect(late.tree.root).to.equal(build(rs).root) }
-    const refused = finalBlockTree([row('a'), row('a')], SCOPE, tl, 1500)
+    const refused = finalBlockTree([row('ba'), row('ba')], SCOPE, tl, 1500)
     expect(refused).to.include({ ok: false, reason: 'duplicate-block' })
   })
 })

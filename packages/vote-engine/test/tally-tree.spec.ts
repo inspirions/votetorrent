@@ -139,7 +139,7 @@ const templates = (): any[] => [makeFixtureTemplate('ballot-a'), makeFixtureTemp
 
 /** 5 rows over 2 ballots (entry counts 3,4,3,3,5) with a released finding per Cid. */
 function syntheticSet (over: { invalidBlock?: number } = {}): any {
-  const spec: Array<[string, string, number]> = [['c1', 'ballot-a', 3], ['c2', 'ballot-a', 4], ['c3', 'ballot-b', 3], ['c4', 'ballot-a', 3], ['c5', 'ballot-b', 5]]
+  const spec: Array<[string, string, number]> = [['bca', 'ballot-a', 3], ['bcb', 'ballot-a', 4], ['bcc', 'ballot-b', 3], ['bcd', 'ballot-a', 3], ['bce', 'ballot-b', 5]]
   const rows = spec.map(([cid, b, n]) => row(cid, b, n))
   const blocks = rows.map((r, i) => {
     if (i === over.invalidBlock) {
@@ -361,7 +361,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
         options: ['__proto__', 'constructor', 'toString', '1'].map(code => ({ code, title: code }))
       }, { code: '__proto__', title: 'u', type: 'rank', options: [{ code: 'r', title: 'r' }] }]
     })
-    const rows = [row('c1', 'ballot-a', 3)]
+    const rows = [row('bca', 'ballot-a', 3)]
     const built = buildBlockTree(rows, scope)
     if (!built.ok) throw new Error('tree')
     const votes = [
@@ -645,7 +645,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     const wrong = { secretKey: secp256k1.utils.randomSecretKey(), jointPublicKey: release.jointPublicKey }
     expect(reason(buildTallyTree(input({ release: wrong })))).to.equal('secret-mismatch')
     expect(reason(buildTallyTree(input({ rows: [...set.rows, set.rows[0]] })))).to.equal('duplicate-block')
-    expect(reason(buildTallyTree(input({ rows: [...set.rows, { ...set.rows[0]!, Cid: 'zz', Id: 'zz', ElectionId: 'other' }] })))).to.equal('mixed-election')
+    expect(reason(buildTallyTree(input({ rows: [...set.rows, { ...set.rows[0]!, Cid: 'bzz', Id: 'zz', ElectionId: 'other' }] })))).to.equal('mixed-election')
     expect(reason(buildTallyTree(input({ rows: 'x' })))).to.equal('malformed-row')
     expect(reason(buildTallyTree(null as any))).to.equal('malformed-input')
     expect(reason(buildTallyTree({ scope: 5 } as any))).to.equal('malformed-input')

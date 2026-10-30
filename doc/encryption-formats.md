@@ -404,7 +404,11 @@ row of another revision (`mixed-revision`).
   tree (section 7.4) and must not carry registrant ids. `canonicalJson`
   is the sorted-key, no-whitespace JSON of `src/voting/canonical.ts`.
 - **Leaf order.** Ascending by the UTF-8 bytes of `Cid`; a shorter string
-  that is a prefix of a longer one sorts first.
+  that is a prefix of a longer one sorts first. A `Cid` must be a base32
+  CIDv1 string, `b` followed by characters of `a-z` and `2-7` (the form
+  `cid(Digest(Ciphertext))` produces; `isBase32Cid`), or the row is
+  `malformed-row`. That keeps the order total: two distinct strings can
+  never encode to the same bytes, as two different lone surrogates would.
 - **Leaf hash.** `SHA-256(0x00 || UTF-8(leafData))`.
 - **Node hash.** `SHA-256(0x01 || left || right)`, where `left` and
   `right` are the raw 32-byte child hashes (not their hex text).

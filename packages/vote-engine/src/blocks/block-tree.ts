@@ -14,7 +14,8 @@
 //     ciphertext). The list enters as a digest because the leaf data is published inside the tally tree and
 //     must not carry registrant ids.
 //   - Leaf hash: sha256(0x00 || utf8(leafData)).  Node hash: sha256(0x01 || leftHash || rightHash).
-//   - Leaf order: ascending by the UTF-8 bytes of Cid (a shorter prefix sorts first).
+//   - Leaf order: ascending by the UTF-8 bytes of Cid (a shorter prefix sorts first). A Cid must be a base32
+//     CID ('b' then a-z, 2-7), so that order is total.
 //   - Shape: RFC 6962. A range of width n > 1 splits at the largest power of two strictly below n; a lone
 //     node is carried up and NEVER duplicated.
 //   - Empty set: the root is sha256(utf8('vt-block-tree/1/empty')). One leaf: the root is its own hash.
@@ -116,6 +117,19 @@ export type FinalBlockTreeResult =
 
 const HEX64 = /^[0-9a-f]{64}$/
 
+/**
+ * IN-05: a VoteBlock Cid is a CIDv1 in multibase base32 (prefix 'b', RFC 4648 lowercase alphabet, no
+ * padding), the form `cid(Digest(Ciphertext))` produces. Only this character set is accepted, so the UTF-8
+ * byte order of leaves is a total order: distinct strings never encode to equal bytes (a lone surrogate
+ * would encode to U+FFFD).
+ */
+const BASE32_CID = /^b[a-z2-7]+$/
+
+/** Is `cid` shaped like a base32 CIDv1 string (character set only)? */
+export function isBase32Cid (cid: unknown): cid is string {
+  return typeof cid === 'string' && BASE32_CID.test(cid)
+}
+
 function compareUtf8 (a: string, b: string): number {
   const x = utf8ToBytes(a)
   const y = utf8ToBytes(b)
@@ -184,6 +198,7 @@ function normaliseRow (raw: unknown, position: number, scope: BlockTreeScope): R
   for (const field of ['TemplateDigest', 'VoterRegistrantIds']) {
     if (typeof r[field] !== 'string') return bad(`${field} must be a string`)
   }
+  if (!isBase32Cid(r.Cid)) return bad('Cid must be a base32 CID (b followed by a-z and 2-7)')
   const revision = intField(r.ElectionRevision, 0)
   if (revision === undefined) return bad('ElectionRevision must be a non-negative safe integer')
   const entryCount = intField(r.EntryCount, 1)

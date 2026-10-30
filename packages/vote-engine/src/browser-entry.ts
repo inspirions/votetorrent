@@ -65,6 +65,7 @@ export {
 	voterListDigest,
 	blockLeafHash,
 	blockNodeHash,
+	isBase32Cid,
 	buildBlockTree,
 	verifyInclusion,
 	blockTreeStatus,
