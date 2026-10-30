@@ -1,8 +1,8 @@
 diff --git a/dist/src/runtime/emit/dml-executor.js b/dist/src/runtime/emit/dml-executor.js
-index b3de58090c930370d3101a0ff119be88624f70b4..d80d157323600a7776e10d1c969f041cd2a56db7 100644
+index 899213e2747cbff45062097f436697e88d492ba6..38228b4c1b50864b678c8c63e0196dbda8ae8030 100644
 --- a/dist/src/runtime/emit/dml-executor.js
 +++ b/dist/src/runtime/emit/dml-executor.js
-@@ -605,14 +605,16 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -624,14 +624,16 @@ export function emitDmlExecutor(plan, ctx) {
          await assertTransitiveRestrictsForParentMutation(rctx.db, tableSchema, 'update', existingRow, updatedRow, plan.lensRouted);
          // Extract the primary key from existing row
          const keyValues = pkColumnIndicesInSchema.map(idx => existingRow[idx]);
@@ -20,9 +20,9 @@ index b3de58090c930370d3101a0ff119be88624f70b4..d80d157323600a7776e10d1c969f041c
 -            preCoerced: true,
 +            preCoerced: false,
              mutationStatement: vtab.wantStatements ?
-                 buildUpdateStatement(tableSchema, updatedRow, keyValues, contextRow) : undefined
-         };
-@@ -932,10 +934,11 @@ export function emitDmlExecutor(plan, ctx) {
+                 buildUpdateStatement(tableSchema, updatedRow, keyValues, contextRow) : undefined,
+             // The arm is part of the INSERT's own write: its `disposition.clauses` describe it.
+@@ -954,10 +956,11 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -35,10 +35,10 @@ index b3de58090c930370d3101a0ff119be88624f70b4..d80d157323600a7776e10d1c969f041c
 +            // front (so immediate CHECKs see the value as provided), so the storage
 +            // layer must coerce here as it did on 4.3.1.
 +            preCoerced: false,
-             mutationStatement
+             mutationStatement,
+             writeScope,
          };
-         if (REPR_STRICT)
-@@ -1118,10 +1121,10 @@ export function emitDmlExecutor(plan, ctx) {
+@@ -1142,10 +1145,10 @@ export function emitDmlExecutor(plan, ctx) {
              // can fall back to per-constraint defaultConflict directives. The memory
              // module treats undefined as ABORT when no constraint default is set.
              onConflict: plan.onConflict,
@@ -50,9 +50,9 @@ index b3de58090c930370d3101a0ff119be88624f70b4..d80d157323600a7776e10d1c969f041c
 +            // forced to false — emitUpdate no longer converts the NEW section up
 +            // front, so the storage layer must coerce here as it did on 4.3.1.
 +            preCoerced: false,
-             mutationStatement
+             mutationStatement,
+             writeScope,
          };
-         if (REPR_STRICT)
 diff --git a/dist/src/runtime/emit/insert.js b/dist/src/runtime/emit/insert.js
 index 0b76a9275292239d2405534bd4eff42a8b96097f..5fef4571f854e947aedd7fadd842fc9e525576e6 100644
 --- a/dist/src/runtime/emit/insert.js
