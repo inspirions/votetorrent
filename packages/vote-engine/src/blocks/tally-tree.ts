@@ -620,7 +620,7 @@ function verifyChecked (input: unknown): TallyVerifyResult {
     const bad = (detail: string): VerifyFailure => vfail('leaf-mismatch', `leaf ${i}: ${detail}`, { leafIndex: i })
     let parsed: unknown
     try { parsed = JSON.parse(l.leafData) } catch { return bad('leafData is not JSON') }
-    if (!Array.isArray(parsed) || parsed.length !== 6 || canonicalJson(parsed) !== l.leafData) return bad('leafData is not the canonical leaf tuple')
+    if (!Array.isArray(parsed) || parsed.length !== 8 || canonicalJson(parsed) !== l.leafData) return bad('leafData is not the canonical leaf tuple')
     const [electionId, electionRevision, ballotId, , cid, entryCount] = parsed as unknown[]
     if (electionId !== tally.electionId || electionRevision !== tally.electionRevision) return bad('leafData names another election or revision')
     if (ballotId !== l.ballotId || cid !== l.blockCid || entryCount !== l.entryCount) return bad('leafData differs from the leaf fields')

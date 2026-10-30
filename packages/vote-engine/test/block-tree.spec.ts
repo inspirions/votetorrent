@@ -48,6 +48,8 @@ function row (cid: string, overrides: Partial<Record<keyof BlockTreeRow, unknown
     ElectionRevision: 1,
     BallotId: 'ballot-a',
     EntryCount: 3,
+    TemplateDigest: 'template-digest-a',
+    VoterRegistrantIds: '["r1","r2","r3"]',
     ...overrides
   } as BlockTreeRow
 }
@@ -64,7 +66,8 @@ function cmpUtf8 (a: string, b: string): number {
   return x.length - y.length
 }
 const refLeaf = (r: BlockTreeRow): Uint8Array => sha256(concatBytes(Uint8Array.of(0), utf8ToBytes(
-  canonicalJson([r.ElectionId, Number(r.ElectionRevision), r.BallotId, r.Id, r.Cid, Number(r.EntryCount)]))))
+  canonicalJson([r.ElectionId, Number(r.ElectionRevision), r.BallotId, r.Id, r.Cid, Number(r.EntryCount),
+    r.TemplateDigest, bytesToHex(sha256(utf8ToBytes(r.VoterRegistrantIds)))]))))
 const refNode = (l: Uint8Array, r: Uint8Array): Uint8Array => sha256(concatBytes(Uint8Array.of(1), l, r))
 function refMth (leaves: Uint8Array[]): Uint8Array {
   if (leaves.length === 1) return leaves[0]!
@@ -140,7 +143,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
   it('BT-4 known-answer vector (literal derived from refRoot, not from buildBlockTree)', () => {
     const rs = [row('cid-a', { EntryCount: 3 }), row('cid-b', { EntryCount: 4, BallotId: 'ballot-b' }), row('cid-c', { EntryCount: 5 })]
     // Derived once from refRoot over these three rows.
-    const KAT = '2548e71a5de11d7275dac46f6fbade8bb2241af96383e5f6f6fbdd7b24a705f7'
+    const KAT = 'dd88a42e9c939d89afaea6912ed4f068201a9e4c2305d8e6c341f15f65318e87'
     expect(refRoot(rs)).to.equal(KAT)
     expect(build(rs).root).to.equal(KAT)
   })
@@ -197,6 +200,9 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     expect(mutate('BallotId', 'ballot-z')).to.not.equal(base.root)
     expect(mutate('Id', 'id-changed')).to.not.equal(base.root)
     expect(mutate('Cid', 'cid-changed')).to.not.equal(base.root)
+    // IN-08: the frozen voter list and the template column are bound too
+    expect(mutate('TemplateDigest', 'template-digest-z')).to.not.equal(base.root)
+    expect(mutate('VoterRegistrantIds', '["r1","r2","r9"]')).to.not.equal(base.root)
     const revCopy = rs.map((r, i) => i === 2 ? { ...r, ElectionRevision: 2 } : r)
     const revTree = buildBlockTree(revCopy, { electionId: EID, electionRevision: 2 })
     // other rows are revision 1 so the scope refuses; the leaf data itself carries the revision
@@ -247,6 +253,12 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
       expect(missing.reason).to.equal('malformed-row')
       expect(missing.detail).to.contain(field)
       expect(refusal([row('a', { [field]: '' })]).reason).to.equal('malformed-row')
+    }
+    for (const field of ['TemplateDigest', 'VoterRegistrantIds']) {
+      const missing = refusal([row('a', { [field]: undefined })])
+      expect(missing.reason).to.equal('malformed-row')
+      expect(missing.detail).to.contain(field)
+      expect(refusal([row('a', { [field]: 7 })]).reason).to.equal('malformed-row')
     }
     expect(refusal([row('a', { EntryCount: 0 })]).detail).to.contain('EntryCount')
     expect(refusal([row('a', { ElectionRevision: 1.5 })]).detail).to.contain('ElectionRevision')

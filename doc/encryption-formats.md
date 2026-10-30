@@ -392,10 +392,17 @@ row of another revision (`mixed-revision`).
 
 - **Leaf data.** The exact string
   `canonicalJson([ElectionId, ElectionRevision, BallotId, Id, Cid,
-  EntryCount])`, a JSON array in that order, with `ElectionRevision` and
-  `EntryCount` as plain numbers (a database bigint is converted first).
-  `canonicalJson` is the sorted-key, no-whitespace JSON of
-  `src/voting/canonical.ts`.
+  EntryCount, TemplateDigest, voterListDigest])`, a JSON array in that
+  order, with `ElectionRevision` and `EntryCount` as plain numbers (a
+  database bigint is converted first) and `TemplateDigest` exactly as
+  stored. `voterListDigest` is the lowercase hex of
+  `SHA-256(UTF-8(VoterRegistrantIds))`, taken over the stored JSON text
+  of the column (exported as `voterListDigest`). The root so commits to
+  each block's frozen voter list and template column, which neither the
+  `Cid` (it covers only the ciphertext) nor the `Id` covers. The list
+  enters as a digest because the leaf data is published inside the tally
+  tree (section 7.4) and must not carry registrant ids. `canonicalJson`
+  is the sorted-key, no-whitespace JSON of `src/voting/canonical.ts`.
 - **Leaf order.** Ascending by the UTF-8 bytes of `Cid`; a shorter string
   that is a prefix of a longer one sorts first.
 - **Leaf hash.** `SHA-256(0x00 || UTF-8(leafData))`.

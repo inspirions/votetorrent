@@ -62,6 +62,7 @@ export {
 	BLOCK_TREE_DOMAIN,
 	BLOCK_TREE_EMPTY_ROOT,
 	blockLeafData,
+	voterListDigest,
 	blockLeafHash,
 	blockNodeHash,
 	buildBlockTree,

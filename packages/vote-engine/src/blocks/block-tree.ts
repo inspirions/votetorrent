@@ -7,8 +7,12 @@
 //     tree, R8).
 //
 // Format contract (third parties must be able to reproduce this byte for byte):
-//   - Leaf data: canonicalJson([ElectionId, ElectionRevision, BallotId, Id, Cid, EntryCount]), with both
-//     integers as plain numbers.
+//   - Leaf data: canonicalJson([ElectionId, ElectionRevision, BallotId, Id, Cid, EntryCount, TemplateDigest,
+//     voterListDigest]), with both integers as plain numbers, TemplateDigest exactly as stored, and
+//     voterListDigest = hex(sha256(utf8(VoterRegistrantIds))) over the stored JSON text. The root so binds the
+//     block's frozen voter list and its template column, which no other hash covers (the Cid covers only the
+//     ciphertext). The list enters as a digest because the leaf data is published inside the tally tree and
+//     must not carry registrant ids.
 //   - Leaf hash: sha256(0x00 || utf8(leafData)).  Node hash: sha256(0x01 || leftHash || rightHash).
 //   - Leaf order: ascending by the UTF-8 bytes of Cid (a shorter prefix sorts first).
 //   - Shape: RFC 6962. A range of width n > 1 splits at the largest power of two strictly below n; a lone
@@ -31,7 +35,7 @@ export const BLOCK_TREE_DOMAIN = 'vt-block-tree/1' as const
 /** Root of the empty set (no committed blocks). */
 export const BLOCK_TREE_EMPTY_ROOT: string = bytesToHex(sha256(utf8ToBytes(`${BLOCK_TREE_DOMAIN}/empty`)))
 
-/** Structural subset of a VoteBlock row; other columns (TemplateDigest, VoterRegistrantIds, Ciphertext) are ignored. */
+/** Structural subset of a VoteBlock row; other columns are ignored. */
 export interface BlockTreeRow {
   Cid: string
   Id: string
@@ -39,6 +43,9 @@ export interface BlockTreeRow {
   ElectionRevision: number | bigint
   BallotId: string
   EntryCount: number | bigint
+  TemplateDigest: string
+  /** the stored JSON text of the sorted registrant ids; the leaf binds its sha256 (voterListDigest) */
+  VoterRegistrantIds: string
 }
 
 export interface BlockTreeScope { electionId: string, electionRevision: number }
@@ -130,10 +137,18 @@ function splitPoint (n: number): number {
 /**
  * The A6 format contract: the exact string a block's leaf hash is taken over. Both integers are
  * normalised to plain numbers first, because a Quereus row read may surface a bigint and JSON cannot
- * carry one.
+ * carry one. The voter list enters as voterListDigest, never as registrant ids.
  */
 export function blockLeafData (row: BlockTreeRow): string {
-  return canonicalJson([row.ElectionId, Number(row.ElectionRevision), row.BallotId, row.Id, row.Cid, Number(row.EntryCount)])
+  return canonicalJson([
+    row.ElectionId, Number(row.ElectionRevision), row.BallotId, row.Id, row.Cid, Number(row.EntryCount),
+    row.TemplateDigest, voterListDigest(row.VoterRegistrantIds)
+  ])
+}
+
+/** hex(sha256(utf8(VoterRegistrantIds))): the leaf's commitment to the stored voter list text. */
+export function voterListDigest (voterRegistrantIds: string): string {
+  return bytesToHex(sha256(utf8ToBytes(voterRegistrantIds)))
 }
 
 /** hex(sha256(0x00 || utf8(leafData))). */
@@ -155,7 +170,7 @@ function intField (value: unknown, min: number): number | undefined {
   return value
 }
 
-interface NormalRow { cid: string, id: string, ballotId: string, entryCount: number }
+interface NormalRow { cid: string, id: string, ballotId: string, entryCount: number, templateDigest: string, voterRegistrantIds: string }
 
 type RowCheck = { ok: true, row: NormalRow } | { ok: false, reason: BlockTreeRefusal, detail: string }
 
@@ -165,6 +180,9 @@ function normaliseRow (raw: unknown, position: number, scope: BlockTreeScope): R
   const r = raw as Record<string, unknown>
   for (const field of ['Cid', 'Id', 'ElectionId', 'BallotId']) {
     if (typeof r[field] !== 'string' || r[field] === '') return bad(`${field} must be a non-empty string`)
+  }
+  for (const field of ['TemplateDigest', 'VoterRegistrantIds']) {
+    if (typeof r[field] !== 'string') return bad(`${field} must be a string`)
   }
   const revision = intField(r.ElectionRevision, 0)
   if (revision === undefined) return bad('ElectionRevision must be a non-negative safe integer')
@@ -176,7 +194,13 @@ function normaliseRow (raw: unknown, position: number, scope: BlockTreeScope): R
   if (revision !== scope.electionRevision) {
     return { ok: false, reason: 'mixed-revision', detail: `row ${position}: ElectionRevision ${revision} is not ${scope.electionRevision}` }
   }
-  return { ok: true, row: { cid: r.Cid as string, id: r.Id as string, ballotId: r.BallotId as string, entryCount } }
+  return {
+    ok: true,
+    row: {
+      cid: r.Cid as string, id: r.Id as string, ballotId: r.BallotId as string, entryCount,
+      templateDigest: r.TemplateDigest as string, voterRegistrantIds: r.VoterRegistrantIds as string
+    }
+  }
 }
 
 /**
@@ -203,7 +227,8 @@ export function buildBlockTree (rows: readonly BlockTreeRow[], scope: BlockTreeS
 
   const leaves: BlockTreeLeaf[] = normal.map((row, index) => {
     const leafData = blockLeafData({
-      Cid: row.cid, Id: row.id, ElectionId: scope.electionId, ElectionRevision: scope.electionRevision, BallotId: row.ballotId, EntryCount: row.entryCount
+      Cid: row.cid, Id: row.id, ElectionId: scope.electionId, ElectionRevision: scope.electionRevision, BallotId: row.ballotId,
+      EntryCount: row.entryCount, TemplateDigest: row.templateDigest, VoterRegistrantIds: row.voterRegistrantIds
     })
     return { index, cid: row.cid, blockId: row.id, ballotId: row.ballotId, entryCount: row.entryCount, leafData, hash: blockLeafHash(leafData) }
   })
