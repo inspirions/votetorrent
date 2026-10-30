@@ -7,7 +7,7 @@ import { expect } from 'chai'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { BLOCK_TREE_EMPTY_ROOT, buildBlockTree } from '../src/blocks/block-tree.js'
-import { TALLY_TREE_DOMAIN, addHistograms, buildTallyTree, tallyNodeHash, tallyTreeFrom } from '../src/blocks/tally-tree.js'
+import { TALLY_TREE_DOMAIN, addHistograms, buildTallyTree, tallyNodeHash, tallyTreeFrom, verifyTallyTree } from '../src/blocks/tally-tree.js'
 import { validateElectionBlocks } from '../src/blocks/validate-blocks.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { buildVoteEntry, makeVoteNonce } from '../src/voting/vote-entries.js'
@@ -666,5 +666,216 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
         expect(text).to.not.include(v.pubHex)
       }
     }
+  })
+})
+
+// ---- Part 3: verifyTallyTree ----
+//
+// What verification proves: every histogram, merkle hash and tally hash in the document is consistent and the
+// branch from each leaf to the root holds. It does NOT prove faithfulness to the decrypted blocks: a tally built
+// from tampered inputs (a flipped consent signature, TB-4a) verifies on its own. Faithfulness is checked by
+// recomputing with buildTallyTree over the rows and comparing roots (TV-5).
+
+describe('verify tally tree (65-08: R8, comprehensive validation of tally nodes)', function () {
+  this.timeout(60_000)
+
+  let set: ReturnType<typeof makeCommittedElection>
+  let ballots: any[]
+  let release: { secretKey: Uint8Array, jointPublicKey: string }
+  let good: any
+  let excludedTally: any
+  let single: any
+  let empty: any
+  const flip = (hex: string): string => (hex[0] === '0' ? '1' : '0') + hex.slice(1)
+  const input = (over: Record<string, unknown> = {}): any => ({ scope, rows: set.rows, voterRows: set.voterRows, ballots, release, ...over })
+  const clone = <T>(x: T): T => structuredClone(x)
+  const fails = (t: unknown, reason: string, where: { nodeIndex?: number, leafIndex?: number } = {}): void => {
+    const r: any = verifyTallyTree(t)
+    expect(r.ok, JSON.stringify(r)).to.equal(false)
+    expect(r.reason, r.detail).to.equal(reason)
+    if (where.nodeIndex !== undefined) expect(r.nodeIndex).to.equal(where.nodeIndex)
+    if (where.leafIndex !== undefined) expect(r.leafIndex).to.equal(where.leafIndex)
+  }
+  const rehash = (t: any, ...idx: number[]): any => {
+    for (const i of idx) t.nodes[i].hash = refTallyHash(t.nodes[i].merkleHash, t.nodes[i].histogram)
+    return t
+  }
+  const parentOf = (t: any, i: number): number => t.nodes.findIndex((n: any) => n.left === i || n.right === i)
+  const ballotOf = (t: any, i: number): any => Object.values<any>(t.nodes[i].histogram.ballots)[0]
+  const firstOption = (b: any): [string, string] => {
+    const q = Object.keys(b.questions)[0]!
+    return [q, Object.keys(b.questions[q].options).find(o => b.questions[q].options[o] >= 1)!]
+  }
+
+  before(() => {
+    set = makeCommittedElection({ ballotIds: ['ballot-a', 'ballot-b'], blocks: [{ size: 3 }, { size: 4 }, { ballotIndex: 1, size: 3 }, { size: 3, payloadVersion: 1 }] })
+    ballots = set.election.ballots.map(b => b.template)
+    release = { secretKey: set.election.electionSecret, jointPublicKey: set.election.electionKey.jointPublicKey }
+    good = (buildTallyTree(input()) as any).tally
+    const victim = set.blocks[1]!.voterRows[2]!
+    excludedTally = (buildTallyTree(input({ voterRows: set.voterRows.map(v => (v === victim ? { ...v, Signature: flip(v.Signature) } : v)) })) as any).tally
+    const one = makeCommittedElection({ ballotIds: ['ballot-a'], blocks: [{ size: 3 }] })
+    single = (buildTallyTree({
+      scope, rows: one.rows, voterRows: one.voterRows, ballots: one.election.ballots.map(b => b.template),
+      release: { secretKey: one.election.electionSecret, jointPublicKey: one.election.electionKey.jointPublicKey }
+    } as any) as any).tally
+    empty = (buildTallyTree(input({ rows: [], voterRows: [] })) as any).tally
+  })
+
+  it('TV-1 good tallies verify, as built and after a JSON round trip', () => {
+    for (const [name, t] of [['good', good], ['excluded', excludedTally], ['single', single], ['empty', empty]] as Array<[string, any]>) {
+      expect(t, name).to.be.an('object')
+      expect(verifyTallyTree(t), name).to.deep.equal({ ok: true })
+      expect(verifyTallyTree(JSON.parse(JSON.stringify(t))), `${name} json`).to.deep.equal({ ok: true })
+    }
+    expect(good.nodes.length).to.equal(7)
+    expect(single.nodes.length).to.equal(1)
+    expect(empty.size).to.equal(0)
+    expect(excludedTally.leaves.some((l: any) => l.disposition === 'excluded')).to.equal(true)
+  })
+
+  describe('TV-2 tamper, exact reason and index', () => {
+    it('a flipped leaf node hash', () => {
+      const t = clone(good)
+      t.nodes[0].hash = flip(t.nodes[0].hash)
+      fails(t, 'tally-hash-mismatch', { nodeIndex: 0 })
+    })
+
+    it('leaf-bound edits are caught at the leaf', () => {
+      const t = clone(good)
+      const b = ballotOf(t, 0)
+      const [q, o] = firstOption(b)
+      b.questions[q].answered += 1
+      b.questions[q].options[o] += 1
+      rehash(t, 0)
+      fails(t, 'histogram-mismatch', { nodeIndex: 0 })
+      const u = clone(good)
+      const ub = ballotOf(u, 0)
+      const [uq, uo] = firstOption(ub)
+      ub.questions[uq].options[uo] = ub.questions[uq].answered + 1
+      rehash(u, 0)
+      fails(u, 'histogram-mismatch', { nodeIndex: 0 })
+    })
+
+    it('parent-sum cases', () => {
+      const t = clone(good)
+      const b = ballotOf(t, 0)
+      const [q, o] = firstOption(b)
+      b.questions[q].options[o] -= 1
+      rehash(t, 0)
+      fails(t, 'histogram-mismatch', { nodeIndex: parentOf(t, 0) })
+      expect(parentOf(t, 0)).to.equal(2)
+      const u = clone(good)
+      const ub = Object.values<any>(u.nodes[2].histogram.ballots)[0]
+      ub.questions.q1.options.a += 1
+      rehash(u, 2)
+      fails(u, 'histogram-mismatch', { nodeIndex: 2 })
+    })
+
+    it('merkle hash, leaf data and relabelled disposition', () => {
+      const t = clone(good)
+      t.nodes[2].merkleHash = flip(t.nodes[2].merkleHash)
+      fails(t, 'merkle-hash-mismatch', { nodeIndex: 2 })
+      const u = clone(good)
+      u.nodes[0].merkleHash = flip(u.nodes[0].merkleHash)
+      fails(u, 'merkle-hash-mismatch', { nodeIndex: 0 })
+      const v = clone(good)
+      const parsed = JSON.parse(v.leaves[1].leafData)
+      parsed[2] = 'ballot-z'
+      v.leaves[1].leafData = canonicalJson(parsed)
+      fails(v, 'leaf-mismatch', { leafIndex: 1 })
+      const x = clone(excludedTally)
+      const li = x.leaves.findIndex((l: any) => l.disposition === 'excluded')
+      x.leaves[li].disposition = 'tallied'
+      x.leaves[li].excludedFor = []
+      const leafNode = x.nodes.findIndex((n: any) => n.range[1] - n.range[0] === 1 && n.range[0] === li)
+      fails(x, 'histogram-mismatch', { nodeIndex: leafNode })
+    })
+
+    it('root fields', () => {
+      const t = clone(good)
+      t.root = flip(t.root)
+      fails(t, 'root-mismatch')
+      const u = clone(good)
+      Object.values<any>(u.histogram.ballots)[0].votes += 1
+      fails(u, 'root-mismatch')
+      const v = clone(good)
+      v.blockRoot = flip(v.blockRoot)
+      fails(v, 'root-mismatch')
+      const w = clone(good)
+      const last = w.nodes.length - 1
+      Object.values<any>(w.nodes[last].histogram.ballots)[0].votes += 1
+      w.histogram = clone(w.nodes[last].histogram)
+      rehash(w, ...w.nodes.map((_: any, i: number) => i))
+      w.root = w.nodes[last].hash
+      fails(w, 'histogram-mismatch', { nodeIndex: last })
+    })
+  })
+
+  it('TV-3 malformed tallies are typed and never throw', () => {
+    const edit = (f: (t: any) => void): any => { const t = clone(good); f(t); return t }
+    const cases: Array<[string, unknown]> = [
+      ['null', null], ['array', []], ['empty object', {}], ['string', 'x'],
+      ['format', edit(t => { t.format = 'vt-tally-tree/2' })],
+      ['uppercase root', edit(t => { t.root = t.root.toUpperCase() })],
+      ['short blockRoot', edit(t => { t.blockRoot = t.blockRoot.slice(1) })],
+      ['negative count', edit(t => { ballotOf(t, 0).votes = -1 })],
+      ['fractional count', edit(t => { ballotOf(t, 0).invalid = 0.5 })],
+      ['string count', edit(t => { ballotOf(t, 0).excluded = '0' })],
+      ['extra ballot key', edit(t => { ballotOf(t, 0).extra = 1 })],
+      ['extra question key', edit(t => { const b = ballotOf(t, 0); b.questions.q1.extra = 1 })],
+      ['missing unsupported', edit(t => { delete ballotOf(t, 0).unsupported })],
+      ['extra histogram key', edit(t => { t.histogram.extra = {} })],
+      ['nodes too few', edit(t => { t.nodes.pop() })],
+      ['leaves too few', edit(t => { t.leaves.pop() })],
+      ['size off', edit(t => { t.size = 3 })],
+      ['last leaf dropped, size decremented', edit(t => { t.leaves.pop(); t.size -= 1 })],
+      ['junk nodes', edit(t => { t.nodes = Array.from({ length: 10_000 }, () => ({})) })],
+      ['junk nodes on empty', edit(t => { t.size = 0; t.leaves = []; t.nodes = Array.from({ length: 10_000 }, () => ({})) })],
+      ['excludedFor code', edit(t => { t.leaves[0].excludedFor = ['not-a-code'] })],
+      ['entryCount 0', edit(t => { t.leaves[0].entryCount = 0 })],
+      ['bad disposition', edit(t => { t.leaves[0].disposition = 'maybe' })],
+      ['node hash not hex', edit(t => { t.nodes[3].hash = 'zz' })],
+      ['range not array', edit(t => { t.nodes[3].range = 'x' })],
+      ['revision', edit(t => { t.electionRevision = -1 })],
+      ['empty election id', edit(t => { t.electionId = '' })]
+    ]
+    for (const [name, t] of cases) {
+      const r: any = verifyTallyTree(t)
+      expect(r, name).to.deep.include({ ok: false, reason: 'malformed-tally' })
+      expect(r.detail, name).to.be.a('string')
+    }
+  })
+
+  it('TV-4 shape', () => {
+    const t = clone(good)
+    ;[t.leaves[0], t.leaves[1]] = [t.leaves[1], t.leaves[0]]
+    t.leaves[0].index = 0
+    t.leaves[1].index = 1
+    for (const k of ['merkleHash', 'histogram', 'hash']) [t.nodes[0][k], t.nodes[1][k]] = [t.nodes[1][k], t.nodes[0][k]]
+    fails(t, 'shape-mismatch')
+    const r = clone(good)
+    r.nodes[2].range = [0, 3]
+    fails(r, 'shape-mismatch', { nodeIndex: 2 })
+    const l = clone(good)
+    l.nodes[2].left = 1
+    fails(l, 'shape-mismatch', { nodeIndex: 2 })
+    const i = clone(good)
+    i.leaves[2].index = 5
+    fails(i, 'shape-mismatch', { leafIndex: 2 })
+    const n = clone(good)
+    n.nodes[3].index = 4
+    fails(n, 'shape-mismatch', { nodeIndex: 3 })
+  })
+
+  it('TV-5 recomputation from the rows is the faithfulness check', () => {
+    const shuffled: any = buildTallyTree(input({ rows: seededShuffle(set.rows, 7), voterRows: seededShuffle(set.voterRows, 7), ballots: seededShuffle(ballots, 7) }))
+    expect(shuffled.tally.root).to.equal(good.root)
+    expect(verifyTallyTree(shuffled.tally)).to.deep.equal({ ok: true })
+    // The tampered-input tally is internally consistent, so it verifies, but it is a different outcome.
+    expect(excludedTally.root).to.not.equal(good.root)
+    expect(canonicalJson(excludedTally.histogram)).to.not.equal(canonicalJson(good.histogram))
+    expect(verifyTallyTree(excludedTally)).to.deep.equal({ ok: true })
+    expect(excludedTally.blockRoot).to.equal(good.blockRoot)
   })
 })
