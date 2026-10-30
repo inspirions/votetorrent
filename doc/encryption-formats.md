@@ -589,9 +589,22 @@ The report has one finding record per block (ascending by UTF-8 bytes of
 record carries `declaredEntries` (the `EntryCount`) and
 `attestedEntries`, the smallest of `EntryCount`, the number of listed
 voters and the number of listed voters with an authenticated voter row. The totals
-satisfy `valid + invalid + undecryptable = entries`, where `entries`
-counts a block's payload votes if it opened and its declared
-`EntryCount` otherwise. Refusals are `malformed-input`, `mixed-election`,
+satisfy `valid + invalid + excluded + undecryptable = entries`:
+
+- `valid` and `invalid` count the votes of `valid` blocks only. The votes
+  inside a block that is `invalid` are never counted as valid or invalid,
+  because the tally excludes that block.
+- `excluded` is the `attestedEntries` of every `invalid` block.
+- `undecryptable` is the `EntryCount` of every `not-decryptable-yet`
+  block, that is, every block before the release.
+- `entries` is their sum: a valid block's payload votes, an invalid
+  block's `attestedEntries`, and a not-yet-decryptable block's
+  `EntryCount`.
+
+After the release these totals equal the tally root of section 7.4,
+summed over the ballots: `entries` its `votes`, `invalid` its
+`invalid`, `excluded` its `excluded`, and `valid` its derived valid
+count. Refusals are `malformed-input`, `mixed-election`,
 `mixed-revision`, `invalid-secret` and `secret-mismatch`. The secret
 rules are those of section 7.2.
 

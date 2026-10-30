@@ -618,6 +618,11 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       checkInvariants(r.tally, expected)
       expect(r.tally.histogram.ballots['ballot-a'].excluded).to.equal(3)
       expect(r.tally.histogram.ballots['ballot-a'].votes).to.equal(3 + 3 + 3)
+      // WR-05: R7's totals are R8's root, summed over the ballots
+      const root = Object.values<any>(r.tally.histogram.ballots)
+      const sum = (k: string): number => root.reduce((a, b) => a + b[k], 0)
+      expect(r.validation.totals).to.include({ entries: sum('votes'), invalid: sum('invalid'), excluded: sum('excluded'), undecryptable: 0 })
+      expect(r.validation.totals.valid).to.equal(sum('votes') - sum('invalid') - sum('excluded'))
     })
 
     it('TB-4b a missing voter row excludes its block', () => {

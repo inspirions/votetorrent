@@ -125,14 +125,22 @@ export interface BlockFinding {
   findings: readonly ValidationFinding[]
 }
 
+/**
+ * WR-05: valid + invalid + excluded + undecryptable = entries, and after the release these match R8's root
+ * (votes, invalid, excluded) summed over the ballots.
+ */
 export interface ValidationTotals {
   /** BlockFinding count = the R5 leaf count (rows set aside are report-level findings, not blocks) */
   blocks: number
-  /** per block: payload.votes.length if opened, else declaredEntries */
+  /** per block: payload.votes.length for a valid block, attestedEntries for an invalid one, declaredEntries for one not decryptable yet */
   entries: number
+  /** valid votes of valid blocks only */
   valid: number
+  /** invalid votes of valid blocks only */
   invalid: number
-  /** entries of blocks not opened (before release, or block-does-not-open, or malformed-row) */
+  /** attestedEntries of every block whose status is 'invalid' (R8 excludes these blocks, D-82) */
+  excluded: number
+  /** declaredEntries of every 'not-decryptable-yet' block (before the release) */
   undecryptable: number
 }
 
@@ -325,6 +333,8 @@ interface Work {
   /** CR-03: listed registrants whose representative voter row is authenticated */
   authenticated: Set<string>
   ready: boolean
+  /** the row has Ciphertext text, so the block can be opened after the release */
+  openable: boolean
   payloadVersion: 1 | 2 | null
   opened: boolean
   votes: VoteVerdict[]
@@ -452,7 +462,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     w.declared = count ?? 0
     const rev = normaliseInt(row.ElectionRevision)
     if (!isNonEmpty(row.Cid) || !isNonEmpty(row.Id) || !isNonEmpty(row.BallotId) || !isStr(row.ElectionId) ||
-      !isStr(row.TemplateDigest) || !isStr(row.VoterRegistrantIds) || !isStr(row.Ciphertext) || count === null || count < 1 || rev === null) {
+      !isStr(row.TemplateDigest) || !isStr(row.VoterRegistrantIds) || count === null || count < 1 || rev === null) {
       add(w, 'malformed-row', 'the block row is missing a column or holds an unreadable value')
       w.ended = true
       continue
@@ -461,10 +471,17 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     w.ballotId = row.BallotId
     w.revision = rev
     w.ready = true
-    try {
-      if (poolBlockCid(row.Ciphertext) !== row.Cid) add(w, 'cid-mismatch', 'the Cid is not the digest of the ciphertext')
-    } catch {
-      add(w, 'cid-mismatch', 'the Cid cannot be derived from the ciphertext')
+    // R5 keeps a row without Ciphertext text (it only ranks by it); such a block cannot be checked or opened,
+    // but its voter list and voter rows are still read, so its attested volume is known (WR-04, WR-05)
+    if (!isStr(row.Ciphertext)) {
+      add(w, 'malformed-row', 'the block row has no Ciphertext text')
+    } else {
+      w.openable = true
+      try {
+        if (poolBlockCid(row.Ciphertext) !== row.Cid) add(w, 'cid-mismatch', 'the Cid is not the digest of the ciphertext')
+      } catch {
+        add(w, 'cid-mismatch', 'the Cid cannot be derived from the ciphertext')
+      }
     }
     let list: string[] | null = null
     try {
@@ -568,7 +585,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   // after release: open and judge
   if (secret !== null) {
     for (const w of works) {
-      if (!w.ready || w.row === null) continue
+      if (!w.ready || !w.openable || w.row === null) continue
       const row = w.row
       const known = ballotsById.get(w.ballotId)
       const res = openCommittedBlock({
@@ -678,17 +695,22 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
       findings: w.fs
     }
   })
-  const totals: ValidationTotals = { blocks: blocks.length, entries: 0, valid: 0, invalid: 0, undecryptable: 0 }
-  for (const w of ordered) {
-    if (w.opened) {
+  const totals: ValidationTotals = { blocks: blocks.length, entries: 0, valid: 0, invalid: 0, excluded: 0, undecryptable: 0 }
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]!
+    const w = ordered[i]!
+    if (b.status === 'invalid') {
+      totals.entries += b.attestedEntries
+      totals.excluded += b.attestedEntries
+    } else if (b.status === 'valid') {
       totals.entries += w.entries
       for (const v of w.votes) {
         if (v.status === 'valid') totals.valid++
         else totals.invalid++
       }
     } else {
-      totals.entries += w.declared
-      totals.undecryptable += w.declared
+      totals.entries += b.declaredEntries
+      totals.undecryptable += b.declaredEntries
     }
   }
   const known = new Set(works.map(w => w.cid))
@@ -711,7 +733,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
 
 function newWork (row: Rec | null, cid: string): Work {
   return {
-    row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, authenticated: new Set(), ready: false,
+    row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, authenticated: new Set(), ready: false, openable: false,
     payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0
   }
 }

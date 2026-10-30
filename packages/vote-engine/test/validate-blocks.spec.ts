@@ -352,7 +352,15 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
   function assertTotals (r: any): void {
     expect(r.ok, JSON.stringify(r)).to.equal(true)
     const t = r.totals
-    expect(t.valid + t.invalid + t.undecryptable).to.equal(t.entries)
+    expect(t.valid + t.invalid + t.excluded + t.undecryptable).to.equal(t.entries)
+    // WR-05: valid and invalid count only votes of valid blocks; excluded is the attested volume of invalid ones
+    let valid = 0; let invalid = 0; let excluded = 0; let undecryptable = 0
+    for (const b of r.blocks) {
+      if (b.status === 'invalid') excluded += b.attestedEntries
+      else if (b.status === 'valid') for (const v of b.votes) { if (v.status === 'valid') valid++; else invalid++ }
+      else undecryptable += b.declaredEntries
+    }
+    expect({ valid, invalid, excluded, undecryptable }).to.deep.equal({ valid: t.valid, invalid: t.invalid, excluded: t.excluded, undecryptable: t.undecryptable })
     const all = [...r.findings, ...r.blocks.flatMap((b: any) => b.findings)]
     for (const f of all) {
       expect(VALIDATION_CODES).to.include(f.code)
@@ -410,7 +418,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(b.votes).to.deep.equal([])
       expect(b.findings).to.deep.equal([])
     }
-    expect(r.totals).to.deep.equal({ blocks: 4, entries: 13, valid: 0, invalid: 0, undecryptable: 13 })
+    expect(r.totals).to.deep.equal({ blocks: 4, entries: 13, valid: 0, invalid: 0, excluded: 0, undecryptable: 13 })
   })
 
   it('VB-2 after release every block and vote is valid', () => {
@@ -425,7 +433,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(b.votes.map((v: any) => canonicalJson(v.entry)).sort()).to.deep.equal(fixture.voters.map(v => canonicalJson(v.voteEntry)).sort())
     }
     expect(set.blocks.filter(b => b.payloadVersion === 1)).to.have.length(1)
-    expect(r.totals).to.deep.equal({ blocks: 4, entries: 13, valid: 13, invalid: 0, undecryptable: 0 })
+    expect(r.totals).to.deep.equal({ blocks: 4, entries: 13, valid: 13, invalid: 0, excluded: 0, undecryptable: 0 })
     const plain = runR({ ballots: set.election.ballots.map(b => b.template) })
     expect(plain.blocks.every((b: any) => b.status === 'valid' && b.votes.every((v: any) => v.status === 'valid'))).to.equal(true)
     const fs = plain.blocks.flatMap((b: any) => b.findings)
@@ -498,7 +506,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       const bb = bf(bad, t.row.Cid)
       expect(bb.status).to.equal('invalid')
       expect(codesOf(bb)).to.deep.equal(['malformed-row'])
-      expect(bad.totals.undecryptable).to.equal(13)
+      expect(bad.totals).to.include({ undecryptable: 10, excluded: 3, entries: 13 })
     })
   })
 
@@ -559,7 +567,8 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(f.votes).to.deep.equal([])
       expect(f.payloadVersion).to.equal(null)
       expect(codesOf(f)).to.deep.equal(['block-does-not-open'])
-      expect(r.totals.undecryptable).to.equal(3)
+      // WR-05: a released block that does not open is invalid, so its entries are excluded, not undecryptable
+      expect(r.totals).to.include({ undecryptable: 0, excluded: 3, valid: 10, entries: 13 })
 
       const order = tampered(rewrap(b, { ...b.payload, votes: votes().reverse() }))
       expect(codesOf(order)).to.include('not-canonical-order')
@@ -567,6 +576,9 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(codesOf(counts)).to.include('counts-differ')
       const pcm = codesOf(tampered(rewrap(b, b.payload, { row: { EntryCount: 5 } })))
       expect(pcm).to.include.members(['entry-count-mismatch', 'payload-count-mismatch'])
+      // WR-05: the votes inside a block-invalid block are neither valid nor invalid in the totals
+      const inv = runR(swapBlock(b, rewrap(b, b.payload, { id: 'wrong-id-1' })))
+      expect(inv.totals).to.deep.equal({ blocks: 4, entries: 13, valid: 10, invalid: 0, excluded: 3, undecryptable: 0 })
     })
 
     it('v:1 clear votes repeated', () => {
@@ -643,7 +655,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(verdictIndex.get(f.voteIndex)).to.equal('invalid')
     }
     expect(b.findings.some((f: any) => f.code === 'blank-required' && f.severity === 'info')).to.equal(true)
-    expect(r.totals).to.deep.equal({ blocks: 1, entries: 5, valid: 2, invalid: 3, undecryptable: 0 })
+    expect(r.totals).to.deep.equal({ blocks: 1, entries: 5, valid: 2, invalid: 3, excluded: 0, undecryptable: 0 })
     const pre: any = validateElectionBlocks(inp as any)
     assertTotals(pre)
     expect(pre.totals.undecryptable).to.equal(5)
@@ -716,7 +728,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     expect(b.votes.filter((v: any) => v.status === 'valid')).to.have.length(1)
     const inv = b.votes.find((v: any) => v.status === 'invalid')
     expect(inv.codes).to.deep.equal(['unknown-option'])
-    expect(r.totals).to.deep.equal({ blocks: 1, entries: 2, valid: 1, invalid: 1, undecryptable: 0 })
+    expect(r.totals).to.deep.equal({ blocks: 1, entries: 2, valid: 1, invalid: 1, excluded: 0, undecryptable: 0 })
   })
 
   describe('VB-12 authorization (CR-02): the schema VoterAssociated rule, re-checked', () => {
