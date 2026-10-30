@@ -1,8 +1,9 @@
 /**
  * block-tree.spec.ts — 65-05: the R5 block Merkle tree (D-50, D-51).
  *
- * Synthetic rows only: buildBlockTree does not check a Cid against its Ciphertext (that is R7's
- * job), so the rows need no crypto. The spec carries its own independent reference (refLeaf,
+ * Synthetic rows only for the tree shape: with no Cid collision the selection never authenticates a row,
+ * so those rows need no crypto and an empty authorization (NOAUTH). The T-65-05-03 section builds real
+ * committed rows from the shared fixture. The spec carries its own independent reference (refLeaf,
  * refNode, refRoot) so expected values never come from the module's own hash helpers.
  */
 
@@ -12,7 +13,9 @@ import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/
 import {
   BLOCK_TREE_DOMAIN,
   BLOCK_TREE_EMPTY_ROOT,
+  blockAuthorizer,
   blockCidOf,
+  blockConsentDigest,
   blockLeafData,
   blockLeafHash,
   isBase32Cid,
@@ -20,8 +23,13 @@ import {
   blockNodeHash,
   blockTreeStatus,
   buildBlockTree,
+  buildTallyTree,
   finalBlockTree,
+  judgeBlockVoters,
+  validateElectionBlocks,
+  verifyBlockConsent,
   verifyInclusion,
+  type BlockAuthorization,
   type BlockInclusionProof,
   type BlockTree,
   type BlockTreeRow
@@ -29,19 +37,30 @@ import {
 import { canonicalJson } from '../src/voting/canonical.js'
 import { verifySigP256 } from '../src/database/initialize.js'
 import { consentDigest, poolBlockCid, poolBlockId } from '../src/pool/index.js'
-import { openElectionBlock, openVoteEntries } from '../src/key-release/index.js'
+import { encryptElectionBlock, openElectionBlock, openVoteEntries } from '../src/key-release/index.js'
+import { serializeBlockCiphertext } from '../src/crypto/index.js'
 import { ballotTemplateDigest, voterEntryDigest, type VoterEntryUnsigned } from '../src/voting/index.js'
 import {
   FIXTURE_ELECTION_ID,
   FIXTURE_REVISION,
+  fixtureAuthorization,
+  makeCommittedBlock,
   makeCommittedElection,
   makeFixtureElection,
   makeFixtureVoter,
-  seededShuffle
+  seededShuffle,
+  type CommittedFixtureSet
 } from './fixtures/pool-blocks.js'
+import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
 
 const EID = 'election-bt-1'
 const SCOPE = { electionId: EID, electionRevision: 1 }
+/** T-65-05-03: the authorization is a required input; an empty one authenticates nothing. */
+const NOAUTH: BlockAuthorization = { voterRows: [], registrants: [], associations: [], timeline: { votingStarts: 0 }, ballots: [] }
+/** The authorization of a whole fixture set: its voter rows, registrants, associations, timeline and ballots. */
+const authOfSet = (set: CommittedFixtureSet): BlockAuthorization => ({
+  voterRows: set.voterRows, ...set.authorization, ballots: set.election.ballots.map(b => b.template)
+})
 
 function row (cid: string, overrides: Partial<Record<keyof BlockTreeRow, unknown>> = {}): BlockTreeRow {
   return {
@@ -88,7 +107,7 @@ function refRoot (rs: readonly BlockTreeRow[]): string {
 }
 
 function build (rs: readonly BlockTreeRow[]): BlockTree {
-  const r = buildBlockTree(rs, SCOPE)
+  const r = buildBlockTree(rs, SCOPE, NOAUTH)
   if (!r.ok) throw new Error(`build refused: ${r.reason} ${r.detail}`)
   return r.tree
 }
@@ -198,13 +217,13 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
   it('BT-8b (IN-05) a Cid outside the base32 CID alphabet is malformed, so leaf order is total', () => {
     // two distinct lone surrogates both encode to U+FFFD and would compare equal byte-wise
     for (const cid of ['a\u{1F600}', 'b\uD800', 'b\uDC00', 'bA', 'bcid-a', 'b', 'Bcida', 'bcid1', 'bcid8', 'bcid=', ' bcida']) {
-      const r = buildBlockTree([row(cid)], SCOPE)
+      const r = buildBlockTree([row(cid)], SCOPE, NOAUTH)
       if (!r.ok) throw new Error(`refused ${JSON.stringify(cid)}`)
       expect(r.tree.size, JSON.stringify(cid)).to.equal(0)
       expect(r.tree.rejected[0]!.reason).to.equal('malformed-row')
       expect(r.tree.rejected[0]!.detail).to.contain('Cid')
     }
-    expect(buildBlockTree([row('bafkreiabc234567')], SCOPE).ok).to.equal(true)
+    expect(buildBlockTree([row('bafkreiabc234567')], SCOPE, NOAUTH).ok).to.equal(true)
   })
 
   it('BT-9 tamper: changed leaf fields change the root; bad proofs return typed results and never throw', () => {
@@ -222,7 +241,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     expect(mutate('TemplateDigest', 'template-digest-z')).to.not.equal(base.root)
     expect(mutate('VoterRegistrantIds', '["r1","r2","r9"]')).to.not.equal(base.root)
     const revCopy = rs.map((r, i) => i === 2 ? { ...r, ElectionRevision: 2 } : r)
-    const revTree = buildBlockTree(revCopy, { electionId: EID, electionRevision: 2 })
+    const revTree = buildBlockTree(revCopy, { electionId: EID, electionRevision: 2 }, NOAUTH)
     // other rows are revision 1 so the scope refuses; the leaf data itself carries the revision
     expect(revTree.ok).to.equal(false)
     expect(blockLeafData(row('bc'))).to.not.equal(blockLeafData(row('bc', { ElectionRevision: 2 })))
@@ -258,7 +277,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
 
   it('BT-10 typed refusals, bigint acceptance, never a throw', () => {
     const refusal = (input: unknown): { reason: string, detail: string } => {
-      const r = buildBlockTree(input as BlockTreeRow[], SCOPE)
+      const r = buildBlockTree(input as BlockTreeRow[], SCOPE, NOAUTH)
       if (r.ok) throw new Error('expected refusal')
       return r
     }
@@ -268,7 +287,7 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     expect(refusal([row('ba'), row('bb', { ElectionRevision: 2 })]).reason).to.equal('mixed-revision')
     // WR-06: a malformed row is set aside in tree.rejected and never refuses the tree
     const rejected = (bad: unknown): { reason: string, detail: string, cid: string } => {
-      const r = buildBlockTree([row('bz'), bad] as BlockTreeRow[], SCOPE)
+      const r = buildBlockTree([row('bz'), bad] as BlockTreeRow[], SCOPE, NOAUTH)
       if (!r.ok) throw new Error(`expected a tree, got ${r.reason}`)
       expect(r.tree.size).to.equal(1)
       expect(r.tree.root).to.equal(build([row('bz')]).root)
@@ -315,27 +334,27 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     expect(blockTreeStatus({ accruingVotes: 1000 } as never, 3000)).to.deep.equal({ ok: false, reason: 'timeline-invalid' })
 
     const rs = rows(4)
-    const early = finalBlockTree(rs, SCOPE, tl, 1500)
+    const early = finalBlockTree(rs, SCOPE, NOAUTH, tl, 1500)
     expect(early.ok).to.equal(false)
     if (!early.ok && early.reason === 'accruing-not-ended') {
       expect(early.finalAtMs).to.equal(2000)
       expect(early.provisional.root).to.equal(build(rs).root)
     } else throw new Error('expected accruing-not-ended')
-    const late = finalBlockTree(rs, SCOPE, tl, 2000)
+    const late = finalBlockTree(rs, SCOPE, NOAUTH, tl, 2000)
     expect(late.ok).to.equal(true)
     if (late.ok) { expect(late.final).to.equal(true); expect(late.tree.root).to.equal(build(rs).root) }
-    const doubled = finalBlockTree([row('ba'), row('ba')], SCOPE, tl, 1500)
+    const doubled = finalBlockTree([row('ba'), row('ba')], SCOPE, NOAUTH, tl, 1500)
     if (!doubled.ok && doubled.reason === 'accruing-not-ended') {
       expect(doubled.provisional.size).to.equal(1)
       expect(doubled.provisional.rejected.map(r => r.reason)).to.deep.equal(['duplicate-block'])
     } else throw new Error('expected accruing-not-ended')
-    expect(finalBlockTree([row('ba'), row('bb', { ElectionRevision: 2 })], SCOPE, tl, 2500)).to.include({ ok: false, reason: 'mixed-revision' })
+    expect(finalBlockTree([row('ba'), row('bb', { ElectionRevision: 2 })], SCOPE, NOAUTH, tl, 2500)).to.include({ ok: false, reason: 'mixed-revision' })
   })
 })
 
 describe('block-tree row policy (WR-06: tolerant, shared with R7)', () => {
   const tree = (rs: unknown[]): BlockTree => {
-    const r = buildBlockTree(rs as BlockTreeRow[], SCOPE)
+    const r = buildBlockTree(rs as BlockTreeRow[], SCOPE, NOAUTH)
     if (!r.ok) throw new Error(`refused: ${r.reason} ${r.detail}`)
     return r.tree
   }
@@ -363,37 +382,284 @@ describe('block-tree row policy (WR-06: tolerant, shared with R7)', () => {
     }
   })
 
-  it('WR6-3 otherwise the lowest canonical bytes win, for a shared Cid and for a shared Id', () => {
+  it('WR6-3 a shared Cid keeps the lowest canonical bytes when none authenticates; a shared Id with distinct Cids is two leaves (T-65-05-03)', () => {
     const a = row('ba', { Id: 'id-1', EntryCount: 3 })
     const b = row('ba', { Id: 'id-1', EntryCount: 4 })
     for (const seed of [1, 2, 3]) {
       const t = tree(seededShuffle([a, b, row('bc')], seed))
       expect(t.leaves.map(l => [l.cid, l.entryCount])).to.deep.equal([['ba', 3], ['bc', 3]])
     }
+    // only an exact Cid collision is a duplicate: rows sharing an Id are separate blocks, and R7 judges each
     const x = row('bx', { Id: 'same' })
     const y = row('by', { Id: 'same' })
     const t1 = tree([y, x])
     const t2 = tree([x, y])
-    expect(t1.leaves.map(l => l.cid)).to.deep.equal(['bx'])
+    expect(t1.leaves.map(l => [l.cid, l.blockId])).to.deep.equal([['bx', 'same'], ['by', 'same']])
     expect(t1.root).to.equal(t2.root)
-    expect(t1.rejected).to.deep.equal([{ cid: 'by', reason: 'duplicate-block', detail: 'Id same is already taken by a preferred row' }])
-    expect(t2.rejected).to.deep.equal(t1.rejected)
+    expect(t1.root).to.equal(refRoot([x, y]))
+    expect(t1.rejected).to.deep.equal([])
   })
 
   it('WR6-4 malformed and duplicate rows never refuse the tree; the root is the root of the kept rows', () => {
     const good = rows(5)
-    const hostile = [...good, null, 'x', row('BAD'), { ...good[1]! }, row('bzz', { Id: good[0]!.Id })]
+    // T-65-05-03: a row reusing another row's Id under its own Cid is kept as its own leaf
+    const sameId = row('bzz', { Id: good[0]!.Id })
+    const hostile = [...good, null, 'x', row('BAD'), { ...good[1]! }, sameId]
     for (const seed of [1, 2, 3]) {
       const t = tree(seededShuffle(hostile, seed))
-      expect(t.root).to.equal(build(good).root)
-      expect(t.rejected.map(r => r.reason)).to.deep.equal(['malformed-row', 'malformed-row', 'malformed-row', 'duplicate-block', 'duplicate-block'])
+      expect(t.root).to.equal(build([...good, sameId]).root)
+      expect(t.rejected.map(r => r.reason)).to.deep.equal(['malformed-row', 'malformed-row', 'malformed-row', 'duplicate-block'])
     }
-    const sel = selectBlockRows(hostile, SCOPE)
+    const sel = selectBlockRows(hostile, SCOPE, NOAUTH)
     if (!sel.ok) throw new Error('refused')
-    expect(sel.accepted).to.have.length(5)
-    for (const r of sel.accepted) expect(good).to.include(r)
-    expect(sel.rejected).to.have.length(5)
-    expect(selectBlockRows('nope' as never, SCOPE)).to.include({ ok: false, reason: 'malformed-row' })
+    expect(sel.accepted).to.have.length(6)
+    for (const r of sel.accepted) expect([...good, sameId]).to.include(r)
+    expect(sel.rejected).to.have.length(4)
+    expect(selectBlockRows('nope' as never, SCOPE, NOAUTH)).to.include({ ok: false, reason: 'malformed-row' })
+  })
+
+  it('WR6-5 (T-65-05-03) the authorization is required and checked; a malformed one refuses with malformed-input', () => {
+    const reason = (auth: unknown): string => {
+      const r = buildBlockTree([row('ba')], SCOPE, auth as BlockAuthorization)
+      return r.ok ? 'ok' : r.reason
+    }
+    expect(reason(NOAUTH)).to.equal('ok')
+    for (const bad of [
+      undefined, null, 'x', [],
+      { ...NOAUTH, voterRows: 'x' }, { ...NOAUTH, registrants: undefined }, { ...NOAUTH, associations: {} },
+      { ...NOAUTH, timeline: undefined }, { ...NOAUTH, timeline: { votingStarts: NaN } }, { ...NOAUTH, timeline: { votingStarts: '0' } },
+      { ...NOAUTH, ballots: undefined }, { ...NOAUTH, ballots: [null] }, { ...NOAUTH, ballots: [{ id: 'b' }] },
+      { ...NOAUTH, ballots: [{ id: 'b', questions: [] }, { id: 'b', questions: [] }] }
+    ]) {
+      expect(reason(bad), JSON.stringify(bad) ?? 'undefined').to.equal('malformed-input')
+    }
+    // a hostile item inside the row lists authorizes nothing and never refuses
+    expect(reason({ ...NOAUTH, voterRows: [null, 5, 'x'], registrants: [null], associations: [7] })).to.equal('ok')
+    const tl = { accruingVotes: 1000, hashingVotes: 2000 }
+    expect(finalBlockTree([row('ba')], SCOPE, undefined as never, tl, 2500)).to.include({ ok: false, reason: 'malformed-input' })
+  })
+})
+
+describe('block-tree authenticated selection (T-65-05-03: the WR-06 residual)', function () {
+  this.timeout(120_000)
+
+  const e = makeFixtureElection({ ballotIds: ['ballot-a'] })
+  const ballot = e.ballots[0]!
+  const vs = [0, 1, 2, 3, 4, 5].map(i => makeFixtureVoter(e, ballot, i))
+  // H: the honest block under attack; O: another honest block of the same ballot
+  const H = makeCommittedBlock(e, ballot, [vs[0]!, vs[1]!, vs[2]!])
+  const O = makeCommittedBlock(e, ballot, [vs[3]!, vs[4]!, vs[5]!])
+  const scope = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION }
+  const ballots = [ballot.template]
+  const release = { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey }
+  const honestRows = [H.row, O.row]
+  const honestVoterRows = [...H.voterRows, ...O.voterRows]
+
+  /** An attacker that holds a registered and associated device key of its own. */
+  const attackers = [0, 1, 2].map(i => {
+    const k = makeP256TestKey()
+    return { registrantId: `attacker-${i}`, pubHex: k.pubHex, priv: k.privBytes }
+  })
+  const authorization = (voterRows: readonly unknown[]): BlockAuthorization => {
+    const base = fixtureAuthorization(vs)
+    return {
+      voterRows: voterRows as BlockAuthorization['voterRows'],
+      registrants: [...base.registrants, ...attackers.map(a => ({ Id: a.registrantId, Status: 'a', Expiration: '2030-01-01T00:00:00.000Z' }))],
+      associations: [...base.associations, ...attackers.map(a => ({ RegistrantId: a.registrantId, DeviceKey: a.pubHex, Expiration: '2030-01-01T00:00:00.000Z' }))],
+      timeline: base.timeline,
+      ballots
+    }
+  }
+  /** A real consent row by an attacker key for (cid, blockId). */
+  const consentRow = (a: typeof attackers[number], cid: string, blockId: string): Record<string, unknown> => ({
+    ElectionId: FIXTURE_ELECTION_ID, BallotId: ballot.poolBallot.ballotId, RegistrantId: a.registrantId, BlockCid: cid, BlockId: blockId,
+    ElectionRevision: FIXTURE_REVISION, DeviceKey: a.pubHex,
+    Signature: signDigestP256(consentDigest({ cid, blockId }, ballot.poolBallot, a.registrantId, a.pubHex), a.priv)
+  })
+
+  /** R5, R7 (before and after release) and R8 over the same public inputs. */
+  function judge (rows: readonly unknown[], voterRows: readonly unknown[]): { tree: BlockTree, pre: any, post: any, tally: any } {
+    const auth = authorization(voterRows)
+    const built = buildBlockTree(rows as BlockTreeRow[], scope, auth)
+    if (!built.ok) throw new Error(`R5 refused: ${built.reason} ${built.detail}`)
+    const r7 = (withRelease: boolean): any => validateElectionBlocks({
+      scope, rows: rows as never, voterRows: voterRows as never, ballots: ballots as never,
+      registrants: auth.registrants, associations: auth.associations, timeline: auth.timeline, release: withRelease ? release : null
+    })
+    const pre = r7(false)
+    const post = r7(true)
+    expect(pre.ok && post.ok, JSON.stringify([pre, post]).slice(0, 400)).to.equal(true)
+    const tally: any = buildTallyTree({
+      scope, rows: rows as never, voterRows: voterRows as never, ballots: ballots as never,
+      registrants: auth.registrants, associations: auth.associations, timeline: auth.timeline, release
+    })
+    expect(tally.ok, JSON.stringify(tally).slice(0, 400)).to.equal(true)
+    // R7 and R8 judge exactly the R5 leaves
+    expect(post.blocks.map((b: any) => [b.blockCid, b.blockId])).to.deep.equal(built.tree.leaves.map(l => [l.cid, l.blockId]))
+    expect(tally.blockTree.root).to.equal(built.tree.root)
+    return { tree: built.tree, pre, post, tally }
+  }
+  const clean = (() => {
+    let memo: ReturnType<typeof judge> | null = null
+    return () => (memo ??= judge(honestRows, honestVoterRows))
+  })()
+  const blockOf = (report: any, cid: string, id: string): any => report.blocks.find((b: any) => b.blockCid === cid && b.blockId === id)
+  const cmpBytes = (a: string, b: string): number => cmpUtf8(a, b)
+
+  /** H stays the leaf at its Cid, is valid after release, and the outcome equals the clean one. */
+  function expectHonestKept (j: ReturnType<typeof judge>): void {
+    const leaf = j.tree.leaves.find(l => l.cid === H.row.Cid)!
+    expect(leaf.blockId).to.equal(H.row.Id)
+    expect(leaf.leafData).to.equal(blockLeafData(H.row))
+    expect(blockOf(j.pre, H.row.Cid, H.row.Id)).to.include({ status: 'not-decryptable-yet' })
+    expect(blockOf(j.pre, H.row.Cid, H.row.Id).findings).to.deep.equal([])
+    expect(blockOf(j.post, H.row.Cid, H.row.Id)).to.include({ status: 'valid' })
+    expect(blockOf(j.post, H.row.Cid, H.row.Id).votes.every((v: any) => v.status === 'valid')).to.equal(true)
+    expect(j.tally.tally.histogram).to.deep.equal(clean().tally.tally.histogram)
+  }
+
+  it('TA-0 the clean election: two leaves, both valid, six votes tallied', () => {
+    const c = clean()
+    expect(c.tree.size).to.equal(2)
+    expect(c.tree.rejected).to.deep.equal([])
+    expect(c.post.blocks.map((b: any) => b.status)).to.deep.equal(['valid', 'valid'])
+    expect(c.tally.tally.histogram.ballots['ballot-a'].votes).to.equal(6)
+  })
+
+  it('TA-1 (a) a forged row that copies the honest ciphertext, under another Id and voter list, never displaces the honest block', () => {
+    // under the old rule F sorted first: same Cid and Ciphertext (both match), then '!' is the lowest Id byte
+    expect(cmpBytes('!forged', H.row.Id)).to.be.lessThan(0)
+    const strangers = { ...H.row, Id: '!forged', VoterRegistrantIds: '["x-1","x-2"]', EntryCount: 2 }
+    // the strongest variant: the forged voter list is AUTHENTICATED by two registered attacker keys
+    const owned = { ...H.row, Id: '!forged', VoterRegistrantIds: JSON.stringify([attackers[0]!.registrantId, attackers[1]!.registrantId]), EntryCount: 2 }
+    const ownedRows = [consentRow(attackers[0]!, H.row.Cid, '!forged'), consentRow(attackers[1]!, H.row.Cid, '!forged')]
+    for (const [forged, extra] of [[strangers, []], [owned, ownedRows]] as const) {
+      const j = judge([forged, ...honestRows], [...honestVoterRows, ...extra])
+      expectHonestKept(j)
+      expect(j.tree.size).to.equal(2)
+      expect(j.tree.root).to.equal(clean().tree.root)
+      expect(j.tree.rejected).to.deep.equal([{ cid: H.row.Cid, reason: 'duplicate-block', detail: `Cid ${H.row.Cid} is already taken by a preferred row` }])
+      expect(j.post.findings.map((f: any) => f.code)).to.include('duplicate-block')
+      expect(j.tally.tally.root).to.equal(clean().tally.tally.root)
+    }
+  })
+
+  it('TA-2 (b) a forged row that reuses the honest Id under its own self-consistent Cid is a second leaf; it is excluded and the honest block is tallied', () => {
+    // a real re-encryption of the honest payload under the honest Id: it opens, and poolBlockId(payload) === Id
+    let ct = ''
+    for (let i = 0; i < 64; i++) {
+      ct = serializeBlockCiphertext(encryptElectionBlock(e.electionKey, H.row.Id, H.payload))
+      if (cmpBytes(blockCidOf(ct), H.row.Cid) < 0) break
+    }
+    const reenc = { ...H.row, Cid: blockCidOf(ct), Ciphertext: ct }
+    // under the old rule the forged row sorted first by Cid and took the Id
+    expect(cmpBytes(reenc.Cid, H.row.Cid)).to.be.lessThan(0)
+    const garbageCt = 'garbage-ciphertext'
+    const garbage = { ...H.row, Cid: blockCidOf(garbageCt), Ciphertext: garbageCt }
+    for (const forged of [reenc, garbage]) {
+      const j = judge([...honestRows, forged], honestVoterRows)
+      expectHonestKept(j)
+      expect(j.tree.size).to.equal(3)
+      expect(j.tree.rejected).to.deep.equal([])
+      expect(j.tree.leaves.filter(l => l.blockId === H.row.Id).map(l => l.cid).sort(cmpBytes)).to.deep.equal([forged.Cid, H.row.Cid].sort(cmpBytes))
+      // no consent names the forged Cid: invalid before and after release, attested volume 0
+      const fPre = blockOf(j.pre, forged.Cid, H.row.Id)
+      expect(fPre.status).to.equal('invalid')
+      expect(fPre.attestedEntries).to.equal(0)
+      expect(fPre.findings.map((f: any) => f.code)).to.deep.equal(['voter-row-missing', 'voter-row-missing', 'voter-row-missing'])
+      const fPost = blockOf(j.post, forged.Cid, H.row.Id)
+      expect(fPost.status).to.equal('invalid')
+      // the re-encryption opens to the honest payload, so its Id check passes; only consent fails it
+      if (forged === reenc) expect(fPost.findings.map((f: any) => f.code)).to.not.include('id-mismatch')
+      const tallyLeaf = j.tally.tally.leaves.find((l: any) => l.blockCid === forged.Cid)
+      expect(tallyLeaf).to.include({ disposition: 'excluded' })
+      expect(tallyLeaf.excludedFor).to.include('voter-row-missing')
+      expect(j.post.totals).to.include({ valid: 6, excluded: 0 })
+    }
+  })
+
+  it('TA-3 (c) a forged row with the same Cid and Id listing a SUBSET of the honest voters (real consents) loses to the honest row', () => {
+    const subset = JSON.parse(H.row.VoterRegistrantIds).slice(0, 2)
+    const forged = { ...H.row, VoterRegistrantIds: JSON.stringify(subset), EntryCount: 2 }
+    // under the old rule F sorted first: EntryCount 2 before 3 in the canonical bytes
+    expect(cmpBytes(canonicalJson([forged.Cid, forged.Id, forged.BallotId, 2]), canonicalJson([H.row.Cid, H.row.Id, H.row.BallotId, 3]))).to.be.lessThan(0)
+    // every listed voter of the forged row is authenticated: it is an authenticated candidate, with fewer voters
+    const j = judge([forged, ...honestRows], honestVoterRows)
+    expectHonestKept(j)
+    expect(j.tree.root).to.equal(clean().tree.root)
+    expect(j.tree.rejected.map(r => r.reason)).to.deep.equal(['duplicate-block'])
+    expect(j.tally.tally.root).to.equal(clean().tally.tally.root)
+  })
+
+  it('TA-4 a forged row that differs only in TemplateDigest (not bound by consent) loses to the honest row', () => {
+    const forged = { ...H.row, TemplateDigest: '' }
+    const j = judge([forged, ...honestRows], honestVoterRows)
+    expectHonestKept(j)
+    expect(j.tree.root).to.equal(clean().tree.root)
+  })
+
+  it('TA-5 (d) every forgery at once, in any order of rows and voter rows, gives one result', () => {
+    const reencCt = serializeBlockCiphertext(encryptElectionBlock(e.electionKey, H.row.Id, H.payload))
+    const forgedRows = [
+      { ...H.row, Id: '!forged', VoterRegistrantIds: JSON.stringify([attackers[0]!.registrantId]), EntryCount: 1 },
+      { ...H.row, Cid: blockCidOf(reencCt), Ciphertext: reencCt },
+      { ...H.row, VoterRegistrantIds: JSON.stringify(JSON.parse(H.row.VoterRegistrantIds).slice(1)), EntryCount: 2 },
+      { ...H.row, TemplateDigest: '' },
+      { ...H.row, Ciphertext: 'not the ciphertext' },
+      { ...H.row }
+    ]
+    const rows = [...honestRows, ...forgedRows]
+    const voterRows = [...honestVoterRows, consentRow(attackers[0]!, H.row.Cid, '!forged')]
+    const base = judge(rows, voterRows)
+    expectHonestKept(base)
+    expect(base.tree.size).to.equal(3)
+    for (const seed of [1, 2, 3, 4]) {
+      const j = buildBlockTree(seededShuffle(rows, seed), scope, authorization(seededShuffle(voterRows, seed + 10)))
+      if (!j.ok) throw new Error('refused')
+      expect(j.tree.root).to.equal(base.tree.root)
+      expect(j.tree.leaves.map(l => [l.cid, l.blockId, l.leafData])).to.deep.equal(base.tree.leaves.map(l => [l.cid, l.blockId, l.leafData]))
+      expect(j.tree.rejected).to.deep.equal(base.tree.rejected)
+      const sel = selectBlockRows(seededShuffle(rows, seed), scope, authorization(seededShuffle(voterRows, seed + 20)))
+      if (!sel.ok) throw new Error('refused')
+      expect(sel.accepted.filter(r => (r as BlockTreeRow).Cid === H.row.Cid)).to.deep.equal([H.row])
+    }
+  })
+
+  it('TA-6 the bound (doc 7.5): a superset forgery needs a registered attacker consent over the honest Cid and Id', () => {
+    const listed = [...JSON.parse(H.row.VoterRegistrantIds), attackers[2]!.registrantId].sort()
+    const forged = { ...H.row, VoterRegistrantIds: JSON.stringify(listed), EntryCount: 4 }
+    const good = consentRow(attackers[2]!, H.row.Cid, H.row.Id)
+    // without a consent that authenticates (none, a flipped signature, a key that is not associated), the honest row wins
+    const flipped = { ...good, Signature: ((good.Signature as string)[0] === '0' ? '1' : '0') + (good.Signature as string).slice(1) }
+    const stranger = makeP256TestKey()
+    const unassociated = { ...good, DeviceKey: stranger.pubHex, Signature: signDigestP256(consentDigest({ cid: H.row.Cid, blockId: H.row.Id }, ballot.poolBallot, attackers[2]!.registrantId, stranger.pubHex), stranger.privBytes) }
+    for (const extra of [[], [flipped], [unassociated]]) {
+      expectHonestKept(judge([forged, ...honestRows], [...honestVoterRows, ...extra]))
+    }
+    // with one: the forged row has more authenticated voters and is kept. It is excluded after the release (its list and
+    // count disagree with the payload), so the honest block's votes are excluded, not counted. This is the documented
+    // residual: it needs a registered, associated attacker key that consents to the honest block, and that registrant's
+    // only vote row on this ballot
+    const j = judge([forged, ...honestRows], [...honestVoterRows, good])
+    const leaf = j.tree.leaves.find(l => l.cid === H.row.Cid)!
+    expect(leaf.entryCount).to.equal(4)
+    expect(blockOf(j.post, H.row.Cid, H.row.Id).status).to.equal('invalid')
+  })
+
+  it('TA-7 one shared consent judge: R5 authenticates exactly the registrants R7 attests', () => {
+    const authorizer = blockAuthorizer(authorization([]).registrants, authorization([]).associations, authorization([]).timeline.votingStarts)
+    const block = { Cid: H.row.Cid, Id: H.row.Id, ElectionId: H.row.ElectionId, ElectionRevision: H.row.ElectionRevision, BallotId: H.row.BallotId }
+    const list = JSON.parse(H.row.VoterRegistrantIds) as string[]
+    const judged = judgeBlockVoters(block, list, H.voterRows, authorizer)
+    expect([...judged.authenticated].sort()).to.deep.equal(list)
+    expect(judged.extras).to.deep.equal([])
+    const r7 = clean().pre
+    expect(blockOf(r7, H.row.Cid, H.row.Id).attestedEntries).to.equal(judged.authenticated.size)
+    // a flipped signature: the same registrant drops out of both
+    const flipped = H.voterRows.map((v, i) => (i === 0 ? { ...v, Signature: (v.Signature[0] === '0' ? '1' : '0') + v.Signature.slice(1) } : v))
+    const judged2 = judgeBlockVoters(block, list, flipped, authorizer)
+    expect(judged2.authenticated.size).to.equal(2)
+    expect(judged2.representatives.find(r => r.registrantId === flipped[0]!.RegistrantId)!.problems.map(p => p.code)).to.deep.equal(['consent-signature-invalid'])
   })
 })
 
@@ -472,14 +738,41 @@ describe('pool-blocks fixture (65-05: shared R5-R8 rows)', () => {
     }
   })
 
+  it('FX-7 (T-65-05-03) blockConsentDigest and verifyBlockConsent are the browser-entry twins of consentDigest and verifySigP256', () => {
+    for (const b of set.blocks) {
+      for (const vr of b.voterRows) {
+        const scopeRow = { Cid: b.row.Cid, Id: b.row.Id, ElectionId: b.row.ElectionId, ElectionRevision: b.row.ElectionRevision, BallotId: b.row.BallotId }
+        const digest = blockConsentDigest(scopeRow, vr.RegistrantId, vr.DeviceKey)
+        expect(digest).to.equal(consentDigest({ cid: b.row.Cid, blockId: b.row.Id }, b.ballot.poolBallot, vr.RegistrantId, vr.DeviceKey))
+        const flip = (h: string): string => (h[0] === '0' ? '1' : '0') + h.slice(1)
+        const other = makeP256TestKey()
+        const lowS = vr.Signature
+        for (const [sig, key] of [
+          [lowS, vr.DeviceKey], [flip(lowS), vr.DeviceKey], [lowS, other.pubHex], [lowS.toUpperCase(), vr.DeviceKey],
+          [lowS, vr.DeviceKey.toUpperCase()], [lowS.slice(1), vr.DeviceKey], [lowS, vr.DeviceKey.slice(2)], ['', vr.DeviceKey],
+          [lowS, ''], [`${lowS}00`, vr.DeviceKey], ['zz'.repeat(64), vr.DeviceKey]
+        ] as Array<[string, string]>) {
+          expect(verifyBlockConsent(digest, sig, key), `${sig.slice(0, 6)} ${key.slice(0, 6)}`).to.equal(verifySigP256(digest, sig, key))
+        }
+        expect(verifyBlockConsent(digest, lowS, vr.DeviceKey)).to.equal(true)
+        expect(verifyBlockConsent('', lowS, vr.DeviceKey)).to.equal(verifySigP256('', lowS, vr.DeviceKey))
+        expect(verifyBlockConsent(digest, 5 as never, vr.DeviceKey)).to.equal(false)
+      }
+    }
+    // a bigint revision and odd text digest the same as consentDigest
+    const odd = { Cid: 'bodd', Id: 'id é\u{1F600}', ElectionId: 'e', ElectionRevision: 0, BallotId: 'x'.repeat(300) }
+    const ballotOdd = { electionKey: { electionId: 'e', revision: 0, jointPublicKey: '' }, ballotId: 'x'.repeat(300), templateDigest: '' }
+    expect(blockConsentDigest(odd, 'r', 'k')).to.equal(consentDigest({ cid: 'bodd', blockId: odd.Id }, ballotOdd, 'r', 'k'))
+  })
+
   it('FX-5 seededShuffle is a deterministic permutation; shuffled rows give the same root', () => {
     const xs = [1, 2, 3, 4, 5, 6, 7]
     expect(seededShuffle(xs, 3)).to.deep.equal(seededShuffle(xs, 3))
     expect([...seededShuffle(xs, 3)].sort()).to.deep.equal(xs)
     expect([1, 2, 3, 4, 5].some(s => JSON.stringify(seededShuffle(xs, s)) !== JSON.stringify(xs))).to.equal(true)
     const scope = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION }
-    const ra = buildBlockTree(set.rows, scope)
-    const rb = buildBlockTree(seededShuffle(set.rows, 4), scope)
+    const ra = buildBlockTree(set.rows, scope, authOfSet(set))
+    const rb = buildBlockTree(seededShuffle(set.rows, 4), scope, { ...authOfSet(set), voterRows: seededShuffle(set.voterRows, 5) })
     if (!ra.ok || !rb.ok) throw new Error('fixture rows refused')
     const a = ra.tree
     expect(rb.tree.root).to.equal(a.root)

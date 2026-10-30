@@ -24,7 +24,11 @@ export {
   buildBlockTree,
   verifyInclusion,
   blockTreeStatus,
-  finalBlockTree
+  finalBlockTree,
+  blockConsentDigest,
+  verifyBlockConsent,
+  blockAuthorizer,
+  judgeBlockVoters
 } from './block-tree.js'
 export type {
   BlockTreeRow,
@@ -43,7 +47,19 @@ export type {
   InclusionCheck,
   BlockTreeTimeline,
   BlockTreeStatus,
-  FinalBlockTreeResult
+  FinalBlockTreeResult,
+  BlockVoterRow,
+  BlockRegistrantRow,
+  BlockAssociationRow,
+  BlockAuthorizationTimeline,
+  BlockAuthorization,
+  BlockConsentScope,
+  BlockAuthorizer,
+  BlockVoterProblemCode,
+  BlockVoterProblem,
+  BlockVoterRepresentative,
+  BlockVoterExtra,
+  BlockVoterJudgement
 } from './block-tree.js'
 export {
   checkElectionSecret,
@@ -69,6 +85,7 @@ export type {
   SliceVoterRow,
   SliceTreeAnchor,
   SliceRelease,
+  SliceAuthorization,
   SlicePendingPart,
   SliceFailReason,
   SliceNotApplicableReason,

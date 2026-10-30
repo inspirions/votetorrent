@@ -8,8 +8,8 @@
 import { expect } from 'chai'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { checkElectionSecret, openCommittedBlock, type CommittedBlockRow } from '../src/blocks/open-committed-block.js'
-import { sliceChecks, SLICE_CHECK_IDS, type SliceCheckReport, type SliceBlockRow, type SliceVoterRow } from '../src/blocks/slice-checks.js'
-import { buildBlockTree } from '../src/blocks/block-tree.js'
+import { sliceChecks, SLICE_CHECK_IDS, type SliceAuthorization, type SliceCheckReport, type SliceBlockRow, type SliceVoterRow } from '../src/blocks/slice-checks.js'
+import { buildBlockTree, type BlockAuthorization } from '../src/blocks/block-tree.js'
 import { consentDigest, formPoolBlock, poolBlockCid } from '../src/pool/pool-block.js'
 import { encryptElectionBlock, encryptVoteEntry } from '../src/key-release/election-block.js'
 import { serializeBlockCiphertext } from '../src/crypto/index.js'
@@ -26,6 +26,10 @@ import {
   type FixtureReceipt
 } from './fixtures/pool-blocks.js'
 import { makeP256TestKey, signDigestP256 } from './fixtures/p256-signer.js'
+
+/** T-65-05-03: R5's authorization besides the voter rows (set in the SC before hook from the fixture). */
+let AUTH: SliceAuthorization
+const AUTH_FOR = (voterRows: readonly unknown[]): BlockAuthorization => ({ ...AUTH, voterRows: voterRows as BlockAuthorization['voterRows'] })
 
 function containsBytes (value: unknown, seen = new Set<unknown>()): boolean {
   if (value instanceof Uint8Array) return true
@@ -179,7 +183,8 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     scope = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION }
     rows = set.rows
     voterRows = set.voterRows
-    const tree = buildBlockTree(set.rows, scope)
+    AUTH = { ...set.authorization, ballots: set.election.ballots.map(b => b.template) }
+    const tree = buildBlockTree(set.rows, scope, AUTH_FOR(voterRows))
     if (!tree.ok) throw new Error('fixture tree refused')
     root = tree.tree.root
     anchor = { root }
@@ -211,7 +216,7 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
 
   it('SC-1 pre-release happy path: my-vote is pending, the rest pass with what remains after release', () => {
     set.receipts.forEach(receipt => {
-      const r = ok(sliceChecks(receipt, rows, voterRows, anchor))
+      const r = ok(sliceChecks(receipt, rows, voterRows, anchor, undefined, AUTH))
       expect(r.released).to.equal(false)
       expect(r.ballots).to.have.length(1)
       const b = r.ballots[0]!
@@ -229,7 +234,7 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
 
   it('SC-2 post-release happy path: every check passes outright (v:2 and v:1, both ballots)', () => {
     set.receipts.forEach(receipt => {
-      const r = ok(sliceChecks(receipt, rows, voterRows, anchor, release))
+      const r = ok(sliceChecks(receipt, rows, voterRows, anchor, release, AUTH))
       expect(r.released).to.equal(true)
       const b = r.ballots[0]!
       for (const c of b.checks) {
@@ -249,13 +254,13 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     ]
     for (const v of altered) {
       const rc: FixtureReceipt = { ...receipt, votes: [v] }
-      const post = sliceChecks(rc, rows, voterRows, anchor, release)
+      const post = sliceChecks(rc, rows, voterRows, anchor, release, AUTH)
       expect(failReason(chk(post, 0, 'my-vote'))).to.equal('vote-missing-or-altered')
       expect(chk(post, 0, 'my-voter-entry').status).to.equal('pass')
       expect(chk(post, 0, 'block-hash').status).to.equal('pass')
       expect(chk(post, 0, 'under-root').status).to.equal('pass')
       expect(ok(post).ballots[0]!.verdict).to.equal('fail')
-      expect(chk(sliceChecks(rc, rows, voterRows, anchor), 0, 'my-vote').status).to.equal('pending-key-release')
+      expect(chk(sliceChecks(rc, rows, voterRows, anchor, undefined, AUTH), 0, 'my-vote').status).to.equal('pending-key-release')
     }
   })
 
@@ -264,13 +269,13 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     const unsigned = unsignedOf(receipt.voter)
     const voterPriv = set.blocks[0]!.voters[0]!.priv
     const unsignedAlter: FixtureReceipt = { ...receipt, voter: { ...receipt.voter, privateCid: 'private-altered' } }
-    expect(failReason(chk(sliceChecks(unsignedAlter, rows, voterRows, anchor), 0, 'my-voter-entry'))).to.equal('voter-entry-signature-invalid')
-    expect(failReason(chk(sliceChecks(unsignedAlter, rows, voterRows, anchor, release), 0, 'my-voter-entry'))).to.equal('voter-entry-signature-invalid')
+    expect(failReason(chk(sliceChecks(unsignedAlter, rows, voterRows, anchor, undefined, AUTH), 0, 'my-voter-entry'))).to.equal('voter-entry-signature-invalid')
+    expect(failReason(chk(sliceChecks(unsignedAlter, rows, voterRows, anchor, release, AUTH), 0, 'my-voter-entry'))).to.equal('voter-entry-signature-invalid')
     const resigned: FixtureReceipt = { ...receipt, voter: signVoterEntry({ ...unsigned, privateCid: 'private-altered' }, voterPriv) }
-    expect(chk(sliceChecks(resigned, rows, voterRows, anchor), 0, 'my-voter-entry').status).to.equal('pass')
-    expect(failReason(chk(sliceChecks(resigned, rows, voterRows, anchor, release), 0, 'my-voter-entry'))).to.equal('voter-entry-missing-or-altered')
+    expect(chk(sliceChecks(resigned, rows, voterRows, anchor, undefined, AUTH), 0, 'my-voter-entry').status).to.equal('pass')
+    expect(failReason(chk(sliceChecks(resigned, rows, voterRows, anchor, release, AUTH), 0, 'my-voter-entry'))).to.equal('voter-entry-missing-or-altered')
     const noBallot: FixtureReceipt = { ...receipt, voter: signVoterEntry({ ...unsigned, ballots: [] }, voterPriv) }
-    expect(failReason(chk(sliceChecks(noBallot, rows, voterRows, anchor), 0, 'my-voter-entry'))).to.equal('ballot-not-in-voter-entry')
+    expect(failReason(chk(sliceChecks(noBallot, rows, voterRows, anchor, undefined, AUTH), 0, 'my-voter-entry'))).to.equal('ballot-not-in-voter-entry')
   })
 
   it('SC-5 D-13 revisit: another device vote under my registrant fails before and after release', () => {
@@ -282,12 +287,12 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     })
     const voter = signVoterEntry({ ...unsignedOf(y.voterEntry), deviceKey: key.pubHex }, key.privBytes)
     const rc: FixtureReceipt = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION, votes: [vote], voter }
-    const pre = sliceChecks(rc, rows, voterRows, anchor)
+    const pre = sliceChecks(rc, rows, voterRows, anchor, undefined, AUTH)
     expect(failReason(chk(pre, 0, 'my-voter-entry'))).to.equal('device-key-mismatch')
     expect(chk(pre, 0, 'my-vote').status).to.equal('pending-key-release')
     expect(chk(pre, 0, 'block-hash').status).to.equal('pass')
     expect(ok(pre).ballots[0]!.verdict).to.equal('fail')
-    const post = sliceChecks(rc, rows, voterRows, anchor, release)
+    const post = sliceChecks(rc, rows, voterRows, anchor, release, AUTH)
     expect(failReason(chk(post, 0, 'my-vote'))).to.equal('vote-missing-or-altered')
     expect(failReason(chk(post, 0, 'my-voter-entry'))).to.equal('device-key-mismatch')
     expect(ok(post).ballots[0]!.verdict).to.equal('fail')
@@ -295,7 +300,7 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
 
   describe('SC-6 wrong or tampered rows', () => {
     const run = (r: SliceBlockRow[], v: SliceVoterRow[], withRelease = false) =>
-      sliceChecks(mine(0).receipt, r, v, anchor, withRelease ? release : null)
+      sliceChecks(mine(0).receipt, r, v, anchor, withRelease ? release : null, AUTH)
 
     it('(i) no voter row for my registrant', () => {
       const m = mine(0)
@@ -372,13 +377,13 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     }))
     const rows2 = rows.map(r => (r === block.row ? newRow : r))
     const voterRows2 = [...voterRows.filter(v => v.BlockCid !== block.row.Cid), ...newVoterRows]
-    const t = buildBlockTree(rows2, scope)
+    const t = buildBlockTree(rows2, scope, AUTH_FOR(voterRows2))
     if (!t.ok) throw new Error('tree refused')
     const a2 = { root: t.tree.root }
     const rc = set.receipts[0]!
-    const pre = sliceChecks(rc, rows2, voterRows2, a2)
+    const pre = sliceChecks(rc, rows2, voterRows2, a2, undefined, AUTH)
     expect(chk(pre, 0, 'block-hash')).to.deep.equal({ check: 'block-hash', status: 'pass', pendingAfterRelease: ['block-id'] })
-    const post = sliceChecks(rc, rows2, voterRows2, a2, release)
+    const post = sliceChecks(rc, rows2, voterRows2, a2, release, AUTH)
     expect(failReason(chk(post, 0, 'block-hash'))).to.equal('id-mismatch')
     expect(chk(post, 0, 'my-vote').status).to.equal('pass')
     expect(chk(post, 0, 'my-voter-entry').status).to.equal('pass')
@@ -387,46 +392,71 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
   describe('SC-8 under-root', () => {
     it('no anchor is not-applicable and the verdict stays incomplete', () => {
       for (const a of [undefined, null]) {
-        const r = sliceChecks(set.receipts[0]!, rows, voterRows, a, release)
+        const r = sliceChecks(set.receipts[0]!, rows, voterRows, a, release, AUTH)
         expect(chk(r, 0, 'under-root')).to.deep.equal({ check: 'under-root', status: 'not-applicable', reason: 'no-root' })
         expect(ok(r).ballots[0]!.verdict).to.equal('incomplete')
       }
     })
     it('another root fails not-under-root', () => {
-      const other = buildBlockTree(rows.slice(1), scope)
+      const other = buildBlockTree(rows.slice(1), scope, AUTH_FOR(voterRows))
       if (!other.ok) throw new Error('refused')
-      expect(failReason(chk(sliceChecks(set.receipts[0]!, rows, voterRows, { root: other.tree.root }), 0, 'under-root'))).to.equal('not-under-root')
+      expect(failReason(chk(sliceChecks(set.receipts[0]!, rows, voterRows, { root: other.tree.root }, undefined, AUTH), 0, 'under-root'))).to.equal('not-under-root')
     })
     it('a publisher proof works with only my block row; without it the lone-row tree fails', () => {
       const m = mine(0)
-      const full = buildBlockTree(rows, scope)
+      const full = buildBlockTree(rows, scope, AUTH_FOR(voterRows))
       if (!full.ok) throw new Error('refused')
       const proof = full.tree.proofFor(m.myBlockRow.Cid)
       if (!proof.ok) throw new Error('no proof')
-      expect(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root, proof: proof.proof }), 0, 'under-root').status).to.equal('pass')
-      expect(failReason(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root }), 0, 'under-root'))).to.equal('not-under-root')
+      expect(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root, proof: proof.proof }, undefined, AUTH), 0, 'under-root').status).to.equal('pass')
+      expect(failReason(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root }, undefined, AUTH), 0, 'under-root'))).to.equal('not-under-root')
       const flipped = { ...proof.proof, path: proof.proof.path.map((s, i) => (i === 0 ? { ...s, side: s.side === 'left' ? 'right' as const : 'left' as const } : s)) }
-      expect(failReason(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root, proof: flipped }), 0, 'under-root'))).to.equal('malformed-proof')
+      expect(failReason(chk(sliceChecks(m.receipt, [m.myBlockRow], voterRows, { root, proof: flipped }, undefined, AUTH), 0, 'under-root'))).to.equal('malformed-proof')
     })
     it('a duplicate or malformed row of another block no longer refuses the tree (WR-06); rows of another election are ignored', () => {
       const dup = [...rows, { ...set.blocks[1]!.row }, { ...set.blocks[1]!.row, Cid: 'NOT-BASE32' }, null]
-      const r = chk(sliceChecks(set.receipts[0]!, dup as SliceBlockRow[], voterRows, anchor), 0, 'under-root')
+      const r = chk(sliceChecks(set.receipts[0]!, dup as SliceBlockRow[], voterRows, anchor, undefined, AUTH), 0, 'under-root')
       expect(r.status).to.equal('pass')
       const foreign = [...rows, { ...set.blocks[1]!.row, ElectionId: 'another-election', Cid: 'foreign-cid' }]
-      expect(chk(sliceChecks(set.receipts[0]!, foreign, voterRows, anchor), 0, 'under-root').status).to.equal('pass')
+      expect(chk(sliceChecks(set.receipts[0]!, foreign, voterRows, anchor, undefined, AUTH), 0, 'under-root').status).to.equal('pass')
     })
+  })
+
+  it('SC-13 (T-65-05-03) the rows-built tree needs R5\'s authorization and resolves a forged Cid collision by consent', () => {
+    const rc = set.receipts[0]!
+    // no authorization: the tree is never built; without a proof under-root is not-applicable, with one it is checked alone
+    for (const a of [undefined, null]) {
+      const r = sliceChecks(rc, rows, voterRows, anchor, release, a)
+      expect(chk(r, 0, 'under-root')).to.deep.equal({ check: 'under-root', status: 'not-applicable', reason: 'no-authorization' })
+      expect(ok(r).ballots[0]!.verdict).to.equal('incomplete')
+      const full = buildBlockTree(rows, scope, AUTH_FOR(voterRows))
+      if (!full.ok) throw new Error('refused')
+      const proof = full.tree.proofFor(mine(0).myBlockRow.Cid)
+      if (!proof.ok) throw new Error('no proof')
+      expect(chk(sliceChecks(rc, rows, voterRows, { root, proof: proof.proof }, release, a), 0, 'under-root').status).to.equal('pass')
+    }
+    // a forged row that copies another block's ciphertext under a lower Id and a stranger list: the authenticated
+    // block keeps its leaf, so the rows still build the published root and my block is under it
+    const other = set.blocks[1]!.row
+    const forged = { ...other, Id: '!forged', VoterRegistrantIds: '["x-1","x-2","x-3","x-4"]' }
+    for (const order of [[forged, ...rows], [...rows, forged]]) {
+      const r = sliceChecks(rc, order as SliceBlockRow[], voterRows, anchor, release, AUTH)
+      expect(chk(r, 0, 'under-root').status).to.equal('pass')
+    }
+    // an unreadable authorization refuses the tree, typed
+    expect(failReason(chk(sliceChecks(rc, rows, voterRows, anchor, release, { ...AUTH, ballots: 'x' } as never), 0, 'under-root'))).to.equal('tree-refused')
   })
 
   it('SC-9 a wrong or invalid secret is refused at the top level; the caller secret is left alone', () => {
     const jointPublicKey = release.jointPublicKey
-    const wrong = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, { secretKey: secp256k1.utils.randomSecretKey(), jointPublicKey })
+    const wrong = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, { secretKey: secp256k1.utils.randomSecretKey(), jointPublicKey }, AUTH)
     expect(wrong.ok).to.equal(false)
     if (!wrong.ok) expect(wrong.reason).to.equal('secret-mismatch')
-    const zero = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, { secretKey: new Uint8Array(32), jointPublicKey })
+    const zero = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, { secretKey: new Uint8Array(32), jointPublicKey }, AUTH)
     expect(zero.ok).to.equal(false)
     if (!zero.ok) expect(zero.reason).to.equal('invalid-secret')
     const copy = new Uint8Array(release.secretKey)
-    const good = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, release)
+    const good = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, release, AUTH)
     expect(Array.from(release.secretKey)).to.deep.equal(Array.from(copy))
     expect(containsBytes(good)).to.equal(false)
   })
@@ -434,7 +464,7 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
   it('SC-10 malformed input never throws', () => {
     const rc = set.receipts[0]!
     const refusal = (r: unknown, rs: unknown = rows, vs: unknown = voterRows): string => {
-      const out = sliceChecks(r as FixtureReceipt, rs as SliceBlockRow[], vs as SliceVoterRow[], anchor, release)
+      const out = sliceChecks(r as FixtureReceipt, rs as SliceBlockRow[], vs as SliceVoterRow[], anchor, release, AUTH)
       return out.ok ? 'ok' : out.reason
     }
     const v0 = rc.votes[0]!
@@ -456,8 +486,8 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
       replaceVoterRow(m.myVoterRow, { ...m.myVoterRow, ElectionRevision: BigInt(FIXTURE_REVISION) }),
       anchor,
       release
-    )
-    expect(big).to.deep.equal(sliceChecks(rc, rows, voterRows, anchor, release))
+    , AUTH)
+    expect(big).to.deep.equal(sliceChecks(rc, rows, voterRows, anchor, release, AUTH))
   })
 
   it('SC-11 a multi-ballot receipt reports per ballot, in receipt order', () => {
@@ -466,7 +496,7 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
       ballot: set.election.ballots[1]!.template, electionRevision: FIXTURE_REVISION, selections: { q1: ['a'], q2: ['x'] }, nonce: randomNonce()
     })
     const rc: FixtureReceipt = { ...base, votes: [base.votes[0]!, voteB] }
-    const r = ok(sliceChecks(rc, rows, voterRows, anchor, release))
+    const r = ok(sliceChecks(rc, rows, voterRows, anchor, release, AUTH))
     expect(r.ballots.map(b => b.ballotId)).to.deep.equal(['ballot-a', 'ballot-b'])
     expect(r.ballots[0]!.verdict).to.equal('pass')
     expect(failReason(r.ballots[1]!.checks[1]! as ReturnType<typeof chk>)).to.equal('not-recorded')
@@ -476,9 +506,9 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
 
   it('SC-12 is deterministic and order independent', () => {
     const rc = set.receipts[5]!
-    const a = sliceChecks(rc, rows, voterRows, anchor, release)
-    const b = sliceChecks(rc, rows, voterRows, anchor, release)
-    const c = sliceChecks(rc, seededShuffle(rows, 7), seededShuffle(voterRows, 11), anchor, release)
+    const a = sliceChecks(rc, rows, voterRows, anchor, release, AUTH)
+    const b = sliceChecks(rc, rows, voterRows, anchor, release, AUTH)
+    const c = sliceChecks(rc, seededShuffle(rows, 7), seededShuffle(voterRows, 11), anchor, release, AUTH)
     expect(b).to.deep.equal(a)
     expect(c).to.deep.equal(a)
     expect(ok(a).ballots[0]!.checks.map(x => x.check)).to.deep.equal([...SLICE_CHECK_IDS])

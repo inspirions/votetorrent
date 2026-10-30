@@ -132,8 +132,17 @@ function voteCoreValueImports (stripped: string): string[] {
   return hits
 }
 
-const BLOCK_TREE_ALLOWED = ['@noble/hashes/sha2.js', '@noble/hashes/utils.js', '../voting/canonical.js']
+// T-65-05-03: block-tree authenticates rows that share a Cid (consent digest + P-256 verify, the template digest),
+// so it reaches the crypto plugin (the very digestFields and verify that pool-block's consentDigest and
+// verifySigP256 call; already on browser-entry's allowlist through database/initialize.ts) and
+// ../voting/vote-entries.js (ballotTemplateDigest; itself only the plugin and noble hashes, pinned below).
+// browser-entry-purity's set-equality allowlist is unchanged by this.
+const BLOCK_TREE_ALLOWED = [
+  '@noble/hashes/sha2.js', '@noble/hashes/utils.js', '@optimystic/quereus-plugin-crypto',
+  '../voting/canonical.js', '../voting/vote-entries.js'
+]
 const CANONICAL_ALLOWED = ['@noble/hashes/utils.js']
+const VOTE_ENTRIES_ALLOWED = ['@optimystic/quereus-plugin-crypto', '@noble/hashes/sha2.js', '@noble/hashes/utils.js', '@votetorrent/vote-core']
 
 const R5_VALUES = [
   'BLOCK_TREE_DOMAIN', 'BLOCK_TREE_EMPTY_ROOT', 'blockLeafData', 'blockLeafHash', 'blockNodeHash',
@@ -288,6 +297,9 @@ describe('blocks-purity (65-05: D-50..D-52)', () => {
     expect(tree.filter((s) => !BLOCK_TREE_ALLOWED.includes(s))).to.deep.equal([])
     const canonical = extractFromSpecifiers(stripComments(readFileSync(join(SRC_DIR, 'voting', 'canonical.ts'), 'utf8')))
     expect(canonical.filter((s) => !CANONICAL_ALLOWED.includes(s))).to.deep.equal([])
+    const voteEntriesSrc = stripComments(readFileSync(join(SRC_DIR, 'voting', 'vote-entries.ts'), 'utf8'))
+    expect(extractFromSpecifiers(voteEntriesSrc).filter((s) => !VOTE_ENTRIES_ALLOWED.includes(s))).to.deep.equal([])
+    expect(voteCoreValueImports(voteEntriesSrc)).to.deep.equal([])
   })
 
   it('P-2 no forbidden token in comment-stripped src/blocks', () => {

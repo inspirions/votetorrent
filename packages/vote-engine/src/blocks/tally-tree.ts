@@ -61,7 +61,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { BLOCK_TREE_EMPTY_ROOT, blockLeafHash, blockNodeHash, buildBlockTree, type BlockTree } from './block-tree.js'
+import { BLOCK_TREE_EMPTY_ROOT, blockLeafHash, blockNodeHash, buildBlockTree, type BlockAuthorization, type BlockTree } from './block-tree.js'
 import {
   VALIDATION_CODES, validateElectionBlocks, type ElectionValidationResult, type ValidationAssociationRow, type ValidationBlockRow,
   type ValidationCode, type ValidationRegistrantRow, type ValidationRelease, type ValidationTimeline, type ValidationVoterRow
@@ -499,7 +499,7 @@ export interface TallyTreeInput {
   rows: readonly ValidationBlockRow[]
   voterRows: readonly ValidationVoterRow[]
   ballots: readonly AnswerCheckBallot[]
-  /** CR-02: passed straight to validateElectionBlocks */
+  /** CR-02: passed straight to validateElectionBlocks; with voterRows, associations, timeline and ballots also R5's authorization (T-65-05-03) */
   registrants: readonly ValidationRegistrantRow[]
   associations: readonly ValidationAssociationRow[]
   timeline: ValidationTimeline
@@ -513,14 +513,19 @@ export type BuildTallyTreeResult =
 
 /**
  * buildBlockTree + validateElectionBlocks + tallyTreeFrom. R5 runs first, so mixed-scope rows are refused before any
- * decryption; malformed and duplicate rows are set aside by both R5 and R7 (WR-06) and the rest is tallied. The release goes only to validateElectionBlocks, which checks the
+ * decryption; malformed and duplicate rows are set aside by both R5 and R7 (WR-06), both with the same authorization
+ * inputs (T-65-05-03), and the rest is tallied. The release goes only to validateElectionBlocks, which checks the
  * secret, copies it and zero-fills the copy; R8 never reads it. A caller who already holds an R7 report should
  * call tallyTreeFrom, to avoid decrypting twice.
  */
 export function buildTallyTree (input: TallyTreeInput): BuildTallyTreeResult {
   if (!isRec(input) || !isRec(input.scope)) return refuse('malformed-input', 'input must be an object with a scope')
   if (input.release === undefined || input.release === null) return refuse('not-released', 'the election key has not been released')
-  const built = buildBlockTree(input.rows, input.scope)
+  // T-65-05-03: R5 authenticates rows that share a Cid with the very inputs R7 judges, so its leaves are R7's blocks
+  const built = buildBlockTree(input.rows, input.scope, {
+    voterRows: input.voterRows, registrants: input.registrants, associations: input.associations, timeline: input.timeline,
+    ballots: input.ballots
+  } as unknown as BlockAuthorization)
   if (!built.ok) return refuse(built.reason, built.detail)
   const validation = validateElectionBlocks({
     scope: input.scope,

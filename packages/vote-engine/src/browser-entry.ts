@@ -55,9 +55,10 @@ export { H16, toCanonicalDatetime, nowCanonicalDatetime, fromCanonicalDatetime }
 
 export type { DbFactory, EngineContext } from './types.js'
 
-// The R5 block Merkle tree: pure SHA-256 over public VoteBlock columns, for the dashboard's recomputation
-// of the root. Imported from the module file and NOT from the blocks barrel, because the barrel also
-// carries R6-R8.
+// The R5 block Merkle tree: SHA-256 over public VoteBlock columns, for the dashboard's recomputation
+// of the root. A Cid that several rows name is resolved by consent authentication (T-65-05-03), with the
+// crypto plugin's digest and P-256 verify (already in this graph through database/initialize.ts).
+// Imported from the module file and NOT from the blocks barrel, because the barrel also carries R6-R8.
 export {
 	BLOCK_TREE_DOMAIN,
 	BLOCK_TREE_EMPTY_ROOT,
@@ -71,7 +72,11 @@ export {
 	buildBlockTree,
 	verifyInclusion,
 	blockTreeStatus,
-	finalBlockTree
+	finalBlockTree,
+	blockConsentDigest,
+	verifyBlockConsent,
+	blockAuthorizer,
+	judgeBlockVoters
 } from './blocks/block-tree.js'
 export type {
 	BlockTreeRow,
@@ -90,7 +95,19 @@ export type {
 	InclusionCheck,
 	BlockTreeTimeline,
 	BlockTreeStatus,
-	FinalBlockTreeResult
+	FinalBlockTreeResult,
+	BlockVoterRow,
+	BlockRegistrantRow,
+	BlockAssociationRow,
+	BlockAuthorizationTimeline,
+	BlockAuthorization,
+	BlockConsentScope,
+	BlockAuthorizer,
+	BlockVoterProblemCode,
+	BlockVoterProblem,
+	BlockVoterRepresentative,
+	BlockVoterExtra,
+	BlockVoterJudgement
 } from './blocks/block-tree.js'
 
 // -----------------------------------------------------------------------

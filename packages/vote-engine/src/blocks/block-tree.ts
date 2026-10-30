@@ -23,23 +23,40 @@
 //
 // Row policy (WR-06, TOLERANT, shared with R7 through selectBlockRows): one bad row never refuses the tree.
 //   - A row that is not shaped like a block is set aside as `malformed-row` in `rejected`.
-//   - Rows sharing a Cid or an Id are reduced to one: the preferred row is the one whose Cid is the digest of
-//     its own Ciphertext (blockCidOf, the integrity check R7 runs without the key), then the one with the lowest
-//     UTF-8 bytes of canonicalJson([Cid, Id, BallotId, EntryCount, TemplateDigest, VoterRegistrantIds,
-//     Ciphertext]). Rows are taken greedily in that order; a row whose Cid or Id is already taken goes to
-//     `rejected` as `duplicate-block`. The Id check of R7 needs the key, so it cannot rank rows here.
+//   - Rows that share an Id but not a Cid are separate blocks, each with its own leaf (T-65-05-03). R7 judges
+//     each one on its own consent rows, so a forged row reusing an honest Id cannot take the honest leaf.
+//   - Rows that share a Cid are reduced to one (a leaf is named by its Cid). The kept row is chosen by
+//     authentication (T-65-05-03), in this order:
+//       1. an AUTHENTICATED row first: its Cid is the digest of its own Ciphertext (blockCidOf), its voter list
+//          is a canonical JSON array as long as EntryCount, its TemplateDigest is the template digest of its
+//          ballot, and every listed registrant has a VoteBlockVoter row naming this Cid that judgeBlockVoters
+//          authenticates (consent signature over consentDigest, Registrant and Association, CR-02). These are
+//          exactly R7's no-key block checks other than the cross-block one, so R7 finds none of them on it;
+//       2. among authenticated rows, the most listed voters;
+//       3. then the rule for rows that are not authenticated: a Cid that matches the row's own Ciphertext;
+//       4. then the lowest UTF-8 bytes of canonicalJson([Cid, Id, BallotId, EntryCount, TemplateDigest,
+//          VoterRegistrantIds, Ciphertext]).
+//     Every other row of the Cid goes to `rejected` as `duplicate-block`. When no row of the Cid authenticates,
+//     rules 3 and 4 decide, and R7 finds the kept row invalid anyway. Authentication is computed only for a Cid
+//     that more than one row names, so a tree with no collision checks no signature.
+//   - The authorization (voter rows, registrants, associations, timeline, ballots) is a REQUIRED input, so the
+//     root is a function of public data every party passes identically. A malformed one refuses the tree as
+//     `malformed-input`; a hostile item inside its row lists authorizes nothing.
 //   - Only a row of another election or revision refuses the whole tree (`mixed-election`, `mixed-revision`):
 //     that is a caller error (rows are selected per election revision), and R7 refuses it the same way.
 //
 // Rules:
 //   - Results are typed unions; nothing here reports failure by throwing.
 //   - Pure: no clock (nowMs is a parameter), no randomness, no Node-only globals, no logging. Imports are
-//     limited to the noble hash helpers and ../voting/canonical.js so this file stays inside the browser
-//     entry allowlist (D-52).
+//     limited to the noble hash helpers, @optimystic/quereus-plugin-crypto (the digest framing and P-256 verify
+//     that verifySigP256 itself calls), ../voting/canonical.js and ../voting/vote-entries.js, all already inside
+//     the browser entry allowlist (D-52).
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
+import { digestFields, resolveHasher, resolveOutputEncoder, verify as verifySignature } from '@optimystic/quereus-plugin-crypto'
 import { canonicalJson } from '../voting/canonical.js'
+import { ballotTemplateDigest, type TemplateBallot } from '../voting/vote-entries.js'
 
 export const BLOCK_TREE_DOMAIN = 'vt-block-tree/1' as const
 
@@ -48,7 +65,7 @@ export const BLOCK_TREE_EMPTY_ROOT: string = bytesToHex(sha256(utf8ToBytes(`${BL
 
 /** Structural subset of a VoteBlock row; other columns are ignored. */
 export interface BlockTreeRow {
-  /** optional here: used only to rank rows that share a Cid or an Id (blockCidOf) */
+  /** optional here: used only to rank rows that share a Cid (blockCidOf); a row without it never authenticates */
   Ciphertext?: string
   Cid: string
   Id: string
@@ -126,8 +143,11 @@ export type BlockRowSelection<R> =
   | { ok: true, accepted: readonly R[], rejected: ReadonlyArray<BlockTreeRejection & { row: unknown }> }
   | { ok: false, reason: BlockTreeRefusal, detail: string }
 
-/** Whole-tree refusals: `malformed-row` only when `rows` is not an array. `duplicate-block` is kept for type compatibility and no longer returned. */
-export type BlockTreeRefusal = 'malformed-row' | 'duplicate-block' | 'mixed-election' | 'mixed-revision'
+/**
+ * Whole-tree refusals: `malformed-row` only when `rows` is not an array, `malformed-input` when the authorization
+ * is not readable. `duplicate-block` is kept for type compatibility and no longer returned.
+ */
+export type BlockTreeRefusal = 'malformed-row' | 'malformed-input' | 'duplicate-block' | 'mixed-election' | 'mixed-revision'
 export type BlockTreeResult = { ok: true, tree: BlockTree } | { ok: false, reason: BlockTreeRefusal, detail: string }
 export type InclusionCheck = { ok: true } | { ok: false, reason: 'malformed-proof' | 'root-mismatch' }
 
@@ -303,16 +323,281 @@ function looseKey (row: unknown): string {
   }
 }
 
-interface Candidate { raw: unknown, row: NormalRow, cidOk: boolean, rank: string }
+// ---- T-65-05-03: consent authentication, shared by R5 (selection) and R7 (findings) ----
+
+/** A VoteBlockVoter row (structural; other columns are ignored). */
+export interface BlockVoterRow {
+  ElectionId: string
+  BallotId: string
+  RegistrantId: string
+  BlockCid: string
+  BlockId: string
+  ElectionRevision: number | bigint
+  DeviceKey: string
+  Signature: string
+}
+
+/** A Registrant row (CR-02); other columns are ignored. Expiration is the stored ISO datetime ending in Z. */
+export interface BlockRegistrantRow { Id: string, Status: string, Expiration: string }
+
+/** An Association row (CR-02); other columns are ignored. */
+export interface BlockAssociationRow { RegistrantId: string, DeviceKey: string, Expiration: string }
+
+/** Structural; an Election.timeline fits. votingStarts (epoch ms) is the reference time of the authorization check. */
+export interface BlockAuthorizationTimeline { votingStarts: number }
 
 /**
- * WR-06: the row policy shared by R5 and R7. Keeps every well-formed row whose Cid and Id are unique after the
- * preference rule (see the header), in leaf order, and returns every other row in `rejected` with a typed reason.
- * Refuses only a non-array input (`malformed-row`) and a row of another election or revision. The outcome does
- * not depend on input order. Never throws.
+ * T-65-05-03: the public rows a block row is authenticated against, the same ones R7 reads. Required by
+ * selectBlockRows, buildBlockTree and finalBlockTree, so the root never depends on an optional input.
  */
-export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope): BlockRowSelection<R> {
+export interface BlockAuthorization {
+  voterRows: readonly BlockVoterRow[]
+  registrants: readonly BlockRegistrantRow[]
+  associations: readonly BlockAssociationRow[]
+  timeline: BlockAuthorizationTimeline
+  /** the revision's ballot templates; a block's TemplateDigest must be ballotTemplateDigest(ballot, revision) */
+  ballots: readonly TemplateBallot[]
+}
+
+/** The block columns a consent signature binds. */
+export interface BlockConsentScope { Cid: string, Id: string, ElectionId: string, ElectionRevision: number, BallotId: string }
+
+/** CR-02, VoterAssociated: who is registered and which device keys are associated, at the reference time. */
+export interface BlockAuthorizer {
+  registered: (registrantId: string) => boolean
+  associated: (registrantId: string, deviceKey: string) => boolean
+}
+
+export type BlockVoterProblemCode = 'voter-row-mismatch' | 'consent-signature-invalid' | 'voter-not-registered' | 'device-key-not-associated'
+
+export interface BlockVoterProblem { code: BlockVoterProblemCode, detail: string }
+
+/** One registrant's representative voter row for a block, and what is wrong with it ([] = authenticated). */
+export interface BlockVoterRepresentative { registrantId: string, row: Readonly<Record<string, unknown>>, problems: readonly BlockVoterProblem[] }
+
+/** A voter row naming the block that is not a representative (R7 reports it as `voter-row-forged`). */
+export interface BlockVoterExtra { row: Readonly<Record<string, unknown>>, reason: 'no-registrant' | 'unlisted' | 'second-row' }
+
+export interface BlockVoterJudgement {
+  /** one per registrant with a row naming the block (listed ones only when the list is readable), by registrant id */
+  representatives: readonly BlockVoterRepresentative[]
+  /** rows without a RegistrantId or for an unlisted registrant (in row order), then second rows */
+  extras: readonly BlockVoterExtra[]
+  /** registrants whose representative row has no problem */
+  authenticated: ReadonlySet<string>
+}
+
+const consentHasher = resolveHasher('sha256')
+const consentEncode = resolveOutputEncoder('base64url')
+
+type Rec = Record<string, unknown>
+
+const isRec = (v: unknown): v is Rec => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+const byCodeUnits = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+/**
+ * The digest a voter's device key signs: VoteBlockVoter.SignatureValid's input, Digest('VoteBlockVoter',
+ * ElectionId, ElectionRevision, BallotId, BlockCid, BlockId, RegistrantId, DeviceKey) in base64url. The
+ * browser-entry twin of pool-block's consentDigest (block-tree.spec FX-7 pins the parity).
+ */
+export function blockConsentDigest (block: BlockConsentScope, registrantId: string, deviceKey: string): string {
+  return digestFields(
+    ['VoteBlockVoter', block.ElectionId, block.ElectionRevision, block.BallotId, block.Cid, block.Id, registrantId, deviceKey],
+    consentHasher, consentEncode
+  ) as string
+}
+
+/**
+ * P-256 compact low-S hex signature by a compressed hex key over a base64url digest: the same call
+ * verifySigP256 makes, without its database module (block-tree.spec FX-7 pins the parity). Never throws.
+ */
+export function verifyBlockConsent (digest: string, signature: unknown, deviceKey: unknown): boolean {
+  if (typeof digest !== 'string' || digest === '' || typeof signature !== 'string' || signature === '' ||
+    typeof deviceKey !== 'string' || deviceKey === '') return false
+  try {
+    return verifySignature(digest, signature, deviceKey, 'p256', 'base64url', 'hex', 'hex')
+  } catch {
+    return false
+  }
+}
+
+const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
+
+/** Epoch ms of a stored ISO datetime ending in Z (the schema's ExpirationValid form), or null. Sub-ms digits are dropped. */
+function isoMs (value: unknown): number | null {
+  if (typeof value !== 'string' || !ISO_Z.test(value)) return null
+  const dot = value.indexOf('.')
+  const text = dot === -1 ? value : `${value.slice(0, Math.min(dot + 4, value.length - 1))}Z`
+  const ms = Date.parse(text)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * CR-02: VoterAssociated over the caller's rows. registered(r): a Registrant r with Status 'a' and Expiration
+ * later than `at`. associated(r, key): an Association (r, key) with Expiration later than `at`. Unreadable rows
+ * authorize nothing. Never throws for arrays.
+ */
+export function blockAuthorizer (registrants: readonly unknown[], associations: readonly unknown[], at: number): BlockAuthorizer {
+  const active = new Set<string>()
+  for (const r of registrants) {
+    if (!isRec(r) || typeof r.Id !== 'string' || r.Status !== 'a') continue
+    const exp = isoMs(r.Expiration)
+    if (exp !== null && exp > at) active.add(r.Id)
+  }
+  const keys = new Map<string, Set<string>>()
+  for (const a of associations) {
+    if (!isRec(a) || typeof a.RegistrantId !== 'string' || typeof a.DeviceKey !== 'string') continue
+    const exp = isoMs(a.Expiration)
+    if (exp === null || exp <= at) continue
+    const g = keys.get(a.RegistrantId)
+    if (g === undefined) keys.set(a.RegistrantId, new Set([a.DeviceKey]))
+    else g.add(a.DeviceKey)
+  }
+  return {
+    registered: (r) => active.has(r),
+    associated: (r, key) => keys.get(r)?.has(key) === true
+  }
+}
+
+/** What is wrong with one voter row for one block and registrant: CR-02's rule. [] means authenticated. */
+function voterRowProblems (block: BlockConsentScope, v: Rec, reg: string, authorizer: BlockAuthorizer): BlockVoterProblem[] {
+  const out: BlockVoterProblem[] = []
+  if (v.ElectionId !== block.ElectionId || intField(v.ElectionRevision, 0) !== block.ElectionRevision || v.BallotId !== block.BallotId || v.BlockId !== block.Id) {
+    out.push({ code: 'voter-row-mismatch', detail: 'a voter row disagrees with its block on election, revision, ballot or block id' })
+  }
+  let signed = false
+  try {
+    signed = typeof v.DeviceKey === 'string' && verifyBlockConsent(blockConsentDigest(block, reg, v.DeviceKey), v.Signature, v.DeviceKey)
+  } catch { signed = false }
+  if (!signed) out.push({ code: 'consent-signature-invalid', detail: 'the consent signature does not verify over the consent digest' })
+  if (!authorizer.registered(reg)) {
+    out.push({ code: 'voter-not-registered', detail: 'no active registrant with this id expires after the voting start' })
+  }
+  if (typeof v.DeviceKey !== 'string' || !authorizer.associated(reg, v.DeviceKey)) {
+    out.push({ code: 'device-key-not-associated', detail: 'no association of this registrant and device key expires after the voting start' })
+  }
+  return out
+}
+
+/**
+ * CR-02 + CR-03: judge the voter rows that name one block (BlockCid = block.Cid). The single definition of an
+ * authenticated voter, used by R5 to choose among rows that share a Cid and by R7 for its findings, so the two
+ * cannot disagree. Rows are grouped per registrant; the representative is a row with no problem if there is one,
+ * else the fewest problems, then the lowest row key. A row with no RegistrantId, or (when `list` is readable) for a
+ * registrant the block does not list, is an extra, as is every second row. Pure; never throws.
+ */
+export function judgeBlockVoters (block: BlockConsentScope, list: readonly string[] | null, rowsNamingBlock: readonly unknown[], authorizer: BlockAuthorizer): BlockVoterJudgement {
+  const regOf = (v: Rec): string => (typeof v.RegistrantId === 'string' ? v.RegistrantId : '')
+  const mine = rowsNamingBlock.filter(isRec).sort((a, b) => byCodeUnits(regOf(a), regOf(b)) || byCodeUnits(looseKey(a), looseKey(b)))
+  const listed = new Set(list ?? [])
+  const extras: BlockVoterExtra[] = []
+  const byReg = new Map<string, Array<{ v: Rec, problems: BlockVoterProblem[] }>>()
+  for (const v of mine) {
+    const reg = regOf(v)
+    if (reg === '' || (list !== null && !listed.has(reg))) {
+      extras.push({ row: v, reason: reg === '' ? 'no-registrant' : 'unlisted' })
+      continue
+    }
+    const entry = { v, problems: voterRowProblems(block, v, reg, authorizer) }
+    const g = byReg.get(reg)
+    if (g === undefined) byReg.set(reg, [entry])
+    else g.push(entry)
+  }
+  const representatives: BlockVoterRepresentative[] = []
+  const authenticated = new Set<string>()
+  for (const reg of [...byReg.keys()].sort(byCodeUnits)) {
+    const ranked = [...byReg.get(reg)!].sort((a, b) => (a.problems.length - b.problems.length) || byCodeUnits(looseKey(a.v), looseKey(b.v)))
+    const rep = ranked[0]!
+    representatives.push({ registrantId: reg, row: rep.v, problems: rep.problems })
+    if (rep.problems.length === 0) authenticated.add(reg)
+    for (const other of ranked.slice(1)) extras.push({ row: other.v, reason: 'second-row' })
+  }
+  return { representatives, extras, authenticated }
+}
+
+/** The voter list when it is a JSON array of non-empty strings in strictly ascending order (R7's canonical list), else null. */
+function canonicalVoterList (text: string): string[] | null {
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { return null }
+  if (!Array.isArray(parsed) || !parsed.every((x): x is string => typeof x === 'string' && x.length > 0)) return null
+  for (let i = 1; i < parsed.length; i++) if (byCodeUnits(parsed[i - 1] as string, parsed[i] as string) >= 0) return null
+  return parsed as string[]
+}
+
+interface AuthContext { voterByCid: Map<string, unknown[]>, authorizer: BlockAuthorizer, templateDigests: Map<string, string> }
+
+/** Read the required authorization, with the refusal rules R7 applies to the same fields. */
+function authContext (auth: unknown, revision: number): { ok: true, ctx: AuthContext } | { ok: false, detail: string } {
+  const bad = (detail: string): { ok: false, detail: string } => ({ ok: false, detail: `authorization: ${detail}` })
+  if (!isRec(auth)) return bad('the authorization is not an object')
+  if (!Array.isArray(auth.voterRows)) return bad('voterRows is not an array')
+  if (!Array.isArray(auth.registrants)) return bad('registrants is not an array')
+  if (!Array.isArray(auth.associations)) return bad('associations is not an array')
+  const tl = auth.timeline
+  if (!isRec(tl) || typeof tl.votingStarts !== 'number' || !Number.isFinite(tl.votingStarts)) return bad('timeline needs a finite votingStarts (epoch ms)')
+  if (!Array.isArray(auth.ballots)) return bad('ballots is not an array')
+  const templateDigests = new Map<string, string>()
+  for (const b of auth.ballots as unknown[]) {
+    if (!isRec(b) || typeof b.id !== 'string' || !Array.isArray(b.questions)) return bad('a ballot is not readable')
+    if (templateDigests.has(b.id)) return bad('two ballots share one id')
+    try {
+      templateDigests.set(b.id, ballotTemplateDigest(b as unknown as TemplateBallot, revision))
+    } catch {
+      return bad('a ballot template digest cannot be computed')
+    }
+  }
+  const voterByCid = new Map<string, unknown[]>()
+  for (const v of auth.voterRows as unknown[]) {
+    if (!isRec(v) || typeof v.BlockCid !== 'string') continue
+    const g = voterByCid.get(v.BlockCid)
+    if (g === undefined) voterByCid.set(v.BlockCid, [v])
+    else g.push(v)
+  }
+  return {
+    ok: true,
+    ctx: { voterByCid, authorizer: blockAuthorizer(auth.registrants as unknown[], auth.associations as unknown[], tl.votingStarts), templateDigests }
+  }
+}
+
+interface Candidate {
+  raw: unknown
+  row: NormalRow
+  cidOk: boolean
+  rank: string
+  /** T-65-05-03: set only for a Cid that more than one row names */
+  authenticated: boolean
+  /** listed voters when authenticated, else 0 */
+  voters: number
+}
+
+/** T-65-05-03: is this row one R7 finds no no-key block finding on (the cross-block check aside)? */
+function authenticate (c: Candidate, scope: BlockTreeScope, ctx: AuthContext): void {
+  c.authenticated = false
+  c.voters = 0
+  if (!c.cidOk) return
+  const list = canonicalVoterList(c.row.voterRegistrantIds)
+  if (list === null || list.length !== c.row.entryCount) return
+  const template = ctx.templateDigests.get(c.row.ballotId)
+  if (template === undefined || template !== c.row.templateDigest) return
+  const block: BlockConsentScope = { Cid: c.row.cid, Id: c.row.id, ElectionId: scope.electionId, ElectionRevision: scope.electionRevision, BallotId: c.row.ballotId }
+  const judged = judgeBlockVoters(block, list, ctx.voterByCid.get(c.row.cid) ?? [], ctx.authorizer)
+  if (list.every(reg => judged.authenticated.has(reg))) {
+    c.authenticated = true
+    c.voters = list.length
+  }
+}
+
+/**
+ * WR-06 + T-65-05-03: the row policy shared by R5 and R7. Keeps one row per Cid (the preference rule in the
+ * header) in leaf order, rows sharing only an Id included, and returns every other row in `rejected` with a typed
+ * reason. Refuses only a non-array `rows` (`malformed-row`), an unreadable authorization (`malformed-input`) and a
+ * row of another election or revision. The outcome does not depend on input order. Never throws.
+ */
+export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope, authorization: BlockAuthorization): BlockRowSelection<R> {
   if (!Array.isArray(rows)) return { ok: false, reason: 'malformed-row', detail: 'rows must be an array' }
+  const auth = authContext(authorization, scope.electionRevision)
+  if (!auth.ok) return { ok: false, reason: 'malformed-input', detail: auth.detail }
   const candidates: Candidate[] = []
   const rejected: Array<BlockTreeRejection & { row: unknown, key: string }> = []
   for (let i = 0; i < rows.length; i++) {
@@ -328,23 +613,29 @@ export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope): 
     const row = checked.row
     const cidOk = typeof ct === 'string' && blockCidOf(ct) === row.cid
     const rank = canonicalJson([row.cid, row.id, row.ballotId, row.entryCount, row.templateDigest, row.voterRegistrantIds, typeof ct === 'string' ? ct : null])
-    candidates.push({ raw, row, cidOk, rank })
+    candidates.push({ raw, row, cidOk, rank, authenticated: false, voters: 0 })
   }
   // UTF-8 bytes first; code units break the tie two distinct lone surrogates would leave, so the order is total
   const byRank = (a: string, b: string): number => compareUtf8(a, b) || (a < b ? -1 : a > b ? 1 : 0)
-  candidates.sort((a, b) => (a.cidOk === b.cidOk ? byRank(a.rank, b.rank) : a.cidOk ? -1 : 1))
-  const cids = new Set<string>()
-  const ids = new Set<string>()
-  const kept: Candidate[] = []
+  const byCid = new Map<string, Candidate[]>()
   for (const c of candidates) {
-    const taken = cids.has(c.row.cid) ? `Cid ${c.row.cid}` : ids.has(c.row.id) ? `Id ${c.row.id}` : null
-    if (taken !== null) {
-      rejected.push({ cid: c.row.cid, reason: 'duplicate-block', detail: `${taken} is already taken by a preferred row`, row: c.raw, key: c.rank })
-      continue
+    const g = byCid.get(c.row.cid)
+    if (g === undefined) byCid.set(c.row.cid, [c])
+    else g.push(c)
+  }
+  const preferred = (a: Candidate, b: Candidate): number =>
+    (a.authenticated === b.authenticated ? 0 : a.authenticated ? -1 : 1) ||
+    (b.voters - a.voters) ||
+    (a.cidOk === b.cidOk ? 0 : a.cidOk ? -1 : 1) ||
+    byRank(a.rank, b.rank)
+  const kept: Candidate[] = []
+  for (const [cid, group] of byCid) {
+    if (group.length > 1) for (const c of group) authenticate(c, scope, auth.ctx)
+    group.sort(preferred)
+    kept.push(group[0]!)
+    for (const c of group.slice(1)) {
+      rejected.push({ cid: c.row.cid, reason: 'duplicate-block', detail: `Cid ${cid} is already taken by a preferred row`, row: c.raw, key: c.rank })
     }
-    cids.add(c.row.cid)
-    ids.add(c.row.id)
-    kept.push(c)
   }
   kept.sort((a, b) => compareUtf8(a.row.cid, b.row.cid))
   rejected.sort((a, b) => byRank(a.cid, b.cid) || byRank(a.detail, b.detail) || byRank(a.key, b.key))
@@ -357,12 +648,13 @@ export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope): 
 
 /**
  * Build the block tree for one election revision. The rows may arrive in any order; the result does not
- * depend on it. Rows are selected by selectBlockRows (WR-06): malformed rows and the non-preferred rows of a
- * shared Cid or Id are set aside in `tree.rejected` and the tree is built over the rest. Only rows from another
- * election or revision, or a non-array input, refuse the whole tree.
+ * depend on it. Rows are selected by selectBlockRows (WR-06, T-65-05-03): malformed rows and the rows that lose a
+ * shared Cid to the authenticated row are set aside in `tree.rejected`, and the tree is built over the rest.
+ * `authorization` is required: every party passes the same public rows, so every party gets the same root.
+ * Only rows from another election or revision, a non-array input or an unreadable authorization refuse the tree.
  */
-export function buildBlockTree (rows: readonly BlockTreeRow[], scope: BlockTreeScope): BlockTreeResult {
-  const selected = selectBlockRows(rows, scope)
+export function buildBlockTree (rows: readonly BlockTreeRow[], scope: BlockTreeScope, authorization: BlockAuthorization): BlockTreeResult {
+  const selected = selectBlockRows(rows, scope, authorization)
   if (!selected.ok) return selected
   const normal: NormalRow[] = []
   for (let i = 0; i < selected.accepted.length; i++) {
@@ -487,10 +779,12 @@ export function blockTreeStatus (timeline: BlockTreeTimeline, nowMs: number): Bl
  * The tree, labelled final or provisional by blockTreeStatus. Before the end of the accruing period the
  * refusal still carries the provisional tree. Who stores or publishes the root is out of scope (D-51).
  */
-export function finalBlockTree (rows: readonly BlockTreeRow[], scope: BlockTreeScope, timeline: BlockTreeTimeline, nowMs: number): FinalBlockTreeResult {
+export function finalBlockTree (
+  rows: readonly BlockTreeRow[], scope: BlockTreeScope, authorization: BlockAuthorization, timeline: BlockTreeTimeline, nowMs: number
+): FinalBlockTreeResult {
   const status = blockTreeStatus(timeline, nowMs)
   if (!status.ok && (status.reason === 'timeline-invalid' || status.reason === 'clock-invalid')) return status
-  const built = buildBlockTree(rows, scope)
+  const built = buildBlockTree(rows, scope, authorization)
   if (!built.ok) return built
   if (!status.ok && status.reason === 'accruing-not-ended') {
     return { ok: false, reason: 'accruing-not-ended', finalAtMs: status.finalAtMs, provisional: built.tree }

@@ -552,6 +552,20 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
       expect(bf(fr, set.rows[0]!.Cid).blockId).to.equal(set.rows[0]!.Id)
       expect(fr.findings.map((f: any) => f.code)).to.deep.equal(['duplicate-block'])
     }
+    // T-65-05-03: a row reusing the honest Id under its own Cid is not a duplicate; it is a block of its own, judged
+    // on its own consent rows (none name it), and the honest block stays valid
+    const ownCt = 'forged ciphertext text'
+    const sameId = { ...set.rows[0]!, Cid: poolBlockCid(ownCt), Ciphertext: ownCt }
+    for (const rows of [[sameId, ...set.rows], [...set.rows, sameId]]) {
+      const sr = runR({ rows })
+      expect(sr.totals.blocks).to.equal(5)
+      expect(sr.findings.map((f: any) => f.code)).to.deep.equal([])
+      expect(bf(sr, set.rows[0]!.Cid).status).to.equal('valid')
+      expect(bf(sr, sameId.Cid).status).to.equal('invalid')
+      expect(bf(sr, sameId.Cid).blockId).to.equal(set.rows[0]!.Id)
+      expect(bf(sr, sameId.Cid).attestedEntries).to.equal(0)
+      expect(codesOf(bf(sr, sameId.Cid))).to.include('voter-row-missing')
+    }
     const orphan = run({ voterRows: [...set.voterRows, { ...set.voterRows[0]!, BlockCid: 'nope' }] })
     expect(orphan.findings).to.have.length(1)
     expect(orphan.findings[0]).to.deep.include({ code: 'voter-row-without-block', severity: 'info', blockCid: 'nope' })

@@ -21,7 +21,10 @@
 //     against the caller's root, using a supplied publisher proof or a tree built from the supplied rows.
 //     Who publishes the root is out of scope (D-51). A proof's treeSize is trusted for nothing beyond
 //     verifyInclusion: when the rows build a tree whose root is the caller's root, the proof must agree
-//     with that tree's own size and position.
+//     with that tree's own size and position. Building a tree needs R5's authorization (T-65-05-03: the
+//     registrants, associations, timeline and ballots, with the voterRows given here), because R5 resolves a
+//     shared Cid by consent; without it the tree is never built: under-root is `not-applicable`
+//     (`no-authorization`) when there is no proof, and a proof is checked by verifyInclusion alone.
 //
 // D-13 revisit: after the release, a block recorded under my registrant that does not hold my own vote
 // entry (another device's vote, or an altered one) fails my-vote; before the release a different device
@@ -36,7 +39,10 @@
 // throw on hostile input is wrapped. Pure for Hermes and the browser: no Node-only globals, no logging, no
 // clock, no randomness.
 
-import { blockLeafData, blockLeafHash, buildBlockTree, verifyInclusion, type BlockInclusionProof, type BlockTree, type BlockTreeRow } from './block-tree.js'
+import {
+  blockLeafData, blockLeafHash, buildBlockTree, verifyInclusion,
+  type BlockAuthorization, type BlockInclusionProof, type BlockTree, type BlockTreeRow
+} from './block-tree.js'
 import { checkElectionSecret, openCommittedBlock, type OpenCommittedBlockResult } from './open-committed-block.js'
 import { consentDigest, poolBlockCid, poolBlockId, type PoolBallot } from '../pool/pool-block.js'
 import { canonicalJson } from '../voting/canonical.js'
@@ -78,6 +84,12 @@ export interface SliceTreeAnchor { root: string, proof?: BlockInclusionProof }
 /** Caller-held secret (for example from KeyReleaseEngine.reconstructElectionKey). The caller zero-fills it after the call. */
 export interface SliceRelease { secretKey: Uint8Array, jointPublicKey: string }
 
+/**
+ * T-65-05-03: what R5 needs besides the voter rows to build the tree from the rows (registrants, associations,
+ * the revision timeline and its ballot templates). The same public rows every party passes to R5.
+ */
+export type SliceAuthorization = Omit<BlockAuthorization, 'voterRows'>
+
 export type SlicePendingPart = 'voter-entry-in-payload' | 'block-id'
 
 export type SliceFailReason =
@@ -90,7 +102,7 @@ export type SliceFailReason =
   | 'cid-mismatch' | 'id-mismatch'
   | 'not-under-root' | 'malformed-proof' | 'tree-refused' | 'malformed-row'
 
-export type SliceNotApplicableReason = 'no-block' | 'no-root'
+export type SliceNotApplicableReason = 'no-block' | 'no-root' | 'no-authorization'
 
 export type SliceCheckResult =
   | { check: SliceCheckId, status: 'pass', pendingAfterRelease: readonly SlicePendingPart[] }
@@ -208,13 +220,17 @@ function describeOpenFailure (opened: Extract<OpenCommittedBlockResult, { ok: fa
   return `${opened.reason}: ${opened.detail}`
 }
 
-/** The root to check against, my voter slice, and (when released) the opened block: four typed results per ballot. */
+/**
+ * The root to check against, my voter slice, and (when released) the opened block: four typed results per ballot.
+ * `authorization` is needed only to build the tree from `rows` for under-root (T-65-05-03).
+ */
 export function sliceChecks (
   receipt: SliceReceipt,
   rows: readonly SliceBlockRow[],
   voterRows: readonly SliceVoterRow[],
   anchor?: SliceTreeAnchor | null,
-  release?: SliceRelease | null
+  release?: SliceRelease | null,
+  authorization?: SliceAuthorization | null
 ): SliceCheckReport {
   const receiptProblem = validateReceipt(receipt)
   if (receiptProblem !== null) return refuse('malformed-receipt', receiptProblem)
@@ -238,9 +254,13 @@ export function sliceChecks (
   const scopedRows = inScope<SliceBlockRow>(rows, electionId, revision)
   const scopedVoterRows = inScope<SliceVoterRow>(voterRows, electionId, revision)
 
+  // T-65-05-03: R5 needs the authorization; without one the tree is never built (null)
   let treeMemo: ReturnType<typeof buildBlockTree> | null = null
-  const treeOverRows = (): ReturnType<typeof buildBlockTree> => {
-    if (treeMemo === null) treeMemo = buildBlockTree(scopedRows, { electionId, electionRevision: revision })
+  const treeOverRows = (): ReturnType<typeof buildBlockTree> | null => {
+    if (authorization === undefined || authorization === null) return null
+    if (treeMemo === null) {
+      treeMemo = buildBlockTree(scopedRows, { electionId, electionRevision: revision }, { ...authorization, voterRows } as unknown as BlockAuthorization)
+    }
     return treeMemo
   }
 
@@ -262,7 +282,7 @@ export function sliceChecks (
       // The proof's treeSize is trusted for nothing beyond verifyInclusion. When the rows build the very tree
       // the root names, the proof must agree with that tree's own size and position.
       const built = treeOverRows()
-      if (built.ok && built.tree.root === anchor.root) {
+      if (built !== null && built.ok && built.tree.root === anchor.root) {
         const tree: BlockTree = built.tree
         const leaf = tree.leaves.find(l => l.cid === block.Cid)
         if (leaf !== undefined && (anchor.proof.treeSize !== tree.size || anchor.proof.leafIndex !== leaf.index)) {
@@ -272,6 +292,7 @@ export function sliceChecks (
       return verdict(verifyInclusion(leafHash, anchor.proof, anchor.root))
     }
     const built = treeOverRows()
+    if (built === null) return notApplicable('under-root', 'no-authorization')
     if (!built.ok) return fail('under-root', 'tree-refused', `${built.reason}: ${built.detail}`)
     const proof = built.tree.proofFor(block.Cid)
     if (!proof.ok) return fail('under-root', 'not-under-root', 'the block is not among the rows the tree covers')

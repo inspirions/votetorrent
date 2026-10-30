@@ -26,7 +26,9 @@
 // if there is one, else the row with the fewest problems, then the lowest row key. Its problems are block-level
 // findings. Every other row naming the block (a second row, a row for an unlisted registrant, a row with no
 // RegistrantId) is the report-level finding `voter-row-forged` and never touches the block. A registrant counts
-// for `registrant-in-two-blocks` only in blocks where its representative row is authenticated.
+// for `registrant-in-two-blocks` only in blocks where its representative row is authenticated. The grouping, the
+// per-row rule and the authorization index are R5's judgeBlockVoters and blockAuthorizer (T-65-05-03), so R5's
+// choice among rows sharing a Cid and R7's findings use one definition of an authenticated voter.
 //   - After key release (a caller-held secret): every block is opened with openCommittedBlock, the payload is
 //     checked (id, count, the shared checkPoolPayloadShape, every voter entry), and every vote is opened and
 //     judged against its ballot template by validateVoteEntryAgainstBallot (D-71). Valid votes carry their
@@ -40,9 +42,12 @@
 // private copy and zero-fills it in a finally block. The caller's array is never modified and never retained,
 // and the report holds no byte array.
 //
-// Row policy (WR-06): the block rows are selected by R5's selectBlockRows, so R7 judges exactly the rows R5
-// makes leaves of. A malformed row and the non-preferred row of a shared Cid or Id are report-level findings
-// (`malformed-row`, `duplicate-block`) and are not blocks of the report; they never touch another block.
+// Row policy (WR-06, T-65-05-03): the block rows are selected by R5's selectBlockRows with the same voter rows,
+// registrants, associations, timeline and ballots, so R7 judges exactly the rows R5 makes leaves of. A malformed
+// row and a row that loses a shared Cid to the authenticated row are report-level findings (`malformed-row`,
+// `duplicate-block`) and are not blocks of the report; they never touch another block. Rows that share only an
+// Id are separate blocks, each judged on its own consent rows: a forged one fails its own checks and is excluded
+// (D-82), and the honest one keeps its status. `duplicate-block` therefore means an exact Cid collision.
 //
 // Rules: the report is deterministic for any input order and the function never reports failure by raising an
 // error; every primitive that can fail on hostile input is wrapped and mapped to a typed finding. Pure for
@@ -51,9 +56,9 @@
 
 import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { validateVoteEntryAgainstBallot, type AnswerCheckBallot, type FindingSeverity } from './answer-checks.js'
-import { selectBlockRows } from './block-tree.js'
+import { blockAuthorizer, judgeBlockVoters, selectBlockRows, type BlockAuthorization, type BlockConsentScope } from './block-tree.js'
 import { checkElectionSecret, openCommittedBlock } from './open-committed-block.js'
-import { checkPoolPayloadShape, consentDigest, poolBlockCid, poolBlockId, type PoolBallot } from '../pool/pool-block.js'
+import { checkPoolPayloadShape, poolBlockCid, poolBlockId } from '../pool/pool-block.js'
 import { canonicalJson } from '../voting/canonical.js'
 import { ballotTemplateDigest, voterEntryDigest, VOTER_ENTRY_KEYS, type VoteEntry } from '../voting/vote-entries.js'
 import { verifySigP256 } from '../database/initialize.js'
@@ -280,46 +285,6 @@ function voterRecordProblem (r: unknown): string | null {
   return null
 }
 
-interface VoterRowProblem { code: ValidationCode, detail: string }
-
-const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
-
-/** Epoch ms of a stored ISO datetime ending in Z (the schema's ExpirationValid form), or null. Sub-ms digits are dropped. */
-function isoMs (value: unknown): number | null {
-  if (typeof value !== 'string' || !ISO_Z.test(value)) return null
-  const dot = value.indexOf('.')
-  const text = dot === -1 ? value : `${value.slice(0, Math.min(dot + 4, value.length - 1))}Z`
-  const ms = Date.parse(text)
-  return Number.isFinite(ms) ? ms : null
-}
-
-/**
- * CR-02: VoterAssociated over the caller's rows. registered(r): a Registrant r with Status 'a' and Expiration
- * later than `at`. associated(r, key): an Association (r, key) with Expiration later than `at`. Unreadable rows
- * authorize nothing.
- */
-function authorizationIndex (registrants: unknown[], associations: unknown[], at: number): { registered: (r: string) => boolean, associated: (r: string, key: string) => boolean } {
-  const active = new Set<string>()
-  for (const r of registrants) {
-    if (!isRec(r) || !isStr(r.Id) || r.Status !== 'a') continue
-    const exp = isoMs(r.Expiration)
-    if (exp !== null && exp > at) active.add(r.Id)
-  }
-  const keys = new Map<string, Set<string>>()
-  for (const a of associations) {
-    if (!isRec(a) || !isStr(a.RegistrantId) || !isStr(a.DeviceKey)) continue
-    const exp = isoMs(a.Expiration)
-    if (exp === null || exp <= at) continue
-    const g = keys.get(a.RegistrantId)
-    if (g === undefined) keys.set(a.RegistrantId, new Set([a.DeviceKey]))
-    else g.add(a.DeviceKey)
-  }
-  return {
-    registered: (r) => active.has(r),
-    associated: (r, key) => keys.get(r)?.has(key) === true
-  }
-}
-
 interface Work {
   row: Rec | null
   cid: string
@@ -375,7 +340,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   if (!isRec(tl) || typeof tl.votingStarts !== 'number' || !Number.isFinite(tl.votingStarts)) {
     return refuse('malformed-input', 'timeline needs a finite votingStarts (epoch ms)')
   }
-  const authorization = authorizationIndex(input.registrants as unknown[], input.associations as unknown[], tl.votingStarts)
+  const authorization = blockAuthorizer(input.registrants as unknown[], input.associations as unknown[], tl.votingStarts)
   const ballotsById = new Map<string, { ballot: AnswerCheckBallot, digest: string }>()
   for (const b of input.ballots as unknown[]) {
     if (!isRec(b) || !isStr(b.id) || !Array.isArray(b.questions)) return refuse('malformed-input', 'a ballot is not readable')
@@ -409,8 +374,11 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     keepSecret(secret)
   }
 
-  // WR-06: the same rows R5 makes leaves of; the rest are report-level findings
-  const selection = selectBlockRows(input.rows as unknown[], { electionId, electionRevision: revision })
+  // WR-06, T-65-05-03: the same rows R5 makes leaves of, chosen with the same public inputs; the rest are
+  // report-level findings
+  const selection = selectBlockRows(input.rows as unknown[], { electionId, electionRevision: revision }, {
+    voterRows: input.voterRows, registrants: input.registrants, associations: input.associations, timeline: tl, ballots: input.ballots
+  } as unknown as BlockAuthorization)
   if (!selection.ok) {
     return selection.reason === 'mixed-election' || selection.reason === 'mixed-revision'
       ? refuse(selection.reason, selection.detail)
@@ -499,57 +467,23 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     if (known === undefined) add(w, 'unknown-ballot', 'no ballot template matches the block BallotId')
     else if (row.TemplateDigest !== known.digest) add(w, 'template-mismatch', 'the block TemplateDigest is not the ballot template digest')
 
-    // consent rows of this block (CR-02, CR-03)
-    const mine = [...(voterByCid.get(w.cid) ?? [])].sort(voterOrder)
+    // consent rows of this block (CR-02, CR-03): R5's judge, so the two agree on who is authenticated
     const keyOf = new Map<string, string>()
-    // consentDigest reads only electionId, revision and ballotId from this ballot
-    const poolBallot: PoolBallot = {
-      electionKey: { electionId: row.ElectionId, revision: rev, jointPublicKey: isRec(rel) ? (rel.jointPublicKey as string) : '' },
-      ballotId: row.BallotId,
-      templateDigest: row.TemplateDigest
+    const consentScope: BlockConsentScope = { Cid: row.Cid as string, Id: row.Id, ElectionId: row.ElectionId, ElectionRevision: rev, BallotId: row.BallotId }
+    const judged = judgeBlockVoters(consentScope, list, voterByCid.get(w.cid) ?? [], authorization)
+    for (const x of judged.extras) {
+      forged.push(forgedFinding(w.cid, x.row as Rec, x.reason === 'no-registrant'
+        ? 'a voter row naming this block has no RegistrantId'
+        : x.reason === 'unlisted'
+          ? 'a voter row names a registrant this block does not list'
+          : 'a second voter row for a registrant of this block; the block keeps the row that verifies'))
     }
-    const problemsOf = (v: Rec, reg: string): VoterRowProblem[] => {
-      const out: VoterRowProblem[] = []
-      if (v.ElectionId !== row.ElectionId || normaliseInt(v.ElectionRevision) !== rev || v.BallotId !== row.BallotId || v.BlockId !== row.Id) {
-        out.push({ code: 'voter-row-mismatch', detail: 'a voter row disagrees with its block on election, revision, ballot or block id' })
-      }
-      let signed = false
-      try {
-        signed = isStr(v.DeviceKey) && isStr(v.Signature) &&
-          verifySigP256(consentDigest({ cid: row.Cid as string, blockId: row.Id as string }, poolBallot, reg, v.DeviceKey), v.Signature, v.DeviceKey)
-      } catch { signed = false }
-      if (!signed) out.push({ code: 'consent-signature-invalid', detail: 'the consent signature does not verify over the consent digest' })
-      if (!authorization.registered(reg)) {
-        out.push({ code: 'voter-not-registered', detail: 'no active registrant with this id expires after the voting start' })
-      }
-      if (!isStr(v.DeviceKey) || !authorization.associated(reg, v.DeviceKey)) {
-        out.push({ code: 'device-key-not-associated', detail: 'no association of this registrant and device key expires after the voting start' })
-      }
-      return out
-    }
-    const listed = new Set(list ?? [])
-    const byReg = new Map<string, Array<{ v: Rec, problems: VoterRowProblem[] }>>()
-    for (const v of mine) {
-      const reg = regOf(v)
-      if (reg === '' || (list !== null && !listed.has(reg))) {
-        forged.push(forgedFinding(w.cid, v, reg === '' ? 'a voter row naming this block has no RegistrantId' : 'a voter row names a registrant this block does not list'))
-        continue
-      }
-      const g = byReg.get(reg)
-      const entry = { v, problems: problemsOf(v, reg) }
-      if (g === undefined) byReg.set(reg, [entry])
-      else g.push(entry)
-    }
-    for (const reg of [...byReg.keys()].sort(byString)) {
-      // the representative: a row with no problem if any, else the fewest problems, then the row key
-      const ranked = [...byReg.get(reg)!].sort((a, b) => (a.problems.length - b.problems.length) || byString(rowKey(a.v), rowKey(b.v)))
-      const rep = ranked[0]!
-      for (const p of rep.problems) add(w, p.code, p.detail, { registrantId: reg })
-      if (rep.problems.length === 0) w.authenticated.add(reg)
-      if (isStr(rep.v.DeviceKey)) keyOf.set(reg, rep.v.DeviceKey)
-      for (const other of ranked.slice(1)) {
-        forged.push(forgedFinding(w.cid, other.v, 'a second voter row for a registrant of this block; the block keeps the row that verifies'))
-      }
+    const byReg = new Set<string>()
+    for (const rep of judged.representatives) {
+      byReg.add(rep.registrantId)
+      for (const p of rep.problems) add(w, p.code, p.detail, { registrantId: rep.registrantId })
+      if (rep.problems.length === 0) w.authenticated.add(rep.registrantId)
+      if (isStr(rep.row.DeviceKey)) keyOf.set(rep.registrantId, rep.row.DeviceKey)
     }
     if (list !== null) {
       for (const reg of [...list].sort(byString)) {

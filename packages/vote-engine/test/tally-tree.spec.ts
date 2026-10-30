@@ -6,7 +6,7 @@
 import { expect } from 'chai'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { BLOCK_TREE_EMPTY_ROOT, buildBlockTree } from '../src/blocks/block-tree.js'
+import { BLOCK_TREE_EMPTY_ROOT, blockCidOf, buildBlockTree, type BlockAuthorization } from '../src/blocks/block-tree.js'
 import { TALLY_TREE_DOMAIN, addHistograms, buildTallyTree, tallyNodeHash, tallyTreeFrom, verifyTallyTree } from '../src/blocks/tally-tree.js'
 import { validateElectionBlocks } from '../src/blocks/validate-blocks.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
@@ -23,6 +23,9 @@ import {
   makeFixtureVoter,
   seededShuffle
 } from './fixtures/pool-blocks.js'
+
+/** T-65-05-03: the synthetic rows never share a Cid, so an empty authorization builds their tree. */
+const NOAUTH: BlockAuthorization = { voterRows: [], registrants: [], associations: [], timeline: { votingStarts: 0 }, ballots: [] }
 
 // ---- independent reference (never uses the module's helpers) ----
 
@@ -176,7 +179,7 @@ function syntheticSet (over: { invalidBlock?: number } = {}): any {
     }
     return blockFinding(r, { votes: verdictsFor(r.BallotId, i, r.EntryCount) })
   })
-  const built = buildBlockTree(rows, scope)
+  const built = buildBlockTree(rows, scope, NOAUTH)
   if (!built.ok) throw new Error('fixture tree failed')
   return { rows, tree: built.tree, validation: report(blocks), blocks }
 }
@@ -377,7 +380,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
       status: 'invalid', attestedEntries: attested, findings: [{ blockCid: r.Cid, code: 'consent-signature-invalid', severity: 'error', detail: 'x' }]
     })
     const big = [row('bca', 'ballot-a', Number.MAX_SAFE_INTEGER), row('bcb', 'ballot-a', Number.MAX_SAFE_INTEGER)]
-    const built = buildBlockTree(big, scope)
+    const built = buildBlockTree(big, scope, NOAUTH)
     if (!built.ok) throw new Error('tree')
     const few: any = tallyTreeFrom(built.tree, report(big.map(r => invalid(r, 2))), templates())
     expect(few.ok, JSON.stringify(few)).to.equal(true)
@@ -387,7 +390,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     expect(over).to.deep.include({ ok: false, reason: 'count-overflow' })
     for (const bad of [undefined, -1, 1.5, '2', Number.MAX_SAFE_INTEGER + 2]) {
       const one = [row('bca', 'ballot-a', 3)]
-      const t = buildBlockTree(one, scope)
+      const t = buildBlockTree(one, scope, NOAUTH)
       if (!t.ok) throw new Error('tree')
       expect(tallyTreeFrom(t.tree, report([invalid(one[0], bad === Number.MAX_SAFE_INTEGER + 2 ? 4 : bad)]), templates()), String(bad)).to.deep.include({ ok: false, reason: 'inconsistent-inputs' })
     }
@@ -417,7 +420,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     const t5 = tree(); t5.nodes[2] = { ...t5.nodes[2], range: [0, 3] }
     expect(reason(t5, s.validation)).to.equal('inconsistent-inputs')
     // a stale tree from other rows does not tally against this report
-    const stale = buildBlockTree([row('bca', 'ballot-a', 3), row('bcb', 'ballot-a', 4)], scope)
+    const stale = buildBlockTree([row('bca', 'ballot-a', 3), row('bcb', 'ballot-a', 4)], scope, NOAUTH)
     if (!stale.ok) throw new Error('tree')
     expect(reason(stale.tree, s.validation)).to.equal('inconsistent-inputs')
   })
@@ -444,7 +447,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
       }, { code: '__proto__', title: 'u', type: 'rank', options: [{ code: 'r', title: 'r' }] }]
     })
     const rows = [row('bca', 'ballot-a', 3)]
-    const built = buildBlockTree(rows, scope)
+    const built = buildBlockTree(rows, scope, NOAUTH)
     if (!built.ok) throw new Error('tree')
     const votes = [
       { index: 0, status: 'valid', entry: entryOf('ballot-a', [['__proto__', ['r']], ['hasOwnProperty', ['1', '__proto__', 'constructor', 'toString']]]) },
@@ -467,7 +470,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     expect(({} as any).polluted).to.equal(undefined)
     expect(canonicalJson(JSON.parse(JSON.stringify(r.tally)))).to.equal(canonicalJson(r.tally))
 
-    const empty = buildBlockTree([], scope)
+    const empty = buildBlockTree([], scope, NOAUTH)
     if (!empty.ok) throw new Error('empty')
     const er: any = tallyTreeFrom(empty.tree, report([]), templates())
     expect(er.ok).to.equal(true)
@@ -571,10 +574,11 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
   }
 
   it('TB-1 composition with R5 and R7', () => {
-    const rootBefore = (() => { const b = buildBlockTree(set.rows, scope); if (!b.ok) throw new Error('b'); return b.tree })()
+    const auth = { voterRows: set.voterRows, ...set.authorization, ballots }
+    const rootBefore = (() => { const b = buildBlockTree(set.rows, scope, auth); if (!b.ok) throw new Error('b'); return b.tree })()
     const r: any = buildTallyTree(input())
     expect(r.ok, JSON.stringify(r)).to.equal(true)
-    const rootAfter: any = buildBlockTree(set.rows, scope).tree
+    const rootAfter: any = (buildBlockTree(set.rows, scope, auth) as any).tree
     expect(r.tally.blockRoot).to.equal(rootBefore.root)
     expect(r.tally.blockRoot).to.equal(rootAfter.root)
     expect(r.blockTree.root).to.equal(r.tally.blockRoot)
@@ -787,6 +791,20 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     expect(noisy.tally.root).to.equal(clean.tally.root)
     expect(noisy.blockTree.rejected.map((x: any) => x.reason)).to.deep.equal(['malformed-row', 'malformed-row', 'duplicate-block'])
     expect(noisy.validation.findings.map((f: any) => f.code)).to.deep.equal(['malformed-row', 'malformed-row', 'duplicate-block'])
+    // T-65-05-03: a row reusing an honest Id under its own Cid is its own leaf, excluded with no attested volume;
+    // the honest block is tallied, so the outcome equals the clean one
+    const sameId = { ...set.rows[0]!, Cid: blockCidOf('forged text'), Ciphertext: 'forged text' }
+    const shared: any = buildTallyTree(input({ rows: [sameId, ...set.rows] }))
+    expect(shared.ok, JSON.stringify(shared).slice(0, 300)).to.equal(true)
+    expect(shared.tally.size).to.equal(clean.tally.size + 1)
+    expect(shared.tally.histogram).to.deep.equal(clean.tally.histogram)
+    const forgedLeaf = shared.tally.leaves.find((l: any) => l.blockCid === sameId.Cid)
+    expect(forgedLeaf.disposition).to.equal('excluded')
+    expect(shared.tally.leaves.find((l: any) => l.blockCid === set.rows[0]!.Cid).disposition).to.equal('tallied')
+    expect(verifyTallyTree(shared.tally).ok).to.equal(true)
+    // the authorization is R5's input too: an unreadable one is refused before any decryption
+    expect(reason(buildTallyTree(input({ timeline: undefined })))).to.equal('malformed-input')
+    expect(reason(buildTallyTree(input({ ballots: 'x' })))).to.equal('malformed-input')
     expect(reason(buildTallyTree(input({ rows: [...set.rows, { ...set.rows[0]!, Cid: 'bzz', Id: 'zz', ElectionId: 'other' }] })))).to.equal('mixed-election')
     expect(reason(buildTallyTree(input({ rows: 'x' })))).to.equal('malformed-row')
     expect(reason(buildTallyTree(null as any))).to.equal('malformed-input')
