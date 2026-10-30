@@ -208,8 +208,8 @@ votes, the original 62-20 `encryptElectionBlock` contract) still parses.
 `ElectionBlockPayload { v: 1, votes, voterRecords }`; pool-formed blocks
 carry `v: 2`. It is left unchanged on purpose: `computeSchemaHash` hashes
 the whole schema text, comments included, so editing it would change the
-schema hash of every existing network. Fixing it is owed to the next
-intentional schema change.
+schema hash of every existing network. Fixing it is owed to the
+next intentional schema change.
 
 ### 3.1 Encrypt
 
