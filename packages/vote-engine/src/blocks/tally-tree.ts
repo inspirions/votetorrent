@@ -53,8 +53,8 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { BLOCK_TREE_EMPTY_ROOT, type BlockTree } from './block-tree.js'
-import type { ElectionValidationResult, ValidationCode } from './validate-blocks.js'
+import { BLOCK_TREE_EMPTY_ROOT, buildBlockTree, type BlockTree } from './block-tree.js'
+import { validateElectionBlocks, type ElectionValidationResult, type ValidationBlockRow, type ValidationCode, type ValidationRelease, type ValidationVoterRow } from './validate-blocks.js'
 import type { AnswerCheckBallot } from './answer-checks.js'
 import { canonicalJson } from '../voting/canonical.js'
 
@@ -361,7 +361,7 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
     const hi = n.range[1] as unknown
     if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi)) return refuse('malformed-input', `tree node ${i} has a malformed range`)
     let histogram: TallyHistogram
-    const node: TallyNode = { index: i, range: [lo as number, hi as number], merkleHash: n.hash, histogram: { ballots: {} }, hash: '' }
+    const entry: TallyNode = { index: i, range: [lo as number, hi as number], merkleHash: n.hash, histogram: { ballots: {} }, hash: '' }
     if ((hi as number) - (lo as number) === 1) {
       const h = leafHist[lo as number]
       if (h === undefined) return refuse('malformed-input', `tree node ${i} names a leaf that does not exist`)
@@ -373,12 +373,12 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
         return refuse('malformed-input', `tree node ${i} has malformed children`)
       }
       histogram = addHistograms(outNodes[left as number]!.histogram, outNodes[right as number]!.histogram)
-      node.left = left as number
-      node.right = right as number
+      entry.left = left as number
+      entry.right = right as number
     }
-    node.histogram = histogram
-    node.hash = tallyNodeHash(n.hash, histogram)
-    outNodes.push(node)
+    entry.histogram = histogram
+    entry.hash = tallyNodeHash(n.hash, histogram)
+    outNodes.push(entry)
   }
 
   const size = leaves.length
@@ -399,4 +399,37 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
       nodes: outNodes
     }
   }
+}
+
+export interface TallyTreeInput {
+  scope: { electionId: string, electionRevision: number }
+  rows: readonly ValidationBlockRow[]
+  voterRows: readonly ValidationVoterRow[]
+  ballots: readonly AnswerCheckBallot[]
+  /** null or undefined gives 'not-released' */
+  release: ValidationRelease | null | undefined
+}
+
+export type BuildTallyTreeResult =
+  | { ok: true, tally: TallyTree, blockTree: BlockTree, validation: ReleasedValidation }
+  | { ok: false, reason: TallyTreeRefusal, detail: string }
+
+/**
+ * buildBlockTree + validateElectionBlocks + tallyTreeFrom. R5 runs first, so duplicate, mixed-scope and malformed
+ * rows are refused before any decryption. The release goes only to validateElectionBlocks, which checks the
+ * secret, copies it and zero-fills the copy; R8 never reads it. A caller who already holds an R7 report should
+ * call tallyTreeFrom, to avoid decrypting twice.
+ */
+export function buildTallyTree (input: TallyTreeInput): BuildTallyTreeResult {
+  if (!isRec(input) || !isRec(input.scope)) return refuse('malformed-input', 'input must be an object with a scope')
+  if (input.release === undefined || input.release === null) return refuse('not-released', 'the election key has not been released')
+  const built = buildBlockTree(input.rows, input.scope)
+  if (!built.ok) return refuse(built.reason, built.detail)
+  const validation = validateElectionBlocks({
+    scope: input.scope, rows: input.rows, voterRows: input.voterRows, ballots: input.ballots, release: input.release
+  })
+  if (!validation.ok) return refuse(validation.reason, validation.detail)
+  const tallied = tallyTreeFrom(built.tree, validation, input.ballots)
+  if (!tallied.ok) return tallied
+  return { ok: true, tally: tallied.tally, blockTree: built.tree, validation }
 }
