@@ -183,6 +183,8 @@ export class PoolAgent {
   private readonly handoverWaiters = new Set<() => void>()
   /** an `already-voted` claim is being checked against the strand */
   private checkingClaim = false
+  /** the consent given (or being given) for the last form: one prompt per coordinator and block */
+  private consent: { from: string, digest: string, signature: Promise<string> } | null = null
   /** observability: message counts by type, sent and received */
   readonly counts: Record<string, number> = {}
 
@@ -654,11 +656,18 @@ export class PoolAgent {
       this.lastHeardAt = this.o.now()
       return await this.post(from, { t: 'refuse', re: m.id, reason: check.reason })
     }
-    this.o.onStatus?.({ phase: 'signing' })
     const mine = this.o.contribution.voterEntry
+    const digest = consentDigest(m.block, this.o.ballot, mine.registrantId, mine.deviceKey)
+    // The same form from the same coordinator (a failover resend, a retried request) reuses the one
+    // consent this voter gave or is giving, never a second prompt (WR-01). The digest binds the
+    // block's cid and id, so another block always prompts.
+    if (this.consent === null || this.consent.from !== from || this.consent.digest !== digest) {
+      this.o.onStatus?.({ phase: 'signing' })
+      this.consent = { from, digest, signature: this.o.signConsent(digest) }
+    }
     let signature: string
     try {
-      signature = await this.o.signConsent(consentDigest(m.block, this.o.ballot, mine.registrantId, mine.deviceKey))
+      signature = await this.consent.signature
     } catch {
       this.lastHeardAt = this.o.now()
       return await this.post(from, { t: 'refuse', re: m.id, reason: 'the voter declined to sign' })

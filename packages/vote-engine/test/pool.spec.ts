@@ -817,6 +817,40 @@ describe('pool: a member\'s coordinator, and already-voted as a hint (CR-01)', f
   })
 })
 
+describe('pool: a duplicated form costs one consent prompt (WR-01)', function () {
+  this.timeout(30_000)
+
+  it('the same coordinator sending the same form twice gets the same signature twice from ONE signConsent call', async () => {
+    let calls = 0
+    let priv: Uint8Array | null = null
+    const h = await memberOfScripted({
+      signConsent: async (digest) => { calls++; await new Promise(resolve => setTimeout(resolve, 300)); return signDigestP256(digest, priv!) }
+    })
+    priv = h.a.priv
+    try {
+      const block = formPoolBlock([h.a.contribution, makeVoter(1).contribution, makeVoter(2).contribution], ballot)
+      // the second copy arrives while the first prompt is still open (a failover resend), and a third after it answered
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-1', topic: h.topic, block })
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-2', topic: h.topic, block })
+      const first = await h.c.next(m => m.body.re === 'f-1', 3_000)
+      const second = await h.c.next(m => m.body.re === 'f-2', 3_000)
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-3', topic: h.topic, block })
+      const third = await h.c.next(m => m.body.re === 'f-3', 3_000)
+      expect([first?.body.t, second?.body.t, third?.body.t]).to.deep.equal(['sign', 'sign', 'sign'])
+      expect(second?.body.signature).to.deep.equal(first?.body.signature)
+      expect(third?.body.signature).to.deep.equal(first?.body.signature)
+      expect(calls).to.equal(1)
+      // a different block is a different consent: it prompts again
+      const other = formPoolBlock([h.a.contribution, makeVoter(3).contribution, makeVoter(4).contribution], ballot)
+      await h.c.send(h.a.identity.peerId, { t: 'form', id: 'f-4', topic: h.topic, block: other })
+      expect((await h.c.next(m => m.body.re === 'f-4', 3_000))?.body.t).to.equal('sign')
+      expect(calls).to.equal(2)
+    } finally {
+      await h.stop()
+    }
+  })
+})
+
 describe('pool: a duplicate voter at commit (R1) - classification and the commit lookup', () => {
   const LOCAL = 'UNIQUE constraint failed: VoteBlockVoter.ElectionId, VoteBlockVoter.BallotId, VoteBlockVoter.RegistrantId'
   // the spike 101 text carries the control markers as 6-character escape text

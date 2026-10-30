@@ -39,6 +39,10 @@ export type RendezvousReply =
 
 /** A transport to one rendezvous: send a request, get its reply (an `error` reply is returned, not thrown). */
 export interface PoolRendezvousClient {
+  /**
+   * Send one request and return its reply. A transport that throws AFTER the request went out sets
+   * `requestSent: true` on the error, so a failover never delivers it twice (pool-failover.ts).
+   */
   call (request: RendezvousRequest, extraWaitMs?: number): Promise<RendezvousReply>
 }
 

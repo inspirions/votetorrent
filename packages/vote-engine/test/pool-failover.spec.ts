@@ -147,6 +147,47 @@ describe('createFailoverRendezvousClient (R3, D-30)', () => {
     expect(f.lastGood()).to.equal(1)
   })
 
+  it('F-11 a failure AFTER the request was sent is not resent elsewhere; the next call starts on the next address', async () => {
+    const sentThenTimedOut = Object.assign(new Error('pool frame read timed out'), { requestSent: true })
+    const a = rejecting(sentThenTimedOut)
+    const b = answering()
+    const f = createFailoverRendezvousClient([a, b])
+    let caught: unknown
+    try { await f.call(request) } catch (e) { caught = e }
+    expect((caught as Error).message).to.equal('rendezvous did not reply')
+    expect((caught as Error).message).to.not.contain('timed out')
+    expect(b.calls).to.have.length(0)
+    // the request is not delivered twice, but a hung address does not keep every later call either
+    expect(await f.call(request)).to.deep.equal(OK)
+    expect(b.calls).to.have.length(1)
+    expect(a.calls).to.have.length(1)
+    expect(f.lastGood()).to.equal(1)
+  })
+
+  it('F-12 the libp2p client marks a post-send failure (requestSent) and leaves a dial failure unmarked', async () => {
+    const { createLibp2pRendezvousClient } = await import('../src/pool/pool-wire.js')
+    const failedDial = createLibp2pRendezvousClient({ handle: () => undefined, dialProtocol: async () => { throw new Error('no route') } }, 'x', { requestTimeoutMs: 100 })
+    let dialErr: unknown
+    try { await failedDial.call(request) } catch (e) { dialErr = e }
+    expect((dialErr as { requestSent?: unknown }).requestSent).to.equal(undefined)
+    const sent: Uint8Array[] = []
+    const silent = {
+      send: (b: Uint8Array) => { sent.push(b) },
+      close: async () => undefined,
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) })
+    }
+    const hung = createLibp2pRendezvousClient({ handle: () => undefined, dialProtocol: async () => silent }, 'x', { requestTimeoutMs: 100 })
+    let readErr: unknown
+    try { await hung.call(request) } catch (e) { readErr = e }
+    expect(sent).to.have.length(1)
+    expect((readErr as { requestSent?: unknown }).requestSent).to.equal(true)
+    // and over a failover pair, the second address is never sent the same request
+    const b = answering()
+    const f = createFailoverRendezvousClient([hung, b])
+    try { await f.call(request) } catch { /* expected */ }
+    expect(b.calls).to.have.length(0)
+  })
+
   it('F-10 the module is pure: type-only imports, no Node or Hermes-hostile globals', () => {
     const file = join(dirname(fileURLToPath(import.meta.url)), '../src/pool/pool-failover.ts')
     const code = readFileSync(file, 'utf8')
