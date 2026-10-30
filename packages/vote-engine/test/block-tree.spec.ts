@@ -24,14 +24,18 @@ import {
   type BlockTreeRow
 } from '../src/blocks/index.js'
 import { canonicalJson } from '../src/voting/canonical.js'
-
-function seededShuffle<T> (items: readonly T[], seed: number): T[] {
-  const out = [...items]
-  let s = seed >>> 0
-  const next = (): number => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
-  for (let i = out.length - 1; i > 0; i--) { const j = Math.floor(next() * (i + 1)); [out[i], out[j]] = [out[j]!, out[i]!] }
-  return out
-}
+import { verifySigP256 } from '../src/database/initialize.js'
+import { consentDigest, poolBlockCid, poolBlockId } from '../src/pool/index.js'
+import { openElectionBlock, openVoteEntries } from '../src/key-release/index.js'
+import { ballotTemplateDigest, voterEntryDigest, type VoterEntryUnsigned } from '../src/voting/index.js'
+import {
+  FIXTURE_ELECTION_ID,
+  FIXTURE_REVISION,
+  makeCommittedElection,
+  makeFixtureElection,
+  makeFixtureVoter,
+  seededShuffle
+} from './fixtures/pool-blocks.js'
 
 const EID = 'election-bt-1'
 const SCOPE = { electionId: EID, electionRevision: 1 }
@@ -280,5 +284,88 @@ describe('block-tree (65-05: R5, D-50, D-51)', () => {
     if (late.ok) { expect(late.final).to.equal(true); expect(late.tree.root).to.equal(build(rs).root) }
     const refused = finalBlockTree([row('a'), row('a')], SCOPE, tl, 1500)
     expect(refused).to.include({ ok: false, reason: 'duplicate-block' })
+  })
+})
+
+describe('pool-blocks fixture (65-05: shared R5-R8 rows)', () => {
+  const set = makeCommittedElection({
+    ballotIds: ['ballot-a', 'ballot-b'],
+    blocks: [{ size: 3 }, { size: 4 }, { ballotIndex: 1, size: 3 }, { size: 3, payloadVersion: 1 }]
+  })
+
+  it('FX-1 rows are schema-shaped and self-consistent', () => {
+    expect(set.blocks).to.have.length(4)
+    for (const b of set.blocks) {
+      const r = b.row
+      expect(poolBlockCid(r.Ciphertext)).to.equal(r.Cid)
+      expect(r.Id).to.equal(poolBlockId(b.payload))
+      expect(r.EntryCount).to.equal(b.voters.length)
+      expect(set.voterRows.filter(v => v.BlockCid === r.Cid)).to.have.length(r.EntryCount)
+      expect(r.VoterRegistrantIds).to.equal(JSON.stringify(b.voters.map(v => v.voterEntry.registrantId).sort()))
+      expect(r.TemplateDigest).to.equal(ballotTemplateDigest(b.ballot.template, FIXTURE_REVISION))
+      expect(r.ElectionId).to.equal(FIXTURE_ELECTION_ID)
+      expect(r.ElectionRevision).to.equal(FIXTURE_REVISION)
+    }
+    expect(set.blocks.map(b => b.payloadVersion)).to.deep.equal([2, 2, 2, 1])
+    expect(set.rows).to.have.length(4)
+    expect(set.voterRows).to.have.length(13)
+    expect(set.receipts).to.have.length(13)
+  })
+
+  it('FX-2 consent and voter-entry signatures are real', () => {
+    for (const b of set.blocks) {
+      for (const vr of b.voterRows) {
+        const digest = consentDigest({ cid: b.row.Cid, blockId: b.row.Id }, b.ballot.poolBallot, vr.RegistrantId, vr.DeviceKey)
+        expect(verifySigP256(digest, vr.Signature, vr.DeviceKey)).to.equal(true)
+      }
+      for (const v of b.voters) {
+        const { signature, ...unsigned } = v.voterEntry
+        expect(verifySigP256(voterEntryDigest(unsigned as VoterEntryUnsigned), signature, v.voterEntry.deviceKey)).to.equal(true)
+      }
+    }
+  })
+
+  it('FX-3 blocks reopen after release; receipts carry the entries found in the block', () => {
+    const key = set.election.electionKey
+    for (const b of set.blocks) {
+      const opened = openElectionBlock(set.election.electionSecret, key, { blockId: b.row.Id, ciphertext: b.row.Ciphertext })
+      expect(opened.ok).to.equal(true)
+      if (!opened.ok) continue
+      const mine = set.receipts.filter(rc => b.voters.some(v => v.voterEntry === rc.voter))
+      expect(mine).to.have.length(b.voters.length)
+      expect(opened.payload.voterRecords.map(v => canonicalJson(v)).sort()).to.deep.equal(mine.map(rc => canonicalJson(rc.voter)).sort())
+      const receiptVotes = mine.flatMap(rc => rc.votes.map(v => canonicalJson(v))).sort()
+      if (b.payloadVersion === 2) {
+        const plain = openVoteEntries(set.election.electionSecret, key, b.ballot.poolBallot.ballotId, opened.payload)
+          .map(p => (p.ok ? canonicalJson(JSON.parse(p.voteEntryJson)) : 'FAILED')).sort()
+        expect(plain).to.deep.equal(receiptVotes)
+      } else {
+        expect(opened.payload.votes.map(v => canonicalJson(v)).sort()).to.deep.equal(receiptVotes)
+      }
+    }
+  })
+
+  it('FX-4 a raw voteEntry is used as is; voterBallots are signed sorted by ballotId', () => {
+    const election = makeFixtureElection({ ballotIds: ['ballot-a', 'ballot-b'] })
+    const raw = { v: 1 as const, ballotId: 'ballot-a', answers: [{ questionCode: 'q1', optionCodes: ['nope'] }], nonce: 'ab'.repeat(32) }
+    const v = makeFixtureVoter(election, election.ballots[0]!, 0, { voteEntry: raw as never, voterBallots: [election.ballots[1]!, election.ballots[0]!] })
+    expect(v.voteEntry).to.equal(raw)
+    expect(v.voteJson).to.equal(canonicalJson(raw))
+    expect(v.voterEntry.ballots.map(b => b.ballotId)).to.deep.equal(['ballot-a', 'ballot-b'])
+  })
+
+  it('FX-5 seededShuffle is a deterministic permutation; shuffled rows give the same root', () => {
+    const xs = [1, 2, 3, 4, 5, 6, 7]
+    expect(seededShuffle(xs, 3)).to.deep.equal(seededShuffle(xs, 3))
+    expect([...seededShuffle(xs, 3)].sort()).to.deep.equal(xs)
+    expect([1, 2, 3, 4, 5].some(s => JSON.stringify(seededShuffle(xs, s)) !== JSON.stringify(xs))).to.equal(true)
+    const scope = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION }
+    const ra = buildBlockTree(set.rows, scope)
+    const rb = buildBlockTree(seededShuffle(set.rows, 4), scope)
+    if (!ra.ok || !rb.ok) throw new Error('fixture rows refused')
+    const a = ra.tree
+    expect(rb.tree.root).to.equal(a.root)
+    const cids = new Set(set.rows.map(r => r.Cid))
+    expect(a.leaves.every(l => cids.has(l.cid))).to.equal(true)
   })
 })
