@@ -374,7 +374,13 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     for (const b of r.blocks) {
       if (b.status === 'invalid') excluded += b.attestedEntries
       else if (b.status === 'valid') for (const v of b.votes) { if (v.status === 'valid') valid++; else invalid++ }
-      else undecryptable += b.declaredEntries
+      else if (b.shadowedBy === null) undecryptable += b.declaredEntries
+      // T-65-05-03: a shadowed block counts nothing, and only a block of a shared Cid is ever shadowed
+      if (b.shadowedBy !== null) {
+        expect(b.attestedEntries).to.equal(0)
+        expect(r.blocks.some((o: any) => o.leafHash === b.shadowedBy && o.blockCid === b.blockCid)).to.equal(true)
+      }
+      expect(b.leafHash).to.match(/^[0-9a-f]{64}$/)
     }
     expect({ valid, invalid, excluded, undecryptable }).to.deep.equal({ valid: t.valid, invalid: t.invalid, excluded: t.excluded, undecryptable: t.undecryptable })
     const all = [...r.findings, ...r.blocks.flatMap((b: any) => b.findings)]

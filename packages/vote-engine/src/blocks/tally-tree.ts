@@ -38,6 +38,10 @@
 // (WR-04): min(EntryCount, listed voters, listed voters with an authenticated voter row). An invalid block is
 // untrusted, so its declared EntryCount alone (up to 2^53 - 1) must not inflate the excluded volume.
 // Its option counts are zero, and the leaf lists the block-level error codes in `excludedFor`.
+// ONE CIPHERTEXT, ONE COUNT (T-65-05-03). R5 may keep several authenticated leaves for one Cid. R7 marks all but one
+// of them `shadowedBy` with attestedEntries 0, so they are excluded leaves with 0 votes. tallyTreeFrom refuses a
+// report where two findings of one Cid count entries, and verifyTallyTree fails a tally where two leaves of one Cid
+// have votes, so the same entries are never in votes or excluded twice.
 // Why: a block-level error means R7 could not show that the block holds what was committed, that its voters
 // consented to it, or that its votes belong to it alone. Counting its votes would let a hostile writer or
 // replica inject, or count twice, votes that no valid consent backs. Dropping them silently would hide them.
@@ -138,7 +142,7 @@ export interface TallyTree {
   size: number
   /** the root histogram: the raw outcome */
   histogram: TallyHistogram
-  /** R5 leaf order (ascending UTF-8 bytes of Cid) */
+  /** R5 leaf order (ascending UTF-8 bytes of Cid, then of leafData) */
   leaves: readonly TallyLeaf[]
   /** R5 node order (post-order, root last); [] when size 0 */
   nodes: readonly TallyNode[]
@@ -363,19 +367,31 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
   const treeProblem = treeSelfProblem(t, leaves, nodes)
   if (treeProblem !== null) return refuse('inconsistent-inputs', treeProblem)
 
+  // T-65-05-03: a Cid may name several leaves, so findings are matched to leaves by the leaf hash
   const findings = new Map<string, Rec>()
   for (const f of v.blocks as unknown[]) {
     if (!isRec(f) || typeof f.blockCid !== 'string') return refuse('inconsistent-inputs', 'a block finding has no Cid')
-    if (findings.has(f.blockCid)) return refuse('inconsistent-inputs', `two findings for Cid ${f.blockCid}`)
-    findings.set(f.blockCid, f)
+    if (typeof f.leafHash !== 'string') return refuse('inconsistent-inputs', `block ${f.blockCid}: the finding has no leaf hash`)
+    if (findings.has(f.leafHash)) return refuse('inconsistent-inputs', `two findings for leaf ${f.leafHash}`)
+    findings.set(f.leafHash, f)
   }
   // WR-07: the report covers exactly the tree's blocks, so no finding is silently dropped from the tally
   if (findings.size !== leaves.length) {
     return refuse('inconsistent-inputs', `the report has ${findings.size} blocks; the tree has ${leaves.length} leaves`)
   }
-  const leafCids = new Set(leaves.map(l => (l as Rec).cid))
-  for (const cid of findings.keys()) {
-    if (!leafCids.has(cid)) return refuse('inconsistent-inputs', `the report's block ${cid} is not a leaf of the tree`)
+  const leafHashes = new Set(leaves.map(l => (l as Rec).hash))
+  for (const [hash, f] of findings) {
+    if (!leafHashes.has(hash)) return refuse('inconsistent-inputs', `the report's block ${String(f.blockCid)} is not a leaf of the tree`)
+  }
+  // T-65-05-03: one ciphertext is counted once. Per Cid, at most one finding is valid, and at most one finding
+  // counts entries (a valid one, or an invalid one with attestedEntries > 0)
+  const countersByCid = new Map<string, number>()
+  for (const f of findings.values()) {
+    const counts = f.status === 'valid' || (f.status === 'invalid' && isCount(f.attestedEntries) && f.attestedEntries > 0)
+    if (!counts) continue
+    const n = (countersByCid.get(f.blockCid as string) ?? 0) + 1
+    if (n > 1) return refuse('inconsistent-inputs', `block ${String(f.blockCid)}: two leaves of this Cid count its entries`)
+    countersByCid.set(f.blockCid as string, n)
   }
 
   const outLeaves: TallyLeaf[] = []
@@ -385,9 +401,9 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
     if (!isRec(l) || typeof l.cid !== 'string' || typeof l.ballotId !== 'string' || typeof l.leafData !== 'string' || !isCount(l.entryCount)) {
       return refuse('malformed-input', `tree leaf ${i} is malformed`)
     }
-    const finding = findings.get(l.cid)
-    if (finding === undefined) return refuse('inconsistent-inputs', `no finding for Cid ${l.cid}`)
-    if (finding.ballotId !== l.ballotId || finding.blockId !== l.blockId || finding.declaredEntries !== l.entryCount) {
+    const finding = typeof l.hash === 'string' ? findings.get(l.hash) : undefined
+    if (finding === undefined) return refuse('inconsistent-inputs', `no finding for leaf ${i} (Cid ${l.cid})`)
+    if (finding.blockCid !== l.cid || finding.ballotId !== l.ballotId || finding.blockId !== l.blockId || finding.declaredEntries !== l.entryCount) {
       return refuse('inconsistent-inputs', `block ${l.cid}: the report's ballot, block id or entry count differs from the tree leaf`)
     }
     const h = leafHistogram(l.ballotId, l.entryCount, finding, checked.byId)
@@ -465,7 +481,10 @@ function treeSelfProblem (t: Rec, leaves: unknown[], nodes: unknown[]): string |
       typeof l.leafData !== 'string' || !isCount(l.entryCount) || typeof l.hash !== 'string') {
       return `tree leaf ${i} is malformed`
     }
-    if (i > 0 && compareUtf8((leaves[i - 1] as Rec).cid as string, l.cid) >= 0) return `tree leaf ${i} is not after leaf ${i - 1} in Cid order`
+    const prev = i > 0 ? leaves[i - 1] as Rec : null
+    if (prev !== null && (compareUtf8(prev.cid as string, l.cid) || compareUtf8(prev.leafData as string, l.leafData)) >= 0) {
+      return `tree leaf ${i} is not after leaf ${i - 1} in leaf order (Cid, then leafData)`
+    }
     let parsed: unknown
     try { parsed = JSON.parse(l.leafData) } catch { return `tree leaf ${i}: leafData is not JSON` }
     if (!Array.isArray(parsed) || parsed.length !== 8 || canonicalJson(parsed) !== l.leafData) return `tree leaf ${i}: leafData is not the canonical leaf tuple`
@@ -712,8 +731,8 @@ function verifyChecked (input: unknown): TallyVerifyResult {
   // shape
   for (let i = 0; i < leaves.length; i++) {
     if (leaves[i]!.index !== i) return vfail('shape-mismatch', `leaf ${i} carries index ${leaves[i]!.index}`, { leafIndex: i })
-    if (i > 0 && compareUtf8(leaves[i - 1]!.blockCid, leaves[i]!.blockCid) >= 0) {
-      return vfail('shape-mismatch', `leaf ${i} is not after leaf ${i - 1} in Cid order`, { leafIndex: i })
+    if (i > 0 && (compareUtf8(leaves[i - 1]!.blockCid, leaves[i]!.blockCid) || compareUtf8(leaves[i - 1]!.leafData, leaves[i]!.leafData)) >= 0) {
+      return vfail('shape-mismatch', `leaf ${i} is not after leaf ${i - 1} in leaf order (Cid, then leafData)`, { leafIndex: i })
     }
   }
   const shape = expectedShape(leaves.length)
@@ -740,10 +759,20 @@ function verifyChecked (input: unknown): TallyVerifyResult {
   }
 
   // nodes
+  const countingLeafOf = new Map<string, number>()
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]!
     if (n.range[1] - n.range[0] === 1) {
       const leaf = leaves[n.range[0]]!
+      // T-65-05-03: one ciphertext is counted once; of the leaves sharing a Cid, at most one has votes
+      const counts = own(n.histogram.ballots, leaf.ballotId) ? n.histogram.ballots[leaf.ballotId]! : null
+      if (counts !== null && counts.votes > 0) {
+        const other = countingLeafOf.get(leaf.blockCid)
+        if (other !== undefined) {
+          return vfail('histogram-mismatch', `leaf node ${i}: leaf ${other} of the same Cid already counts its entries`, { nodeIndex: i, leafIndex: n.range[0] })
+        }
+        countingLeafOf.set(leaf.blockCid, n.range[0])
+      }
       if (n.merkleHash !== blockLeafHash(leaf.leafData)) return vfail('merkle-hash-mismatch', `leaf node ${i}: merkle hash is not the leaf hash`, { nodeIndex: i })
       const problem = leafBoundProblem(n.histogram, leaf)
       if (problem !== null) return vfail('histogram-mismatch', `leaf node ${i}: ${problem}`, { nodeIndex: i })

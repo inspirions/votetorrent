@@ -6,7 +6,7 @@
 import { expect } from 'chai'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { BLOCK_TREE_EMPTY_ROOT, blockCidOf, buildBlockTree, type BlockAuthorization } from '../src/blocks/block-tree.js'
+import { BLOCK_TREE_EMPTY_ROOT, blockCidOf, blockLeafData, blockLeafHash, buildBlockTree, type BlockAuthorization } from '../src/blocks/block-tree.js'
 import { TALLY_TREE_DOMAIN, addHistograms, buildTallyTree, tallyNodeHash, tallyTreeFrom, verifyTallyTree } from '../src/blocks/tally-tree.js'
 import { validateElectionBlocks } from '../src/blocks/validate-blocks.js'
 import { secp256k1 } from '@noble/curves/secp256k1.js'
@@ -148,8 +148,8 @@ function verdictsFor (ballotId: string, blockNo: number, n: number): any[] {
 }
 
 const blockFinding = (r: any, over: any = {}): any => ({
-  blockCid: r.Cid, blockId: r.Id, ballotId: r.BallotId, payloadVersion: 2, status: 'valid', declaredEntries: r.EntryCount,
-  attestedEntries: r.EntryCount, votes: [], findings: [], ...over
+  blockCid: r.Cid, leafHash: blockLeafHash(blockLeafData(r)), shadowedBy: null, blockId: r.Id, ballotId: r.BallotId, payloadVersion: 2,
+  status: 'valid', declaredEntries: r.EntryCount, attestedEntries: r.EntryCount, votes: [], findings: [], ...over
 })
 
 const report = (blocks: any[], over: any = {}): any => ({
@@ -408,6 +408,10 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     expect(reason(s.tree, withBlock(1, { ballotId: 'ballot-b' }))).to.equal('inconsistent-inputs')
     expect(reason(s.tree, withBlock(1, { declaredEntries: 99 }))).to.equal('inconsistent-inputs')
     expect(reason(s.tree, withBlock(1, { blockId: 'id-other' }))).to.equal('inconsistent-inputs')
+    // T-65-05-03: findings are matched by leaf hash; a missing, foreign or repeated one is refused
+    expect(reason(s.tree, withBlock(1, { leafHash: undefined }))).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, withBlock(1, { leafHash: 'ab'.repeat(32) }))).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, withBlock(1, { leafHash: s.validation.blocks[0].leafHash }))).to.equal('inconsistent-inputs')
     const flip = (h: string): string => (h[0] === 'a' ? 'b' : 'a') + h.slice(1)
     const t1 = tree(); t1.nodes[0].hash = flip(t1.nodes[0].hash)
     expect(reason(t1, s.validation)).to.equal('inconsistent-inputs')

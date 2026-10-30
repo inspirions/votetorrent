@@ -14,7 +14,11 @@
 //   - my-voter-entry (b): the VoteBlockVoter row for (election, ballot, registrant) names a block whose Id
 //     matches, whose registrant list holds me once, whose consent signature verifies, and whose device key
 //     is the receipt's; my own voter-entry signature verifies; after the release my voter entry is in the
-//     payload exactly once.
+//     payload exactly once and the block's voter list is the payload's list of voters.
+//   - Several rows may share my Cid (T-65-05-03: R5 keeps every authenticated row as a leaf, for example the honest
+//     block and a forged one that lists me plus a colluding registrant). Each is judged, and the best result is
+//     reported: fewest failures, then fewest checks short of a plain pass, then leaf order. Before the release
+//     both may pass (nothing shows yet which list the ciphertext holds); after it only the honest leaf can.
 //   - block-hash (c): the Cid is the digest of the ciphertext with no key; after the release the Id is the
 //     digest of the payload too.
 //   - under-root (d): the leaf hash is recomputed from MY block row (never taken from a proof) and verified
@@ -45,6 +49,7 @@ import {
 } from './block-tree.js'
 import { checkElectionSecret, openCommittedBlock, type OpenCommittedBlockResult } from './open-committed-block.js'
 import { consentDigest, poolBlockCid, poolBlockId, type PoolBallot } from '../pool/pool-block.js'
+import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { canonicalJson } from '../voting/canonical.js'
 import { voterEntryDigest, type VoteEntry, type VoterEntry } from '../voting/vote-entries.js'
 import { verifySigP256 } from '../database/initialize.js'
@@ -96,7 +101,7 @@ export type SliceFailReason =
   | 'not-recorded' | 'ambiguous-record' | 'block-row-missing' | 'scope-mismatch' | 'block-id-mismatch'
   | 'template-mismatch' | 'device-key-mismatch' | 'voter-list-malformed' | 'not-in-voter-list'
   | 'consent-signature-invalid' | 'voter-entry-signature-invalid' | 'ballot-not-in-voter-entry'
-  | 'voter-entry-missing-or-altered'
+  | 'voter-entry-missing-or-altered' | 'voter-list-mismatch'
   | 'vote-missing-or-altered' | 'vote-duplicated'
   | 'block-does-not-open'
   | 'cid-mismatch' | 'id-mismatch'
@@ -191,7 +196,7 @@ function inScope<T extends { ElectionId: unknown, ElectionRevision: unknown }> (
 
 type LocateResult =
   | { found: false, result: SliceCheckResult }
-  | { found: true, voterRow: SliceVoterRow, block: SliceBlockRow }
+  | { found: true, voterRow: SliceVoterRow, blocks: SliceBlockRow[] }
 
 function locate (ballotId: string, registrantId: string, voterRows: readonly SliceVoterRow[], allRows: readonly unknown[]): LocateResult {
   const mineRows = voterRows.filter(v => v.BallotId === ballotId && v.RegistrantId === registrantId)
@@ -200,8 +205,17 @@ function locate (ballotId: string, registrantId: string, voterRows: readonly Sli
   const voterRow = mineRows[0]!
   const blocks = allRows.filter((r): r is SliceBlockRow => isObject(r) && r.Cid === voterRow.BlockCid)
   if (blocks.length === 0) return { found: false, result: fail('my-voter-entry', 'block-row-missing', 'the VoteBlockVoter row names a block that is not among the rows') }
-  if (blocks.length > 1) return { found: false, result: fail('my-voter-entry', 'ambiguous-record', 'more than one VoteBlock row has the recorded Cid') }
-  return { found: true, voterRow, block: blocks[0]! }
+  // T-65-05-03: several rows may share the Cid (R5 keeps every authenticated one as a leaf); the caller judges each
+  return { found: true, voterRow, blocks }
+}
+
+/** UTF-8 byte order (R5's leaf order); code units would order astral characters differently. */
+function compareBytes (a: string, b: string): number {
+  const x = utf8ToBytes(a)
+  const y = utf8ToBytes(b)
+  const n = Math.min(x.length, y.length)
+  for (let i = 0; i < n; i++) if (x[i] !== y[i]) return x[i]! - y[i]!
+  return x.length - y.length
 }
 
 function countCanonical (list: readonly unknown[], wanted: string): number {
@@ -284,7 +298,7 @@ export function sliceChecks (
       const built = treeOverRows()
       if (built !== null && built.ok && built.tree.root === anchor.root) {
         const tree: BlockTree = built.tree
-        const leaf = tree.leaves.find(l => l.cid === block.Cid)
+        const leaf = tree.leaves.find(l => l.hash === leafHash)
         if (leaf !== undefined && (anchor.proof.treeSize !== tree.size || anchor.proof.leafIndex !== leaf.index)) {
           return fail('under-root', 'malformed-proof', 'the proof disagrees with the tree built from the rows')
         }
@@ -294,7 +308,7 @@ export function sliceChecks (
     const built = treeOverRows()
     if (built === null) return notApplicable('under-root', 'no-authorization')
     if (!built.ok) return fail('under-root', 'tree-refused', `${built.reason}: ${built.detail}`)
-    const proof = built.tree.proofFor(block.Cid)
+    const proof = built.tree.proofFor(block.Cid, leafHash)
     if (!proof.ok) return fail('under-root', 'not-under-root', 'the block is not among the rows the tree covers')
     return verdict(verifyInclusion(leafHash, proof.proof, anchor.root))
   }
@@ -313,130 +327,164 @@ export function sliceChecks (
         notApplicable('under-root', 'no-block')
       ]
     } else {
-      const { voterRow, block } = located
-      blockCid = block.Cid
-      let opened: OpenCommittedBlockResult | null = null
-      if (released && release !== undefined && release !== null) {
-        opened = openCommittedBlock(block, release.secretKey, electionKey)
-      }
-
-      // my-voter-entry (b): first failure wins
-      let voterEntryResult: SliceCheckResult | null = null
-      const bad = (reason: SliceFailReason, detail: string): void => {
-        if (voterEntryResult === null) voterEntryResult = fail('my-voter-entry', reason, detail)
-      }
-      if (block.ElectionId !== electionId || normaliseRevision(block.ElectionRevision) !== revision || block.BallotId !== ballotId) {
-        bad('scope-mismatch', 'the block row belongs to another election, revision or ballot')
-      } else if (block.Id !== voterRow.BlockId) {
-        bad('block-id-mismatch', 'the VoteBlockVoter row names another block Id than the block row holds')
-      } else if (block.TemplateDigest !== vote.templateDigest) {
-        bad('template-mismatch', 'the block row carries another ballot template digest than my vote')
-      } else if (voterRow.DeviceKey !== voter.deviceKey) {
-        bad('device-key-mismatch', 'the recorded device key is not the key this receipt was signed with')
-      } else {
-        let list: unknown
-        let listOk = true
-        try {
-          list = JSON.parse(block.VoterRegistrantIds)
-        } catch {
-          listOk = false
+      const { voterRow, blocks } = located
+      blockCid = voterRow.BlockCid
+      const evaluate = (block: SliceBlockRow): SliceCheckResult[] => {
+        let opened: OpenCommittedBlockResult | null = null
+        if (released && release !== undefined && release !== null) {
+          opened = openCommittedBlock(block, release.secretKey, electionKey)
         }
-        if (!listOk || !Array.isArray(list) || !list.every(x => typeof x === 'string')) {
-          bad('voter-list-malformed', 'the block voter list is not a JSON array of strings')
-        } else if ((list as string[]).filter(x => x === voter.registrantId).length !== 1) {
-          bad('not-in-voter-list', 'my registrant does not appear exactly once in the block voter list')
+
+        // my-voter-entry (b): first failure wins
+        let voterEntryResult: SliceCheckResult | null = null
+        const bad = (reason: SliceFailReason, detail: string): void => {
+          if (voterEntryResult === null) voterEntryResult = fail('my-voter-entry', reason, detail)
+        }
+        if (block.ElectionId !== electionId || normaliseRevision(block.ElectionRevision) !== revision || block.BallotId !== ballotId) {
+          bad('scope-mismatch', 'the block row belongs to another election, revision or ballot')
+        } else if (block.Id !== voterRow.BlockId) {
+          bad('block-id-mismatch', 'the VoteBlockVoter row names another block Id than the block row holds')
+        } else if (block.TemplateDigest !== vote.templateDigest) {
+          bad('template-mismatch', 'the block row carries another ballot template digest than my vote')
+        } else if (voterRow.DeviceKey !== voter.deviceKey) {
+          bad('device-key-mismatch', 'the recorded device key is not the key this receipt was signed with')
         } else {
-          let consentOk = false
+          let list: unknown
+          let listOk = true
           try {
-            // consentDigest reads only electionId, revision and ballotId of the pool ballot
-            const poolBallot: PoolBallot = { electionKey: { electionId, revision, jointPublicKey }, ballotId, templateDigest: block.TemplateDigest }
-            consentOk = verifySigP256(
-              consentDigest({ cid: block.Cid, blockId: block.Id }, poolBallot, voter.registrantId, voterRow.DeviceKey),
-              voterRow.Signature,
-              voterRow.DeviceKey
-            )
+            list = JSON.parse(block.VoterRegistrantIds)
           } catch {
-            consentOk = false
+            listOk = false
           }
-          if (!consentOk) {
-            bad('consent-signature-invalid', 'the recorded consent signature does not verify')
-          } else if (!voter.ballots.some(b => isObject(b) && b.ballotId === ballotId && b.templateDigest === vote.templateDigest)) {
-            bad('ballot-not-in-voter-entry', 'my voter entry does not list this ballot with this template')
+          if (!listOk || !Array.isArray(list) || !list.every(x => typeof x === 'string')) {
+            bad('voter-list-malformed', 'the block voter list is not a JSON array of strings')
+          } else if ((list as string[]).filter(x => x === voter.registrantId).length !== 1) {
+            bad('not-in-voter-list', 'my registrant does not appear exactly once in the block voter list')
           } else {
-            let entryOk = false
+            let consentOk = false
             try {
-              entryOk = verifySigP256(voterEntryDigest(voter), voter.signature, voter.deviceKey)
+              // consentDigest reads only electionId, revision and ballotId of the pool ballot
+              const poolBallot: PoolBallot = { electionKey: { electionId, revision, jointPublicKey }, ballotId, templateDigest: block.TemplateDigest }
+              consentOk = verifySigP256(
+                consentDigest({ cid: block.Cid, blockId: block.Id }, poolBallot, voter.registrantId, voterRow.DeviceKey),
+                voterRow.Signature,
+                voterRow.DeviceKey
+              )
             } catch {
-              entryOk = false
+              consentOk = false
             }
-            if (!entryOk) {
-              bad('voter-entry-signature-invalid', 'my voter entry signature does not verify')
-            } else if (opened !== null) {
-              if (!opened.ok) {
-                bad('block-does-not-open', describeOpenFailure(opened))
-              } else {
-                let mineVoter: string | null = null
-                try {
-                  mineVoter = canonicalJson(voter)
-                } catch {
-                  mineVoter = null
-                }
-                if (mineVoter === null || countCanonical(opened.payload.voterRecords, mineVoter) !== 1) {
-                  bad('voter-entry-missing-or-altered', 'my voter entry is not in the block payload exactly once')
+            if (!consentOk) {
+              bad('consent-signature-invalid', 'the recorded consent signature does not verify')
+            } else if (!voter.ballots.some(b => isObject(b) && b.ballotId === ballotId && b.templateDigest === vote.templateDigest)) {
+              bad('ballot-not-in-voter-entry', 'my voter entry does not list this ballot with this template')
+            } else {
+              let entryOk = false
+              try {
+                entryOk = verifySigP256(voterEntryDigest(voter), voter.signature, voter.deviceKey)
+              } catch {
+                entryOk = false
+              }
+              if (!entryOk) {
+                bad('voter-entry-signature-invalid', 'my voter entry signature does not verify')
+              } else if (opened !== null) {
+                if (!opened.ok) {
+                  bad('block-does-not-open', describeOpenFailure(opened))
+                } else {
+                  let mineVoter: string | null = null
+                  try {
+                    mineVoter = canonicalJson(voter)
+                  } catch {
+                    mineVoter = null
+                  }
+                  if (mineVoter === null || countCanonical(opened.payload.voterRecords, mineVoter) !== 1) {
+                    bad('voter-entry-missing-or-altered', 'my voter entry is not in the block payload exactly once')
+                  } else {
+                    // T-65-05-03: the row's voter list must be the payload's voters, or the row is not the leaf
+                    // that counts this ciphertext (R7: voter-count-mismatch, voter-list-mismatch)
+                    let payloadList: string | null = null
+                    try {
+                      payloadList = canonicalJson((opened.payload.voterRecords as Array<{ registrantId?: unknown }>).map(r => r?.registrantId).sort())
+                    } catch {
+                      payloadList = null
+                    }
+                    if (payloadList === null || payloadList !== canonicalJson(list)) {
+                      bad('voter-list-mismatch', 'the block voter list is not the list of voters in the payload')
+                    }
+                  }
                 }
               }
             }
           }
         }
-      }
-      const myVoterEntry: SliceCheckResult = voterEntryResult ?? pass('my-voter-entry', released ? [] : ['voter-entry-in-payload'])
+        const myVoterEntry: SliceCheckResult = voterEntryResult ?? pass('my-voter-entry', released ? [] : ['voter-entry-in-payload'])
 
-      // my-vote (a)
-      let myVote: SliceCheckResult
-      if (opened === null) {
-        myVote = { check: 'my-vote', status: 'pending-key-release' }
-      } else if (!opened.ok) {
-        myVote = fail('my-vote', 'block-does-not-open', describeOpenFailure(opened))
-      } else {
-        let wanted: string | null = null
-        try {
-          wanted = canonicalJson(vote)
-        } catch {
-          wanted = null
+        // my-vote (a)
+        let myVote: SliceCheckResult
+        if (opened === null) {
+          myVote = { check: 'my-vote', status: 'pending-key-release' }
+        } else if (!opened.ok) {
+          myVote = fail('my-vote', 'block-does-not-open', describeOpenFailure(opened))
+        } else {
+          let wanted: string | null = null
+          try {
+            wanted = canonicalJson(vote)
+          } catch {
+            wanted = null
+          }
+          const unopened = opened.votes.filter(v => !v.ok).length
+          const matches = wanted === null ? 0 : opened.votes.filter(v => v.ok && v.entryJson === wanted).length
+          if (matches === 1) myVote = pass('my-vote', [])
+          else if (matches === 0) {
+            myVote = fail('my-vote', 'vote-missing-or-altered', `my vote entry is not among the opened votes (${unopened} did not open); this also covers another device's vote under my registrant`)
+          } else myVote = fail('my-vote', 'vote-duplicated', 'my vote entry appears more than once among the opened votes')
         }
-        const unopened = opened.votes.filter(v => !v.ok).length
-        const matches = wanted === null ? 0 : opened.votes.filter(v => v.ok && v.entryJson === wanted).length
-        if (matches === 1) myVote = pass('my-vote', [])
-        else if (matches === 0) {
-          myVote = fail('my-vote', 'vote-missing-or-altered', `my vote entry is not among the opened votes (${unopened} did not open); this also covers another device's vote under my registrant`)
-        } else myVote = fail('my-vote', 'vote-duplicated', 'my vote entry appears more than once among the opened votes')
-      }
 
-      // block-hash (c)
-      let blockHash: SliceCheckResult
-      let cidOk = false
-      try {
-        cidOk = poolBlockCid(block.Ciphertext) === block.Cid
-      } catch {
-        cidOk = false
-      }
-      if (!cidOk) {
-        blockHash = fail('block-hash', 'cid-mismatch', 'the block Cid is not the digest of its ciphertext')
-      } else if (opened === null) {
-        blockHash = pass('block-hash', ['block-id'])
-      } else if (!opened.ok) {
-        blockHash = fail('block-hash', 'block-does-not-open', describeOpenFailure(opened))
-      } else {
-        let idOk = false
+        // block-hash (c)
+        let blockHash: SliceCheckResult
+        let cidOk = false
         try {
-          idOk = poolBlockId(opened.payload) === block.Id
+          cidOk = poolBlockCid(block.Ciphertext) === block.Cid
         } catch {
-          idOk = false
+          cidOk = false
         }
-        blockHash = idOk ? pass('block-hash', []) : fail('block-hash', 'id-mismatch', 'the block Id is not the digest of its payload')
-      }
+        if (!cidOk) {
+          blockHash = fail('block-hash', 'cid-mismatch', 'the block Cid is not the digest of its ciphertext')
+        } else if (opened === null) {
+          blockHash = pass('block-hash', ['block-id'])
+        } else if (!opened.ok) {
+          blockHash = fail('block-hash', 'block-does-not-open', describeOpenFailure(opened))
+        } else {
+          let idOk = false
+          try {
+            idOk = poolBlockId(opened.payload) === block.Id
+          } catch {
+            idOk = false
+          }
+          blockHash = idOk ? pass('block-hash', []) : fail('block-hash', 'id-mismatch', 'the block Id is not the digest of its payload')
+        }
 
-      checks = [myVote, myVoterEntry, blockHash, underRoot(block)]
+        return [myVote, myVoterEntry, blockHash, underRoot(block)]
+      }
+      // T-65-05-03: with one row this is the old path. With several rows of the Cid (an honest leaf and a forged one
+      // that also lists me), each is judged and the best result stands: fewest failures, then fewest checks short of
+      // a plain pass, then leaf order. After the release only the row whose voter list is the payload's can pass
+      // my-voter-entry, so the honest leaf is the one reported.
+      if (blocks.length === 1) {
+        checks = evaluate(blocks[0]!)
+      } else {
+        const short = (cs: SliceCheckResult[]): [number, number] => [
+          cs.filter(c => c.status === 'fail').length,
+          cs.filter(c => !(c.status === 'pass' && c.pendingAfterRelease.length === 0)).length
+        ]
+        const leafKey = (b: SliceBlockRow): string => { try { return blockLeafData(b) } catch { return '' } }
+        const judged = blocks.map(b => ({ checks: evaluate(b), key: leafKey(b) }))
+        judged.sort((a, b) => {
+          const [fa, na] = short(a.checks)
+          const [fb, nb] = short(b.checks)
+          return (fa - fb) || (na - nb) || compareBytes(a.key, b.key)
+        })
+        checks = judged[0]!.checks
+      }
     }
     const anyFail = checks.some(c => c.status === 'fail')
     const allPass = checks.every(c => c.status === 'pass' && c.pendingAfterRelease.length === 0)

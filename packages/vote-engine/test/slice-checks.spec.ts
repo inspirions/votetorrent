@@ -447,6 +447,23 @@ describe('slice-checks (65-06: R6, D-60, D-61, D-13)', function () {
     expect(failReason(chk(sliceChecks(rc, rows, voterRows, anchor, release, { ...AUTH, ballots: 'x' } as never), 0, 'under-root'))).to.equal('tree-refused')
   })
 
+  it('SC-14 (T-65-05-03) several block rows with my Cid are each judged; the best result stands, in any order', () => {
+    const m = mine(0)
+    // an exact copy of my block row used to be ambiguous-record; it is now the same leaf twice and passes
+    for (const order of [[...rows, { ...m.myBlockRow }], [{ ...m.myBlockRow }, ...rows]]) {
+      const r = ok(sliceChecks(m.receipt, order, voterRows, anchor, release, AUTH))
+      expect(r.ballots[0]!.verdict, JSON.stringify(r.ballots[0]!.checks)).to.equal('pass')
+    }
+    // a copy with a list that is not the payload's fails my-voter-entry on its own, and loses to my real row
+    const others = JSON.parse(m.myBlockRow.VoterRegistrantIds).filter((x: string) => x !== m.receipt.voter.registrantId)
+    const wrongList = { ...m.myBlockRow, VoterRegistrantIds: JSON.stringify([...others, m.receipt.voter.registrantId, 'zz-extra'].sort()), EntryCount: others.length + 2 }
+    const alone = sliceChecks(m.receipt, rows.map(r => (r === m.myBlockRow ? wrongList : r)), voterRows, anchor, release, AUTH)
+    expect(failReason(chk(alone, 0, 'my-voter-entry'))).to.equal('voter-list-mismatch')
+    for (const order of [[wrongList, ...rows], [...rows, wrongList]]) {
+      expect(ok(sliceChecks(m.receipt, order, voterRows, anchor, release, AUTH)).ballots[0]!.verdict).to.equal('pass')
+    }
+  })
+
   it('SC-9 a wrong or invalid secret is refused at the top level; the caller secret is left alone', () => {
     const jointPublicKey = release.jointPublicKey
     const wrong = sliceChecks(set.receipts[0]!, rows, voterRows, anchor, { secretKey: secp256k1.utils.randomSecretKey(), jointPublicKey }, AUTH)

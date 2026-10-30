@@ -14,8 +14,9 @@
 //     ciphertext). The list enters as a digest because the leaf data is published inside the tally tree and
 //     must not carry registrant ids.
 //   - Leaf hash: sha256(0x00 || utf8(leafData)).  Node hash: sha256(0x01 || leftHash || rightHash).
-//   - Leaf order: ascending by the UTF-8 bytes of Cid (a shorter prefix sorts first). A Cid must be a base32
-//     CID ('b' then a-z, 2-7), so that order is total.
+//   - Leaf order: ascending by the UTF-8 bytes of Cid (a shorter prefix sorts first), then by the UTF-8 bytes of
+//     leafData. A Cid must be a base32 CID ('b' then a-z, 2-7), and two leaves of one Cid never have equal
+//     leafData (exact duplicates collapse), so that order is total.
 //   - Shape: RFC 6962. A range of width n > 1 splits at the largest power of two strictly below n; a lone
 //     node is carried up and NEVER duplicated.
 //   - Empty set: the root is sha256(utf8('vt-block-tree/1/empty')). One leaf: the root is its own hash.
@@ -25,20 +26,23 @@
 //   - A row that is not shaped like a block is set aside as `malformed-row` in `rejected`.
 //   - Rows that share an Id but not a Cid are separate blocks, each with its own leaf (T-65-05-03). R7 judges
 //     each one on its own consent rows, so a forged row reusing an honest Id cannot take the honest leaf.
-//   - Rows that share a Cid are reduced to one (a leaf is named by its Cid). The kept row is chosen by
-//     authentication (T-65-05-03), in this order:
-//       1. an AUTHENTICATED row first: its Cid is the digest of its own Ciphertext (blockCidOf), its voter list
-//          is a canonical JSON array as long as EntryCount, its TemplateDigest is the template digest of its
-//          ballot, and every listed registrant has a VoteBlockVoter row naming this Cid that judgeBlockVoters
-//          authenticates (consent signature over consentDigest, Registrant and Association, CR-02). These are
-//          exactly R7's no-key block checks other than the cross-block one, so R7 finds none of them on it;
-//       2. among authenticated rows, the most listed voters;
-//       3. then the rule for rows that are not authenticated: a Cid that matches the row's own Ciphertext;
-//       4. then the lowest UTF-8 bytes of canonicalJson([Cid, Id, BallotId, EntryCount, TemplateDigest,
-//          VoterRegistrantIds, Ciphertext]).
-//     Every other row of the Cid goes to `rejected` as `duplicate-block`. When no row of the Cid authenticates,
-//     rules 3 and 4 decide, and R7 finds the kept row invalid anyway. Authentication is computed only for a Cid
-//     that more than one row names, so a tree with no collision checks no signature.
+//   - Rows that share a Cid (T-65-05-03). The R5 root is final at hashingVotes, before the key release, so which
+//     voter list the ciphertext really holds cannot be decided here. Each row of a shared Cid is first checked for
+//     AUTHENTICATION: its Cid is the digest of its own Ciphertext (blockCidOf), its voter list is a canonical JSON
+//     array as long as EntryCount, its TemplateDigest is the template digest of its ballot, and every listed
+//     registrant has a VoteBlockVoter row naming this Cid that judgeBlockVoters authenticates (consent signature
+//     over consentDigest, Registrant and Association, CR-02). These are exactly R7's no-key block checks other than
+//     the cross-block one. Then:
+//       - EVERY authenticated row is kept as a leaf of its own; an exact duplicate (equal leafData) collapses to
+//         one. R7 decides after the release: at most one of them matches the payload, and R7 counts this
+//         ciphertext's entries once (BlockFinding.shadowedBy).
+//       - The rows that are not authenticated go to `rejected` as `duplicate-block`, so junk cannot add leaves
+//         under an honest Cid.
+//       - When no row of the Cid is authenticated, one row is kept: a Cid that matches its own Ciphertext first,
+//         then the lowest UTF-8 bytes of canonicalJson([Cid, Id, BallotId, EntryCount, TemplateDigest,
+//         VoterRegistrantIds, Ciphertext]). R7 finds it invalid anyway.
+//     Authentication runs only for a Cid that more than one row names, so a tree with no collision checks no
+//     signature.
 //   - The authorization (voter rows, registrants, associations, timeline, ballots) is a REQUIRED input, so the
 //     root is a function of public data every party passes identically. A malformed one refuses the tree as
 //     `malformed-input`; a hostile item inside its row lists authorizes nothing.
@@ -112,20 +116,22 @@ export interface BlockInclusionProof {
   path: readonly BlockProofStep[]
 }
 
-export type BlockProofResult = { ok: true, proof: BlockInclusionProof } | { ok: false, reason: 'unknown-block' }
+/** `ambiguous-block`: the Cid names more than one leaf (T-65-05-03) and no leaf hash was given to choose one. */
+export type BlockProofResult = { ok: true, proof: BlockInclusionProof } | { ok: false, reason: 'unknown-block' | 'ambiguous-block' }
 
 export interface BlockTree {
   electionId: string
   electionRevision: number
   root: string
   size: number
-  /** Ascending by UTF-8 bytes of Cid. */
+  /** Ascending by UTF-8 bytes of Cid, then of leafData (a Cid may name several authenticated leaves). */
   leaves: readonly BlockTreeLeaf[]
   /** 2*size-1 entries, root last; empty when size === 0. */
   nodes: readonly BlockTreeNode[]
   /** rows set aside (WR-06), ascending by UTF-8 bytes of cid then detail; they have no leaf */
   rejected: readonly BlockTreeRejection[]
-  proofFor: (cid: string) => BlockProofResult
+  /** The proof of the leaf with this Cid; `leafHash` picks one when the Cid names several leaves. */
+  proofFor: (cid: string, leafHash?: string) => BlockProofResult
 }
 
 export type BlockTreeRejectReason = 'malformed-row' | 'duplicate-block'
@@ -138,7 +144,7 @@ export interface BlockTreeRejection {
   detail: string
 }
 
-/** The rows selectBlockRows keeps (leaf order) and sets aside; `row` is the caller's own object. */
+/** The rows selectBlockRows keeps (in leaf order: Cid, then leafData) and sets aside; `row` is the caller's own object. */
 export type BlockRowSelection<R> =
   | { ok: true, accepted: readonly R[], rejected: ReadonlyArray<BlockTreeRejection & { row: unknown }> }
   | { ok: false, reason: BlockTreeRefusal, detail: string }
@@ -488,6 +494,22 @@ function voterRowProblems (block: BlockConsentScope, v: Rec, reg: string, author
  * registrant the block does not list, is an extra, as is every second row. Pure; never throws.
  */
 export function judgeBlockVoters (block: BlockConsentScope, list: readonly string[] | null, rowsNamingBlock: readonly unknown[], authorizer: BlockAuthorizer): BlockVoterJudgement {
+  return judgeWith(block, list, rowsNamingBlock, authorizer, null)
+}
+
+/** Per voter row, the problems already computed for a (BallotId, Id) of one Cid: candidates sharing a Cid reuse them. */
+type ProblemCache = Map<Rec, Map<string, BlockVoterProblem[]>>
+
+function judgeWith (block: BlockConsentScope, list: readonly string[] | null, rowsNamingBlock: readonly unknown[], authorizer: BlockAuthorizer, cache: ProblemCache | null): BlockVoterJudgement {
+  const problemsOf = (v: Rec, reg: string): BlockVoterProblem[] => {
+    if (cache === null) return voterRowProblems(block, v, reg, authorizer)
+    const key = `${block.BallotId}\u0000${block.Id}`
+    let byKey = cache.get(v)
+    if (byKey === undefined) { byKey = new Map(); cache.set(v, byKey) }
+    let got = byKey.get(key)
+    if (got === undefined) { got = voterRowProblems(block, v, reg, authorizer); byKey.set(key, got) }
+    return got
+  }
   const regOf = (v: Rec): string => (typeof v.RegistrantId === 'string' ? v.RegistrantId : '')
   const mine = rowsNamingBlock.filter(isRec).sort((a, b) => byCodeUnits(regOf(a), regOf(b)) || byCodeUnits(looseKey(a), looseKey(b)))
   const listed = new Set(list ?? [])
@@ -499,7 +521,7 @@ export function judgeBlockVoters (block: BlockConsentScope, list: readonly strin
       extras.push({ row: v, reason: reg === '' ? 'no-registrant' : 'unlisted' })
       continue
     }
-    const entry = { v, problems: voterRowProblems(block, v, reg, authorizer) }
+    const entry = { v, problems: problemsOf(v, reg) }
     const g = byReg.get(reg)
     if (g === undefined) byReg.set(reg, [entry])
     else g.push(entry)
@@ -565,33 +587,34 @@ interface Candidate {
   row: NormalRow
   cidOk: boolean
   rank: string
+  /** blockLeafData of the row: the secondary leaf order, and equal for exact duplicates */
+  leafData: string
   /** T-65-05-03: set only for a Cid that more than one row names */
   authenticated: boolean
-  /** listed voters when authenticated, else 0 */
-  voters: number
 }
 
 /** T-65-05-03: is this row one R7 finds no no-key block finding on (the cross-block check aside)? */
-function authenticate (c: Candidate, scope: BlockTreeScope, ctx: AuthContext): void {
+function authenticate (c: Candidate, scope: BlockTreeScope, ctx: AuthContext, cache: ProblemCache): void {
   c.authenticated = false
-  c.voters = 0
   if (!c.cidOk) return
   const list = canonicalVoterList(c.row.voterRegistrantIds)
   if (list === null || list.length !== c.row.entryCount) return
   const template = ctx.templateDigests.get(c.row.ballotId)
   if (template === undefined || template !== c.row.templateDigest) return
   const block: BlockConsentScope = { Cid: c.row.cid, Id: c.row.id, ElectionId: scope.electionId, ElectionRevision: scope.electionRevision, BallotId: c.row.ballotId }
-  const judged = judgeBlockVoters(block, list, ctx.voterByCid.get(c.row.cid) ?? [], ctx.authorizer)
-  if (list.every(reg => judged.authenticated.has(reg))) {
-    c.authenticated = true
-    c.voters = list.length
-  }
+  const judged = judgeWith(block, list, ctx.voterByCid.get(c.row.cid) ?? [], ctx.authorizer, cache)
+  c.authenticated = list.every(reg => judged.authenticated.has(reg))
+}
+
+/** R5 leaf order: ascending UTF-8 bytes of Cid, then of leafData (distinct for distinct leaves of one Cid). */
+function byLeafOrder (a: { cid: string, leafData: string }, b: { cid: string, leafData: string }): number {
+  return compareUtf8(a.cid, b.cid) || compareUtf8(a.leafData, b.leafData)
 }
 
 /**
- * WR-06 + T-65-05-03: the row policy shared by R5 and R7. Keeps one row per Cid (the preference rule in the
- * header) in leaf order, rows sharing only an Id included, and returns every other row in `rejected` with a typed
- * reason. Refuses only a non-array `rows` (`malformed-row`), an unreadable authorization (`malformed-input`) and a
+ * WR-06 + T-65-05-03: the row policy shared by R5 and R7. Keeps every well-formed row with a Cid of its own, and for
+ * a shared Cid every authenticated row (or one row when none is), in leaf order (Cid, then leafData); returns every
+ * other row in `rejected` with a typed reason. R7 keeps this order, so its blocks are R5's leaves one for one. Refuses only a non-array `rows` (`malformed-row`), an unreadable authorization (`malformed-input`) and a
  * row of another election or revision. The outcome does not depend on input order. Never throws.
  */
 export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope, authorization: BlockAuthorization): BlockRowSelection<R> {
@@ -613,7 +636,11 @@ export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope, a
     const row = checked.row
     const cidOk = typeof ct === 'string' && blockCidOf(ct) === row.cid
     const rank = canonicalJson([row.cid, row.id, row.ballotId, row.entryCount, row.templateDigest, row.voterRegistrantIds, typeof ct === 'string' ? ct : null])
-    candidates.push({ raw, row, cidOk, rank, authenticated: false, voters: 0 })
+    const leafData = blockLeafData({
+      Cid: row.cid, Id: row.id, ElectionId: scope.electionId, ElectionRevision: scope.electionRevision, BallotId: row.ballotId,
+      EntryCount: row.entryCount, TemplateDigest: row.templateDigest, VoterRegistrantIds: row.voterRegistrantIds
+    })
+    candidates.push({ raw, row, cidOk, rank, leafData, authenticated: false })
   }
   // UTF-8 bytes first; code units break the tie two distinct lone surrogates would leave, so the order is total
   const byRank = (a: string, b: string): number => compareUtf8(a, b) || (a < b ? -1 : a > b ? 1 : 0)
@@ -623,21 +650,34 @@ export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope, a
     if (g === undefined) byCid.set(c.row.cid, [c])
     else g.push(c)
   }
-  const preferred = (a: Candidate, b: Candidate): number =>
-    (a.authenticated === b.authenticated ? 0 : a.authenticated ? -1 : 1) ||
-    (b.voters - a.voters) ||
-    (a.cidOk === b.cidOk ? 0 : a.cidOk ? -1 : 1) ||
-    byRank(a.rank, b.rank)
+  const fallback = (a: Candidate, b: Candidate): number => (a.cidOk === b.cidOk ? 0 : a.cidOk ? -1 : 1) || byRank(a.rank, b.rank)
   const kept: Candidate[] = []
-  for (const [cid, group] of byCid) {
-    if (group.length > 1) for (const c of group) authenticate(c, scope, auth.ctx)
-    group.sort(preferred)
-    kept.push(group[0]!)
-    for (const c of group.slice(1)) {
-      rejected.push({ cid: c.row.cid, reason: 'duplicate-block', detail: `Cid ${cid} is already taken by a preferred row`, row: c.raw, key: c.rank })
-    }
+  const setAside = (c: Candidate): void => {
+    rejected.push({ cid: c.row.cid, reason: 'duplicate-block', detail: `Cid ${c.row.cid} is already taken by a preferred row`, row: c.raw, key: c.rank })
   }
-  kept.sort((a, b) => compareUtf8(a.row.cid, b.row.cid))
+  for (const group of byCid.values()) {
+    if (group.length === 1) { kept.push(group[0]!); continue }
+    const cache: ProblemCache = new Map()
+    for (const c of group) authenticate(c, scope, auth.ctx, cache)
+    const authenticated = group.filter(c => c.authenticated)
+    if (authenticated.length === 0) {
+      // none authenticates: one deterministic row, which R7 finds invalid anyway
+      group.sort(fallback)
+      kept.push(group[0]!)
+      group.slice(1).forEach(setAside)
+      continue
+    }
+    // every authenticated row is a leaf of its own; R7 decides after the release which one the ciphertext holds.
+    // An exact duplicate (same leafData) collapses to one; unauthenticated rows of the Cid are set aside.
+    authenticated.sort((a, b) => compareUtf8(a.leafData, b.leafData) || byRank(a.rank, b.rank))
+    for (let i = 0; i < authenticated.length; i++) {
+      const c = authenticated[i]!
+      if (i > 0 && authenticated[i - 1]!.leafData === c.leafData) setAside(c)
+      else kept.push(c)
+    }
+    for (const c of group) if (!c.authenticated) setAside(c)
+  }
+  kept.sort((a, b) => byLeafOrder({ cid: a.row.cid, leafData: a.leafData }, { cid: b.row.cid, leafData: b.leafData }))
   rejected.sort((a, b) => byRank(a.cid, b.cid) || byRank(a.detail, b.detail) || byRank(a.key, b.key))
   return {
     ok: true,
@@ -648,8 +688,9 @@ export function selectBlockRows<R> (rows: readonly R[], scope: BlockTreeScope, a
 
 /**
  * Build the block tree for one election revision. The rows may arrive in any order; the result does not
- * depend on it. Rows are selected by selectBlockRows (WR-06, T-65-05-03): malformed rows and the rows that lose a
- * shared Cid to the authenticated row are set aside in `tree.rejected`, and the tree is built over the rest.
+ * depend on it. Rows are selected by selectBlockRows (WR-06, T-65-05-03): malformed rows and the unauthenticated
+ * rows of a shared Cid are set aside in `tree.rejected`, and the tree is built over the rest (a shared Cid keeps every
+ * authenticated row as its own leaf).
  * `authorization` is required: every party passes the same public rows, so every party gets the same root.
  * Only rows from another election or revision, a non-array input or an unreadable authorization refuse the tree.
  */
@@ -691,11 +732,19 @@ export function buildBlockTree (rows: readonly BlockTreeRow[], scope: BlockTreeS
 
   const size = leaves.length
   const root = size === 0 ? BLOCK_TREE_EMPTY_ROOT : nodes[nodes.length - 1]!.hash
-  const leafIndexOf = new Map(leaves.map(l => [l.cid, l.index]))
+  const leafIndexesOf = new Map<string, number[]>()
+  for (const l of leaves) {
+    const g = leafIndexesOf.get(l.cid)
+    if (g === undefined) leafIndexesOf.set(l.cid, [l.index])
+    else g.push(l.index)
+  }
 
-  const proofFor = (cid: string): BlockProofResult => {
-    const leafIndex = leafIndexOf.get(cid)
-    if (leafIndex === undefined) return { ok: false, reason: 'unknown-block' }
+  const proofFor = (cid: string, leafHash?: string): BlockProofResult => {
+    const all = leafIndexesOf.get(cid) ?? []
+    const matching = leafHash === undefined ? all : all.filter(i => leaves[i]!.hash === leafHash)
+    if (matching.length === 0) return { ok: false, reason: 'unknown-block' }
+    if (matching.length > 1) return { ok: false, reason: 'ambiguous-block' }
+    const leafIndex = matching[0]!
     const rootDown: BlockProofStep[] = []
     let lo = 0
     let hi = size

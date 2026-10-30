@@ -43,11 +43,20 @@
 // and the report holds no byte array.
 //
 // Row policy (WR-06, T-65-05-03): the block rows are selected by R5's selectBlockRows with the same voter rows,
-// registrants, associations, timeline and ballots, so R7 judges exactly the rows R5 makes leaves of. A malformed
-// row and a row that loses a shared Cid to the authenticated row are report-level findings (`malformed-row`,
-// `duplicate-block`) and are not blocks of the report; they never touch another block. Rows that share only an
-// Id are separate blocks, each judged on its own consent rows: a forged one fails its own checks and is excluded
-// (D-82), and the honest one keeps its status. `duplicate-block` therefore means an exact Cid collision.
+// registrants, associations, timeline and ballots, so R7 judges exactly the rows R5 makes leaves of, in R5's leaf
+// order (Cid, then leafData). A malformed row and an unauthenticated row of a shared Cid are report-level findings
+// (`malformed-row`, `duplicate-block`) and are not blocks of the report; they never touch another block. Rows that
+// share only an Id are separate blocks, each judged on its own consent rows.
+//
+// Shared Cid (T-65-05-03): R5 keeps every authenticated row of a Cid as a leaf, because before the release nothing
+// shows which voter list the ciphertext holds. After the release each leaf is checked against the payload
+// (checkPoolPayloadShape: voter-count-mismatch, voter-list-mismatch; payload-count-mismatch; id-mismatch), so at
+// most one leaf of a Cid is valid; two valid leaves would be the hard inconsistency `cid-in-two-valid-blocks` on
+// both. Leaves of one Cid are ONE block for `registrant-in-two-blocks`, so a forged leaf listing honest voters never
+// invalidates the honest leaf. One leaf per Cid counts the ciphertext's entries (the valid one, else one not
+// decryptable yet, else an invalid one; then the most attested entries; then leaf order); the others carry
+// `shadowedBy` and count nothing (attestedEntries 0, no undecryptable entries), so R8 never counts one ciphertext
+// twice.
 //
 // Rules: the report is deterministic for any input order and the function never reports failure by raising an
 // error; every primitive that can fail on hostile input is wrapped and mapped to a typed finding. Pure for
@@ -56,7 +65,10 @@
 
 import { utf8ToBytes } from '@noble/hashes/utils.js'
 import { validateVoteEntryAgainstBallot, type AnswerCheckBallot, type FindingSeverity } from './answer-checks.js'
-import { blockAuthorizer, judgeBlockVoters, selectBlockRows, type BlockAuthorization, type BlockConsentScope } from './block-tree.js'
+import {
+  blockAuthorizer, blockLeafData, blockLeafHash, judgeBlockVoters, selectBlockRows,
+  type BlockAuthorization, type BlockConsentScope, type BlockTreeRow
+} from './block-tree.js'
 import { checkElectionSecret, openCommittedBlock } from './open-committed-block.js'
 import { checkPoolPayloadShape, poolBlockCid, poolBlockId } from '../pool/pool-block.js'
 import { canonicalJson } from '../voting/canonical.js'
@@ -72,8 +84,9 @@ export const VALIDATION_CODES = Object.freeze([
   // report level (not tied to a validated block); 'malformed-row' and 'duplicate-block' also land here for
   // rows the R5 selection set aside
   'voter-row-without-block', 'voter-row-forged',
-  // block, after release
-  'block-does-not-open', 'id-mismatch', 'payload-count-mismatch',
+  // block, after release ('cid-in-two-valid-blocks': two leaves of one Cid both pass every check, T-65-05-03;
+  // unreachable by construction, a hard inconsistency that excludes both rather than counting twice)
+  'block-does-not-open', 'id-mismatch', 'payload-count-mismatch', 'cid-in-two-valid-blocks',
   'not-a-payload', 'counts-differ', 'voter-count-mismatch', 'not-canonical-order', 'duplicate-vote', 'duplicate-voter',
   'voter-list-mismatch', 'voter-entry-scope-mismatch',
   'voter-entry-malformed', 'voter-entry-signature-invalid', 'voter-entry-ballot-missing', 'voter-entry-device-key-mismatch',
@@ -111,6 +124,14 @@ export type VoteVerdict =
 export interface BlockFinding {
   /** '' where the row field is unreadable */
   blockCid: string
+  /** the R5 leaf hash of this block's row: names the leaf, also when several leaves share a Cid (T-65-05-03) */
+  leafHash: string
+  /**
+   * T-65-05-03: null when this block counts its ciphertext's entries; else the leafHash of the block of the same
+   * Cid that does (the valid one if any). A shadowed block counts nothing: attestedEntries 0, and no undecryptable
+   * entries, so one ciphertext's entries are never counted twice.
+   */
+  shadowedBy: string | null
   blockId: string
   ballotId: string
   /** null before release or when the block did not open */
@@ -137,7 +158,7 @@ export interface BlockFinding {
 export interface ValidationTotals {
   /** BlockFinding count = the R5 leaf count (rows set aside are report-level findings, not blocks) */
   blocks: number
-  /** per block: payload.votes.length for a valid block, attestedEntries for an invalid one, declaredEntries for one not decryptable yet */
+  /** per block: payload.votes.length for a valid block, attestedEntries for an invalid one, declaredEntries for one not decryptable yet (0 for a shadowed block) */
   entries: number
   /** valid votes of valid blocks only */
   valid: number
@@ -145,7 +166,7 @@ export interface ValidationTotals {
   invalid: number
   /** attestedEntries of every block whose status is 'invalid' (R8 excludes these blocks, D-82) */
   excluded: number
-  /** declaredEntries of every 'not-decryptable-yet' block (before the release) */
+  /** declaredEntries of every 'not-decryptable-yet' block that is not shadowed (before the release) */
   undecryptable: number
 }
 
@@ -210,7 +231,7 @@ export type ElectionValidationResult =
     electionId: string
     electionRevision: number
     released: boolean
-    /** ascending by UTF-8 bytes of Cid */
+    /** R5 leaf order: ascending by UTF-8 bytes of Cid, then of leafData */
     blocks: readonly BlockFinding[]
     /** report-level only: rows set aside by the R5 selection, then voter-row-without-block */
     findings: readonly ValidationFinding[]
@@ -305,6 +326,10 @@ interface Work {
   votes: VoteVerdict[]
   entries: number
   revision: number
+  /** R5 leaf hash of the row */
+  leafHash: string
+  /** CR-03 representative device key per registrant (per block: leaves of one Cid may differ) */
+  keyOf: Map<string, string>
 }
 
 function refuse (reason: ValidationRefusal, detail: string): ElectionValidationResult {
@@ -405,7 +430,6 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   }
   const regOf = (v: Rec): string => (isStr(v.RegistrantId) ? v.RegistrantId : '')
   const voterOrder = (a: Rec, b: Rec): number => byString(regOf(a), regOf(b)) || byString(rowKey(a), rowKey(b))
-  const deviceKeys = new Map<string, Map<string, string>>()
   const forged: ValidationFinding[] = []
   const forgedFinding = (blockCid: string, v: Rec, detail: string): ValidationFinding => ({
     blockCid, code: 'voter-row-forged', severity: 'error', detail, ...(regOf(v) !== '' ? { registrantId: regOf(v) } : {})
@@ -468,7 +492,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     else if (row.TemplateDigest !== known.digest) add(w, 'template-mismatch', 'the block TemplateDigest is not the ballot template digest')
 
     // consent rows of this block (CR-02, CR-03): R5's judge, so the two agree on who is authenticated
-    const keyOf = new Map<string, string>()
+    const keyOf = w.keyOf
     const consentScope: BlockConsentScope = { Cid: row.Cid as string, Id: row.Id, ElectionId: row.ElectionId, ElectionRevision: rev, BallotId: row.BallotId }
     const judged = judgeBlockVoters(consentScope, list, voterByCid.get(w.cid) ?? [], authorization)
     for (const x of judged.extras) {
@@ -490,11 +514,11 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
         if (!byReg.has(reg)) add(w, 'voter-row-missing', 'a listed registrant has no voter row', { registrantId: reg })
       }
     }
-    deviceKeys.set(w.cid, keyOf)
   }
 
-  // cross-block: a registrant in two blocks of one ballot
-  const placed = new Map<string, Map<string, Work[]>>()
+  // cross-block: a registrant in two blocks of one ballot. Leaves that share a Cid are ONE block here (T-65-05-03):
+  // they are claims about one ciphertext, so an honest voter listed by a forged leaf of its own Cid is not double voting
+  const placed = new Map<string, Map<string, Set<string>>>()
   // CR-03: only registrants whose voter row in that block is authenticated
   for (const w of works) {
     if (!w.ready || w.list === null) continue
@@ -502,16 +526,16 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     if (byReg === undefined) { byReg = new Map(); placed.set(w.ballotId, byReg) }
     for (const reg of w.authenticated) {
       const g = byReg.get(reg)
-      if (g === undefined) byReg.set(reg, [w])
-      else g.push(w)
+      if (g === undefined) byReg.set(reg, new Set([w.cid]))
+      else g.add(w.cid)
     }
   }
   for (const w of works) {
     if (!w.ready || w.list === null) continue
     for (const reg of [...w.authenticated].sort(byString)) {
       const g = placed.get(w.ballotId)?.get(reg)
-      if (g === undefined || g.length < 2) continue
-      const others = g.filter(o => o !== w).map(o => o.cid).sort(byBytes)
+      if (g === undefined || g.size < 2) continue
+      const others = [...g].filter(c => c !== w.cid).sort(byBytes)
       add(w, 'registrant-in-two-blocks', `the registrant is also listed in block ${others.join(', ')}`, { registrantId: reg })
     }
   }
@@ -560,7 +584,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
         }
         if (repeated) add(w, 'duplicate-vote', 'a clear vote appears twice')
       }
-      const keyOf = deviceKeys.get(w.cid) ?? new Map<string, string>()
+      const keyOf = w.keyOf
       for (const r of payload.voterRecords as unknown[]) {
         const problem = voterRecordProblem(r)
         if (problem !== null) {
@@ -616,19 +640,55 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     }
   }
 
-  // report
+  // report, in R5 leaf order (selectBlockRows returns the kept rows in it)
   const released = secret !== null
-  const ordered = [...works].sort((a, b) => byBytes(a.cid, b.cid) || byString(a.key, b.key))
+  const ordered = works
+  const blockLevelError = (w: Work): boolean => w.fs.some(f => f.severity === 'error' && f.voteIndex === undefined)
+  const groups = new Map<string, Work[]>()
+  for (const w of ordered) {
+    const g = groups.get(w.cid)
+    if (g === undefined) groups.set(w.cid, [w])
+    else g.push(w)
+  }
+  // T-65-05-03: at most one leaf of a Cid may be valid. Two can only pass together if the payload matched two leaves,
+  // which the leaf data rules out; if it ever happens, both are excluded rather than counted twice
+  if (released) {
+    for (const g of groups.values()) {
+      const valid = g.filter(w => !blockLevelError(w))
+      if (valid.length < 2) continue
+      for (const w of valid) {
+        const others = valid.filter(o => o !== w).map(o => o.leafHash).sort(byString)
+        add(w, 'cid-in-two-valid-blocks', `another leaf of this Cid also passes every check (leaf ${others.join(', ')})`)
+      }
+    }
+  }
+  const statusOf = (w: Work): BlockFinding['status'] => (blockLevelError(w) ? 'invalid' : released ? 'valid' : 'not-decryptable-yet')
+  const attestedOf = (w: Work): number => Math.min(w.declared, w.list === null ? 0 : w.list.length, w.authenticated.size)
+  // T-65-05-03: one leaf per Cid counts the ciphertext's entries: the valid one, else one not decryptable yet, else an
+  // invalid one; then the most attested entries; then leaf order. The others are shadowed and count nothing
+  const counting = new Map<string, Work>()
+  const statusRank = { valid: 0, 'not-decryptable-yet': 1, invalid: 2 } as const
+  for (const [cid, g] of groups) {
+    let best = g[0]!
+    for (const w of g.slice(1)) {
+      const d = (statusRank[statusOf(w)] - statusRank[statusOf(best)]) || (attestedOf(best) - attestedOf(w))
+      if (d < 0) best = w
+    }
+    counting.set(cid, best)
+  }
   const blocks: BlockFinding[] = ordered.map(w => {
-    const blockLevelError = w.fs.some(f => f.severity === 'error' && f.voteIndex === undefined)
+    const counter = counting.get(w.cid)!
+    const shadowedBy = counter === w ? null : counter.leafHash
     return {
       blockCid: w.cid,
+      leafHash: w.leafHash,
+      shadowedBy,
       blockId: w.id,
       ballotId: w.ballotId,
       payloadVersion: w.payloadVersion,
-      status: blockLevelError ? 'invalid' : released ? 'valid' : 'not-decryptable-yet',
+      status: statusOf(w),
       declaredEntries: w.declared,
-      attestedEntries: Math.min(w.declared, w.list === null ? 0 : w.list.length, w.authenticated.size),
+      attestedEntries: shadowedBy === null ? attestedOf(w) : 0,
       votes: w.votes,
       findings: w.fs
     }
@@ -646,7 +706,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
         if (v.status === 'valid') totals.valid++
         else totals.invalid++
       }
-    } else {
+    } else if (b.shadowedBy === null) {
       totals.entries += b.declaredEntries
       totals.undecryptable += b.declaredEntries
     }
@@ -672,6 +732,16 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
 function newWork (row: Rec | null, cid: string): Work {
   return {
     row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, authenticated: new Set(), ready: false, openable: false,
-    payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0
+    payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0, leafHash: leafHashOf(row), keyOf: new Map()
+  }
+}
+
+/** The R5 leaf hash of a kept row (selectBlockRows keeps only rows R5 can hash); '' if it cannot be computed. */
+function leafHashOf (row: Rec | null): string {
+  if (row === null) return ''
+  try {
+    return blockLeafHash(blockLeafData(row as unknown as BlockTreeRow))
+  } catch {
+    return ''
   }
 }
