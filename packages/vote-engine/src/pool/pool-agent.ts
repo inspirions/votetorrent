@@ -566,7 +566,8 @@ export class PoolAgent {
     if (m.code === 'already-voted') {
       // Trust only what this voter's own strand read says (D-13): a recorded cid means sent.
       const recorded = (await this.o.findRecordedVote?.().catch(() => null)) ?? null
-      if (this.role === 'done') return
+      // the role can change during the await; the cast defeats TS's narrowing to 'member'
+      if ((this.role as 'coordinator' | 'member' | 'done') === 'done') return
       if (recorded !== null) this.finish({ status: 'committed', cid: recorded, blockId: '', size: 0, formedByMe: false })
       else this.finish({ status: 'stopped', reason: 'already-voted' })
       return
