@@ -269,7 +269,8 @@ export {
 	poolRequests,
 	POOL_RENDEZVOUS_PROTOCOL,
 	attachPoolRendezvous,
-	createLibp2pRendezvousClient
+	createLibp2pRendezvousClient,
+	createFailoverRendezvousClient
 } from './pool/index.js'
 export type {
 	PoolAgentOptions,
@@ -282,5 +283,6 @@ export type {
 	PoolIdentity,
 	PoolRendezvousClient,
 	RendezvousRequest,
-	RendezvousReply
+	RendezvousReply,
+	FailoverRendezvousClient
 } from './pool/index.js'

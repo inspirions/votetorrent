@@ -30,3 +30,5 @@ export type { SealedPoolEnvelope, OpenedPoolEnvelope, PoolIdentity } from './poo
 export { PoolRendezvous, createInMemoryRendezvousClient, poolRequests, signedFields } from './pool-rendezvous.js'
 export type { PoolRendezvousClient, PoolRendezvousOptions, CoordinatorListing, RendezvousRequest, RendezvousReply } from './pool-rendezvous.js'
 export { POOL_RENDEZVOUS_PROTOCOL, attachPoolRendezvous, createLibp2pRendezvousClient } from './pool-wire.js'
+export { createFailoverRendezvousClient } from './pool-failover.js'
+export type { FailoverRendezvousClient } from './pool-failover.js'
