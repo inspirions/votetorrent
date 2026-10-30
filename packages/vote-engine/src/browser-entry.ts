@@ -55,6 +55,37 @@ export { H16, toCanonicalDatetime, nowCanonicalDatetime, fromCanonicalDatetime }
 
 export type { DbFactory, EngineContext } from './types.js'
 
+// The R5 block Merkle tree: pure SHA-256 over public VoteBlock columns, for the dashboard's recomputation
+// of the root. Imported from the module file and NOT from the blocks barrel, because the barrel also
+// carries R6-R8.
+export {
+	BLOCK_TREE_DOMAIN,
+	BLOCK_TREE_EMPTY_ROOT,
+	blockLeafData,
+	blockLeafHash,
+	blockNodeHash,
+	buildBlockTree,
+	verifyInclusion,
+	blockTreeStatus,
+	finalBlockTree
+} from './blocks/block-tree.js'
+export type {
+	BlockTreeRow,
+	BlockTreeScope,
+	BlockTreeLeaf,
+	BlockTreeNode,
+	BlockProofStep,
+	BlockInclusionProof,
+	BlockProofResult,
+	BlockTree,
+	BlockTreeRefusal,
+	BlockTreeResult,
+	InclusionCheck,
+	BlockTreeTimeline,
+	BlockTreeStatus,
+	FinalBlockTreeResult
+} from './blocks/block-tree.js'
+
 // -----------------------------------------------------------------------
 // DELIBERATELY NOT EXPORTED (enforced by test/browser-entry-purity.spec.ts)
 // -----------------------------------------------------------------------
@@ -72,3 +103,5 @@ export type { DbFactory, EngineContext } from './types.js'
 //   is read-only (D-01: panel actions are step 3, explicitly OUT) and
 //   because the outline's binding cross-plan contract 2 fixes the
 //   dashboard's only engine-class import as UserEngine.
+// - The R6-R8 functions (slice checks, validation, tally tree) — they import election-block.ts, which
+//   reaches `@noble/curves/secp256k1.js`, outside the 7-entry allowlist, and the dashboard has no consumer.
