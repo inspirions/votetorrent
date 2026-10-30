@@ -929,6 +929,23 @@ describe('pool: a duplicate voter at commit (R1) - classification and the commit
     expect(s.evals).to.have.length(0)
   })
 
+  it('WR-03 a distributed commit that landed but threw: the text names a member whose row holds THIS block\'s cid, so it is not a duplicate', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), Object.fromEntries(block.registrantIds.map(r => [r, block.cid])))
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [] })
+  })
+
+  it('WR-03 the text fallback still names a member whose lookup threw (unknown), but never one proven to be in this block', async () => {
+    const msg = distributedMessageNaming(dup)
+    const s = stub(new Error(msg), {})
+    const evalOrig = (s.db as unknown as { eval: (sql: string, p?: Record<string, unknown>) => AsyncGenerator<unknown> }).eval
+    ;(s.db as unknown as { eval: unknown }).eval = async function * (sql: string, params?: Record<string, unknown>) {
+      if (params?.reg === dup) throw new Error('lookup failed')
+      yield * evalOrig(sql, params)
+    }
+    expect(await commitPoolBlock(s.db, block, ballot, signatures, clock)).to.deep.equal({ ok: false, reason: msg, duplicateRegistrants: [dup] })
+  })
+
   it('a lookup row holding this block\'s own cid is not a duplicate', async () => {
     const s = stub(new Error(LOCAL), { [dup]: block.cid })
     const r = await commitPoolBlock(s.db, block, ballot, signatures, clock)

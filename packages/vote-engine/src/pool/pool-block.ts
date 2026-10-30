@@ -232,8 +232,11 @@ export async function commitPoolBlock (
     const reason = err instanceof Error ? err.message : String(err)
     if (classifyCommitFailure(reason) !== 'duplicate-voter') return { ok: false, reason }
     // Name who collided: one point lookup per registrant (no IN list), after ROLLBACK so the read
-    // sees committed rows only. A row whose BlockCid is another block's is a voter who already voted.
+    // sees committed rows only. Each lookup has three outcomes (WR-03): a row of ANOTHER block (that
+    // voter already voted), a row of THIS block (the distributed commit landed but threw: that voter
+    // is in this very block), or unknown (no row yet, or the lookup threw).
     const duplicateRegistrants: string[] = []
+    const unknown: string[] = []
     for (const registrantId of block.registrantIds) {
       try {
         const row = await firstRow(
@@ -241,10 +244,16 @@ export async function commitPoolBlock (
           'select BlockCid from VoteBlockVoter where ElectionId = :e and BallotId = :b and RegistrantId = :reg',
           { e: ballot.electionKey.electionId, b: ballot.ballotId, reg: registrantId }
         )
-        if (typeof row?.BlockCid === 'string' && row.BlockCid !== block.cid) duplicateRegistrants.push(registrantId)
-      } catch { /* a failed lookup means "not found" for this registrant only */ }
+        if (typeof row?.BlockCid !== 'string') unknown.push(registrantId)
+        else if (row.BlockCid !== block.cid) duplicateRegistrants.push(registrantId)
+        // else: this block's own row, never a duplicate
+      } catch {
+        unknown.push(registrantId)
+      }
     }
-    if (duplicateRegistrants.length === 0) duplicateRegistrants.push(...registrantsNamedInCommitError(reason, block.registrantIds))
+    // The error text may name the colliding key; it is believed only for registrants the lookups
+    // could not place, never over positive evidence that the row is this block's.
+    if (duplicateRegistrants.length === 0) duplicateRegistrants.push(...registrantsNamedInCommitError(reason, unknown))
     return { ok: false, reason, duplicateRegistrants }
   }
 }
