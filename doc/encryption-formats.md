@@ -369,6 +369,242 @@ the port and at least one implementation are proven together.
   and bigint/JIT copies of key material may still survive elsewhere in the
   process's memory after a call returns.
 
+## 7. Committed-block computations: block tree, slice checks, validation, tally tree
+
+This section specifies pure computations in
+`packages/vote-engine/src/blocks/` over the committed `VoteBlock` and
+`VoteBlockVoter` rows of one election revision. No schema change and no
+new table come with it. Anyone holding the rows (and, after the key
+release, the election secret) can recompute every value below. The
+functions are exported from the package entry and the `./rn` entry. Only
+the block tree is on the `./browser` entry, because the other
+computations reach `@noble/curves/secp256k1.js`. Every function returns a
+typed result and none reports failure by throwing.
+
+### 7.1 Block Merkle tree
+
+`buildBlockTree(rows, scope)` takes the committed `VoteBlock` rows of one
+election (`scope.electionId`) and one revision (`scope.electionRevision`),
+in any order. It refuses, with a typed reason, a row that is not shaped
+like a block (`malformed-row`), a repeated `Cid` or `Id`
+(`duplicate-block`), a row of another election (`mixed-election`) and a
+row of another revision (`mixed-revision`).
+
+- **Leaf data.** The exact string
+  `canonicalJson([ElectionId, ElectionRevision, BallotId, Id, Cid,
+  EntryCount])`, a JSON array in that order, with `ElectionRevision` and
+  `EntryCount` as plain numbers (a database bigint is converted first).
+  `canonicalJson` is the sorted-key, no-whitespace JSON of
+  `src/voting/canonical.ts`.
+- **Leaf order.** Ascending by the UTF-8 bytes of `Cid`; a shorter string
+  that is a prefix of a longer one sorts first.
+- **Leaf hash.** `SHA-256(0x00 || UTF-8(leafData))`.
+- **Node hash.** `SHA-256(0x01 || left || right)`, where `left` and
+  `right` are the raw 32-byte child hashes (not their hex text).
+- **Shape.** A range of width n greater than 1 splits at the largest
+  power of two strictly below n; the left part is the first that many
+  leaves. A lone node is carried up unchanged and is never duplicated.
+- **Small sets.** One leaf is its own root. The empty set has no nodes and
+  the root `SHA-256(UTF-8("vt-block-tree/1/empty"))`, which is
+  `d4058a2d363e8f3901b46f30728fbbdbc7f17e30c7b7e4466804e2aaacfb6016`.
+- **Inclusion proof.** `{ leafIndex, treeSize, path }`, where `path` lists
+  sibling hashes from the leaf to the root, each with the side
+  (`left` or `right`) the sibling sits on. `verifyInclusion(leafHash,
+  proof, root)` first checks that `leafHash` and `root` are 64 lowercase
+  hex characters, that `0 <= leafIndex < treeSize`, and that the path
+  length and every side equal what `(leafIndex, treeSize)` dictate; any
+  difference is `malformed-proof`. It then folds the path from the leaf
+  hash with the node hash and compares the result with the root
+  (`root-mismatch` when they differ). The caller recomputes `leafHash`
+  from its own row, never from the proof.
+- **Final root.** The accruing period ends at the election timeline's
+  `hashingVotes`. `finalBlockTree` and `blockTreeStatus` return a final
+  tree only when `nowMs >= hashingVotes`. Before that they return
+  `accruing-not-ended` with the time it ends and, from `finalBlockTree`,
+  the provisional tree. `nowMs` is the caller's clock, so this is a
+  computation gate and not a security boundary. A timeline with
+  `hashingVotes` before `accruingVotes`, or a `nowMs` that is not a finite
+  number, is refused.
+
+Who stores, caches and publishes the root is open (section 7.5).
+
+### 7.2 Voter slice checks
+
+`sliceChecks(receipt, rows, voterRows, anchor?, release?)` lets a voter
+check its own slice of the committed blocks. The receipt holds the
+election id and revision, the voter's plaintext vote entries with their
+nonces (one per ballot), and the voter's signed voter entry. It holds no
+ciphertext. `rows` and `voterRows` are the replicated `VoteBlock` and
+`VoteBlockVoter` rows. `anchor` is a root and optionally a publisher's
+inclusion proof. `release` is the election secret key and the joint
+public key.
+
+For each ballot of the receipt the report has four results, always in
+the order of `SLICE_CHECK_IDS`:
+
+- `my-vote`: after the release, the voter's canonical vote entry,
+  nonce included, is found exactly once among the opened votes of the
+  block recorded for the voter and ballot.
+- `my-voter-entry`: the `VoteBlockVoter` row names a block with the same
+  `Id`; the block's registrant list holds the voter once; the consent
+  signature verifies; the row's device key is the receipt's; the voter
+  entry's own signature verifies; and after the release the voter entry
+  is in the payload exactly once.
+- `block-hash`: the `Cid` is the digest of the ciphertext (needs no key);
+  after the release the `Id` is the digest of the payload too.
+- `under-root`: the leaf hash is recomputed from the voter's own block row
+  and checked against the anchor's root, with the supplied proof or with
+  a tree built from the supplied rows.
+
+Each result has one of four statuses: `pass`, `fail` (with a reason code
+and a detail), `pending-key-release` and `not-applicable` (reason
+`no-block` or `no-root`). The ballot verdict is `fail` if any check
+fails, `pass` if all four pass with nothing left pending, and
+`incomplete` otherwise.
+
+`my-vote` is `pending-key-release` before the release, never `pass` or
+`fail`: the receipt keeps the plaintext entry and its nonce but no
+ciphertext, so there is nothing to compare until the block opens. A
+`pass` on another check may still list parts that are pending the
+release (`voter-entry-in-payload`, `block-id`).
+
+The caller obtains the election secret, holds it and zero-fills it after
+the call. The functions check it against the joint public key first
+(`invalid-secret` or `secret-mismatch` refuse the whole report), and never
+copy, store or return it. Other refusals are `malformed-receipt` and
+`malformed-rows`.
+
+### 7.3 Comprehensive validation
+
+`validateElectionBlocks({ scope, rows, voterRows, ballots, release? })`
+checks every committed block of one election revision, in two phases.
+
+- **Without the key**, for every block: the `Cid` is the digest of the
+  ciphertext; the registrant list is well formed, canonical and as long
+  as `EntryCount`; the ballot is known and the template digest matches;
+  the `VoteBlockVoter` rows correspond one for one with the list; every
+  consent signature verifies; and a registrant appears in at most one
+  block per ballot. Such a block's status is `not-decryptable-yet`,
+  which is a status of its own and not a failure.
+- **After the release**, for every block: the block opens; the `Id` and
+  the entry count match; the payload is well shaped, canonically ordered
+  and free of duplicate votes or voters; every voter entry has a valid
+  signature, the right scope, the ballot and the registered device key;
+  and every vote opens, parses and is judged against its ballot template.
+  A block is `invalid` exactly when it has an error finding that is not
+  tied to one vote.
+
+The answer policy for one decrypted vote against its ballot template:
+
+- The vote is invalid when it is not shaped like a vote entry, is for
+  another election, revision or ballot, carries another template digest
+  or a bad nonce, repeats or mis-orders its answers, answers an unknown
+  question or option, repeats or mis-orders option codes, gives an
+  empty answer, gives more options than the question's cap
+  (`too-many-options`), or gives fewer than `optionRange.min`
+  (`below-minimum`).
+- A blank answer to a required question (`required` defaults to true) is
+  valid and reported as the info finding `blank-required`.
+- A rank, score or text answer cannot be represented as a set of option
+  codes. It is reported with the info finding `unsupported-question-type`
+  and still receives the structural checks.
+- Invalid votes are counted apart from valid ones and are never dropped.
+
+The report has one finding record per block (ascending by UTF-8 bytes of
+`Cid`), a verdict per vote, report-level findings and totals. The totals
+satisfy `valid + invalid + undecryptable = entries`, where `entries`
+counts a block's payload votes if it opened and its declared
+`EntryCount` otherwise. Refusals are `malformed-input`, `mixed-election`,
+`mixed-revision`, `invalid-secret` and `secret-mismatch`. The secret
+rules are those of section 7.2.
+
+Every finding has a code and a severity, `error` or `info`. The codes,
+grouped as the source groups them:
+
+- Block, no key needed: `malformed-row`, `duplicate-block`,
+  `cid-mismatch`, `voter-list-malformed`, `voter-list-not-canonical`,
+  `entry-count-mismatch`, `unknown-ballot`, `template-mismatch`,
+  `voter-row-mismatch`, `voter-row-duplicate`, `voter-row-unlisted`,
+  `voter-row-missing`, `consent-signature-invalid`,
+  `registrant-in-two-blocks`.
+- Report level: `voter-row-without-block` (info).
+- Block, after the release: `block-does-not-open`, `id-mismatch`,
+  `payload-count-mismatch`, `not-a-payload`, `counts-differ`,
+  `voter-count-mismatch`, `not-canonical-order`, `duplicate-vote`,
+  `duplicate-voter`, `voter-list-mismatch`, `voter-entry-scope-mismatch`,
+  `voter-entry-malformed`, `voter-entry-signature-invalid`,
+  `voter-entry-ballot-missing`, `voter-entry-device-key-mismatch`.
+- Per vote, after the release: `vote-does-not-open`, `vote-not-json`.
+- Per vote, the answer codes: `malformed-ballot`, `malformed-entry`,
+  `wrong-election`, `wrong-revision`, `wrong-ballot`,
+  `template-digest-mismatch`, `bad-nonce`, `answers-not-sorted`,
+  `duplicate-question`, `unknown-question`, `empty-answer`,
+  `unknown-option`, `duplicate-option`, `options-not-sorted`,
+  `too-many-options`, `below-minimum`, `blank-required` (info),
+  `unsupported-question-type` (info).
+
+### 7.4 Tally tree
+
+`buildTallyTree` runs the block tree, the validation and the tally in
+that order and needs the released secret (`not-released` otherwise).
+`tallyTreeFrom` does the same from an existing tree and validation
+report. The tally tree has one node for every node of the block tree, in
+the same order, so the block-tree root is unchanged by the tally.
+
+- **Histogram.** `{ ballots: { <ballotId>: { votes, invalid, excluded,
+  questions, unsupported } } }`, listing only the ballots present in the
+  subtree. For a `select` question (type absent or `select`),
+  `questions[code]` is `{ answered, options }`: `answered` is the number
+  of valid votes that answered the question, and `options` has every
+  option code of the template, starting at zero, with the number of valid
+  votes choosing it. A blank is derived as the valid votes minus
+  `answered` and is not stored; likewise the valid count is
+  `votes - invalid - excluded`.
+- **Leaf.** The histogram of one block: its valid decrypted select
+  answers; its invalid votes counted apart under `invalid`. A block that
+  validation marks `invalid` is not tallied: its declared `EntryCount`
+  goes under `votes` and `excluded`, its option counts stay zero, and the
+  leaf lists the block-level error codes in `excludedFor`.
+- **Parent.** The canonical sum of the two children: the union of keys,
+  every count added, keys sorted.
+- **Unsupported types.** Every question whose type is not `select`
+  (rank, score, text, unknown) is counted under `unsupported`, as the
+  number of valid votes that answered it, and never under `questions`.
+- **Tally hash.** For every node,
+  `SHA-256(0x03 || merkleHash || UTF-8(canonicalJson(histogram)))`, where
+  `merkleHash` is the block-tree node hash as 32 raw bytes. The prefix
+  byte `0x02` is left unused on purpose, so a tally hash cannot pose as a
+  block-tree hash. The empty tally has size 0, no nodes, and the root
+  `SHA-256(0x03 || emptyRoot || UTF-8(canonicalJson({"ballots":{}})))`,
+  where `emptyRoot` is the empty block-tree root of section 7.1.
+- **Contents.** The tally is plain JSON data: counts and public block
+  columns only, with no vote entry, nonce, registrant id or key.
+- **Verifier.** `verifyTallyTree(tally)` takes an untrusted tally and
+  checks, in order: the format; the shape (leaf order, node order, ranges
+  and children as the block tree builds them); each leaf's data and
+  disposition; then for each node the block-tree hash, the histogram (a
+  leaf's own bounds, a parent's sum of its children) and the tally hash;
+  and last the root. It reports the first failure with its node or leaf
+  index. A pass shows the tally is internally consistent and every
+  branch holds. It does not show that the leaf histograms match the
+  decrypted blocks; that needs the released key, and the check is to
+  run `buildTallyTree` over the rows and compare the roots.
+
+### 7.5 Open items
+
+The election specification leaves these open, and this code does not
+settle them:
+
+- Who coordinates, stores, caches and publishes the block-tree root and
+  the tally tree.
+- Signing of tally nodes and trusted timestamps.
+- The completion notification.
+- Large answer sets, and normalisation of write-in answers.
+- Tallies for rank, score and text questions.
+- A clock the writer cannot choose. The final-root gate uses the caller's
+  clock.
+- The voter screens for slice-check and validation results.
+
 [SEC 1 v2.0]: #5-references
 [SEC 2 v2.0]: #5-references
 [RFC 5869]: #5-references
