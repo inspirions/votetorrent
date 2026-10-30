@@ -190,24 +190,27 @@ export class PoolAgent {
 
   constructor (options: PoolAgentOptions) {
     if (options.contribution.member !== options.identity.peerId) throw new Error('PoolAgent: the contribution must name this agent\'s peer id')
+    // Defaults per field with `??`, AFTER the spread (IN-01): an explicit `undefined` takes the
+    // default, and nothing in `options` can lower minSize below POOL_MIN_BLOCK_SIZE.
+    const quietMs = options.quietMs ?? 20_000
+    const dwell = options.rungDwellTicks ?? POOL_LADDER_DWELL_PRESENTS
     this.o = {
+      ...options,
       minSize: Math.max(POOL_MIN_BLOCK_SIZE, options.minSize ?? POOL_MIN_BLOCK_SIZE),
-      capacity: 16,
-      quietMs: 20_000,
-      presentIntervalMs: 1_000,
-      replyTimeoutMs: 5_000,
-      informAttempts: 3,
-      signTimeoutMs: 120_000,
-      memberTimeoutMs: 60_000,
-      pollWaitMs: 2_000,
-      formLeadMs: 60_000,
-      now: () => Date.now(),
-      ladder: true,
-      rungDwellTicks: POOL_LADDER_DWELL_PRESENTS,
-      ...options
+      capacity: options.capacity ?? 16,
+      quietMs,
+      presentIntervalMs: options.presentIntervalMs ?? 1_000,
+      replyTimeoutMs: options.replyTimeoutMs ?? 5_000,
+      informAttempts: options.informAttempts ?? 3,
+      signTimeoutMs: options.signTimeoutMs ?? 120_000,
+      memberTimeoutMs: options.memberTimeoutMs ?? 60_000,
+      pollWaitMs: options.pollWaitMs ?? 2_000,
+      formLeadMs: options.formLeadMs ?? 60_000,
+      now: options.now ?? (() => Date.now()),
+      ladder: options.ladder ?? true,
+      rungDwellTicks: Number.isFinite(dwell) ? Math.max(1, Math.floor(dwell)) : POOL_LADDER_DWELL_PRESENTS,
+      ladderMaxMs: Math.min(POOL_LADDER_MAX_MS, options.ladderMaxMs ?? quietMs)
     } as PoolAgent['o']
-    this.o.rungDwellTicks = Math.max(1, Math.floor(this.o.rungDwellTicks))
-    this.o.ladderMaxMs = Math.min(POOL_LADDER_MAX_MS, options.ladderMaxMs ?? this.o.quietMs)
     this.discovery = options.discovery ?? rendezvousDiscovery(options.rendezvous, options.identity)
     if (this.o.capacity < this.o.minSize) this.o.capacity = this.o.minSize
     this.me = options.identity.peerId

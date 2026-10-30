@@ -40,6 +40,7 @@ import {
   type RendezvousRequest,
   type RendezvousReply,
   type PoolIdentity,
+  type PoolAgentOptions,
   type PoolOutcome
 } from '../src/pool/index.js'
 import * as poolBlock from '../src/pool/pool-block.js'
@@ -290,6 +291,8 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     hijack?: number
     /** per-agent delay before run() starts */
     startDelayMs?: number[]
+    /** spread LAST into every agent's options (explicit undefined included) */
+    extra?: Partial<PoolAgentOptions>
     ladder?: boolean | boolean[]
     rungDwellTicks?: number
     ladderMaxMs?: number
@@ -386,7 +389,8 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
         pollWaitMs: 200,
         formLeadMs: opts.formLeadMs ?? 0,
         deadlineAt,
-        onStatus: (s) => { if (opts.abortWhenMember === i && s.phase === 'member') controller.abort() }
+        onStatus: (s) => { if (opts.abortWhenMember === i && s.phase === 'member') controller.abort() },
+        ...opts.extra
       })
       const delay = opts.startDelayMs?.[i] ?? 0
       if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
@@ -412,6 +416,24 @@ describe('pool (spike 102): agents negotiate through the rendezvous', function (
     const run = await runAgents([0, 1].map(makeVoter), { deadlineMs: 2_000 })
     expect(run.commits).to.deep.equal([])
     expect(run.outcomes).to.deep.equal([{ status: 'stopped', reason: 'deadline' }, { status: 'stopped', reason: 'deadline' }])
+  })
+
+  it('IN-01 minSize below the floor is clamped after the options spread: two voters with minSize 2 still never form', async () => {
+    const run = await runAgents([0, 1].map(makeVoter), { deadlineMs: 2_000, extra: { minSize: 2 } })
+    expect(run.commits).to.deep.equal([])
+    expect(run.outcomes).to.deep.equal([{ status: 'stopped', reason: 'deadline' }, { status: 'stopped', reason: 'deadline' }])
+  })
+
+  it('IN-01 an explicit undefined ladder / rungDwellTicks takes the defaults: the lone coordinator still climbs 2-bit, 1-bit, plain', async () => {
+    const v = makeVoter(0)
+    const run = await runAgents([v], { quietMs: 5_000, deadlineMs: 1_500, extra: { ladder: undefined, rungDwellTicks: undefined } })
+    const topics = run.requests.filter(r => r.i === 0 && r.t === 'present').map(r => r.topic)
+    const plain = poolTopic(ballot)
+    const hold = bytesToHex(sha256(utf8ToBytes(v.contribution.voteCiphertext)))
+    expect(topics.length).to.be.at.least(8)
+    expect(topics.slice(0, 3)).to.deep.equal(Array(3).fill(ladderTopic(plain, 2, [hold])))
+    expect(topics.slice(3, 6)).to.deep.equal(Array(3).fill(ladderTopic(plain, 1, [hold])))
+    expect(topics.slice(6)).to.deep.equal(Array(topics.length - 6).fill(plain))
   })
 
   it('a member that goes silent after merging is dropped after retries; the other four still commit', async () => {
