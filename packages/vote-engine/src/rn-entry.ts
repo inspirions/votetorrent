@@ -316,6 +316,8 @@ export {
 	validateElectionBlocks,
 	TALLY_TREE_DOMAIN,
 	tallyNodeHash,
+	tallyLeafHash,
+	tallyParentHash,
 	addHistograms,
 	tallyTreeFrom,
 	buildTallyTree,

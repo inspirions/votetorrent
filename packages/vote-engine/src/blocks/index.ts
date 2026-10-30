@@ -115,6 +115,8 @@ export type {
 export {
   TALLY_TREE_DOMAIN,
   tallyNodeHash,
+  tallyLeafHash,
+  tallyParentHash,
   addHistograms,
   tallyTreeFrom,
   buildTallyTree,

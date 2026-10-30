@@ -7,16 +7,21 @@
 //     canonical sum of its two children. The root histogram is the raw outcome.
 //
 // Format contract (third parties must be able to reproduce this byte for byte):
-//   - Node hash: sha256(0x03 || merkleNodeHash || utf8(canonicalJson(histogram))). The merkle hash enters as its
-//     32 raw bytes, the same way R5 concatenates child hashes. R5 uses 0x00 (leaf) and 0x01 (node); 0x02 is left
-//     unused on purpose, so a tally hash can never pose as a merkle hash.
+//   - Leaf tally hash (IN-02): sha256(0x04 || merkleLeafHash || utf8(canonicalJson({ disposition, excludedFor,
+//     histogram }))), so the disposition and the exclusion reasons are bound.
+//   - Parent tally hash (IN-02): sha256(0x03 || merkleNodeHash || leftTallyHash || rightTallyHash ||
+//     utf8(canonicalJson(histogram))). Each parent commits to its children's tally hashes, so the root binds every
+//     leaf's histogram, disposition and excludedFor: none can be rewritten without changing the root.
+//   - Every hash enters as its 32 raw bytes, the same way R5 concatenates child hashes. R5 uses 0x00 (leaf) and
+//     0x01 (node); 0x02 is left unused on purpose, so a tally hash can never pose as a merkle hash.
 //   - Histogram: { ballots: { [ballotId]: { votes, invalid, excluded, questions, unsupported } } }, only ballots
 //     present in the subtree. `valid` = votes - invalid - excluded is derived and never stored. A `select`
 //     question is { answered, options }: `answered` is the number of valid votes that answered it, and
 //     `options` has EVERY template option code, zero-initialised, with the number of valid votes choosing it.
 //     A blank is (valid - answered), derived. `answered` exists because a multi-select question
 //     (optionRange.max > 1) cannot recover it from the option counts.
-//   - Empty set: size 0, no nodes, root = tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} }).
+//   - Empty set: size 0, no nodes, root = tallyNodeHash(BLOCK_TREE_EMPTY_ROOT, { ballots: {} }), which is
+//     sha256(0x03 || emptyRoot || utf8('{"ballots":{}}')).
 //   - The tally is plain JSON data. It carries counts and public block columns only: no vote entry, nonce,
 //     registrant id or key, and nothing that is not JSON.
 //
@@ -66,6 +71,7 @@ import { canonicalJson } from '../voting/canonical.js'
 export const TALLY_TREE_DOMAIN = 'vt-tally-tree/1' as const
 
 const TALLY_PREFIX = 0x03
+const TALLY_LEAF_PREFIX = 0x04
 
 /** One `select` question. Blank = (ballot valid) - answered: derived, never stored. */
 export interface TallyQuestionCounts {
@@ -115,7 +121,7 @@ export interface TallyNode {
   merkleHash: string
   /** leaf: one ballot; parent: addHistograms(left, right) */
   histogram: TallyHistogram
-  /** tallyNodeHash(merkleHash, histogram) */
+  /** leaf: tallyLeafHash(merkleHash, histogram, disposition, excludedFor); parent: tallyParentHash(merkleHash, left.hash, right.hash, histogram) */
   hash: string
 }
 
@@ -166,6 +172,20 @@ function sortedRecord<V> (map: Map<string, V>): Record<string, V> {
 /** hex(sha256(0x03 || hexToBytes(merkleHash) || utf8(canonicalJson(histogram)))). Precondition: 64 lowercase hex, well-formed histogram. */
 export function tallyNodeHash (merkleHash: string, histogram: TallyHistogram): string {
   return bytesToHex(sha256(concatBytes(Uint8Array.of(TALLY_PREFIX), hexToBytes(merkleHash), utf8ToBytes(canonicalJson(histogram)))))
+}
+
+/** IN-02: hex(sha256(0x04 || merkleHash || utf8(canonicalJson({ disposition, excludedFor, histogram })))). */
+export function tallyLeafHash (merkleHash: string, histogram: TallyHistogram, disposition: TallyLeafDisposition, excludedFor: readonly ValidationCode[]): string {
+  return bytesToHex(sha256(concatBytes(
+    Uint8Array.of(TALLY_LEAF_PREFIX), hexToBytes(merkleHash), utf8ToBytes(canonicalJson({ disposition, excludedFor: [...excludedFor], histogram }))
+  )))
+}
+
+/** IN-02: hex(sha256(0x03 || merkleHash || leftTallyHash || rightTallyHash || utf8(canonicalJson(histogram)))). */
+export function tallyParentHash (merkleHash: string, leftHash: string, rightHash: string, histogram: TallyHistogram): string {
+  return bytesToHex(sha256(concatBytes(
+    Uint8Array.of(TALLY_PREFIX), hexToBytes(merkleHash), hexToBytes(leftHash), hexToBytes(rightHash), utf8ToBytes(canonicalJson(histogram))
+  )))
 }
 
 function sumRecords (a: Record<string, number> | undefined, b: Record<string, number> | undefined): Record<string, number> {
@@ -403,7 +423,12 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
       entry.right = right as number
     }
     entry.histogram = histogram
-    entry.hash = tallyNodeHash(n.hash, histogram)
+    if (entry.left === undefined) {
+      const leaf = outLeaves[lo as number]!
+      entry.hash = tallyLeafHash(n.hash, histogram, leaf.disposition, leaf.excludedFor)
+    } else {
+      entry.hash = tallyParentHash(n.hash, outNodes[entry.left]!.hash, outNodes[entry.right!]!.hash, histogram)
+    }
     outNodes.push(entry)
   }
 
@@ -705,6 +730,7 @@ function verifyChecked (input: unknown): TallyVerifyResult {
     if (electionId !== tally.electionId || electionRevision !== tally.electionRevision) return bad('leafData names another election or revision')
     if (ballotId !== l.ballotId || cid !== l.blockCid || entryCount !== l.entryCount) return bad('leafData differs from the leaf fields')
     if (l.disposition === 'tallied' ? l.excludedFor.length !== 0 : l.excludedFor.length === 0) return bad('excludedFor does not fit the disposition')
+    if (!l.excludedFor.every((c, k) => k === 0 || byString(l.excludedFor[k - 1]!, c) < 0)) return bad('excludedFor is not sorted and unique')
   }
 
   // nodes
@@ -723,7 +749,11 @@ function verifyChecked (input: unknown): TallyVerifyResult {
         return vfail('histogram-mismatch', `node ${i}: histogram is not the sum of its children`, { nodeIndex: i })
       }
     }
-    if (n.hash !== tallyNodeHash(n.merkleHash, n.histogram)) return vfail('tally-hash-mismatch', `node ${i}: hash is not the tally hash`, { nodeIndex: i })
+    const leaf = n.range[1] - n.range[0] === 1 ? leaves[n.range[0]]! : null
+    const want = leaf !== null
+      ? tallyLeafHash(n.merkleHash, n.histogram, leaf.disposition, leaf.excludedFor)
+      : tallyParentHash(n.merkleHash, nodes[n.left!]!.hash, nodes[n.right!]!.hash, n.histogram)
+    if (n.hash !== want) return vfail('tally-hash-mismatch', `node ${i}: hash is not the tally hash`, { nodeIndex: i })
   }
 
   // root

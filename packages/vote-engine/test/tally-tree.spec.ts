@@ -29,6 +29,24 @@ import {
 const refTallyHash = (merkleHex: string, hist: unknown, prefix = 0x03): string =>
   bytesToHex(sha256(concatBytes(Uint8Array.of(prefix), hexToBytes(merkleHex), utf8ToBytes(canonicalJson(hist)))))
 
+/** IN-02 leaf: 0x04 || merkle || canonicalJson({ disposition, excludedFor, histogram }). */
+const refLeafTallyHash = (merkleHex: string, hist: unknown, disposition: string, excludedFor: string[]): string =>
+  bytesToHex(sha256(concatBytes(Uint8Array.of(0x04), hexToBytes(merkleHex), utf8ToBytes(canonicalJson({ disposition, excludedFor, histogram: hist })))))
+
+/** IN-02 parent: 0x03 || merkle || leftTally || rightTally || canonicalJson(histogram). */
+const refParentTallyHash = (merkleHex: string, left: string, right: string, hist: unknown): string =>
+  bytesToHex(sha256(concatBytes(Uint8Array.of(0x03), hexToBytes(merkleHex), hexToBytes(left), hexToBytes(right), utf8ToBytes(canonicalJson(hist)))))
+
+/** The reference tally hash of node i of a tally, from its own fields and its children's hashes. */
+function refNodeHash (t: any, i: number): string {
+  const n = t.nodes[i]
+  if (n.left === undefined) {
+    const l = t.leaves[n.range[0]]
+    return refLeafTallyHash(n.merkleHash, n.histogram, l.disposition, l.excludedFor)
+  }
+  return refParentTallyHash(n.merkleHash, t.nodes[n.left].hash, t.nodes[n.right].hash, n.histogram)
+}
+
 const hasOwn = (o: any, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k)
 
 function refSumRec (a: any, b: any): any {
@@ -249,7 +267,7 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
       expect(n.left).to.equal(rn.left)
       expect(n.right).to.equal(rn.right)
       expect(n.merkleHash).to.equal(rn.hash)
-      expect(n.hash).to.equal(refTallyHash(rn.hash, n.histogram))
+      expect(n.hash).to.equal(refNodeHash(t, i))
       if (rn.range[1] - rn.range[0] === 1) {
         const leaf: any = tree.leaves[rn.range[0]]
         const f = blocks[tree.leaves.findIndex((l: any) => l.cid === leaf.cid)]
@@ -559,7 +577,8 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     const v1 = set.blocks[3]!
     const leafNode = r.tally.nodes.find((n: any) => n.range[1] - n.range[0] === 1 && r.tally.leaves[n.range[0]].blockCid === v1.row.Cid)
     expect(canonicalJson(leafNode.histogram)).to.equal(canonicalJson(naiveTally([v1], ballots)))
-    expect(r.tally.root).to.equal(refTallyHash(rootBefore.root, r.tally.histogram))
+    const last = r.tally.nodes.length - 1
+    expect(r.tally.root).to.equal(refParentTallyHash(rootBefore.root, r.tally.nodes[r.tally.nodes[last].left].hash, r.tally.nodes[r.tally.nodes[last].right].hash, r.tally.histogram))
   })
 
   it('TB-2 per-vote invalid votes (D-71 via R7) are counted apart', () => {
@@ -807,7 +826,7 @@ describe('verify tally tree (65-08: R8, comprehensive validation of tally nodes)
     if (where.leafIndex !== undefined) expect(r.leafIndex).to.equal(where.leafIndex)
   }
   const rehash = (t: any, ...idx: number[]): any => {
-    for (const i of idx) t.nodes[i].hash = refTallyHash(t.nodes[i].merkleHash, t.nodes[i].histogram)
+    for (const i of idx) t.nodes[i].hash = refNodeHash(t, i)
     return t
   }
   const parentOf = (t: any, i: number): number => t.nodes.findIndex((n: any) => n.left === i || n.right === i)
@@ -920,6 +939,31 @@ describe('verify tally tree (65-08: R8, comprehensive validation of tally nodes)
       w.root = w.nodes[last].hash
       fails(w, 'histogram-mismatch', { nodeIndex: last })
     })
+  })
+
+  it('TV-2b (IN-02) excludedFor and disposition are bound into the leaf hash and through it into the root', () => {
+    const li = excludedTally.leaves.findIndex((l: any) => l.disposition === 'excluded')
+    const leafNode = excludedTally.nodes.findIndex((n: any) => n.range[1] - n.range[0] === 1 && n.range[0] === li)
+    // rewriting the reasons alone breaks the leaf hash
+    const t = clone(excludedTally)
+    t.leaves[li].excludedFor = ['cid-mismatch']
+    fails(t, 'tally-hash-mismatch', { nodeIndex: leafNode })
+    // rewriting the reasons and rehashing that leaf breaks its parent, whose hash commits to the child hash
+    const u = clone(excludedTally)
+    u.leaves[li].excludedFor = ['cid-mismatch']
+    rehash(u, leafNode)
+    fails(u, 'tally-hash-mismatch', { nodeIndex: parentOf(u, leafNode) })
+    // rehashing the whole path is a different root
+    const w = clone(excludedTally)
+    w.leaves[li].excludedFor = ['cid-mismatch']
+    rehash(w, ...w.nodes.map((_: any, i: number) => i))
+    w.root = w.nodes[w.nodes.length - 1].hash
+    expect(verifyTallyTree(w)).to.deep.equal({ ok: true })
+    expect(w.root).to.not.equal(excludedTally.root)
+    // excludedFor must be sorted and unique, so its hash input is canonical
+    const v = clone(excludedTally)
+    v.leaves[li].excludedFor = [...v.leaves[li].excludedFor, ...v.leaves[li].excludedFor]
+    fails(v, 'leaf-mismatch', { leafIndex: li })
   })
 
   it('TV-3 malformed tallies are typed and never throw', () => {

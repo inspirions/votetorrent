@@ -684,13 +684,22 @@ the same order, so the block-tree root is unchanged by the tally.
 - **Unsupported types.** Every question whose type is not `select`
   (rank, score, text, unknown) is counted under `unsupported`, as the
   number of valid votes that answered it, and never under `questions`.
-- **Tally hash.** For every node,
-  `SHA-256(0x03 || merkleHash || UTF-8(canonicalJson(histogram)))`, where
-  `merkleHash` is the block-tree node hash as 32 raw bytes. The prefix
-  byte `0x02` is left unused on purpose, so a tally hash cannot pose as a
-  block-tree hash. The empty tally has size 0, no nodes, and the root
-  `SHA-256(0x03 || emptyRoot || UTF-8(canonicalJson({"ballots":{}})))`,
-  where `emptyRoot` is the empty block-tree root of section 7.1.
+- **Tally hash.** For a leaf node,
+  `SHA-256(0x04 || merkleHash || UTF-8(canonicalJson({ disposition,
+  excludedFor, histogram })))` (`tallyLeafHash`). For a parent node,
+  `SHA-256(0x03 || merkleHash || leftHash || rightHash ||
+  UTF-8(canonicalJson(histogram)))` (`tallyParentHash`), where
+  `leftHash` and `rightHash` are the children's tally hashes. Every hash
+  enters as its 32 raw bytes, and `merkleHash` is the block-tree node hash.
+  Because each parent commits to its children's tally hashes, the root
+  binds every leaf's histogram, disposition and `excludedFor` (which must
+  be sorted and free of repeats): none of them can be rewritten without
+  changing the root. The prefix byte `0x02` is left unused on purpose, so
+  a tally hash cannot pose as a block-tree hash. The empty tally has size
+  0, no nodes, and the root
+  `SHA-256(0x03 || emptyRoot || UTF-8(canonicalJson({"ballots":{}})))`
+  (`tallyNodeHash`), where `emptyRoot` is the empty block-tree root of
+  section 7.1.
 - **Contents.** The tally is plain JSON data: counts and public block
   columns only, with no vote entry, nonce, registrant id or key.
 - **Verifier.** `verifyTallyTree(tally)` takes an untrusted tally and
