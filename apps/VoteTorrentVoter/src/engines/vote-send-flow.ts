@@ -6,8 +6,10 @@
  * behind, in order, until one answers; the same rendezvous for every voter who joined with that
  * code), the sealed vote record (opened with one fingerprint prompt) and the voting key (one
  * prompt per block). A reachability probe signed with a throwaway pool key runs before the
- * fingerprint prompt, so an unreachable network costs no prompt (R3, D-30). Every dependency is
- * injectable so the flow is tested without a device. Nothing is logged.
+ * fingerprint prompt, so an unreachable network costs no prompt (R3, D-30). The probe stops when
+ * the card leaves (the signal) or after PROBE_BUDGET_MS, whichever comes first, and dials no further
+ * address after that (WR-02). Every dependency is injectable so the flow is tested without a device.
+ * Nothing is logged.
  */
 import {multiaddr} from '@multiformats/multiaddr';
 import {
@@ -49,6 +51,34 @@ export interface VoteSendFlowDeps {
 	readRendezvousAddrs?: () => Promise<string[]>
 	toDialTarget?: (addr: string) => unknown
 	send?: typeof sendSavedVote
+	/** test seam: the probe's overall budget (default PROBE_BUDGET_MS) */
+	probeBudgetMs?: number
+}
+
+/** The reachability probe gives up after this long in total, however many addresses are left. */
+export const PROBE_BUDGET_MS = 20_000;
+
+/**
+ * Run `call` until it answers (true), throws (false), `signal` aborts or `budgetMs` passes (false).
+ * On abort or budget, `stop` is aborted, so the clients refuse to dial any further address; the
+ * call still in flight is left to finish on its own and its result is ignored.
+ */
+async function probe(call: () => Promise<unknown>, stop: AbortController, signal: AbortSignal | undefined, budgetMs: number): Promise<boolean> {
+	const halt = () => stop.abort();
+	if (signal?.aborted === true) halt();
+	if (stop.signal.aborted) return false;
+	signal?.addEventListener('abort', halt);
+	const timer = setTimeout(halt, budgetMs);
+	try {
+		const attempt = call().then(() => true, () => false);
+		const stopped = new Promise<boolean>((resolve) => {
+			stop.signal.addEventListener('abort', () => resolve(false));
+		});
+		return await Promise.race([attempt, stopped]);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener('abort', halt);
+	}
 }
 
 export async function runVoteSendFlow(deps: VoteSendFlowDeps): Promise<VoteSendFlowResult> {
@@ -68,11 +98,15 @@ export async function runVoteSendFlow(deps: VoteSendFlowDeps): Promise<VoteSendF
 		}
 	}
 	if (targets.length === 0) return {kind: 'no-rendezvous'};
+	// Stopped when the card leaves or the budget runs out: once stopped, no address is dialed again.
+	// A probe that answered never stops it, so the clients below serve sending unchanged.
+	const probeStop = new AbortController();
 	// One lazily built client per address: an address that is never needed is never built.
 	const clients: PoolRendezvousClient[] = targets.map((target) => {
 		let built: PoolRendezvousClient | null = null;
 		return {
 			call: (request, extraWaitMs) => {
+				if (probeStop.signal.aborted) return Promise.reject(new Error('probe stopped'));
 				built ??= createLibp2pRendezvousClient(control as Parameters<typeof createLibp2pRendezvousClient>[0], target);
 				return built.call(request, extraWaitMs);
 			},
@@ -81,12 +115,10 @@ export async function runVoteSendFlow(deps: VoteSendFlowDeps): Promise<VoteSendF
 	const rendezvous = createFailoverRendezvousClient(clients);
 	// Reachability probe: a poll signed by a throwaway pool key (never the device key, no prompt).
 	// Any reply, even an error reply, means a rendezvous answered; only a throw means none did.
-	try {
-		await rendezvous.call(poolRequests.poll(createPoolIdentity(), 0, deps.nowMs()));
-	} catch {
-		return {kind: 'rendezvous-unreachable'};
-	}
+	const reached = await probe(() => rendezvous.call(poolRequests.poll(createPoolIdentity(), 0, deps.nowMs())), probeStop, deps.signal, deps.probeBudgetMs ?? PROBE_BUDGET_MS);
+	// Canceled whenever the card left, whatever the probe's result.
 	if (deps.signal?.aborted === true) return {kind: 'canceled'};
+	if (!reached) return {kind: 'rendezvous-unreachable'};
 
 	const opened = await revealVoteReceipt(deps.electionId, deps.envelope, deps.recordPrompt);
 	if (opened.kind !== 'ok') return {kind: opened.kind === 'canceled' || opened.kind === 'biometric-unavailable' || opened.kind === 'unreadable' ? opened.kind : 'failed'};

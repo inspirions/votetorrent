@@ -155,6 +155,46 @@ describe('every joined address (R3, D-30)', () => {
 		expect(revealVoteReceipt).not.toHaveBeenCalled();
 	});
 
+	it('an aborted probe that throws is canceled, not unreachable, and dials no further address (WR-02)', async () => {
+		const controller = new AbortController();
+		clients[FIRST]!.call.mockImplementation(async () => {
+			controller.abort();
+			throw new Error('dial failed');
+		});
+		expect(await runVoteSendFlow(deps({signal: controller.signal}))).toEqual({kind: 'canceled'});
+		expect(clients[SECOND]!.call).not.toHaveBeenCalled();
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
+	});
+
+	it('a card that leaves while a dial hangs is canceled at once; the remaining addresses are never dialed (WR-02)', async () => {
+		const controller = new AbortController();
+		clients[FIRST]!.call.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(new Error('dial failed')), 150)));
+		setTimeout(() => controller.abort(), 10);
+		const startedAt = Date.now();
+		expect(await runVoteSendFlow(deps({signal: controller.signal}))).toEqual({kind: 'canceled'});
+		expect(Date.now() - startedAt).toBeLessThan(120);
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		expect(clients[SECOND]!.call).not.toHaveBeenCalled();
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
+	});
+
+	it('the probe has an overall budget: past it, unreachable, and no further address is dialed (WR-02)', async () => {
+		clients[FIRST]!.call.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(new Error('dial failed')), 150)));
+		const startedAt = Date.now();
+		expect(await runVoteSendFlow(deps({probeBudgetMs: 40}))).toEqual({kind: 'rendezvous-unreachable'});
+		expect(Date.now() - startedAt).toBeLessThan(120);
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		expect(clients[SECOND]!.call).not.toHaveBeenCalled();
+		expect(revealVoteReceipt).not.toHaveBeenCalled();
+	});
+
+	it('a signal already aborted before the probe is canceled with no dial', async () => {
+		const controller = new AbortController();
+		controller.abort();
+		expect(await runVoteSendFlow(deps({signal: controller.signal}))).toEqual({kind: 'canceled'});
+		expect(clients[FIRST]!.call).not.toHaveBeenCalled();
+	});
+
 	it('returns canceled without a prompt when the card leaves during the probe', async () => {
 		const controller = new AbortController();
 		clients[FIRST]!.call.mockImplementation(async () => {
