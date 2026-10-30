@@ -7,9 +7,26 @@
 //
 // Two phases:
 //   - No key: Cid re-derived from the ciphertext, the registrant list canonical and as long as EntryCount, the
-//     template digest, the VoteBlockVoter rows one-for-one with the list, every consent signature, and a
-//     registrant in at most one block per ballot. Every block is then `not-decryptable-yet`, which is a status
-//     of its own and not a failure.
+//     template digest, an AUTHENTICATED VoteBlockVoter row for every listed registrant (consent signature
+//     verifies, the registrant is registered and the device key is associated, CR-02), and a registrant in at
+//     most one block per ballot. Every block is then `not-decryptable-yet`, which is a status of its own and not
+//     a failure.
+//
+// Authorization (CR-02): the signatures alone are self-certifying (a key from the same untrusted row). Each
+// voter row is therefore checked against the caller's Registrant and Association rows with the rule of the
+// schema's VoterAssociated CHECK: an Association (RegistrantId, DeviceKey) whose Expiration is later than the
+// reference time, joined to a Registrant whose Status is 'a' and whose Expiration is later than the reference
+// time. The schema compares with the writer's clock at insert (context.now), which a validator cannot see; the
+// insert had to fall in [votingStarts, accruingVotes), so the reference time is the timeline's votingStarts,
+// the weakest bound every honest insert met. The Status and the Association rows are read as the caller
+// supplies them: a registrant revoked, or an association deleted, after voting fails the check.
+//
+// Attribution (CR-03): a finding lands on a block only when the evidence is authenticated for that block.
+// Rows are grouped per (block, registrant); the representative of a listed registrant is a row with no problem
+// if there is one, else the row with the fewest problems, then the lowest row key. Its problems are block-level
+// findings. Every other row naming the block (a second row, a row for an unlisted registrant, a row with no
+// RegistrantId) is the report-level finding `voter-row-forged` and never touches the block. A registrant counts
+// for `registrant-in-two-blocks` only in blocks where its representative row is authenticated.
 //   - After key release (a caller-held secret): every block is opened with openCommittedBlock, the payload is
 //     checked (id, count, the shared checkPoolPayloadShape, every voter entry), and every vote is opened and
 //     judged against its ballot template by validateVoteEntryAgainstBallot (D-71). Valid votes carry their
@@ -44,11 +61,12 @@ import { verifySigP256 } from '../database/initialize.js'
 export const VALIDATION_CODES = Object.freeze([
   // block, no key needed ('malformed-row' is also block-level for a kept row with no Ciphertext text)
   'malformed-row', 'duplicate-block', 'cid-mismatch', 'voter-list-malformed', 'voter-list-not-canonical',
-  'entry-count-mismatch', 'unknown-ballot', 'template-mismatch', 'voter-row-mismatch', 'voter-row-duplicate',
-  'voter-row-unlisted', 'voter-row-missing', 'consent-signature-invalid', 'registrant-in-two-blocks',
+  'entry-count-mismatch', 'unknown-ballot', 'template-mismatch', 'voter-row-mismatch',
+  'voter-row-missing', 'consent-signature-invalid', 'voter-not-registered', 'device-key-not-associated',
+  'registrant-in-two-blocks',
   // report level (not tied to a validated block); 'malformed-row' and 'duplicate-block' also land here for
   // rows the R5 selection set aside
-  'voter-row-without-block',
+  'voter-row-without-block', 'voter-row-forged',
   // block, after release
   'block-does-not-open', 'id-mismatch', 'payload-count-mismatch',
   'not-a-payload', 'counts-differ', 'voter-count-mismatch', 'not-canonical-order', 'duplicate-vote', 'duplicate-voter',
@@ -142,12 +160,27 @@ export interface ValidationRelease {
   jointPublicKey: string
 }
 
+/** A Registrant row (CR-02); other columns are ignored. Expiration is the stored ISO datetime ending in Z. */
+export interface ValidationRegistrantRow { Id: string, Status: string, Expiration: string }
+
+/** An Association row (CR-02); other columns are ignored. */
+export interface ValidationAssociationRow { RegistrantId: string, DeviceKey: string, Expiration: string }
+
+/** Structural; an Election.timeline fits. votingStarts (epoch ms) is the reference time of the authorization check. */
+export interface ValidationTimeline { votingStarts: number }
+
 export interface ValidateElectionBlocksInput {
   scope: { electionId: string, electionRevision: number }
   rows: readonly ValidationBlockRow[]
   voterRows: readonly ValidationVoterRow[]
   /** the revision's ballot templates, keyed by id */
   ballots: readonly AnswerCheckBallot[]
+  /** CR-02: the registrants the voter rows name (a row that is not readable authorizes nothing) */
+  registrants: readonly ValidationRegistrantRow[]
+  /** CR-02: the device associations of those registrants */
+  associations: readonly ValidationAssociationRow[]
+  /** CR-02: the revision timeline; expirations must be later than votingStarts */
+  timeline: ValidationTimeline
   release?: ValidationRelease | null
 }
 
@@ -234,6 +267,46 @@ function voterRecordProblem (r: unknown): string | null {
   return null
 }
 
+interface VoterRowProblem { code: ValidationCode, detail: string }
+
+const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
+
+/** Epoch ms of a stored ISO datetime ending in Z (the schema's ExpirationValid form), or null. Sub-ms digits are dropped. */
+function isoMs (value: unknown): number | null {
+  if (typeof value !== 'string' || !ISO_Z.test(value)) return null
+  const dot = value.indexOf('.')
+  const text = dot === -1 ? value : `${value.slice(0, Math.min(dot + 4, value.length - 1))}Z`
+  const ms = Date.parse(text)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * CR-02: VoterAssociated over the caller's rows. registered(r): a Registrant r with Status 'a' and Expiration
+ * later than `at`. associated(r, key): an Association (r, key) with Expiration later than `at`. Unreadable rows
+ * authorize nothing.
+ */
+function authorizationIndex (registrants: unknown[], associations: unknown[], at: number): { registered: (r: string) => boolean, associated: (r: string, key: string) => boolean } {
+  const active = new Set<string>()
+  for (const r of registrants) {
+    if (!isRec(r) || !isStr(r.Id) || r.Status !== 'a') continue
+    const exp = isoMs(r.Expiration)
+    if (exp !== null && exp > at) active.add(r.Id)
+  }
+  const keys = new Map<string, Set<string>>()
+  for (const a of associations) {
+    if (!isRec(a) || !isStr(a.RegistrantId) || !isStr(a.DeviceKey)) continue
+    const exp = isoMs(a.Expiration)
+    if (exp === null || exp <= at) continue
+    const g = keys.get(a.RegistrantId)
+    if (g === undefined) keys.set(a.RegistrantId, new Set([a.DeviceKey]))
+    else g.add(a.DeviceKey)
+  }
+  return {
+    registered: (r) => active.has(r),
+    associated: (r, key) => keys.get(r)?.has(key) === true
+  }
+}
+
 interface Work {
   row: Rec | null
   cid: string
@@ -244,6 +317,8 @@ interface Work {
   declared: number
   ended: boolean
   list: string[] | null
+  /** CR-03: listed registrants whose representative voter row is authenticated */
+  authenticated: Set<string>
   ready: boolean
   payloadVersion: 1 | 2 | null
   opened: boolean
@@ -279,6 +354,13 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   if (!Array.isArray(input.rows)) return refuse('malformed-input', 'rows is not an array')
   if (!Array.isArray(input.voterRows)) return refuse('malformed-input', 'voterRows is not an array')
   if (!Array.isArray(input.ballots)) return refuse('malformed-input', 'ballots is not an array')
+  if (!Array.isArray(input.registrants)) return refuse('malformed-input', 'registrants is not an array')
+  if (!Array.isArray(input.associations)) return refuse('malformed-input', 'associations is not an array')
+  const tl = input.timeline as unknown
+  if (!isRec(tl) || typeof tl.votingStarts !== 'number' || !Number.isFinite(tl.votingStarts)) {
+    return refuse('malformed-input', 'timeline needs a finite votingStarts (epoch ms)')
+  }
+  const authorization = authorizationIndex(input.registrants as unknown[], input.associations as unknown[], tl.votingStarts)
   const ballotsById = new Map<string, { ballot: AnswerCheckBallot, digest: string }>()
   for (const b of input.ballots as unknown[]) {
     if (!isRec(b) || !isStr(b.id) || !Array.isArray(b.questions)) return refuse('malformed-input', 'a ballot is not readable')
@@ -341,6 +423,10 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   const regOf = (v: Rec): string => (isStr(v.RegistrantId) ? v.RegistrantId : '')
   const voterOrder = (a: Rec, b: Rec): number => byString(regOf(a), regOf(b)) || byString(rowKey(a), rowKey(b))
   const deviceKeys = new Map<string, Map<string, string>>()
+  const forged: ValidationFinding[] = []
+  const forgedFinding = (blockCid: string, v: Rec, detail: string): ValidationFinding => ({
+    blockCid, code: 'voter-row-forged', severity: 'error', detail, ...(regOf(v) !== '' ? { registrantId: regOf(v) } : {})
+  })
 
   const add = (w: Work, code: ValidationCode, detail: string, extra: { voteIndex?: number, registrantId?: string, questionCode?: string, optionCode?: string } = {}): void => {
     const severity: FindingSeverity = (VALIDATION_INFO_CODES as readonly string[]).includes(code) ? 'info' : 'error'
@@ -391,9 +477,8 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
     if (known === undefined) add(w, 'unknown-ballot', 'no ballot template matches the block BallotId')
     else if (row.TemplateDigest !== known.digest) add(w, 'template-mismatch', 'the block TemplateDigest is not the ballot template digest')
 
-    // consent rows of this block
+    // consent rows of this block (CR-02, CR-03)
     const mine = [...(voterByCid.get(w.cid) ?? [])].sort(voterOrder)
-    const seen = new Set<string>()
     const keyOf = new Map<string, string>()
     // consentDigest reads only electionId, revision and ballotId from this ballot
     const poolBallot: PoolBallot = {
@@ -401,32 +486,52 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
       ballotId: row.BallotId,
       templateDigest: row.TemplateDigest
     }
-    for (const v of mine) {
-      const reg = regOf(v)
-      if (reg === '') {
-        add(w, 'voter-row-mismatch', 'a voter row has no RegistrantId')
-        continue
-      }
+    const problemsOf = (v: Rec, reg: string): VoterRowProblem[] => {
+      const out: VoterRowProblem[] = []
       if (v.ElectionId !== row.ElectionId || normaliseInt(v.ElectionRevision) !== rev || v.BallotId !== row.BallotId || v.BlockId !== row.Id) {
-        add(w, 'voter-row-mismatch', 'a voter row disagrees with its block on election, revision, ballot or block id', { registrantId: reg })
+        out.push({ code: 'voter-row-mismatch', detail: 'a voter row disagrees with its block on election, revision, ballot or block id' })
       }
-      if (seen.has(reg)) {
-        add(w, 'voter-row-duplicate', 'a registrant has two voter rows for this block', { registrantId: reg })
-        continue
-      }
-      seen.add(reg)
-      if (isStr(v.DeviceKey)) keyOf.set(reg, v.DeviceKey)
-      if (list !== null && !list.includes(reg)) add(w, 'voter-row-unlisted', 'a voter row names a registrant the block does not list', { registrantId: reg })
       let signed = false
       try {
         signed = isStr(v.DeviceKey) && isStr(v.Signature) &&
-          verifySigP256(consentDigest({ cid: row.Cid, blockId: row.Id }, poolBallot, reg, v.DeviceKey), v.Signature, v.DeviceKey)
+          verifySigP256(consentDigest({ cid: row.Cid as string, blockId: row.Id as string }, poolBallot, reg, v.DeviceKey), v.Signature, v.DeviceKey)
       } catch { signed = false }
-      if (!signed) add(w, 'consent-signature-invalid', 'the consent signature does not verify over the consent digest', { registrantId: reg })
+      if (!signed) out.push({ code: 'consent-signature-invalid', detail: 'the consent signature does not verify over the consent digest' })
+      if (!authorization.registered(reg)) {
+        out.push({ code: 'voter-not-registered', detail: 'no active registrant with this id expires after the voting start' })
+      }
+      if (!isStr(v.DeviceKey) || !authorization.associated(reg, v.DeviceKey)) {
+        out.push({ code: 'device-key-not-associated', detail: 'no association of this registrant and device key expires after the voting start' })
+      }
+      return out
+    }
+    const listed = new Set(list ?? [])
+    const byReg = new Map<string, Array<{ v: Rec, problems: VoterRowProblem[] }>>()
+    for (const v of mine) {
+      const reg = regOf(v)
+      if (reg === '' || (list !== null && !listed.has(reg))) {
+        forged.push(forgedFinding(w.cid, v, reg === '' ? 'a voter row naming this block has no RegistrantId' : 'a voter row names a registrant this block does not list'))
+        continue
+      }
+      const g = byReg.get(reg)
+      const entry = { v, problems: problemsOf(v, reg) }
+      if (g === undefined) byReg.set(reg, [entry])
+      else g.push(entry)
+    }
+    for (const reg of [...byReg.keys()].sort(byString)) {
+      // the representative: a row with no problem if any, else the fewest problems, then the row key
+      const ranked = [...byReg.get(reg)!].sort((a, b) => (a.problems.length - b.problems.length) || byString(rowKey(a.v), rowKey(b.v)))
+      const rep = ranked[0]!
+      for (const p of rep.problems) add(w, p.code, p.detail, { registrantId: reg })
+      if (rep.problems.length === 0) w.authenticated.add(reg)
+      if (isStr(rep.v.DeviceKey)) keyOf.set(reg, rep.v.DeviceKey)
+      for (const other of ranked.slice(1)) {
+        forged.push(forgedFinding(w.cid, other.v, 'a second voter row for a registrant of this block; the block keeps the row that verifies'))
+      }
     }
     if (list !== null) {
       for (const reg of [...list].sort(byString)) {
-        if (!seen.has(reg)) add(w, 'voter-row-missing', 'a listed registrant has no voter row', { registrantId: reg })
+        if (!byReg.has(reg)) add(w, 'voter-row-missing', 'a listed registrant has no voter row', { registrantId: reg })
       }
     }
     deviceKeys.set(w.cid, keyOf)
@@ -434,11 +539,12 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
 
   // cross-block: a registrant in two blocks of one ballot
   const placed = new Map<string, Map<string, Work[]>>()
+  // CR-03: only registrants whose voter row in that block is authenticated
   for (const w of works) {
     if (!w.ready || w.list === null) continue
     let byReg = placed.get(w.ballotId)
     if (byReg === undefined) { byReg = new Map(); placed.set(w.ballotId, byReg) }
-    for (const reg of new Set(w.list)) {
+    for (const reg of w.authenticated) {
       const g = byReg.get(reg)
       if (g === undefined) byReg.set(reg, [w])
       else g.push(w)
@@ -446,7 +552,7 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
   }
   for (const w of works) {
     if (!w.ready || w.list === null) continue
-    for (const reg of [...new Set(w.list)].sort(byString)) {
+    for (const reg of [...w.authenticated].sort(byString)) {
       const g = placed.get(w.ballotId)?.get(reg)
       if (g === undefined || g.length < 2) continue
       const others = g.filter(o => o !== w).map(o => o.cid).sort(byBytes)
@@ -593,12 +699,13 @@ function validateInner (input: ValidateElectionBlocksInput, keepSecret: (s: Uint
       ...(regOf(v) !== '' ? { registrantId: regOf(v) } : {})
     })
   }
-  return { ok: true, electionId, electionRevision: revision, released, blocks, findings: [...setAside, ...orphans], totals }
+  forged.sort((a, b) => byBytes(a.blockCid, b.blockCid) || byString(a.registrantId ?? '', b.registrantId ?? '') || byString(a.detail, b.detail))
+  return { ok: true, electionId, electionRevision: revision, released, blocks, findings: [...setAside, ...forged, ...orphans], totals }
 }
 
 function newWork (row: Rec | null, cid: string): Work {
   return {
-    row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, ready: false,
+    row, cid, key: rowKey(row), fs: [], id: '', ballotId: '', declared: 0, ended: false, list: null, authenticated: new Set(), ready: false,
     payloadVersion: null, opened: false, votes: [], entries: 0, revision: 0
   }
 }

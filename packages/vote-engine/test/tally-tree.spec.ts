@@ -15,6 +15,7 @@ import { canonicalJson } from '../src/voting/canonical.js'
 import {
   FIXTURE_ELECTION_ID,
   FIXTURE_REVISION,
+  fixtureAuthorization,
   makeCommittedBlock,
   makeCommittedElection,
   makeFixtureElection,
@@ -446,7 +447,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
   let ballots: any[]
   let release: { secretKey: Uint8Array, jointPublicKey: string }
   const input = (over: Record<string, unknown> = {}): any => ({
-    scope, rows: set.rows, voterRows: set.voterRows, ballots, release, ...over
+    scope, rows: set.rows, voterRows: set.voterRows, ballots, ...set.authorization, release, ...over
   })
 
   before(() => {
@@ -516,7 +517,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       makeFixtureVoter(e, ballot, 3, { voteEntry: unknown })
     ]
     const fx = makeCommittedBlock(e, ballot, voters)
-    const inp = { scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [ballot.template], release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey } }
+    const inp = { scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [ballot.template], ...fixtureAuthorization(voters), release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey } }
     const r: any = buildTallyTree(inp as any)
     expect(r.ok, JSON.stringify(r)).to.equal(true)
     const leaf = r.tally.nodes[0].histogram.ballots['ballot-a']
@@ -535,7 +536,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
     })
     const s = makeCommittedElection({ ballotIds: ['ballot-a'], blocks: [{ size: 3, selections: sel }, { size: 3, selections: sel }] })
     const bt = s.election.ballots.map(b => b.template)
-    const r: any = buildTallyTree({ scope, rows: s.rows, voterRows: s.voterRows, ballots: bt, release: { secretKey: s.election.electionSecret, jointPublicKey: s.election.electionKey.jointPublicKey } } as any)
+    const r: any = buildTallyTree({ scope, rows: s.rows, voterRows: s.voterRows, ballots: bt, ...s.authorization, release: { secretKey: s.election.electionSecret, jointPublicKey: s.election.electionKey.jointPublicKey } } as any)
     expect(r.ok, JSON.stringify(r)).to.equal(true)
     const root = r.tally.histogram.ballots['ballot-a']
     expect(root.unsupported).to.deep.equal({ q3: 4 })
@@ -558,7 +559,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       makeFixtureVoter(e, ballot, 2, { selections: { q1: ['a'] } })
     ]
     const fx = makeCommittedBlock(e, ballot, voters)
-    const r2: any = buildTallyTree({ scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [tpl], release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey } } as any)
+    const r2: any = buildTallyTree({ scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [tpl], ...fixtureAuthorization(voters), release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey } } as any)
     expect(r2.ok, JSON.stringify(r2)).to.equal(true)
     const h = r2.tally.histogram.ballots['ballot-a']
     expect(h.unsupported).to.deep.equal({ q4: 2, q5: 0 })
@@ -605,7 +606,7 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       const A = makeCommittedBlock(e, ballot, [vs[0]!, vs[1]!, vs[2]!])
       const B = makeCommittedBlock(e, ballot, [vs[0]!, vs[3]!, vs[4]!])
       const r: any = buildTallyTree({
-        scope, rows: [A.row, B.row], voterRows: [...A.voterRows, ...B.voterRows], ballots: [ballot.template],
+        scope, rows: [A.row, B.row], voterRows: [...A.voterRows, ...B.voterRows], ballots: [ballot.template], ...fixtureAuthorization(vs),
         release: { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey }
       } as any)
       expect(r.ok, JSON.stringify(r)).to.equal(true)
@@ -618,6 +619,29 @@ describe('tally tree over committed blocks (65-08: R8, D-80, D-81, D-71)', funct
       expect(root.votes).to.equal(6)
       expect(root.excluded).to.equal(6)
     })
+  })
+
+  it('TB-4d (CR-02, CR-03) a forged block is excluded and never displaces the honest block it names', () => {
+    const honest = set.blocks[0]!
+    const victim = honest.voters[0]!
+    const ballot = set.election.ballots[0]!
+    // B' lists the victim with a stranger key, and two unregistered strangers who sign their own consent
+    const strangers = [makeFixtureVoter(set.election, ballot, 300), makeFixtureVoter(set.election, ballot, 301)]
+    const forged = makeCommittedBlock(set.election, ballot, [{ ...victim, pubHex: strangers[0]!.pubHex, priv: strangers[0]!.priv } as any, ...strangers])
+    const flip = (hex: string): string => (hex[0] === '0' ? '1' : '0') + hex.slice(1)
+    const extra = { ...honest.voterRows[1]!, Signature: flip(honest.voterRows[1]!.Signature) }
+    const r: any = buildTallyTree(input({ rows: [...set.rows, forged.row], voterRows: [...set.voterRows, ...forged.voterRows, extra] }))
+    expect(r.ok, JSON.stringify(r)).to.equal(true)
+    const leafOf = (cid: string): any => r.tally.leaves.find((l: any) => l.blockCid === cid)
+    expect(leafOf(honest.row.Cid).disposition).to.equal('tallied')
+    expect(leafOf(forged.row.Cid).disposition).to.equal('excluded')
+    expect(leafOf(forged.row.Cid).excludedFor).to.include.members(['device-key-not-associated', 'voter-not-registered'])
+    expect(leafOf(forged.row.Cid).excludedFor).to.not.include('registrant-in-two-blocks')
+    for (const b of set.blocks) expect(leafOf(b.row.Cid).disposition).to.equal('tallied')
+    expect(r.validation.findings.map((f: any) => f.code)).to.deep.equal(['voter-row-forged'])
+    const clean = naiveTally(set.blocks, ballots)
+    const got = r.tally.histogram.ballots['ballot-a']
+    expect(got.questions).to.deep.equal(clean.ballots['ballot-a'].questions)
   })
 
   it('TB-5 determinism for any input order and for bigint columns', () => {
@@ -693,7 +717,7 @@ describe('verify tally tree (65-08: R8, comprehensive validation of tally nodes)
   let single: any
   let empty: any
   const flip = (hex: string): string => (hex[0] === '0' ? '1' : '0') + hex.slice(1)
-  const input = (over: Record<string, unknown> = {}): any => ({ scope, rows: set.rows, voterRows: set.voterRows, ballots, release, ...over })
+  const input = (over: Record<string, unknown> = {}): any => ({ scope, rows: set.rows, voterRows: set.voterRows, ballots, ...set.authorization, release, ...over })
   const clone = <T>(x: T): T => structuredClone(x)
   const fails = (t: unknown, reason: string, where: { nodeIndex?: number, leafIndex?: number } = {}): void => {
     const r: any = verifyTallyTree(t)
@@ -722,7 +746,7 @@ describe('verify tally tree (65-08: R8, comprehensive validation of tally nodes)
     excludedTally = (buildTallyTree(input({ voterRows: set.voterRows.map(v => (v === victim ? { ...v, Signature: flip(v.Signature) } : v)) })) as any).tally
     const one = makeCommittedElection({ ballotIds: ['ballot-a'], blocks: [{ size: 3 }] })
     single = (buildTallyTree({
-      scope, rows: one.rows, voterRows: one.voterRows, ballots: one.election.ballots.map(b => b.template),
+      scope, rows: one.rows, voterRows: one.voterRows, ballots: one.election.ballots.map(b => b.template), ...one.authorization,
       release: { secretKey: one.election.electionSecret, jointPublicKey: one.election.electionKey.jointPublicKey }
     } as any) as any).tally
     empty = (buildTallyTree(input({ rows: [], voterRows: [] })) as any).tally

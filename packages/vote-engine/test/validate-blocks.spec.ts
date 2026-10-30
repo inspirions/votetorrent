@@ -30,7 +30,10 @@ import {
 import { VALIDATION_CODES, VALIDATION_INFO_CODES, validateElectionBlocks } from '../src/blocks/validate-blocks.js'
 import {
   FIXTURE_ELECTION_ID,
+  FIXTURE_EXPIRATION,
   FIXTURE_REVISION,
+  FIXTURE_VOTING_STARTS,
+  fixtureAuthorization,
   makeCommittedBlock,
   makeCommittedElection,
   makeFixtureElection,
@@ -333,7 +336,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
   let ballotsOpt: any[]
   let release: { secretKey: Uint8Array, jointPublicKey: string }
   const input = (over: Record<string, unknown> = {}): any => ({
-    scope, rows: set.rows, voterRows: set.voterRows, ballots: ballotsOpt, ...over
+    scope, rows: set.rows, voterRows: set.voterRows, ballots: ballotsOpt, ...set.authorization, ...over
   })
   const optional = (t: any): any => ({ ...t, questions: t.questions.map((q: any) => (q.code === 'q3' ? { ...q, required: false } : q)) })
 
@@ -467,8 +470,12 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
         ...mine[0]!, RegistrantId: 'stranger', DeviceKey: k.pubHex,
         Signature: signDigestP256(consentDigest({ cid: t.row.Cid, blockId: t.row.Id }, t.ballot.poolBallot, 'stranger', k.pubHex), k.privBytes)
       }
-      expectOnly(run({ voterRows: [...set.voterRows, stranger] }), t.row.Cid, 'voter-row-unlisted')
-      expectOnly(run({ voterRows: [...set.voterRows, clone(mine[0]!)] }), t.row.Cid, 'voter-row-duplicate')
+      // CR-03: an unlisted row and a second row are report-level, never a finding on the block they name
+      for (const extra of [stranger, clone(mine[0]!)]) {
+        const r = run({ voterRows: [...set.voterRows, extra] })
+        for (const b of r.blocks) expect(b.findings, b.blockCid).to.deep.equal([])
+        expect(r.findings.map((f: any) => [f.code, f.blockCid, f.registrantId])).to.deep.equal([['voter-row-forged', t.row.Cid, extra.RegistrantId]])
+      }
       const mism = set.voterRows.map(v => (v === mine[1] ? { ...v, BlockId: 'other-id' } : v))
       expectOnly(run({ voterRows: mism }), t.row.Cid, 'voter-row-mismatch')
       const flipped = set.voterRows.map(v => (v === mine[2] ? { ...v, Signature: (v.Signature[0] === '0' ? '1' : '0') + v.Signature.slice(1) } : v))
@@ -501,7 +508,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     const vs = [0, 1, 2, 3, 4].map(i => makeFixtureVoter(e, ballot, i))
     const A = makeCommittedBlock(e, ballot, [vs[0]!, vs[1]!, vs[2]!])
     const B = makeCommittedBlock(e, ballot, [vs[0]!, vs[3]!, vs[4]!])
-    const r = run({ rows: [A.row, B.row], voterRows: [...A.voterRows, ...B.voterRows], ballots: [optional(ballot.template)] })
+    const r = run({ rows: [A.row, B.row], voterRows: [...A.voterRows, ...B.voterRows], ballots: [optional(ballot.template)], ...fixtureAuthorization(vs) })
     for (const b of [A, B]) {
       const f = bf(r, b.row.Cid).findings.filter((x: any) => x.code === 'registrant-in-two-blocks')
       expect(f).to.have.length(1)
@@ -621,7 +628,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     ]
     const blockFx = makeCommittedBlock(e, ballot, voters)
     const rel = { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey }
-    const inp = { scope, rows: [blockFx.row], voterRows: blockFx.voterRows, ballots: [optional(tpl)] }
+    const inp = { scope, rows: [blockFx.row], voterRows: blockFx.voterRows, ballots: [optional(tpl)], ...fixtureAuthorization(voters) }
     const r: any = validateElectionBlocks({ ...inp, release: rel } as any)
     assertTotals(r)
     const b = r.blocks[0]
@@ -670,7 +677,8 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     const bad: any[] = [
       { rows: 'x' }, { voterRows: {} }, { ballots: null }, { scope: { electionRevision: 1 } },
       { ballots: [ballotsOpt[0], ballotsOpt[0]] }, { ballots: [{ ...ballotsOpt[0], questions: 'x' }] },
-      { release: 5 }, { release: { secretKey: 'x', jointPublicKey: release.jointPublicKey } }
+      { release: 5 }, { release: { secretKey: 'x', jointPublicKey: release.jointPublicKey } },
+      { registrants: undefined }, { associations: 'x' }, { timeline: undefined }, { timeline: { votingStarts: NaN } }, { timeline: { votingStarts: '0' } }
     ]
     for (const over of bad) expect(validateElectionBlocks(input(over)), JSON.stringify(Object.keys(over))).to.deep.include({ ok: false, reason: 'malformed-input' })
     expect(validateElectionBlocks(null as any)).to.deep.include({ ok: false, reason: 'malformed-input' })
@@ -700,7 +708,7 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     const vs = [makeFixtureVoter(e, ballot, 0, { voteEntry: good }), makeFixtureVoter(e, ballot, 1, { voteEntry: badEntry })]
     const fx = makeCommittedBlock(e, ballot, vs, { payloadVersion: 1 })
     const rel = { secretKey: e.electionSecret, jointPublicKey: e.electionKey.jointPublicKey }
-    const r: any = validateElectionBlocks({ scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [optional(ballot.template)], release: rel } as any)
+    const r: any = validateElectionBlocks({ scope, rows: [fx.row], voterRows: fx.voterRows, ballots: [optional(ballot.template)], ...fixtureAuthorization(vs), release: rel } as any)
     assertTotals(r)
     const b = r.blocks[0]
     expect(b.payloadVersion).to.equal(1)
@@ -709,6 +717,125 @@ describe('validate election blocks (65-07: R7, D-70, D-71)', function () {
     const inv = b.votes.find((v: any) => v.status === 'invalid')
     expect(inv.codes).to.deep.equal(['unknown-option'])
     expect(r.totals).to.deep.equal({ blocks: 1, entries: 2, valid: 1, invalid: 1, undecryptable: 0 })
+  })
+
+  describe('VB-12 authorization (CR-02): the schema VoterAssociated rule, re-checked', () => {
+    const t = (): any => set.blocks[0]!
+    const reg0 = (): string => t().voterRows[0]!.RegistrantId
+    const key0 = (): string => t().voterRows[0]!.DeviceKey
+    const auth = (): any => clone(set.authorization)
+    const only = (r: any, codes: string[]): void => {
+      const b = bf(r, t().row.Cid)
+      expect(b.status).to.equal('invalid')
+      expect(codesOf(b)).to.deep.equal(codes)
+      expect(b.findings.every((f: any) => f.registrantId === reg0())).to.equal(true)
+      for (const o of r.blocks) if (o.blockCid !== t().row.Cid) expect(o.findings, o.blockCid).to.deep.equal([])
+    }
+    const withRegistrant = (mut: (r: any) => void): any => { const a = auth(); mut(a.registrants.find((r: any) => r.Id === reg0())); return a }
+    const withAssociation = (mut: (r: any) => void): any => { const a = auth(); mut(a.associations.find((r: any) => r.RegistrantId === reg0())); return a }
+
+    it('an honest election passes and the reference time is votingStarts', () => {
+      expect(run().blocks.every((b: any) => b.findings.length === 0)).to.equal(true)
+      expect(Date.parse(FIXTURE_EXPIRATION)).to.be.greaterThan(FIXTURE_VOTING_STARTS)
+    })
+
+    it('voter-not-registered: missing, not active, or expired by votingStarts', () => {
+      const a = auth()
+      a.registrants = a.registrants.filter((r: any) => r.Id !== reg0())
+      only(run(a), ['voter-not-registered'])
+      for (const status of ['s', 'r', 'A', '']) only(run(withRegistrant(r => { r.Status = status })), ['voter-not-registered'])
+      only(run(withRegistrant(r => { r.Expiration = new Date(FIXTURE_VOTING_STARTS).toISOString() })), ['voter-not-registered'])
+      only(run(withRegistrant(r => { r.Expiration = '2030-01-01 00:00:00' })), ['voter-not-registered'])
+      expect(codesOf(bf(run(withRegistrant(r => { r.Expiration = new Date(FIXTURE_VOTING_STARTS + 1).toISOString() })), t().row.Cid))).to.deep.equal([])
+      expect(codesOf(bf(run(withRegistrant(r => { r.Expiration = '2030-01-01T00:00:00.123456Z' })), t().row.Cid))).to.deep.equal([])
+    })
+
+    it('device-key-not-associated: missing, another key, or expired by votingStarts', () => {
+      const a = auth()
+      a.associations = a.associations.filter((r: any) => r.RegistrantId !== reg0())
+      only(run(a), ['device-key-not-associated'])
+      only(run(withAssociation(r => { r.DeviceKey = makeP256TestKey().pubHex })), ['device-key-not-associated'])
+      only(run(withAssociation(r => { r.DeviceKey = key0().toUpperCase() })), ['device-key-not-associated'])
+      only(run(withAssociation(r => { r.Expiration = new Date(FIXTURE_VOTING_STARTS - 1).toISOString() })), ['device-key-not-associated'])
+      only(run(withAssociation(r => { r.RegistrantId = 'someone-else' })), ['device-key-not-associated'])
+      // a later voting start expires every row: every block fails both checks
+      const late = run({ timeline: { votingStarts: Date.parse('2031-01-01T00:00:00.000Z') } })
+      for (const b of late.blocks) {
+        expect(b.status).to.equal('invalid')
+        expect([...new Set(codesOf(b))]).to.deep.equal(['voter-not-registered', 'device-key-not-associated'])
+      }
+    })
+
+    it('a self-certifying block of strangers validates invalid and is never tallied as valid', () => {
+      const e = set.election
+      const ballot = e.ballots[0]!
+      const strangers = [0, 1, 2].map(i => makeFixtureVoter(e, ballot, 100 + i))
+      const fake = makeCommittedBlock(e, ballot, strangers)
+      const r = runR({ rows: [...set.rows, fake.row], voterRows: [...set.voterRows, ...fake.voterRows] })
+      const fb = bf(r, fake.row.Cid)
+      expect(fb.status).to.equal('invalid')
+      expect([...new Set(codesOf(fb))].sort()).to.deep.equal(['device-key-not-associated', 'voter-not-registered'])
+      for (const o of r.blocks) if (o.blockCid !== fake.row.Cid) expect(o.status).to.equal('valid')
+      // the same block with its strangers registered is valid: the codes come from the authorization alone
+      const ok = runR({ rows: [...set.rows, fake.row], voterRows: [...set.voterRows, ...fake.voterRows], ...fixtureAuthorization([...set.blocks.flatMap(b => b.voters), ...strangers]) })
+      expect(bf(ok, fake.row.Cid).status).to.equal('valid')
+    })
+  })
+
+  describe('VB-13 attribution (CR-03): unauthenticated rows never make an honest block invalid', () => {
+    const honest = (): any => set.blocks[0]!
+    const flip = (hex: string): string => (hex[0] === '0' ? '1' : '0') + hex.slice(1)
+
+    it('a forged block listing an honest registrant, with no valid consent, leaves the honest block valid', () => {
+      const e = set.election
+      const ballot = e.ballots[0]!
+      const victim = honest().voters[0]!
+      const others = [makeFixtureVoter(e, ballot, 200), makeFixtureVoter(e, ballot, 201)]
+      // B' names the victim; its voter rows carry no valid consent (signed with a stranger key)
+      const forged = makeCommittedBlock(e, ballot, [{ ...victim, pubHex: others[0]!.pubHex, priv: others[0]!.priv } as any, ...others])
+      for (const consent of ['stranger-key', 'flipped', 'missing']) {
+        const fvr = consent === 'missing'
+          ? forged.voterRows.filter((v: any) => v.RegistrantId !== victim.voterEntry.registrantId)
+          : consent === 'flipped' ? forged.voterRows.map((v: any) => (v.RegistrantId === victim.voterEntry.registrantId ? { ...v, Signature: flip(v.Signature) } : v)) : forged.voterRows
+        const r = runR({ rows: [...set.rows, forged.row], voterRows: [...set.voterRows, ...fvr] })
+        expect(bf(r, honest().row.Cid).status, consent).to.equal('valid')
+        expect(codesOf(bf(r, honest().row.Cid)), consent).to.deep.equal([])
+        const fb = bf(r, forged.row.Cid)
+        expect(fb.status, consent).to.equal('invalid')
+        expect(codesOf(fb), consent).to.not.include('registrant-in-two-blocks')
+      }
+    })
+
+    it('extra rows naming the honest block with bad consent are report-level; a forged duplicate that sorts first loses to the row that verifies', () => {
+      const b = honest()
+      const mine = b.voterRows
+      const k = makeP256TestKey()
+      const badUnlisted = { ...mine[0]!, RegistrantId: 'stranger', DeviceKey: k.pubHex, Signature: flip(mine[0]!.Signature) }
+      // a forged duplicate for a listed registrant whose row key sorts before the honest one ('0' < any hex)
+      const badDup = { ...mine[1]!, DeviceKey: `00${mine[1]!.DeviceKey.slice(2)}`, Signature: '00'.repeat(64) }
+      const unnamed = { ...mine[2]!, RegistrantId: '' }
+      for (const voterRows of [[...set.voterRows, badUnlisted, badDup, unnamed], [badDup, unnamed, badUnlisted, ...set.voterRows]]) {
+        const r = runR({ voterRows })
+        for (const blk of r.blocks) {
+          expect(blk.status).to.equal('valid')
+          expect(blk.findings).to.deep.equal([])
+        }
+        expect(r.findings.map((f: any) => f.code)).to.deep.equal(['voter-row-forged', 'voter-row-forged', 'voter-row-forged'])
+        expect(r.findings.every((f: any) => f.blockCid === b.row.Cid && f.severity === 'error')).to.equal(true)
+        expect(r.totals.valid).to.equal(13)
+      }
+    })
+
+    it('with no row that verifies, the best row decides the block finding and the rest are report-level', () => {
+      const b = honest()
+      const target = b.voterRows[0]!
+      const bad1 = { ...target, Signature: flip(target.Signature) }
+      const bad2 = { ...target, BlockId: 'other', Signature: '11'.repeat(64) }
+      const voterRows = [...set.voterRows.filter(v => v !== target), bad2, bad1]
+      const r = run({ voterRows })
+      expect(codesOf(bf(r, b.row.Cid))).to.deep.equal(['consent-signature-invalid'])
+      expect(r.findings.map((f: any) => f.code)).to.deep.equal(['voter-row-forged'])
+    })
   })
 
   it('VB-11 finding order inside a block is fixed', () => {

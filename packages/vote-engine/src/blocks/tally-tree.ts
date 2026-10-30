@@ -54,7 +54,10 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, concatBytes, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { BLOCK_TREE_EMPTY_ROOT, blockLeafHash, blockNodeHash, buildBlockTree, type BlockTree } from './block-tree.js'
-import { VALIDATION_CODES, validateElectionBlocks, type ElectionValidationResult, type ValidationBlockRow, type ValidationCode, type ValidationRelease, type ValidationVoterRow } from './validate-blocks.js'
+import {
+  VALIDATION_CODES, validateElectionBlocks, type ElectionValidationResult, type ValidationAssociationRow, type ValidationBlockRow,
+  type ValidationCode, type ValidationRegistrantRow, type ValidationRelease, type ValidationTimeline, type ValidationVoterRow
+} from './validate-blocks.js'
 import type { AnswerCheckBallot } from './answer-checks.js'
 import { canonicalJson } from '../voting/canonical.js'
 
@@ -406,6 +409,10 @@ export interface TallyTreeInput {
   rows: readonly ValidationBlockRow[]
   voterRows: readonly ValidationVoterRow[]
   ballots: readonly AnswerCheckBallot[]
+  /** CR-02: passed straight to validateElectionBlocks */
+  registrants: readonly ValidationRegistrantRow[]
+  associations: readonly ValidationAssociationRow[]
+  timeline: ValidationTimeline
   /** null or undefined gives 'not-released' */
   release: ValidationRelease | null | undefined
 }
@@ -426,7 +433,14 @@ export function buildTallyTree (input: TallyTreeInput): BuildTallyTreeResult {
   const built = buildBlockTree(input.rows, input.scope)
   if (!built.ok) return refuse(built.reason, built.detail)
   const validation = validateElectionBlocks({
-    scope: input.scope, rows: input.rows, voterRows: input.voterRows, ballots: input.ballots, release: input.release
+    scope: input.scope,
+    rows: input.rows,
+    voterRows: input.voterRows,
+    ballots: input.ballots,
+    registrants: input.registrants,
+    associations: input.associations,
+    timeline: input.timeline,
+    release: input.release
   })
   if (!validation.ok) return refuse(validation.reason, validation.detail)
   const tallied = tallyTreeFrom(built.tree, validation, input.ballots)

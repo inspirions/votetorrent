@@ -46,6 +46,25 @@ import { makeP256TestKey, signDigestP256 } from './p256-signer.js'
 
 export const FIXTURE_ELECTION_ID = 'election-blocks-1' as const
 export const FIXTURE_REVISION = 1 as const
+/** CR-02: the fixture timeline's votingStarts; every fixture registrant and association expires after it. */
+export const FIXTURE_VOTING_STARTS = Date.parse('2026-06-01T00:00:00.000Z')
+export const FIXTURE_EXPIRATION = '2030-01-01T00:00:00.000Z' as const
+
+/** CR-02: the Registrant and Association rows that authorize the fixture voters (VoterAssociated). */
+export interface FixtureAuthorization {
+  registrants: Array<{ Id: string, Status: string, Expiration: string }>
+  associations: Array<{ RegistrantId: string, DeviceKey: string, Expiration: string }>
+  timeline: { votingStarts: number }
+}
+
+/** An active, unexpired registrant and an unexpired association of its device key, for every voter given. */
+export function fixtureAuthorization (voters: ReadonlyArray<{ voterEntry: VoterEntry, pubHex: string }>): FixtureAuthorization {
+  return {
+    registrants: voters.map(v => ({ Id: v.voterEntry.registrantId, Status: 'a', Expiration: FIXTURE_EXPIRATION })),
+    associations: voters.map(v => ({ RegistrantId: v.voterEntry.registrantId, DeviceKey: v.pubHex, Expiration: FIXTURE_EXPIRATION })),
+    timeline: { votingStarts: FIXTURE_VOTING_STARTS }
+  }
+}
 
 /** All 9 VoteBlock columns, as stored. */
 export interface VoteBlockRow {
@@ -117,6 +136,8 @@ export interface CommittedFixtureSet {
   voterRows: VoteBlockVoterRow[]
   /** one receipt per voter */
   receipts: FixtureReceipt[]
+  /** CR-02: authorizes every voter of every block */
+  authorization: FixtureAuthorization
 }
 
 export function makeFixtureTemplate (ballotId: string, overrides: Partial<TemplateBallot> = {}): TemplateBallot {
@@ -282,7 +303,8 @@ export function makeCommittedElection (opts: {
     blocks,
     rows: blocks.map(b => b.row),
     voterRows: blocks.flatMap(b => b.voterRows),
-    receipts
+    receipts,
+    authorization: fixtureAuthorization(blocks.flatMap(b => b.voters))
   }
 }
 

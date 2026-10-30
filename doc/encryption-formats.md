@@ -507,23 +507,66 @@ copy, store or return it. Other refusals are `malformed-receipt` and
 
 ### 7.3 Comprehensive validation
 
-`validateElectionBlocks({ scope, rows, voterRows, ballots, release? })`
-checks every committed block of one election revision, in two phases.
+`validateElectionBlocks({ scope, rows, voterRows, ballots, registrants,
+associations, timeline, release? })` checks every committed block of one
+election revision, in two phases. `registrants` are the election's
+`Registrant` rows (`Id`, `Status`, `Expiration`), `associations` the
+device `Association` rows (`RegistrantId`, `DeviceKey`, `Expiration`),
+and `timeline` the revision timeline (`votingStarts`, epoch ms). All
+three are required (`malformed-input` otherwise).
 
 - **Without the key**, for every block: the `Cid` is the digest of the
   ciphertext; the registrant list is well formed, canonical and as long
   as `EntryCount`; the ballot is known and the template digest matches;
-  the `VoteBlockVoter` rows correspond one for one with the list; every
-  consent signature verifies; and a registrant appears in at most one
-  block per ballot. Such a block's status is `not-decryptable-yet`,
-  which is a status of its own and not a failure.
+  every listed registrant has an authenticated `VoteBlockVoter` row; and
+  a registrant appears in at most one block per ballot. Such a block's
+  status is `not-decryptable-yet`, which is a status of its own and not a
+  failure.
 - **After the release**, for every block: the block opens; the `Id` and
   the entry count match; the payload is well shaped, canonically ordered
   and free of duplicate votes or voters; every voter entry has a valid
-  signature, the right scope, the ballot and the registered device key;
-  and every vote opens, parses and is judged against its ballot template.
+  signature, the right scope and the ballot, and its device key is the
+  device key of the registrant's authenticated voter row, which the
+  authorization check below ties to a registered, associated device; and
+  every vote opens, parses and is judged against its ballot template.
   A block is `invalid` exactly when it has an error finding that is not
   tied to one vote.
+
+**Authorization.** A consent signature, or a voter-entry signature, only
+shows that the row's own key signed it. Each voter row is therefore also
+checked against the caller's `Registrant` and `Association` rows with the
+rule of the schema's `VoterAssociated` CHECK:
+
+- `voter-not-registered`: there is no `Registrant` row with the row's
+  `RegistrantId`, `Status` `'a'` and an `Expiration` later than the
+  reference time.
+- `device-key-not-associated`: there is no `Association` row with the
+  row's `RegistrantId` and exactly its `DeviceKey` and an `Expiration`
+  later than the reference time.
+
+The schema compares with the writer's clock at insert, which a validator
+cannot see. An insert had to fall in `[votingStarts, accruingVotes)`, so
+the reference time is the timeline's `votingStarts`, the weakest bound
+every honest insert met. `Expiration` must be an ISO datetime ending in
+`Z`; it is compared to the millisecond, and an unreadable value
+authorizes nothing. Status and associations are read as supplied: a
+registrant revoked, or an association deleted, after voting fails the
+check.
+
+**Attribution.** A finding lands on a block only when the evidence is
+authenticated for that block. The voter rows naming a block are grouped
+by registrant. For a listed registrant, the block keeps one
+representative row: a row with no problem if there is one (its consent
+signature verifies, it agrees with the block, and it passes the
+authorization), else the row with the fewest problems, then the lowest
+row key. The representative's problems are the block's findings. Every
+other row naming the block (a second row for a listed registrant, a row
+for a registrant the block does not list, a row with no `RegistrantId`)
+is the report-level error `voter-row-forged` and never touches the block.
+A registrant counts towards `registrant-in-two-blocks` only in the blocks
+where its representative row is authenticated, so a forged block that
+lists an honest voter without that voter's valid consent cannot exclude
+the honest block.
 
 The answer policy for one decrypted vote against its ballot template:
 
@@ -552,13 +595,14 @@ rules are those of section 7.2.
 Every finding has a code and a severity, `error` or `info`. The codes,
 grouped as the source groups them:
 
-- Block, no key needed: `malformed-row`, `duplicate-block`,
-  `cid-mismatch`, `voter-list-malformed`, `voter-list-not-canonical`,
-  `entry-count-mismatch`, `unknown-ballot`, `template-mismatch`,
-  `voter-row-mismatch`, `voter-row-duplicate`, `voter-row-unlisted`,
-  `voter-row-missing`, `consent-signature-invalid`,
-  `registrant-in-two-blocks`.
-- Report level: `voter-row-without-block` (info), and `malformed-row` and
+- Block, no key needed: `malformed-row` (a kept row with no
+  `Ciphertext` text), `cid-mismatch`, `voter-list-malformed`,
+  `voter-list-not-canonical`, `entry-count-mismatch`, `unknown-ballot`,
+  `template-mismatch`, `voter-row-mismatch`, `voter-row-missing`,
+  `consent-signature-invalid`, `voter-not-registered`,
+  `device-key-not-associated`, `registrant-in-two-blocks`.
+- Report level: `voter-row-without-block` (info), `voter-row-forged`,
+  and `malformed-row` and
   `duplicate-block` for the rows the block-tree row policy (section 7.1)
   set aside. A set-aside row is not a block of the report and never adds
   a finding to another block; the blocks of the report are exactly the
