@@ -24,6 +24,7 @@ import { ballotTemplateDigest, buildVoteEntry, makeVoteNonce, type VoteEntry } f
 import {
   ANSWER_FINDING_CODES,
   ANSWER_INFO_CODES,
+  questionType,
   validateVoteEntryAgainstBallot,
   type VoteEntryValidity
 } from '../src/blocks/answer-checks.js'
@@ -308,6 +309,21 @@ describe('answer checks (65-07: validateVoteEntryAgainstBallot, D-71)', function
       const r = validateVoteEntryAgainstBallot(base(), ballot as any, scope)
       expect(r.valid).to.equal(false)
       expect(codes(r)).to.deep.equal(['malformed-ballot'])
+    }
+  })
+
+  it('AC-10 (IN-03) a null type is select; a non-string type makes the ballot malformed', () => {
+    const nullType = { ...tOpt, questions: tOpt.questions.map(q => (q.code === 'q1' ? { ...q, type: null } : q)) } as any
+    const r = validateVoteEntryAgainstBallot(base(), nullType, scope)
+    expect(r.valid).to.equal(true)
+    expect(codes(r)).to.not.include('unsupported-question-type')
+    expect(questionType({ code: 'q', type: null })).to.equal('select')
+    expect(questionType({ code: 'q' })).to.equal('select')
+    expect(questionType({ code: 'q', type: 'rank' })).to.equal('rank')
+    expect(questionType({ code: 'q', type: 5 })).to.equal(null)
+    for (const type of [5, true, {}, []]) {
+      const bad = { ...tOpt, questions: tOpt.questions.map(q => (q.code === 'q1' ? { ...q, type } : q)) } as any
+      expect(codes(validateVoteEntryAgainstBallot(base(), bad, scope)), JSON.stringify(type)).to.deep.equal(['malformed-ballot'])
     }
   })
 

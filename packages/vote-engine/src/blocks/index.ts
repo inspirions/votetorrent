@@ -80,7 +80,8 @@ export type {
 export {
   ANSWER_FINDING_CODES,
   ANSWER_INFO_CODES,
-  validateVoteEntryAgainstBallot
+  validateVoteEntryAgainstBallot,
+  questionType
 } from './answer-checks.js'
 export type {
   AnswerFindingCode,

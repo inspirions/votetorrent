@@ -311,6 +311,7 @@ export {
 	ANSWER_FINDING_CODES,
 	ANSWER_INFO_CODES,
 	validateVoteEntryAgainstBallot,
+	questionType,
 	VALIDATION_CODES,
 	VALIDATION_INFO_CODES,
 	validateElectionBlocks,

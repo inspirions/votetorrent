@@ -78,10 +78,21 @@ function finding (code: AnswerFindingCode, detail: string, extra: { questionCode
   return { code, severity, detail, ...extra }
 }
 
+/**
+ * IN-03: the one rule R7 and R8 share for a question's type. An absent or null type is 'select'; a string is
+ * itself; any other value is unreadable (null), which makes the ballot malformed in both modules.
+ */
+export function questionType (question: unknown): string | null {
+  if (!isRecord(question)) return null
+  const t = question.type
+  if (t === undefined || t === null) return 'select'
+  return typeof t === 'string' ? t : null
+}
+
 function ballotReadable (ballot: unknown): ballot is AnswerCheckBallot {
   if (!isRecord(ballot) || typeof ballot.id !== 'string' || !Array.isArray(ballot.questions)) return false
   return ballot.questions.every(q =>
-    isRecord(q) && typeof q.code === 'string' && Array.isArray(q.options) &&
+    isRecord(q) && typeof q.code === 'string' && Array.isArray(q.options) && questionType(q) !== null &&
     q.options.every(o => isRecord(o) && typeof o.code === 'string')
   )
 }
@@ -174,7 +185,7 @@ export function validateVoteEntryAgainstBallot (entry: unknown, ballot: AnswerCh
     if (distinct.size < min) {
       findings.push(finding('below-minimum', `the answer to ${qc} has ${distinct.size} options; at least ${min} are required`, { questionCode: qc }))
     }
-    if ((q.type ?? 'select') !== 'select') {
+    if (questionType(q) !== 'select') {
       findings.push(finding('unsupported-question-type', `the question ${qc} is not a select question; its answer is counted as a set of options`, { questionCode: qc }))
     }
   }

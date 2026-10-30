@@ -422,6 +422,19 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     expect(reason(stale.tree, s.validation)).to.equal('inconsistent-inputs')
   })
 
+  it('TH-9 (IN-03) R8 reads a question type exactly as R7 does', () => {
+    const s = syntheticSet()
+    const withQ1Type = (type: unknown): any[] => templates().map((t: any) => ({ ...t, questions: t.questions.map((q: any) => (q.code === 'q1' ? { ...q, type } : q)) }))
+    const r: any = tallyTreeFrom(s.tree, s.validation, withQ1Type(null))
+    expect(r.ok, JSON.stringify(r)).to.equal(true)
+    const plain: any = tallyTreeFrom(s.tree, s.validation, templates())
+    expect(canonicalJson(r.tally.histogram)).to.equal(canonicalJson(plain.tally.histogram))
+    expect(r.tally.histogram.ballots['ballot-a'].questions).to.have.property('q1')
+    for (const type of [5, true, {}]) {
+      expect(tallyTreeFrom(s.tree, s.validation, withQ1Type(type)), JSON.stringify(type)).to.deep.include({ ok: false, reason: 'malformed-input' })
+    }
+  })
+
   it('TH-6 hostile codes and the empty tree', () => {
     const before = Object.getOwnPropertyNames(Object.prototype).sort()
     const template: any = makeFixtureTemplate('ballot-a', {

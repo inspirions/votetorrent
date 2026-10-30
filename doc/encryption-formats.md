@@ -657,7 +657,9 @@ the same order, so the block-tree root is unchanged by the tally.
 
 - **Histogram.** `{ ballots: { <ballotId>: { votes, invalid, excluded,
   questions, unsupported } } }`, listing only the ballots present in the
-  subtree. For a `select` question (type absent or `select`),
+  subtree. For a `select` question (type absent, `null` or `select`; the
+  validation and the tally share one rule, `questionType`, and a type that
+  is neither a string nor absent makes the ballot malformed in both),
   `questions[code]` is `{ answered, options }`: `answered` is the number
   of valid votes that answered the question, and `options` has every
   option code of the template, starting at zero, with the number of valid

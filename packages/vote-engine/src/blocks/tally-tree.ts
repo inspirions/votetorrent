@@ -25,9 +25,10 @@
 //   - The tally is plain JSON data. It carries counts and public block columns only: no vote entry, nonce,
 //     registrant id or key, and nothing that is not JSON.
 //
-// D-81: a VoteAnswer holds a sorted, de-duplicated option set, so only `select` questions (type absent or
-// 'select') can be histogrammed faithfully. Every other question type (rank, score, text, unknown) is reported
-// under `unsupported` with the number of valid votes that answered it, and never under `questions`.
+// D-81: a VoteAnswer holds a sorted, de-duplicated option set, so only `select` questions (type absent, null or
+// 'select', by answer-checks' questionType, IN-03) can be histogrammed faithfully. Every other question type
+// (rank, score, text, unknown) is reported under `unsupported` with the number of valid votes that answered it,
+// and never under `questions`.
 //
 // BLOCK-LEVEL POLICY (D-82). A block whose R7 status is 'invalid' is NOT tallied. That status means some error
 // finding has no voteIndex: Cid or Id mismatch, the block does not open, a payload shape or count error, a
@@ -65,7 +66,7 @@ import {
   VALIDATION_CODES, validateElectionBlocks, type ElectionValidationResult, type ValidationAssociationRow, type ValidationBlockRow,
   type ValidationCode, type ValidationRegistrantRow, type ValidationRelease, type ValidationTimeline, type ValidationVoterRow
 } from './validate-blocks.js'
-import type { AnswerCheckBallot } from './answer-checks.js'
+import { questionType, type AnswerCheckBallot } from './answer-checks.js'
 import { canonicalJson } from '../voting/canonical.js'
 
 export const TALLY_TREE_DOMAIN = 'vt-tally-tree/1' as const
@@ -242,7 +243,7 @@ function ballotSkeleton (ballot: AnswerCheckBallot | undefined): WorkBallot {
   if (ballot === undefined) return w
   for (const q of ballot.questions) {
     if (w.questions.has(q.code) || w.unsupported.has(q.code)) continue
-    if (q.type === undefined || q.type === 'select') {
+    if (questionType(q) === 'select') {
       const options = new Map<string, number>()
       for (const o of q.options) options.set(o.code, 0)
       w.questions.set(q.code, { answered: 0, options })
@@ -270,7 +271,7 @@ function checkBallots (ballots: unknown): { ok: true, byId: Map<string, AnswerCh
     if (!Array.isArray(b.questions)) return refuse('malformed-input', `ballot ${b.id}: questions must be an array`)
     for (const q of b.questions as unknown[]) {
       if (!isRec(q) || typeof q.code !== 'string') return refuse('malformed-input', `ballot ${b.id}: a question has no string code`)
-      if (q.type !== undefined && typeof q.type !== 'string') return refuse('malformed-input', `ballot ${b.id}: question ${q.code} has a non-string type`)
+      if (questionType(q) === null) return refuse('malformed-input', `ballot ${b.id}: question ${q.code} has a type that is neither a string nor absent`)
       if (!Array.isArray(q.options)) return refuse('malformed-input', `ballot ${b.id}: question ${q.code} options must be an array`)
       for (const o of q.options as unknown[]) {
         if (!isRec(o) || typeof o.code !== 'string') return refuse('malformed-input', `ballot ${b.id}: question ${q.code} has an option without a string code`)
