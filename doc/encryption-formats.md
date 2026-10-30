@@ -647,7 +647,12 @@ policy of section 7.1, a malformed or duplicate row never prevents the
 tally of the other blocks; it is listed in `blockTree.rejected` and in the
 validation's report-level findings.
 `tallyTreeFrom` does the same from an existing tree and validation
-report. The tally tree has one node for every node of the block tree, in
+report. It trusts neither input. It refuses `inconsistent-inputs` when the
+tree does not hash to itself (leaf order and indexes, each leaf's fields
+against its leaf data, the node shape, every leaf hash recomputed from
+its leaf data, every internal hash from its children, and the root), when
+the report does not cover exactly the tree's leaves, or when a block's
+ballot, block id or `declaredEntries` differs from its leaf. The tally tree has one node for every node of the block tree, in
 the same order, so the block-tree root is unchanged by the tally.
 
 - **Histogram.** `{ ballots: { <ballotId>: { votes, invalid, excluded,

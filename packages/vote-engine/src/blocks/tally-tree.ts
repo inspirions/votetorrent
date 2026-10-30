@@ -338,11 +338,23 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
     return refuse('malformed-input', 'tree scope or root is malformed')
   }
 
+  // WR-07: the tree must hash to itself before any of its hashes is used
+  const treeProblem = treeSelfProblem(t, leaves, nodes)
+  if (treeProblem !== null) return refuse('inconsistent-inputs', treeProblem)
+
   const findings = new Map<string, Rec>()
   for (const f of v.blocks as unknown[]) {
     if (!isRec(f) || typeof f.blockCid !== 'string') return refuse('inconsistent-inputs', 'a block finding has no Cid')
     if (findings.has(f.blockCid)) return refuse('inconsistent-inputs', `two findings for Cid ${f.blockCid}`)
     findings.set(f.blockCid, f)
+  }
+  // WR-07: the report covers exactly the tree's blocks, so no finding is silently dropped from the tally
+  if (findings.size !== leaves.length) {
+    return refuse('inconsistent-inputs', `the report has ${findings.size} blocks; the tree has ${leaves.length} leaves`)
+  }
+  const leafCids = new Set(leaves.map(l => (l as Rec).cid))
+  for (const cid of findings.keys()) {
+    if (!leafCids.has(cid)) return refuse('inconsistent-inputs', `the report's block ${cid} is not a leaf of the tree`)
   }
 
   const outLeaves: TallyLeaf[] = []
@@ -354,6 +366,9 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
     }
     const finding = findings.get(l.cid)
     if (finding === undefined) return refuse('inconsistent-inputs', `no finding for Cid ${l.cid}`)
+    if (finding.ballotId !== l.ballotId || finding.blockId !== l.blockId || finding.declaredEntries !== l.entryCount) {
+      return refuse('inconsistent-inputs', `block ${l.cid}: the report's ballot, block id or entry count differs from the tree leaf`)
+    }
     const h = leafHistogram(l.ballotId, l.entryCount, finding, checked.byId)
     if (!h.ok) return h
     leafHist.push({ ballots: Object.fromEntries([[l.ballotId, h.counts]]) })
@@ -410,6 +425,47 @@ export function tallyTreeFrom (tree: BlockTree, validation: ElectionValidationRe
       nodes: outNodes
     }
   }
+}
+
+/**
+ * WR-07: why an R5 tree is not one buildBlockTree could have produced, or null. Checks the leaf order and
+ * indexes, each leaf's fields against its leafData, the node shape, every leaf hash recomputed from leafData,
+ * every internal hash recomputed from its children, and the root. A caller-supplied tree is trusted for nothing.
+ */
+function treeSelfProblem (t: Rec, leaves: unknown[], nodes: unknown[]): string | null {
+  for (let i = 0; i < leaves.length; i++) {
+    const l: unknown = leaves[i]
+    if (!isRec(l) || l.index !== i || typeof l.cid !== 'string' || typeof l.blockId !== 'string' || typeof l.ballotId !== 'string' ||
+      typeof l.leafData !== 'string' || !isCount(l.entryCount) || typeof l.hash !== 'string') {
+      return `tree leaf ${i} is malformed`
+    }
+    if (i > 0 && compareUtf8((leaves[i - 1] as Rec).cid as string, l.cid) >= 0) return `tree leaf ${i} is not after leaf ${i - 1} in Cid order`
+    let parsed: unknown
+    try { parsed = JSON.parse(l.leafData) } catch { return `tree leaf ${i}: leafData is not JSON` }
+    if (!Array.isArray(parsed) || parsed.length !== 8 || canonicalJson(parsed) !== l.leafData) return `tree leaf ${i}: leafData is not the canonical leaf tuple`
+    const [electionId, electionRevision, ballotId, blockId, cid, entryCount] = parsed as unknown[]
+    if (electionId !== t.electionId || electionRevision !== t.electionRevision || ballotId !== l.ballotId || blockId !== l.blockId ||
+      cid !== l.cid || entryCount !== l.entryCount) {
+      return `tree leaf ${i}: the leaf fields differ from its leafData`
+    }
+    if (l.hash !== blockLeafHash(l.leafData)) return `tree leaf ${i}: the hash is not the leaf hash of its leafData`
+  }
+  const shape = expectedShape(leaves.length)
+  for (let i = 0; i < nodes.length; i++) {
+    const n: unknown = nodes[i]
+    const want = shape[i]!
+    if (!isRec(n) || !Array.isArray(n.range) || n.range.length !== 2 || !isHex64(n.hash)) return `tree node ${i} is malformed`
+    if (n.index !== i || n.range[0] !== want.range[0] || n.range[1] !== want.range[1] || n.left !== want.left || n.right !== want.right) {
+      return `tree node ${i} is not where the block tree puts it`
+    }
+    const expected = want.left === undefined
+      ? (leaves[want.range[0]] as Rec).hash
+      : blockNodeHash((nodes[want.left] as Rec).hash as string, (nodes[want.right!] as Rec).hash as string)
+    if (n.hash !== expected) return `tree node ${i}: the hash is not recomputable from its ${want.left === undefined ? 'leaf' : 'children'}`
+  }
+  const root = nodes.length === 0 ? BLOCK_TREE_EMPTY_ROOT : (nodes[nodes.length - 1] as Rec).hash
+  if (t.root !== root) return 'the tree root is not its last node hash'
+  return null
 }
 
 export interface TallyTreeInput {

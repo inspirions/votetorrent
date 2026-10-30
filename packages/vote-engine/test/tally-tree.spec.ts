@@ -375,6 +375,35 @@ describe('tally histograms (65-08: R8, D-80, D-81)', function () {
     }
   })
 
+  it('TH-8 (WR-07) the report must match the tree, and the tree must hash to itself', () => {
+    const s = syntheticSet()
+    const reason = (tree: any, validation: any): string => { const r: any = tallyTreeFrom(tree, validation, templates()); return r.ok ? 'ok' : r.reason }
+    const tree = (): any => ({ ...s.tree, leaves: s.tree.leaves.map((l: any) => ({ ...l })), nodes: s.tree.nodes.map((n: any) => ({ ...n })) })
+    const withBlock = (i: number, over: any): any => ({ ...s.validation, blocks: s.validation.blocks.map((b: any, j: number) => (j === i ? { ...b, ...over } : b)) })
+    expect(reason(s.tree, s.validation)).to.equal('ok')
+    // a report with a block the tree does not have (and one fewer it does), or one block more
+    expect(reason(s.tree, withBlock(0, { blockCid: 'bforeign' }))).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, { ...s.validation, blocks: [...s.validation.blocks, blockFinding(row('bzz', 'ballot-a', 3))] })).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, withBlock(1, { ballotId: 'ballot-b' }))).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, withBlock(1, { declaredEntries: 99 }))).to.equal('inconsistent-inputs')
+    expect(reason(s.tree, withBlock(1, { blockId: 'id-other' }))).to.equal('inconsistent-inputs')
+    const flip = (h: string): string => (h[0] === 'a' ? 'b' : 'a') + h.slice(1)
+    const t1 = tree(); t1.nodes[0].hash = flip(t1.nodes[0].hash)
+    expect(reason(t1, s.validation)).to.equal('inconsistent-inputs')
+    const t2 = tree(); t2.nodes[t2.nodes.length - 1].hash = flip(t2.nodes[t2.nodes.length - 1].hash); t2.root = t2.nodes[t2.nodes.length - 1].hash
+    expect(reason(t2, s.validation)).to.equal('inconsistent-inputs')
+    const t3 = tree(); t3.root = flip(t3.root)
+    expect(reason(t3, s.validation)).to.equal('inconsistent-inputs')
+    const t4 = tree(); t4.leaves[2].entryCount = 9
+    expect(reason(t4, withBlock(2, { declaredEntries: 9 }))).to.equal('inconsistent-inputs')
+    const t5 = tree(); t5.nodes[2] = { ...t5.nodes[2], range: [0, 3] }
+    expect(reason(t5, s.validation)).to.equal('inconsistent-inputs')
+    // a stale tree from other rows does not tally against this report
+    const stale = buildBlockTree([row('bca', 'ballot-a', 3), row('bcb', 'ballot-a', 4)], scope)
+    if (!stale.ok) throw new Error('tree')
+    expect(reason(stale.tree, s.validation)).to.equal('inconsistent-inputs')
+  })
+
   it('TH-6 hostile codes and the empty tree', () => {
     const before = Object.getOwnPropertyNames(Object.prototype).sort()
     const template: any = makeFixtureTemplate('ballot-a', {
