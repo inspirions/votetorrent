@@ -18,7 +18,14 @@ import {
   type PoolContribution
 } from '../src/pool/pool-block.js'
 import { canonicalJson, sortByCanonicalBytes } from '../src/voting/canonical.js'
-import { FIXTURE_ELECTION_ID, FIXTURE_REVISION, makeCommittedElection } from './fixtures/pool-blocks.js'
+import { ballotTemplateDigest, buildVoteEntry, makeVoteNonce, type VoteEntry } from '../src/voting/vote-entries.js'
+import {
+  ANSWER_FINDING_CODES,
+  ANSWER_INFO_CODES,
+  validateVoteEntryAgainstBallot,
+  type VoteEntryValidity
+} from '../src/blocks/answer-checks.js'
+import { FIXTURE_ELECTION_ID, FIXTURE_REVISION, makeCommittedElection, makeFixtureTemplate } from './fixtures/pool-blocks.js'
 
 // The oracle below is the b0cee4af body of checkFormedPoolBlock and sameOrder, copied verbatim from
 // `git show b0cee4af:packages/vote-engine/src/pool/pool-block.ts` (only the two names changed).
@@ -160,5 +167,146 @@ describe('pool payload shape (65-07: checkPoolPayloadShape)', function () {
     expect(typeof reencryptElectionBlock).to.equal('function')
     expect(typeof serializeBlockCiphertext).to.equal('function')
     expect(typeof canonicalJson).to.equal('function')
+  })
+})
+
+describe('answer checks (65-07: validateVoteEntryAgainstBallot, D-71)', function () {
+  this.timeout(30_000)
+
+  const t = makeFixtureTemplate('ballot-a')
+  const tOpt = { ...t, questions: t.questions.map(q => (q.code === 'q3' ? { ...q, required: false } : q)) }
+  const scope = { electionId: FIXTURE_ELECTION_ID, electionRevision: FIXTURE_REVISION, ballotId: 'ballot-a' }
+  const nonce = (): string => makeVoteNonce(globalThis.crypto.getRandomValues(new Uint8Array(32)))
+  const build = (selections: Record<string, string[]>, ballot = t): VoteEntry =>
+    buildVoteEntry({ ballot, electionRevision: FIXTURE_REVISION, selections, nonce: nonce() })
+  const codes = (r: VoteEntryValidity): string[] => r.findings.map(f => f.code)
+  const errors = (r: VoteEntryValidity): string[] => r.findings.filter(f => f.severity === 'error').map(f => f.code)
+  const base = (): VoteEntry => build({ q1: ['a'], q2: ['x'] }, tOpt)
+  const raw = (over: Record<string, unknown>): unknown => ({ ...base(), ...over })
+  const withQ2 = (over: Record<string, unknown>): ReturnType<typeof makeFixtureTemplate> =>
+    makeFixtureTemplate('ballot-a', { questions: t.questions.map(q => (q.code === 'q2' ? { ...q, ...over } : q)) })
+
+  it('AC-1 producer output validates', () => {
+    for (const sel of [{ q1: ['a'], q2: ['x'] }, { q1: ['c'], q2: ['y', 'x'] }]) {
+      const e = build(sel, tOpt)
+      const r = validateVoteEntryAgainstBallot(e, tOpt, scope)
+      expect(r.valid).to.equal(true)
+      if (r.valid) expect(r.entry).to.deep.equal(e)
+      expect(r.findings).to.deep.equal([])
+    }
+    const blank = validateVoteEntryAgainstBallot(build({ q1: ['b'] }, tOpt), tOpt, scope)
+    expect(blank.valid).to.equal(true)
+    expect(blank.findings).to.have.length(1)
+    expect(blank.findings[0]).to.deep.include({ code: 'blank-required', severity: 'info', questionCode: 'q2' })
+    const plain = validateVoteEntryAgainstBallot(build({ q1: ['a'], q2: ['x'] }), t, scope)
+    expect(plain.valid).to.equal(true)
+    expect(plain.findings).to.have.length(1)
+    expect(plain.findings[0]).to.deep.include({ code: 'blank-required', questionCode: 'q3' })
+  })
+
+  it('AC-2 D-71 minimum', () => {
+    const tm = withQ2({ optionRange: { min: 2, max: 3 }, required: true })
+    const below = validateVoteEntryAgainstBallot(build({ q1: ['a'], q2: ['x'] }, tm), tm, scope)
+    expect(below.valid).to.equal(false)
+    expect(errors(below)).to.deep.equal(['below-minimum'])
+    expect(below.findings.find(f => f.code === 'below-minimum')?.questionCode).to.equal('q2')
+    expect(validateVoteEntryAgainstBallot(build({ q1: ['a'], q2: ['x', 'y'] }, tm), tm, scope).valid).to.equal(true)
+    const blank = validateVoteEntryAgainstBallot(build({ q1: ['a'] }, tm), tm, scope)
+    expect(blank.valid).to.equal(true)
+    expect(blank.findings.filter(f => f.code === 'blank-required' && f.questionCode === 'q2')).to.have.length(1)
+    const opt = { ...tm, questions: tm.questions.map(q => (q.code === 'q2' || q.code === 'q3' ? { ...q, required: false } : q)) }
+    expect(validateVoteEntryAgainstBallot(build({ q1: ['a'] }, opt), opt, scope).findings).to.deep.equal([])
+  })
+
+  it('AC-3 one error code per single-defect raw entry', () => {
+    const q1 = (optionCodes: string[]): unknown => ({ questionCode: 'q1', optionCodes })
+    const q2 = (optionCodes: string[]): unknown => ({ questionCode: 'q2', optionCodes })
+    const cases: Array<[string, unknown]> = [
+      ['unknown-question', raw({ answers: [q1(['a']), q2(['x']), { questionCode: 'q9', optionCodes: ['a'] }] })],
+      ['unknown-option', raw({ answers: [q1(['zz']), q2(['x'])] })],
+      ['too-many-options', raw({ answers: [q1(['a', 'b']), q2(['x'])] })],
+      ['duplicate-option', raw({ answers: [q1(['a']), q2(['x', 'x'])] })],
+      ['options-not-sorted', raw({ answers: [q1(['a']), q2(['y', 'x'])] })],
+      ['empty-answer', raw({ answers: [q1(['a']), q2([])] })],
+      ['answers-not-sorted', raw({ answers: [q2(['x']), q1(['a'])] })],
+      ['duplicate-question', raw({ answers: [q1(['a']), q1(['a']), q2(['x'])] })],
+      ['bad-nonce', raw({ nonce: 'A'.repeat(64) })],
+      ['bad-nonce', raw({ nonce: 'a'.repeat(63) })],
+      ['template-digest-mismatch', raw({ templateDigest: 'other' })],
+      ['wrong-ballot', raw({ ballotId: 'ballot-b' })],
+      ['wrong-election', raw({ electionId: 'other-election' })],
+      ['wrong-revision', raw({ electionRevision: 2 })]
+    ]
+    for (const [code, entry] of cases) {
+      const r = validateVoteEntryAgainstBallot(entry, tOpt, scope)
+      expect(r.valid, code).to.equal(false)
+      expect(errors(r), code).to.deep.equal([code])
+    }
+    const unk = validateVoteEntryAgainstBallot(raw({ answers: [q1(['zz']), q2(['x'])] }), tOpt, scope)
+    expect(unk.findings[0]).to.deep.include({ optionCode: 'zz', questionCode: 'q1' })
+  })
+
+  it('AC-4 malformed entries give one malformed-entry finding', () => {
+    const b = base() as any
+    const { nonce: _n, ...noNonce } = b
+    const bad: unknown[] = [
+      null, [], 'x', noNonce, { ...b, extra: 1 }, { ...b, v: 2 }, { ...b, answers: 'x' },
+      { ...b, answers: [{ questionCode: 'q1', optionCodes: ['a'], extra: 1 }] },
+      { ...b, answers: [{ questionCode: 'q1', optionCodes: [1] }] },
+      { ...b, electionRevision: '1' }, { ...b, electionRevision: 1n }
+    ]
+    for (const e of bad) {
+      const r = validateVoteEntryAgainstBallot(e, tOpt, scope)
+      expect(r.valid).to.equal(false)
+      expect(codes(r)).to.deep.equal(['malformed-entry'])
+    }
+  })
+
+  it('AC-5 non-select questions are info, structure still applies', () => {
+    const e = build({ q1: ['a'], q2: ['x'], q3: ['r1'] }, tOpt)
+    const r = validateVoteEntryAgainstBallot(e, tOpt, scope)
+    expect(r.valid).to.equal(true)
+    expect(r.findings).to.have.length(1)
+    expect(r.findings[0]).to.deep.include({ code: 'unsupported-question-type', severity: 'info', questionCode: 'q3' })
+    const bad = validateVoteEntryAgainstBallot(raw({ answers: [{ questionCode: 'q1', optionCodes: ['a'] }, { questionCode: 'q2', optionCodes: ['x'] }, { questionCode: 'q3', optionCodes: ['zz'] }] }), tOpt, scope)
+    expect(bad.valid).to.equal(false)
+    expect(errors(bad)).to.deep.equal(['unknown-option'])
+  })
+
+  it('AC-6 every defect is collected in a fixed order', () => {
+    const e = raw({ nonce: 'BAD', answers: [{ questionCode: 'q1', optionCodes: ['zz'] }] })
+    const r = validateVoteEntryAgainstBallot(e, tOpt, scope)
+    expect(codes(r)).to.deep.equal(['bad-nonce', 'unknown-option', 'blank-required'])
+  })
+
+  it('AC-7 the scope digest is authoritative; required does not move the digest', () => {
+    const e = raw({ templateDigest: 'custom' })
+    expect(codes(validateVoteEntryAgainstBallot(e, tOpt, scope))).to.deep.equal(['template-digest-mismatch'])
+    expect(codes(validateVoteEntryAgainstBallot(e, tOpt, { ...scope, templateDigest: 'custom' }))).to.deep.equal([])
+    expect(ballotTemplateDigest(t, FIXTURE_REVISION)).to.equal(ballotTemplateDigest(tOpt, FIXTURE_REVISION))
+  })
+
+  it('AC-8 a hostile ballot gives malformed-ballot', () => {
+    for (const ballot of [{ ...tOpt, questions: 'x' }, { ...tOpt, questions: [{ title: 'no code', options: [] }] }, null, { ...tOpt, questions: [{ code: 'q1', options: [null] }] }]) {
+      const r = validateVoteEntryAgainstBallot(base(), ballot as any, scope)
+      expect(r.valid).to.equal(false)
+      expect(codes(r)).to.deep.equal(['malformed-ballot'])
+    }
+  })
+
+  it('AC-9 pure, closed codes, severity rule', () => {
+    const entry = raw({ nonce: 'BAD', answers: [{ questionCode: 'q3', optionCodes: ['r1'] }, { questionCode: 'q9', optionCodes: [] }] })
+    const entryCopy = structuredClone(entry)
+    const ballotCopy = structuredClone(tOpt)
+    const r1 = validateVoteEntryAgainstBallot(entry, tOpt, scope)
+    const r2 = validateVoteEntryAgainstBallot(entry, tOpt, scope)
+    expect(r1).to.deep.equal(r2)
+    expect(entry).to.deep.equal(entryCopy)
+    expect(tOpt).to.deep.equal(ballotCopy)
+    for (const f of r1.findings) {
+      expect(f.detail).to.be.a('string').that.is.not.empty
+      expect(ANSWER_FINDING_CODES).to.include(f.code)
+      expect(f.severity).to.equal((ANSWER_INFO_CODES as readonly string[]).includes(f.code) ? 'info' : 'error')
+    }
   })
 })
