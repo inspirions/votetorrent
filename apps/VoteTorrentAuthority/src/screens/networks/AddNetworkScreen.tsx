@@ -457,7 +457,6 @@ export default function AddNetworkScreen() {
 				);
 				return;
 			}
-			console.error("handleCreate error:", err instanceof Error ? err.name : typeof err);
 			// 49-16 (Gap A): this screen never invokes the per-use device-signing factory
 			// (device-signer.ts's exported creator) and is therefore outside the 20-file rollout
 			// inventory — but getOrCreateDeviceUser above is the exact second-half-of-the-
@@ -468,7 +467,13 @@ export default function AddNetworkScreen() {
 			// (validation, commit, network) is "not mine" to the hook and falls through to this
 			// screen's own raw-message handling unchanged.
 			const outcome = handleDeviceSigningError(err);
-			if (outcome.handled) return;
+			if (outcome.handled) {
+				// The first Create on a fresh install lands here by design (no signing key yet), so it
+				// is routing, not a failure: logged as info so a dev build shows no error toast for it.
+				console.info("[network-create] routed to signing-key setup:", err instanceof Error ? err.name : typeof err);
+				return;
+			}
+			console.error("handleCreate error:", err instanceof Error ? err.name : typeof err);
 			// Engine text carries ids and table names: never rendered. 62-96's peer copy arrives
 			// through outcome.message.
 			setErrorMessage(outcome.message ?? t("networkCreateFailed"));
