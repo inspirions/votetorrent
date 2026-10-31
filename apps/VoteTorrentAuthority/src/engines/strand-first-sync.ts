@@ -65,9 +65,79 @@ export class StrandWaitCancelledError extends Error {
 	}
 }
 
+/**
+ * Thrown when cadre-core marks the strand being opened `'error'` while the open waits on it.
+ * A joiner whose deferred database build fails (`Missing block` from a seed that answers too
+ * slowly) is released and left `'error'` WITHOUT its `whenWritable` waiters being rejected, so
+ * the wait would only ever see the retryable gate error once per `strandFirstSync.timeoutMs`
+ * and loop forever (2026-10-31, iPhone joining a Redmi-founded network). `'error'` is terminal
+ * and `startStrand` hands the same dead instance back to the next `addStrand`, so the opener
+ * stops the strand before rethrowing; the next open launches it afresh. cadre-core's own
+ * message is not carried (it can name blocks and addresses).
+ */
+export class StrandLaunchFailedError extends Error {
+	readonly strandId: string;
+
+	constructor(strandId: string) {
+		super(`Strand ${strandId} failed to start`);
+		this.name = 'StrandLaunchFailedError';
+		this.strandId = strandId;
+	}
+}
+
+/** How often a pending open re-reads the strand's status for `'error'`. */
+export const STRAND_ERROR_POLL_MS = 1000;
+
+/** The status read `failOnStrandError` needs — optional, so a host without it waits as before. */
+export interface StrandStatusHost {
+	getStrand?(strandId: string): { status: string } | undefined;
+}
+
 /** Minimal seam `waitForStrandWritable` needs from a CadreNode — satisfied structurally. */
-export interface StrandWritableHost {
+export interface StrandWritableHost extends StrandStatusHost {
 	whenStrandWritable(strandId: string, options?: { timeoutMs?: number }): Promise<StrandInstance>;
+}
+
+function strandFailed(host: StrandStatusHost, strandId: string): boolean {
+	try {
+		return host.getStrand?.(strandId)?.status === 'error';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Settles with `promise`, or rejects with `StrandLaunchFailedError` as soon as `host` reports
+ * `strandId` as `'error'`. The caller keeps owning `promise`; a rejection it delivers after the
+ * error won the race is absorbed here, never surfaced as unhandled.
+ */
+export function failOnStrandError<T>(
+	host: StrandStatusHost,
+	strandId: string,
+	promise: Promise<T>,
+	pollMs: number = STRAND_ERROR_POLL_MS,
+): Promise<T> {
+	if (typeof host.getStrand !== 'function') {
+		return promise;
+	}
+	return new Promise<T>((resolve, reject) => {
+		const timer = setInterval(() => {
+			if (strandFailed(host, strandId)) {
+				clearInterval(timer);
+				reject(new StrandLaunchFailedError(strandId));
+			}
+		}, pollMs);
+		promise.then(
+			(value) => {
+				clearInterval(timer);
+				resolve(value);
+			},
+			(err) => {
+				clearInterval(timer);
+				reject(err);
+			},
+		);
+	});
 }
 
 /** Rejects/resolves `promise` when `signal` aborts; always removes the listener it adds. */
@@ -124,13 +194,14 @@ function abortableSleep(ms: number, signal: AbortSignal | undefined, strandId: s
  * Waits for `strandId` to become writable, looping on `node.whenStrandWritable` — NEVER
  * re-calls `addStrand` (see the module doc comment). Resolves with the writable
  * `StrandInstance`. Rejects with `StrandWaitCancelledError` if `signal` aborts (before
- * the first attempt, or while an attempt is pending). Rejects unchanged with any error
- * from `whenStrandWritable` that is NOT the first-sync gate error.
+ * the first attempt, or while an attempt is pending). Rejects with `StrandLaunchFailedError`
+ * once the strand is `'error'`, which is not a sync still in progress. Rejects unchanged with
+ * any error from `whenStrandWritable` that is NOT the first-sync gate error.
  */
 export async function waitForStrandWritable(
 	node: StrandWritableHost,
 	strandId: string,
-	options?: { signal?: AbortSignal; minRetryIntervalMs?: number },
+	options?: { signal?: AbortSignal; minRetryIntervalMs?: number; errorPollMs?: number },
 ): Promise<StrandInstance> {
 	const signal = options?.signal;
 	const minRetryIntervalMs = options?.minRetryIntervalMs ?? MIN_FIRST_SYNC_RETRY_INTERVAL_MS;
@@ -141,6 +212,9 @@ export async function waitForStrandWritable(
 
 	// eslint-disable-next-line no-constant-condition
 	while (true) {
+		if (strandFailed(node, strandId)) {
+			throw new StrandLaunchFailedError(strandId);
+		}
 		const attemptStart = Date.now();
 		const raw = node.whenStrandWritable(strandId);
 		// An orphaned attempt (we moved on after cancellation) must never surface as an
@@ -150,7 +224,7 @@ export async function waitForStrandWritable(
 
 		try {
 			// eslint-disable-next-line no-await-in-loop
-			return await raceAbort(raw, signal, strandId);
+			return await raceAbort(failOnStrandError(node, strandId, raw, options?.errorPollMs), signal, strandId);
 		} catch (err) {
 			if (err instanceof StrandWaitCancelledError) {
 				throw err;

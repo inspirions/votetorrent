@@ -110,7 +110,7 @@ const { EngineFactory } = require('../engine-factory');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createScopedRnStorageProvider } = require('../storage-guard');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { StrandWaitCancelledError } = require('../strand-first-sync');
+const { StrandWaitCancelledError, StrandLaunchFailedError, failOnStrandError } = require('../strand-first-sync');
 
 // ---------------------------------------------------------------------------
 // Fakes: a strand DB whose bare table names resolve, and a CadreNode seam.
@@ -838,5 +838,63 @@ describe('64-08 D-30: founder intent in createStrandDbFactory (DF)', () => {
     await p;
     expect(attachLines()[0]).toEqual({ founder: false, controlConnections: 2, intent: 'none' });
     expect(node.addStrand.mock.calls[0][0].founder).toBe(false);
+  });
+});
+
+describe('createStrandDbFactory — a strand that fails to start is not waited on forever', () => {
+  // 2026-10-31: a joiner whose deferred database build failed (`Missing block` from a slow seed)
+  // was left `'error'` by cadre-core with its writable waiters never rejected; the join hung.
+  function withStatus(node: ReturnType<typeof makeFakeNode>) {
+    let status = 'starting';
+    const stopStrand = jest.fn(async (_strandId: string) => undefined);
+    const extended = Object.assign(node, {
+      getStrand: jest.fn((_strandId: string) => ({ status })),
+      stopStrand,
+    });
+    return { node: extended, fail: () => { status = 'error'; }, stopStrand };
+  }
+
+  it('(e1) a pending addStrand whose strand turns error rejects with StrandLaunchFailedError and stops the strand', async () => {
+    const { node, fail, stopStrand } = withStatus(makeFakeNode({ connections: 1 }));
+    node.addStrand.mockImplementationOnce(() => new Promise(() => undefined));
+
+    const opened = createStrandDbFactory(node)('networkhash123');
+    fail();
+
+    await expect(opened).rejects.toBeInstanceOf(StrandLaunchFailedError);
+    expect(stopStrand).toHaveBeenCalledWith('networkhash123');
+    expect(node.whenStrandWritable).not.toHaveBeenCalled();
+  });
+
+  it('(e2) a gate wait whose strand turns error rejects with StrandLaunchFailedError and stops the strand', async () => {
+    const { node, fail, stopStrand } = withStatus(makeFakeNode({ connections: 1 }));
+    node.addStrand.mockRejectedValueOnce(makeGateError('networkhash123'));
+    node.whenStrandWritable.mockImplementation(() => new Promise(() => undefined));
+
+    const opened = createStrandDbFactory(node)('networkhash123');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    fail();
+
+    await expect(opened).rejects.toBeInstanceOf(StrandLaunchFailedError);
+    expect(stopStrand).toHaveBeenCalledTimes(1);
+  });
+
+  it('(e3) the wait loop does not start another attempt on a strand already in error', async () => {
+    const { node, fail, stopStrand } = withStatus(makeFakeNode({ connections: 1 }));
+    node.addStrand.mockRejectedValueOnce(makeGateError('networkhash123'));
+    fail();
+
+    await expect(createStrandDbFactory(node)('networkhash123')).rejects.toBeInstanceOf(StrandLaunchFailedError);
+    expect(node.whenStrandWritable).not.toHaveBeenCalled();
+    expect(stopStrand).toHaveBeenCalledTimes(1);
+  });
+
+  it('(e4) a strand that stays healthy opens exactly as before, and a host without getStrand is passed through', async () => {
+    const { node, stopStrand } = withStatus(makeFakeNode({ connections: 1 }));
+    await expect(createStrandDbFactory(node)('networkhash123')).resolves.toBe(node.db);
+    expect(stopStrand).not.toHaveBeenCalled();
+
+    const pending = Promise.resolve('value');
+    expect(failOnStrandError({}, 'networkhash123', pending)).toBe(pending);
   });
 });

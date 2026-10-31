@@ -22,7 +22,12 @@ import { Database } from '@quereus/quereus';
 import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/rn';
 import type { DbFactory } from '@votetorrent/vote-engine';
 import type { StrandConfig, StrandInstance } from '@serfab/cadre-core';
-import { isStrandAwaitingFirstSyncError, waitForStrandWritable } from './strand-first-sync';
+import {
+	failOnStrandError,
+	isStrandAwaitingFirstSyncError,
+	StrandLaunchFailedError,
+	waitForStrandWritable,
+} from './strand-first-sync';
 import { takeFounderIntent, resolveFounderFlag } from './founder-intent';
 
 // cadre-core's StrandDatabase.executeSchema() wraps the sApp schema as
@@ -96,6 +101,10 @@ export interface StrandHost {
 	addStrand(config: StrandConfig): Promise<StrandInstance>;
 	getControlNode(): { getConnections(): readonly unknown[] } | null;
 	whenStrandWritable(strandId: string, options?: { timeoutMs?: number }): Promise<StrandInstance>;
+	/** Read for `'error'` while an open waits (see `StrandLaunchFailedError`). Optional for test fakes. */
+	getStrand?(strandId: string): { status: string } | undefined;
+	/** Releases a strand that failed to start, so the next open launches it afresh. */
+	stopStrand?(strandId: string): Promise<void>;
 }
 
 /**
@@ -186,35 +195,13 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 
 		let strand: StrandInstance;
 		try {
-			strand = await node.addStrand({
-				// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0: the owner key of the machine
-				// that published the row, used to derive "am I the founder?" for a launch that supplies
-				// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
-				// here rather than merely tolerated — and it is provenance, not content, so
-				// `strandRowMismatches` excludes it from the identical-content comparison.
-				// cadre-core 1.18 adds `FounderPeerId` (the machine that runs the founder bootstrap,
-				// read only when no explicit `founder` flag is given). Same reasoning, so null.
-				strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null, FounderPeerId: null },
-				sAppConfig: {
-					id: 'org.votetorrent',
-					version: '1.0.0',
-					schema: VOTETORRENT_INNER_DDL,
-					latencyHint: 'interactive',
-				},
-				founder: resolveFounderFlag({ intent, joined, controlConnections }),
-			});
+			strand = await openStrand();
 		} catch (error) {
-			// Only the first-sync gate error, FOR THIS strand, is retryable — every other
-			// error (including the same gate error for a different strand) rejects unchanged.
-			if (!isStrandAwaitingFirstSyncError(error, strandId)) {
-				throw error;
+			if (error instanceof StrandLaunchFailedError) {
+				// Best effort: a strand that cannot be stopped leaves the next open failing the same way.
+				await node.stopStrand?.(strandId).catch(() => undefined);
 			}
-			options?.onAwaitingFirstSync?.(strandId);
-			// Never re-calls addStrand — loops on whenStrandWritable only (see the doc
-			// comment above and strand-first-sync.ts). cadre-core's default
-			// `awaitFirstSync: true` is left untouched, so a non-gated/fast join is
-			// unaffected and resolves exactly as before this catch was added.
-			strand = await waitForStrandWritable(node, strandId, { signal: options?.signal });
+			throw error;
 		}
 
 		// Safe only after addStrand OR waitForStrandWritable resolves (Pitfall 3).
@@ -224,5 +211,42 @@ export function createStrandDbFactory(node: StrandHost, options?: StrandDbFactor
 		db.setSchemaPath(['App', 'main']); // D-14 transparency — never omit (Pitfall 2).
 
 		return db;
+
+		async function openStrand(): Promise<StrandInstance> {
+			try {
+				const launch = node.addStrand({
+					// FounderOwnerKey is new and REQUIRED in cadre-core 0.13.0: the owner key of the machine
+					// that published the row, used to derive "am I the founder?" for a launch that supplies
+					// no explicit flag. We DO supply `founder` explicitly just below, so null is correct
+					// here rather than merely tolerated — and it is provenance, not content, so
+					// `strandRowMismatches` excludes it from the identical-content comparison.
+					// cadre-core 1.18 adds `FounderPeerId` (the machine that runs the founder bootstrap,
+					// read only when no explicit `founder` flag is given). Same reasoning, so null.
+					strandRow: { Id: strandId, MemberPrivateKey: null, Type: 'o', FounderOwnerKey: null, FounderPeerId: null },
+					sAppConfig: {
+						id: 'org.votetorrent',
+						version: '1.0.0',
+						schema: VOTETORRENT_INNER_DDL,
+						latencyHint: 'interactive',
+					},
+					founder: resolveFounderFlag({ intent, joined, controlConnections }),
+				});
+				// A launch that loses the race below still settles later; never as an unhandled rejection.
+				launch.catch(() => undefined);
+				return await failOnStrandError(node, strandId, launch);
+			} catch (error) {
+				// Only the first-sync gate error, FOR THIS strand, is retryable — every other
+				// error (including the same gate error for a different strand) rejects unchanged.
+				if (!isStrandAwaitingFirstSyncError(error, strandId)) {
+					throw error;
+				}
+				options?.onAwaitingFirstSync?.(strandId);
+				// Never re-calls addStrand — loops on whenStrandWritable only (see the doc
+				// comment above and strand-first-sync.ts). cadre-core's default
+				// `awaitFirstSync: true` is left untouched, so a non-gated/fast join is
+				// unaffected and resolves exactly as before this catch was added.
+				return await waitForStrandWritable(node, strandId, { signal: options?.signal });
+			}
+		}
 	};
 }
