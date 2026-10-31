@@ -30,6 +30,9 @@ jest.mock("react-i18next", () => ({
 
 const mockNavigate = jest.fn();
 const mockGoBack = jest.fn();
+const mockReplace = jest.fn();
+// Off by default: most specs use a navigation object without `replace`, like a plain mock.
+let mockNavigationHasReplace = false;
 jest.mock("@react-navigation/native", () => ({
 	useTheme: () => ({
 		colors: {
@@ -49,7 +52,10 @@ jest.mock("@react-navigation/native", () => ({
 			light: "sentinel-light",
 		},
 	}),
-	useNavigation: () => ({ navigate: mockNavigate, goBack: mockGoBack }),
+	useNavigation: () =>
+		mockNavigationHasReplace
+			? { navigate: mockNavigate, goBack: mockGoBack, replace: mockReplace }
+			: { navigate: mockNavigate, goBack: mockGoBack },
 }));
 
 const mockGetOrCreateDeviceUser = jest.fn();
@@ -334,6 +340,28 @@ describe("AddNetworkScreen — 49-19: the recovery-key ceremony survives handleC
 		// The assertion the original suite lacked. Before the fix this was 1, and the ceremony
 		// screen the line above pushed was popped straight back off.
 		expect(mockGoBack).not.toHaveBeenCalled();
+	});
+
+	it("REPLACES this screen with the ceremony on a native stack, so finishing it does not land back on the filled form", async () => {
+		// Release APK, 2026-10-31: the ceremony was pushed on top of Add Network, and its own
+		// `goBack()` exit returned the officer to this form although the network existed.
+		mockNavigationHasReplace = true;
+		try {
+			mockGetDeviceProvisioningRecord.mockResolvedValue({
+				recoveryPublicKeyCompressedHex: RECOVERY_KEY,
+			});
+			mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+
+			const tr = await renderScreen();
+			await pressSignThenCreate(tr);
+
+			expect(mockReplace).toHaveBeenCalledTimes(1);
+			expect(mockReplace).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+			expect(mockNavigate).not.toHaveBeenCalled();
+			expect(mockGoBack).not.toHaveBeenCalled();
+		} finally {
+			mockNavigationHasReplace = false;
+		}
 	});
 
 	it("still goes back when the recovery key is already registered — the gate must not strand the officer on this screen", async () => {

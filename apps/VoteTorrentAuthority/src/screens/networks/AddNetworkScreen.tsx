@@ -446,7 +446,12 @@ export default function AddNetworkScreen() {
 			// hardware (Pixel 7 Pro, 2026-08-24): the gate logged `needed: true` and navigated,
 			// and the device still sat on Add Network. `finally` still runs on this path, so the
 			// in-flight flag is cleared exactly as it is on every other exit.
-			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
+			//
+			// `replaceCurrent`: the ceremony replaces this screen instead of stacking on it. Its
+			// own exit is `goBack()`, which otherwise returned the officer to this form with the
+			// network already created (release APK, 2026-10-31); now it lands where this screen's
+			// own `goBack()` would have.
+			if (await promptRecoveryKeyRegistrationIfNeeded({ replaceCurrent: true })) return;
 		} catch (err) {
 			// WR-01 (62-88): a failure that arrives after the officer left neither routes nor sets
 			// screen state. Log the error class name only.
