@@ -37,6 +37,8 @@ function manager() {
   const self = Object.create(StrandInstanceManager.prototype);
   self.firstSyncGates = new Map();
   self.strandStorages = new Map();
+  // cadre-core 1.22 reads the strand's party machines (offline mode) at the top of buildStrandDatabase.
+  self.partyMachines = new Map();
   return self;
 }
 

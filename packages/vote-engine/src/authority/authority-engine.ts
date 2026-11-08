@@ -18,6 +18,7 @@ import { Temporal } from 'temporal-polyfill';
 import { SigningEngine } from '../signing/signing-engine.js';
 import { adminSigningKeyValidity } from '../signing/signer-validity.js';
 import { allocateTid } from '../database/tid-allocator.js';
+import { drainDeferredChecks } from '../database/drain-deferred-checks.js';
 import { readInviteChain, readInviteChainDetailed } from '../invite/read-invite-chain.js';
 import { withInviteWriteSerial } from '../invite/invite-write-serial.js';
 import { verifySig, verifySigP256 } from '../database/initialize.js';
@@ -1166,7 +1167,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 							'proposeAdmin: internal invariant violated — a single signature reached a threshold greater than 1',
 						);
 					}
-					await this.ctx.db.runDeferredRowConstraints();
+					await drainDeferredChecks(this.ctx.db);
 					const fan = await fanOutSignatureTasks(
 						this.ctx,
 						{
@@ -1641,7 +1642,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 			// Workaround for the deferred-CHECK sibling-row-visibility class of
 			// quereus issue (see applyAdminProposal's doc comment) — drain before the next
 			// insert enqueues its own deferred entry.
-			await this.ctx.db.runDeferredRowConstraints();
+			await drainDeferredChecks(this.ctx.db);
 
 			for (const officer of args.sortedOfficers) {
 				await this.ctx.db.exec(
@@ -1657,7 +1658,7 @@ export class AuthorityEngine implements IAuthorityEngine {
 						scopes: JSON.stringify(officer.scopes),
 					},
 				);
-				await this.ctx.db.runDeferredRowConstraints();
+				await drainDeferredChecks(this.ctx.db);
 			}
 
 			if (ownsTransaction) await this.ctx.db.exec('COMMIT');

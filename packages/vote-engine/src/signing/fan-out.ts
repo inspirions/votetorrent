@@ -1,4 +1,5 @@
 import type { EngineContext } from '../types.js'
+import { drainDeferredChecks } from '../database/drain-deferred-checks.js'
 import type { Scope } from '@votetorrent/vote-core'
 import { listCurrentScopeHolders, readSessionThreshold, computeSigningStatus } from './threshold.js'
 
@@ -154,7 +155,7 @@ export async function fanOutSignatureTasks (
       await spec.insertExtension(taskId, recipientUserId)
       // 57-07 workaround: drain the deferred-CHECK queue after EVERY pair, regardless of what
       // the batched-no-flush probe (P0/A11) showed — never rely on a batched evaluation.
-      await db.runDeferredRowConstraints()
+      await drainDeferredChecks(db)
       taskIds.push(taskId)
     }
 

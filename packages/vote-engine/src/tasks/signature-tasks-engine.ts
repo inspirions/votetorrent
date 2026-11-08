@@ -4,6 +4,7 @@ import { seedSignedMutation } from '../signing/signed-mutation.js'
 import { adminSigningKeyValidity } from '../signing/signer-validity.js'
 import { readSessionThreshold } from '../signing/threshold.js'
 import { fanOutSignatureTasks } from '../signing/fan-out.js'
+import { drainDeferredChecks } from '../database/drain-deferred-checks.js'
 import { findPendingAdminTaskRow, findPendingTaskNonce, findRegistrantSessionNonce } from './task-signing-status.js'
 import { resolveSignedSubmittedAt } from '../signing/signed-submitted-at.js'
 import { toIsoZDatetime, toDeferredCheckDatetime, restoreCanonicalDatetime, reZuluDatetime, rethrow as rethrowHelper } from '../signing/ceremony-helpers.js'
@@ -611,7 +612,7 @@ export class SignatureTasksEngine implements ISignatureTasksEngine {
             // (e.g. 'unreachable-at-birth') falls into the existing CR-04 catch below: ROLLBACK,
             // skipped++, nothing logged — the request stays 'p' and unseeded, retried on the
             // next pull. Do NOT change the `not exists` work-set predicate or the tally fields.
-            await ctx.db.runDeferredRowConstraints()
+            await drainDeferredChecks(ctx.db)
             await fanOutSignatureTasks(
               ctx,
               {
