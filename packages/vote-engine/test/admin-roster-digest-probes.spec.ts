@@ -61,6 +61,7 @@ import { toCanonicalDatetime, nowCanonicalDatetime } from '../src/utils.js'
 import { sortRosterEntries, type AdminRosterEntry } from '../src/authority/authority-engine.js'
 import { RAD_ROSTER_JSON_SQL, readProposedRosterJson } from '../src/authority/rad-roster-digest.js'
 import { createThresholdAuthority } from './fixtures/threshold-authority.js'
+import { drainDeferredChecks } from '../src/database/drain-deferred-checks.js'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P1 / P2 / P4 — against the REAL schema, via a genuine proposeAdmin() roster
@@ -425,11 +426,11 @@ describe('P7 — founding-branch batching (D-48 formulation A)', () => {
     await db.exec(`insert into FAuthority (Id) values ('p7c')`)
     await db.exec('BEGIN')
     await db.exec(`insert into FAdmin (AuthorityId, EffectiveAt) values ('p7c','e1')`)
-    await db.runDeferredRowConstraints()
+    await drainDeferredChecks(db)
     let caught: unknown
     try {
       await db.exec(`insert into FAdmin (AuthorityId, EffectiveAt) values ('p7c','e2')`)
-      await db.runDeferredRowConstraints()
+      await drainDeferredChecks(db)
     } catch (err) {
       caught = err
     }

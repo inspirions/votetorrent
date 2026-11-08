@@ -249,11 +249,14 @@ export async function createElection (device, p) {
   for (let i = 0; i < chain.length - 1; i++) {
     if (timeline[chain[i]] >= timeline[chain[i + 1]]) throw fail('timeline-order', `${chain[i]} must be before ${chain[i + 1]}`)
   }
-  const date = p.date !== undefined ? parseWhen(p.date, now) : Math.max(now + 11 * DAY_MS, timeline[ElectionEvent.closed])
+  // Election.Date defaults to `closed`: the engine refuses a timeline that closes before the election date
+  // (timeline-rules.ts CLOSED_BEFORE_ELECTION_DATE, 03b7ea44). The ballot deadline is the app's hidden
+  // now + 10 d, or votingStarts when a compressed test timeline opens voting sooner (the lean rig's choice).
+  const date = p.date !== undefined ? parseWhen(p.date, now) : timeline[ElectionEvent.closed]
   const revisionDeadline = p.revisionDeadline !== undefined ? parseWhen(p.revisionDeadline, now) : date
-  const ballotDeadline = now + 10 * DAY_MS
+  const ballotDeadline = Math.min(now + 10 * DAY_MS, votingStarts)
   if (revisionDeadline > date) throw fail('invalid-argument', 'the revision deadline must not be after the election date')
-  if (ballotDeadline > date) throw fail('invalid-argument', 'the election date must be at least 10 days out (ballot deadline)')
+  if (ballotDeadline > date) throw fail('invalid-argument', 'the election date must not be before the ballot deadline')
   const electionId = p.id ?? `election-${now}`
   const title = requireString(p.title, 'title')
   const type = p.adhoc ? ElectionType.adhoc : ElectionType.official

@@ -17,6 +17,7 @@ import { toCanonicalDatetime, nowCanonicalDatetime } from '../src/utils.js'
 import { randomTestKeyPair } from './fixtures/keys.js'
 import { createTestNetwork, addTestAuthority } from './fixtures/test-context.js'
 import { createThresholdAuthority } from './fixtures/threshold-authority.js'
+import { drainDeferredChecks } from '../src/database/drain-deferred-checks.js'
 
 const NO_CTX = 'with context SigningNonce = null, InviteSlotCid = null, InviteSignature = null, Tid = 1'
 
@@ -122,14 +123,14 @@ describe('Admin/Officer founding-branch restriction (D-48, formulation A)', () =
         `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies) ${NO_CTX} values (:id, '2027-04-03T00:00:00', '[]')`,
         { id: authorityId }
       )
-      await db.runDeferredRowConstraints()
+      await drainDeferredChecks(db)
       let caught: unknown
       try {
         await db.exec(
           `insert into Admin (AuthorityId, EffectiveAt, ThresholdPolicies) ${NO_CTX} values (:id, '2027-04-04T00:00:00', '[]')`,
           { id: authorityId }
         )
-        await db.runDeferredRowConstraints()
+        await drainDeferredChecks(db)
       } catch (err) {
         caught = err
       }

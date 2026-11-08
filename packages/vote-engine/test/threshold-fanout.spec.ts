@@ -19,6 +19,7 @@ import {
 import { seedProposedBallot } from './fixtures/test-context.js'
 import { digestToBytes, nowCanonicalDatetime } from '../src/utils.js'
 import type { Database } from '@quereus/quereus'
+import { drainDeferredChecks } from '../src/database/drain-deferred-checks.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -343,7 +344,7 @@ describe('fan-out helper (62-07)', function () {
         `insert into BallotSignatureTaskExtension (TaskId, BallotId) with context Tid = :tid values (:taskId, :ballotId)`,
         { taskId, ballotId: ballotB, tid: BALLOT_HEADER_TID }
       )
-      await db.runDeferredRowConstraints()
+      await drainDeferredChecks(db)
     }
     await db.exec('COMMIT')
     const openCount = await db
@@ -775,7 +776,7 @@ describe('threshold-fanout structure (62-07)', () => {
     expect(forbiddenDelete.test(fanOutSrc), 'fan-out.ts must never DELETE FROM Task').to.equal(false)
     expect(forbiddenDelete.test(signingEngineSrc), 'signing-engine.ts must never DELETE FROM Task').to.equal(false)
 
-    expect(fanOutSrc.includes('runDeferredRowConstraints'), 'fan-out.ts flushes deferred constraints').to.equal(true)
+    expect(fanOutSrc.includes('drainDeferredChecks'), 'fan-out.ts flushes deferred constraints').to.equal(true)
     expect(signingEngineSrc.includes('crossedNow'), 'signing-engine.ts carries crossedNow').to.equal(true)
   })
 })

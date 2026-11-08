@@ -33,6 +33,7 @@ import { ElectionProposeRevisionBuilder } from './builders/election-propose-revi
 import { ElectionInviteKeyholderBuilder } from './builders/election-invite-keyholder-builder.js'
 import { ElectionRevokeKeyholderBuilder } from './builders/election-revoke-keyholder-builder.js'
 import { allocateTid } from '../database/tid-allocator.js'
+import { drainDeferredChecks } from '../database/drain-deferred-checks.js'
 import { readInviteChain } from '../invite/read-invite-chain.js'
 import { verifyUserKeyMembership } from '../user/verify-user-key.js'
 import { SigningEngine } from '../signing/signing-engine.js'
@@ -1225,7 +1226,7 @@ export class ElectionEngine implements IElectionEngine {
             now,
           }
         )
-        await this.ctx.db.runDeferredRowConstraints()
+        await drainDeferredChecks(this.ctx.db)
 
         if (threshold <= 1) {
           // Step 5 (threshold 1, D-06 self-confirm): the existing Task + extension inserts,
@@ -1255,7 +1256,7 @@ export class ElectionEngine implements IElectionEngine {
             // for this nonce. An internal-invariant guard, not a reachable user-facing case.
             throw new Error('submitBallotForConfirmation: internal invariant violated — a single signature reached a threshold > 1')
           }
-          await this.ctx.db.runDeferredRowConstraints()
+          await drainDeferredChecks(this.ctx.db)
           await fanOutSignatureTasks(
             this.ctx,
             {
@@ -1373,7 +1374,7 @@ export class ElectionEngine implements IElectionEngine {
           await this.ctx.db.exec('delete from Task where Id = :id', { id: row.Id })
           // Delete extension (now passes DeleteValid because the Task no longer exists)
           await this.ctx.db.exec('delete from BallotSignatureTaskExtension where TaskId = :id', { id: row.Id })
-          await this.ctx.db.runDeferredRowConstraints()
+          await drainDeferredChecks(this.ctx.db)
         }
         await this.ctx.db.exec('COMMIT')
       } catch (err) {

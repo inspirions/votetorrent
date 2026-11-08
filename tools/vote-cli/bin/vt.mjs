@@ -27,7 +27,12 @@ if (!linked) {
     console.error(`vt: ${link} exists and is not a symlink to vote-engine's node_modules; remove it`)
     process.exit(2)
   }
-  symlinkSync(relative(cliRoot, engineModules), link, 'dir')
+  try {
+    symlinkSync(relative(cliRoot, engineModules), link, 'dir')
+  } catch (err) {
+    // Several `vt` processes started together (the e2e starts 7 daemons at once) race to create it.
+    if (err.code !== 'EEXIST' || !lstatSync(link).isSymbolicLink()) throw err
+  }
 }
 
 await import('../src/cli.mjs')

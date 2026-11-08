@@ -201,9 +201,14 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // 2026-11-05: @serfab 1.20.0 -> 1.21.0 (a relay reservation re-dials after a dropped dial; a refused app
       // schema change keeps the earlier schema) and @optimystic 1.24.0 -> 1.25.0 (adapts to quereus 4.25's
       // unwound schema commit). @quereus 4.24.0 -> 4.26.0. cadre-core and db-p2p patches carried byte-identical.
+      // 2026-11-08: @serfab 1.21.0 -> 1.22.0 (machine removal rotates the party key, offline queue waits for
+      // party machines, close awaits quereus, a refused app schema stops relaunching) and @optimystic 1.25.0 ->
+      // 1.26.0 (index walks serve order by / ranges / in lists, flat-cost offline queue, delete reports its
+      // row). @quereus 4.26.0 -> 5.0.0, forced by both families' ^5.0.0 ranges. db-p2p patch carried
+      // byte-identical; cadre-core patch forward-ported (3 hunks re-placed by hand).
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.21.' : '1.25.'
+        : pkg.startsWith('@serfab/') ? '1.22.' : '1.26.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

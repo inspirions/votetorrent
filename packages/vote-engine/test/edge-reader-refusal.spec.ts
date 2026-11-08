@@ -260,8 +260,11 @@ describe('ER-TT strandCohortRefusal + withholdStrandAddrs (installed patched cad
     const fail: string[] = []
     const callAt = sim.indexOf('await createLibp2pNode(')
     const literal = callAt < 0 ? '' : blockAt(sim, callAt)
-    if (!/\.\.\.\(cohortRefusal \? \{ isNetworkMember: cohortRefusal\.isNetworkMember \} : \{\}\)\s*\}$/.test(literal)) fail.push('refusal-spread-conditional-and-last')
-    if ((literal.match(/isNetworkMember:/g) ?? []).length !== 1) fail.push('one-isNetworkMember-key')
+    // cadre-core 1.22 sets its own removed-machine `isNetworkMember` (offline mode + party peers only),
+    // earlier in the same literal. Ours stays LAST and folds that check in when both exist, so the
+    // literal holds exactly those two keys: upstream's conditional spread and ours.
+    if (!/\.\.\.\(cohortRefusal \? \{ isNetworkMember: partyMachines \? \(peerId\) => cohortRefusal\.isNetworkMember\(peerId\) && !partyMachines\.removed\(\)\.has\(peerId\) : cohortRefusal\.isNetworkMember \} : \{\}\)\s*\}$/.test(literal)) fail.push('refusal-spread-conditional-and-last')
+    if ((literal.match(/isNetworkMember:/g) ?? []).length !== 2 || !literal.includes('...(partyMachines && { isNetworkMember: (peerId) => !partyMachines.removed().has(peerId) }),')) fail.push('two-isNetworkMember-keys-upstream-then-ours')
     const gaterSpread = literal.indexOf('...(edgeReaderGate ? { connectionGater: edgeReaderGate.connectionGater } : {}),')
     if (gaterSpread < 0 || gaterSpread > literal.indexOf('...(cohortRefusal ?')) fail.push('gater-spread-conditional-before-refusal')
     if ((literal.match(/connectionGater:/g) ?? []).length !== 1) fail.push('one-connectionGater-key-in-literal')
@@ -316,7 +319,7 @@ describe('ER-TT strandCohortRefusal + withholdStrandAddrs (installed patched cad
       // something else between the assignment and attach
       { rule: 'only-the-declaration-block-before-attach', sim: mutate(sim, 'cohortRefusal?.attach(node);', 'await Promise.resolve();\ncohortRefusal?.attach(node);') },
       // the refusal spread made unconditional
-      { rule: 'refusal-spread-conditional-and-last', sim: mutate(sim, '...(cohortRefusal ? { isNetworkMember: cohortRefusal.isNetworkMember } : {})', 'isNetworkMember: cohortRefusal.isNetworkMember') },
+      { rule: 'refusal-spread-conditional-and-last', sim: mutate(sim, '...(cohortRefusal ? { isNetworkMember: partyMachines ? (peerId) => cohortRefusal.isNetworkMember(peerId) && !partyMachines.removed().has(peerId) : cohortRefusal.isNetworkMember } : {})', 'isNetworkMember: cohortRefusal.isNetworkMember') },
       // the gate built without the key
       { rule: 'gate-only-with-key', sim: mutate(sim, "typeof config.edgeReaderProtocol === 'string' && config.edgeReaderProtocol.length > 0", 'true') },
       // startStrand forwards cohortRefusal unconditionally

@@ -1,5 +1,5 @@
 diff --git a/dist/src/runtime/emit/dml-executor.js b/dist/src/runtime/emit/dml-executor.js
-index 88e190e..005f4f2 100644
+index 8cd4e97..c3b27d7 100644
 --- a/dist/src/runtime/emit/dml-executor.js
 +++ b/dist/src/runtime/emit/dml-executor.js
 @@ -653,12 +653,15 @@ export function emitDmlExecutor(plan, ctx) {
@@ -156,19 +156,19 @@ index 512ab1c..9065049 100644
      return {
          operands: [plan.operand],
 diff --git a/dist/src/runtime/row-constraints.js b/dist/src/runtime/row-constraints.js
-index 79718c6..ee12e59 100644
+index 26506b8..500c1b5 100644
 --- a/dist/src/runtime/row-constraints.js
 +++ b/dist/src/runtime/row-constraints.js
-@@ -3,6 +3,8 @@ import { RowOpFlag } from '../schema/table.js';
- import { ConflictResolution } from '../common/constants.js';
+@@ -4,6 +4,8 @@ import { ConflictResolution } from '../common/constants.js';
  import { expressionToString } from '../emit/ast-stringify.js';
- import { sqlValueIdentical, isTruthy } from '../util/comparison.js';
+ import { isTruthy } from '../util/comparison.js';
+ import { referencedKeyValueChanged } from './foreign-key-actions.js';
 +// VoteTorrent patch (datetime-immediate-check-coercion): needed by coerceNewSection below.
 +import { validateAndParse } from '../types/validation.js';
  /**
   * The violation message for a failing constraint — single source of truth for the
   * immediate (row-time) and deferred (commit-time) paths, which must report a row
-@@ -226,7 +228,7 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+@@ -227,7 +229,7 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
                  }
                  return result ?? null;
              };
@@ -177,7 +177,7 @@ index 79718c6..ee12e59 100644
              continue;
          }
          // Resolve without a per-row microtask hop (see runtime/async-util.ts).
-@@ -244,4 +246,37 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
+@@ -245,4 +247,37 @@ async function checkCheckConstraints(rctx, scope, tableSchema, constraintMetadat
      }
      return { skip: false };
  }

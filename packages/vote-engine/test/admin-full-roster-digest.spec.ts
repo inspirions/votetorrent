@@ -22,6 +22,7 @@ import { digestToBytes, toCanonicalDatetime, nowCanonicalDatetime } from '../src
 import { SignatureTasksEngine } from '../src/tasks/signature-tasks-engine.js'
 import { SigningEngine } from '../src/signing/signing-engine.js'
 import type { AdminSignatureTask } from '@votetorrent/vote-core'
+import { drainDeferredChecks } from '../src/database/drain-deferred-checks.js'
 
 function makeNetworkRef () {
   return { hash: 'full-roster-digest-hash', name: 'Full Roster Digest Network', relays: [], primaryAuthorityDomainName: 'full-roster-digest.example.com' }
@@ -238,7 +239,7 @@ describe('Full-roster admin promotion digest (D-33b)', () => {
            values (:authorityId, :effectiveAt, :thresholdPolicies)`,
           { nonce, tid, authorityId: fx.authorityId, effectiveAt: effectiveAtCanon, thresholdPolicies: thresholdPoliciesJson }
         )
-        await fx.elec.ctx.db.runDeferredRowConstraints()
+        await drainDeferredChecks(fx.elec.ctx.db)
         for (const row of sortedRows) {
           await fx.elec.ctx.db.exec(
             `insert into Officer (AuthorityId, AdminEffectiveAt, UserId, Title, Scopes)
@@ -246,7 +247,7 @@ describe('Full-roster admin promotion digest (D-33b)', () => {
              values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
             { nonce, tid, authorityId: fx.authorityId, effectiveAt: effectiveAtCanon, userId: row.userId, title: row.title, scopes: row.scopes }
           )
-          await fx.elec.ctx.db.runDeferredRowConstraints()
+          await drainDeferredChecks(fx.elec.ctx.db)
         }
       } catch (err) {
         caught = err
@@ -284,7 +285,7 @@ describe('Full-roster admin promotion digest (D-33b)', () => {
          values (:authorityId, :effectiveAt, :thresholdPolicies)`,
         { nonce, tid, authorityId: fx.authorityId, effectiveAt: effectiveAtCanon, thresholdPolicies: thresholdPoliciesJson }
       )
-      await fx.elec.ctx.db.runDeferredRowConstraints()
+      await drainDeferredChecks(fx.elec.ctx.db)
       let caught: unknown
       try {
         await fx.elec.ctx.db.exec(
@@ -308,7 +309,7 @@ describe('Full-roster admin promotion digest (D-33b)', () => {
          values (:authorityId, :effectiveAt, :thresholdPolicies)`,
         { nonce, tid, authorityId: fx.authorityId, effectiveAt: effectiveAtCanon, thresholdPolicies: thresholdPoliciesJson }
       )
-      await fx.elec.ctx.db.runDeferredRowConstraints()
+      await drainDeferredChecks(fx.elec.ctx.db)
       let caught: unknown
       try {
         await fx.elec.ctx.db.exec(

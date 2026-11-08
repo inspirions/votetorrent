@@ -1645,7 +1645,7 @@ describe('AuthorityEngine', () => {
            values (:authorityId, :effectiveAt, :thresholdPolicies)`,
           { nonce: promotionNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, thresholdPolicies }
         )
-        await auth.ctx.db.runDeferredRowConstraints()
+        await drainDeferredChecks(auth.ctx.db)
         for (const uid of officersAscending) {
           const meta = officerMeta[uid]!
           await auth.ctx.db.exec(
@@ -1654,7 +1654,7 @@ describe('AuthorityEngine', () => {
              values (:authorityId, :effectiveAt, :userId, :title, :scopes)`,
             { nonce: promotionNonce, tid, authorityId: auth.authority.id, effectiveAt: newEffectiveAt, userId: uid, title: meta.title, scopes: JSON.stringify(meta.scopes) }
           )
-          await auth.ctx.db.runDeferredRowConstraints()
+          await drainDeferredChecks(auth.ctx.db)
         }
         await auth.ctx.db.exec('COMMIT')
       } catch (err) {
@@ -5119,6 +5119,7 @@ import type {
   AuthorityInviteShare,
   OfficerInviteShare
 } from '@votetorrent/vote-core'
+import { drainDeferredChecks } from '../src/database/drain-deferred-checks.js'
 
 // ---------------------------------------------------------------------------
 // Builder test helpers
