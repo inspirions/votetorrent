@@ -324,11 +324,18 @@ test('S8: primaryKeyIdentity is type-tagged, order-sensitive and name-only on an
 	);
 });
 
-test('S9: no officer table key column declares a collation other than BINARY, so byte-exact identity matches the store', async () => {
+// S9 used to assert every officer key column was BINARY. It never was: the store keys a text primary key that
+// declares no collation under its default, NOCASE (64 key columns here). Quereus before 5.2 left
+// primaryKeyDefinition saying BINARY while the column and the key bytes said NOCASE, and S9 read the stale
+// field. From 5.2 the two agree (quereus SCH-006), so the identity now follows the key column's collation.
+test('S9: every officer key column resolves to a key normalizer, and its definition agrees with its column', async () => {
 	const { db } = await seededStore();
 	try {
+		const resolve = db.getKeyNormalizerResolver();
 		/** @type {string[]} */
 		const offenders = [];
+		/** @type {Set<string>} */
+		const seen = new Set();
 		for (const table of OFFICER_SUBSCRIBED_TABLES) {
 			const schema = db.schemaManager.getTable(db.schemaManager.getCurrentSchemaName(), table);
 			if (!schema) {
@@ -336,14 +343,75 @@ test('S9: no officer table key column declares a collation other than BINARY, so
 				continue;
 			}
 			for (const def of schema.primaryKeyDefinition) {
-				const collation = def.collation ?? schema.columns[def.index].collation;
-				if (collation !== undefined && String(collation).toUpperCase() !== 'BINARY') offenders.push(table);
+				const column = schema.columns[def.index];
+				const collation = String(column.collation ?? 'BINARY').toUpperCase();
+				seen.add(collation);
+				if (String(def.collation ?? 'BINARY').toUpperCase() !== collation) offenders.push(`${table}.${column.name} definition`);
+				try {
+					resolve(collation);
+				} catch {
+					offenders.push(`${table}.${column.name} ${collation}`);
+				}
 			}
 		}
 		assert.deepEqual(offenders, []);
+		assert.ok(seen.has('NOCASE'), 'the store keys at least one officer text key NOCASE (its default)');
 	} finally {
 		await closeNetworkDb(db);
 	}
+});
+
+test('S10: a strand key that differs from the local key only in case is the same row: one upsert, no removal', async () => {
+	const { db, strandRows } = await seededStore();
+	try {
+		const resolve = db.getKeyNormalizerResolver();
+		/** @type {{ table: string, name: string } | undefined} */
+		let pick;
+		for (const table of SEED_TABLES) {
+			const schema = tableSchemaOf(db, table);
+			const row = /** @type {Record<string, any>[]} */ (strandRows.get(table))[0];
+			if (!row) continue;
+			for (const def of schema.primaryKeyDefinition) {
+				const column = schema.columns[def.index];
+				const value = row[column.name];
+				if (String(column.collation).toUpperCase() === 'NOCASE' && typeof value === 'string' && value.toUpperCase() !== value) {
+					pick = { table, name: column.name };
+					break;
+				}
+			}
+			if (pick) break;
+		}
+		assert.ok(pick, 'no seeded NOCASE text key with a lower-case letter to flip');
+		const local = /** @type {Record<string, any>[]} */ (strandRows.get(pick.table))[0];
+		const flipped = String(local[pick.name]).toUpperCase();
+		assert.equal(resolve('NOCASE')(flipped), resolve('NOCASE')(local[pick.name]), 'the store treats the two keys as one');
+		let found = 0;
+		for await (const _ of db.eval(`select 1 from ${pick.table} where ${pick.name} = ?`, [flipped])) found += 1;
+		assert.ok(found >= 1, 'positive control: the store finds the local row by the case-flipped key');
+
+		strandRows.set(pick.table, [{ ...local, [pick.name]: flipped }]);
+		const fake = makeFakeStrandDb(strandRows);
+		const reader = await openOfficerStrandReader({ memberNode: makeMemberNode({ current: fake.strandDatabase }), strandId: STRAND_ID, deps: fastDeps() });
+		const localPks = await localPksOf(db, pick.table);
+		assert.equal(localPks.length, 1);
+		const ops = await reader.readRows(pick.table, localPks, { uiDb: db });
+		assert.deepEqual(ops.map((op) => op.op), ['upsert'], `a case-only key change in ${pick.table}.${pick.name} must not remove the row it upserts`);
+	} finally {
+		await closeNetworkDb(db);
+	}
+});
+
+test('S11: primaryKeyIdentity applies a per-position normalizer to text only, and refuses a length mismatch by name', () => {
+	const lower = (/** @type {string} */ s) => s.toLowerCase();
+	const exact = (/** @type {string} */ s) => s;
+	assert.equal(primaryKeyIdentity(['AbC', 'x'], [lower, exact]), primaryKeyIdentity(['abc', 'x'], [lower, exact]));
+	assert.notEqual(primaryKeyIdentity(['a', 'X'], [lower, exact]), primaryKeyIdentity(['a', 'x'], [lower, exact]));
+	assert.notEqual(primaryKeyIdentity(['AbC']), primaryKeyIdentity(['abc']), 'without normalizers text stays exact');
+	assert.equal(primaryKeyIdentity([5], [lower]), primaryKeyIdentity([5n], [lower]));
+	assert.throws(
+		() => primaryKeyIdentity(['a', 'b'], [lower]),
+		(/** @type {any} */ err) => err instanceof StrandReadError && err.message.includes('normalizer'),
+	);
 });
 
 // ---------------------------------------------------------------------------

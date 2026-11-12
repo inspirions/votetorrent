@@ -147,16 +147,25 @@ function toHex(bytes) {
 /**
  * A type-tagged identity for a primary key, so a strand key and a local key compare equal exactly when
  * the store would treat them as the same key. Integer-valued numbers and bigints are equal (`5` and
- * `5n`), text is exact, bytes compare by value, and null is its own tag.
+ * `5n`), bytes compare by value, and null is its own tag. Text goes through the key column's collation
+ * normalizer when one is given: the store keys a text key that declares no collation under NOCASE, so
+ * two keys that differ only in case are one row there and must be one identity here. Without
+ * normalizers, text is exact.
  *
  * @param {ReadonlyArray<unknown>} values - the key's values in PK-definition order
+ * @param {ReadonlyArray<(s: string) => string>} [normalizers] - one per key position, from the store
+ *   database's `getKeyNormalizerResolver()` applied to each key column's collation
  * @returns {string}
  */
-export function primaryKeyIdentity(values) {
+export function primaryKeyIdentity(values, normalizers) {
 	if (!Array.isArray(values)) {
 		throw new StrandReadError('primaryKey', 'a primary key must be an array of values');
 	}
-	const tagged = values.map((value) => {
+	if (normalizers !== undefined && normalizers.length !== values.length) {
+		throw new StrandReadError('primaryKey', 'one key normalizer per key value is required');
+	}
+	const tagged = values.map((value, position) => {
+		if (typeof value === 'string' && normalizers) return `s:${normalizers[position](value)}`;
 		if (value === null || value === undefined) return 'n';
 		if (typeof value === 'boolean') return value ? 'i:1' : 'i:0';
 		if (typeof value === 'bigint') return `i:${value.toString()}`;
@@ -421,6 +430,19 @@ export async function openOfficerStrandReader({ memberNode, strandId, signal, de
 		const pkNames = uiTableSchema.primaryKeyDefinition.map(
 			(/** @type {{ index: number }} */ d) => uiTableSchema.columns[d.index].name,
 		);
+		if (typeof uiDb.getKeyNormalizerResolver !== 'function') {
+			throw new StrandReadError('uiDb', 'the local store handle has no key normalizer resolver');
+		}
+		const resolveNormalizer = uiDb.getKeyNormalizerResolver();
+		/** @type {Array<(s: string) => string>} */
+		let pkNormalizers;
+		try {
+			pkNormalizers = uiTableSchema.primaryKeyDefinition.map(
+				(/** @type {{ index: number }} */ d) => resolveNormalizer(uiTableSchema.columns[d.index].collation ?? 'BINARY'),
+			);
+		} catch (err) {
+			throw new StrandReadError(table, `a key column's collation has no key normalizer (${nameOf(err)})`);
+		}
 
 		const strandDb = await current();
 
@@ -445,11 +467,11 @@ export async function openOfficerStrandReader({ memberNode, strandId, signal, de
 		const ops = [];
 		for (const row of rawRows) {
 			ops.push({ op: 'upsert', row: toUiOrderedRow(uiTableSchema, row) });
-			onStrand.add(primaryKeyIdentity(pkNames.map((/** @type {string} */ n) => row[n])));
+			onStrand.add(primaryKeyIdentity(pkNames.map((/** @type {string} */ n) => row[n]), pkNormalizers));
 		}
 		for (const localPk of localPks) {
 			if (!Array.isArray(localPk)) throw new StrandReadError('localPks', 'every local key must be an array of values');
-			if (!onStrand.has(primaryKeyIdentity(localPk))) ops.push({ op: 'delete', pk: /** @type {any[]} */ (localPk) });
+			if (!onStrand.has(primaryKeyIdentity(localPk, pkNormalizers))) ops.push({ op: 'delete', pk: /** @type {any[]} */ (localPk) });
 		}
 		return ops;
 	}
