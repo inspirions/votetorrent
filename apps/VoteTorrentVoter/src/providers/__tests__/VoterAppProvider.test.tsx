@@ -563,6 +563,23 @@ describe('VoterAppProvider — boot errors never show raw engine text', () => {
 		jest.restoreAllMocks();
 	});
 
+	it("10: an app-schema refusal (through open()'s cause) renders the update copy, not the generic or identity view", async () => {
+		const refusal = new Error("sApp schema cannot be applied to this strand's tables: boom");
+		refusal.name = 'AppSchemaRefusedError';
+		mockSeedDevNetwork.mockRejectedValue(new Error('Network not opened in this session — use create() first: x', {cause: refusal}));
+		jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		const {tr} = renderProvider();
+		await flushBoot();
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('bootError.updateNeeded.title');
+		expect(text).toContain('bootError.updateNeeded.body');
+		expect(text).toContain('bootError.tryAgain');
+		expect(text).not.toContain('bootError.generic');
+		expect(text).not.toContain('bootError.identityLost.create');
+		expect(text).not.toContain('sApp schema');
+		expectNoRawText(tr);
+	});
+
 	it.each([
 		['wrap-unavailable', new DeviceIdentityKeyUnavailableError('wrap-unavailable')],
 		['plain error', new Error('boom')],

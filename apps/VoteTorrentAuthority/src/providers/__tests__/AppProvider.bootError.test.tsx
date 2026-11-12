@@ -335,6 +335,29 @@ describe("AppProvider boot error classification (gap 4)", () => {
 		err.mockRestore();
 	});
 
+	it("B-7: an app-schema refusal (through open()'s cause) is not retried and shows the update copy, never raw text", async () => {
+		const refusal = new Error("sApp schema cannot be applied to this strand's tables: ALTER TABLE App.TidHighWater ADD COLUMN");
+		refusal.name = "AppSchemaRefusedError";
+		mockOpenErrors = [new Error("Network not opened in this session — use create() first: x", { cause: refusal })];
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+		const err = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		const tr = renderApp();
+		await flushMicrotasks();
+		await advance(30000);
+		expect(mockEngineFactoryInstances[0].openCalls.length).toBe(1);
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("bootAppUpdateNeededTitle");
+		expect(json).toContain("bootAppUpdateNeededBody");
+		expect(json).toContain("bootTryAgain");
+		expect(json).not.toContain("bootNetworkLoadFailed");
+		expectNoRaw(tr);
+		expect(json).not.toContain("sApp schema");
+		expect(warn).toHaveBeenCalledWith("[AppProvider] re-attach refused: app schema");
+		expect(err.mock.calls.some((c) => c[0] === "Re-attach failed:")).toBe(false);
+		warn.mockRestore();
+		err.mockRestore();
+	});
+
 	it("B-3: peer-unavailable twice then success heals with no error view", async () => {
 		mockOpenErrors = [new Error(TEST19)];
 		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);

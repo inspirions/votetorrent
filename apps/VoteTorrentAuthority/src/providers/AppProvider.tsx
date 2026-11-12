@@ -18,6 +18,7 @@ import {
 } from "../engines/device-identity-repair";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { classifyPeerReadFailure } from "../engines/peer-read-unavailable";
+import { isAppSchemaRefusal } from "../engines/app-schema-refusal";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachPeerSyncBinding } from "../screens/registration/attach-peer-sync-binding";
 import { sweepRetiredDashboardCodeStorage } from "../engines/retired-dashboard-code-storage";
@@ -174,7 +175,7 @@ async function resolveNodeDispatch(
 	}
 }
 
-type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic" } | null;
+type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "update-needed" } | { kind: "generic" } | null;
 
 // Automatic re-open delays after a peer-unavailable failure (5 s, then 15 s). This covers
 // short blips only: FRET marks a restored silent peer dead after 3 contact failures, but each
@@ -662,7 +663,12 @@ export function AppProvider({ children }: PropsWithChildren) {
 						if (cancelled) return;
 						// D-15: surface the recoverable error; spinner resolves to an error view.
 						const peerFailure = classifyPeerReadFailure(reattachError);
-						if (peerFailure) {
+						if (isAppSchemaRefusal(reattachError)) {
+							// Closed token only. This build's schema does not fit the network's data
+							// (engines/app-schema-refusal.ts): not retryable here, the app needs updating.
+							console.warn("[AppProvider] re-attach refused: app schema");
+							setInitError({ kind: "update-needed" });
+						} else if (peerFailure) {
 							// Closed token only: the message carries block ids and table names.
 							console.warn("[AppProvider] re-attach peer read unavailable:", peerFailure.reason);
 							setInitError({ kind: "peer-unavailable", reason: peerFailure.reason });
@@ -688,7 +694,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 				// Outer catch handles failures before/after the re-attach block
 				// (e.g. getRecentNetworks() failure, LocalStorageReact init failure).
 				const fatalPeer = classifyPeerReadFailure(fatalError);
-				if (fatalPeer) {
+				if (isAppSchemaRefusal(fatalError)) {
+					console.warn("[AppProvider] fatal init refused: app schema");
+					setInitError({ kind: "update-needed" });
+				} else if (fatalPeer) {
 					console.warn("[AppProvider] fatal init peer read unavailable:", fatalPeer.reason);
 					setInitError({ kind: "peer-unavailable", reason: fatalPeer.reason });
 				} else {
@@ -784,6 +793,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 							{t("peerReadUnavailableTitle")}
 						</Text>
 						<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("peerReadUnavailableBody")}</Text>
+					</>
+				) : initError.kind === "update-needed" ? (
+					<>
+						<Text style={{ marginBottom: 8, textAlign: "center", fontWeight: "bold" }}>
+							{t("bootAppUpdateNeededTitle")}
+						</Text>
+						<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("bootAppUpdateNeededBody")}</Text>
 					</>
 				) : (
 					<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("bootNetworkLoadFailed")}</Text>

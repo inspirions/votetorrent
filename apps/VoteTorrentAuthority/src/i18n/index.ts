@@ -404,6 +404,9 @@ const resources = {
 			peerReadUnavailableStaleBody: "Showing what this device last read. It couldn't refresh from the network just now.",
 			peerReadUnavailableRetry: 'Try Again',
 			bootNetworkLoadFailed: "We couldn't open this network on this device.",
+			// The network holds data this build's schema cannot be applied to (AppSchemaRefusedError).
+			bootAppUpdateNeededTitle: "Update VoteTorrent Authority to open this network",
+			bootAppUpdateNeededBody: "This network has data that this version of the app can't open. Install the latest version, then try again. Nothing on this device has been deleted.",
 			bootTryAgain: "Try Again",
 			bootStartFresh: "Start Fresh",
 			authorityNotOnNetworkTitle: "This authority isn't on this network",
@@ -1865,6 +1868,8 @@ const resources = {
 			peerReadUnavailableStaleBody: 'Mostrando lo último que leyó este dispositivo. No pudo actualizarse desde la red hace un momento.',
 			peerReadUnavailableRetry: 'Intentar de Nuevo',
 			bootNetworkLoadFailed: "No pudimos abrir esta red en este dispositivo.",
+			bootAppUpdateNeededTitle: "Actualiza VoteTorrent Authority para abrir esta red",
+			bootAppUpdateNeededBody: "Esta red tiene datos que esta versión de la aplicación no puede abrir. Instala la versión más reciente y vuelve a intentarlo. No se ha borrado nada de este dispositivo.",
 			bootTryAgain: "Intentar de Nuevo",
 			bootStartFresh: "Empezar de Cero",
 			authorityNotOnNetworkTitle: "Esta autoridad no está en esta red",

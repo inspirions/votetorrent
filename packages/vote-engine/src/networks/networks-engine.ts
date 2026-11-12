@@ -101,7 +101,9 @@ export class NetworksEngine implements INetworksEngine {
 		try {
 			ctx = await this.createContext(user, networkHash);
 		} catch (error) {
-			throw new Error('Failed to create database context: ' + error);
+			// `cause` keeps the original error's type (e.g. cadre-core's AppSchemaRefusedError) for
+			// the apps' boot-error classifiers; the message is unchanged.
+			throw new Error('Failed to create database context: ' + error, { cause: error });
 		}
 
 		// Prepare json fields
@@ -1049,8 +1051,12 @@ export class NetworksEngine implements INetworksEngine {
 		try {
 			db = await this.dbFactory(ref.hash);
 		} catch (error) {
+			// `cause` keeps the original error's type (e.g. cadre-core's AppSchemaRefusedError, when
+			// this build's schema cannot be applied to the network's data) for the apps' boot-error
+			// classifiers; the message is unchanged.
 			throw new Error(
 				'Network not opened in this session — use create() first: ' + error,
+				{ cause: error },
 			);
 		}
 

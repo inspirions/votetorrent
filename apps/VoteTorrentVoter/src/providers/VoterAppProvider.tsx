@@ -43,6 +43,7 @@ import {
 	replaceUnrecoverableDeviceIdentity,
 } from '../engines/device-user';
 import {isIdentityNotReplaceable, isReplaceableIdentityError} from '../engines/identity-errors';
+import {isAppSchemaRefusal} from '../engines/app-schema-refusal';
 import {errorClassName} from '../utils/errorClassName';
 import {IdentityRecoveryView} from '../components/IdentityRecoveryView';
 import {seedDevNetwork} from '../engines/dev-seed';
@@ -620,9 +621,19 @@ export function VoterAppProvider({children}: PropsWithChildren) {
 		if (isReplaceableIdentityError(initError.error)) {
 			return <IdentityRecoveryView onCreateNewIdentity={createNewIdentity} onRetry={tryAgain} />;
 		}
+		// This build's schema does not fit the network's data (engines/app-schema-refusal.ts): the
+		// remedy is updating the app, not clearing it.
+		const updateNeeded = isAppSchemaRefusal(initError.error);
 		return (
 			<View style={{flex: 1, justifyContent: 'center', alignItems: 'center'}}>
-				<Text style={{marginBottom: 16, textAlign: 'center'}}>{t('bootError.generic')}</Text>
+				{updateNeeded ? (
+					<>
+						<Text style={{marginBottom: 8, textAlign: 'center', fontWeight: 'bold'}}>{t('bootError.updateNeeded.title')}</Text>
+						<Text style={{marginBottom: 16, textAlign: 'center'}}>{t('bootError.updateNeeded.body')}</Text>
+					</>
+				) : (
+					<Text style={{marginBottom: 16, textAlign: 'center'}}>{t('bootError.generic')}</Text>
+				)}
 				<TouchableOpacity onPress={tryAgain} style={{marginBottom: 8, minHeight: 44, justifyContent: 'center'}}>
 					<Text>{t('bootError.tryAgain')}</Text>
 				</TouchableOpacity>

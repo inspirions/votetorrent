@@ -36,6 +36,10 @@ const resources = {
 			syncSyncing: 'Syncing',
 			// Boot failure screens: translated copy only, raw engine text goes to the console.
 			'bootError.generic': "We couldn't open the voting network on this phone.",
+			// The network holds data this build's schema cannot be applied to (AppSchemaRefusedError).
+			'bootError.updateNeeded.title': 'Update VoteTorrent to open this voting network',
+			'bootError.updateNeeded.body':
+				"This voting network has data that this version of the app can't open. Install the latest version, then try again. Nothing on this phone has been deleted.",
 			'bootError.tryAgain': 'Try Again',
 			'bootError.continueWithoutNetwork': 'Continue without a network',
 			'bootError.identityLost.title': "This phone's voter identity can't be unlocked",
@@ -610,6 +614,9 @@ const resources = {
 			unsharedChanges: 'Guardado en este teléfono, aún no en la red electoral: {{count}}',
 			syncSyncing: 'Sincronizando',
 			'bootError.generic': 'No pudimos abrir la red de votación en este teléfono.',
+			'bootError.updateNeeded.title': 'Actualiza VoteTorrent para abrir esta red de votación',
+			'bootError.updateNeeded.body':
+				'Esta red de votación tiene datos que esta versión de la aplicación no puede abrir. Instala la versión más reciente y vuelve a intentarlo. No se ha borrado nada de este teléfono.',
 			'bootError.tryAgain': 'Intentar de nuevo',
 			'bootError.continueWithoutNetwork': 'Continuar sin red',
 			'bootError.identityLost.title': 'No se puede desbloquear la identidad de votante de este teléfono',
