@@ -206,9 +206,13 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // 1.26.0 (index walks serve order by / ranges / in lists, flat-cost offline queue, delete reports its
       // row). @quereus 4.26.0 -> 5.0.0, forced by both families' ^5.0.0 ranges. db-p2p patch carried
       // byte-identical; cadre-core patch forward-ported (3 hunks re-placed by hand).
+      // 2026-11-12: @optimystic 1.26.0 -> 1.27.0 (in-list seeks span every key column, ordered reads priced by
+      // LIMIT, a fully connected cohort skips the 10 s read-repair consult; engine id quereus@5.4.0, so every
+      // machine moves together). @quereus 5.0.0 -> 5.4.0, forced by the plugins' ^5.4.0 peer range. @serfab
+      // stays 1.22.0 (no newer release). db-p2p and quereus patches carried byte-identical.
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.22.' : '1.26.'
+        : pkg.startsWith('@serfab/') ? '1.22.' : '1.27.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

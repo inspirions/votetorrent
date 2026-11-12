@@ -205,7 +205,7 @@ function stackPreflight() {
 	const ok =
 		versions['@serfab/cadre-core'] === '1.22.0' &&
 		patch &&
-		versions['@optimystic/db-p2p'] === '1.26.0' &&
+		versions['@optimystic/db-p2p'] === '1.27.0' &&
 		versions['main-event'] === '1.0.5' &&
 		nodeOk;
 	if (!ok) refuse('stack');

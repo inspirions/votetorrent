@@ -65,12 +65,12 @@ const execAsync = promisify(exec);
 // The script prints an "INFO: disappeared" hint when a listed mismatch stops showing
 // up; when the set empties, also remove the logFilters block from .yarnrc.yml.
 //
-// Current state (@serfab 1.22.0 / @optimystic 1.26.0 / quereus 5.0.0, 2026-11-08): the
-// single crypto-plugin mismatch, re-keyed to 1.26.0. The peer range is ^5.0.0; YN0002 names
+// Current state (@serfab 1.22.0 / @optimystic 1.27.0 / quereus 5.4.0, 2026-11-12): the
+// single crypto-plugin mismatch, re-keyed to 1.27.0. The peer range is ^5.4.0; YN0002 names
 // packages/attestation-native as the workspace that does not provide @quereus/quereus.
 // ---------------------------------------------------------------------------
 const KNOWN_ALLOWED = new Set([
-  '@optimystic/quereus-plugin-crypto@npm:1.26.0',
+  '@optimystic/quereus-plugin-crypto@npm:1.27.0',
 ]);
 
 // The ✘ marker (U+2718)
