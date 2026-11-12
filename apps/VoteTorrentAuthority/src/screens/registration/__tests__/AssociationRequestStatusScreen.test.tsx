@@ -55,7 +55,7 @@ jest.mock("../../../providers/AppProvider", () => ({
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ScreenModule = require("../AssociationRequestStatusScreen");
 const Screen = ScreenModule.default;
-const { resolveAssociationRequestRows, associationRequestStatusCopy } = ScreenModule;
+const { resolveAssociationRequestRows, associationRequestStatusCopy, ASSOCIATION_REQUEST_PAGE_SIZE } = ScreenModule;
 
 beforeEach(() => {
 	mockListAssociationRequests = jest.fn(async () => []);
@@ -101,6 +101,17 @@ function pressableCount(tr: renderer.ReactTestRenderer): number {
 	const rootNode = tr.root;
 	const nodes = [rootNode, ...rootNode.findAll(() => true)];
 	return nodes.filter((n) => typeof n.props.onPress === "function").length;
+}
+
+/** The rendered tree as JSON, minus the list's own INPUT props: FlatList keeps
+ * the raw rows in its `data` prop and the header element in
+ * `ListHeaderComponent`, neither of which is rendered output. Every other prop
+ * and every rendered node stays in, so the no-nonce / no-PII tripwires still
+ * see anything the screen actually draws. */
+function renderedJSON(tr: renderer.ReactTestRenderer): string {
+	const json = tr.toJSON() as renderer.ReactTestRendererJSON;
+	const { data: _data, ListHeaderComponent: _header, ...props } = json.props;
+	return JSON.stringify({ ...json, props });
 }
 
 const ROW = {
@@ -160,7 +171,7 @@ describe("AssociationRequestStatusScreen — D-06/D-19 read-only status surface"
 
 		expect(has(tr, "association-request-status-row-req-2-challenge")).toBe(true);
 		// Presence only — the real nonce VALUE must never reach the tree.
-		const tree = JSON.stringify(tr.toJSON());
+		const tree = renderedJSON(tr);
 		expect(tree).not.toContain("super-secret-nonce-value");
 	});
 
@@ -182,14 +193,14 @@ describe("AssociationRequestStatusScreen — D-06/D-19 read-only status surface"
 		).resolves.not.toThrow();
 
 		expect(has(tr, "association-request-status-empty")).toBe(true);
-		const tree = JSON.stringify(tr.toJSON());
+		const tree = renderedJSON(tr);
 		expect(tree).not.toContain("network error with a message");
 	});
 
 	it("4. behavior: no raw registrant PII is rendered — only identifiers, status and timestamps reach the tree", async () => {
 		mockListAssociationRequests = jest.fn(async () => [ROW]);
 		const tr = await renderScreen();
-		const tree = JSON.stringify(tr.toJSON());
+		const tree = renderedJSON(tr);
 		// The row carries no name/email/phone/address fields at all (the
 		// AssociationRequestRead shape itself has none), so this is a
 		// structural guarantee, pinned here as a tripwire: the device key
@@ -197,12 +208,13 @@ describe("AssociationRequestStatusScreen — D-06/D-19 read-only status surface"
 		expect(tree).not.toContain(ROW.deviceKey);
 	});
 
-	it("5. reaches the engine through exactly getEngine('association').listAssociationRequests(authorityId), passing no status filter", async () => {
+	it("5. reaches the engine through exactly getEngine('association').listAssociationRequests(authorityId), passing no status filter and one page as the limit", async () => {
 		mockListAssociationRequests = jest.fn(async () => []);
 		await renderScreen();
 		expect(mockGetEngine).toHaveBeenCalledWith("association");
-		expect(mockListAssociationRequests).toHaveBeenCalledWith("fixture-authority-1");
-		expect(mockListAssociationRequests.mock.calls[0].length).toBe(1);
+		expect(mockListAssociationRequests).toHaveBeenCalledWith("fixture-authority-1", undefined, {
+			limit: ASSOCIATION_REQUEST_PAGE_SIZE,
+		});
 	});
 
 	it("6. empty state renders when there are no requests, and only then", async () => {
@@ -213,6 +225,60 @@ describe("AssociationRequestStatusScreen — D-06/D-19 read-only status surface"
 		mockListAssociationRequests = jest.fn(async () => []);
 		const trEmpty = await renderScreen();
 		expect(has(trEmpty, "association-request-status-empty")).toBe(true);
+	});
+
+	describe("8. paging (spike 110): scrolling to the end asks for one more page, with no control", () => {
+		const page = (n: number, from = 0) =>
+			Array.from({ length: n }, (_, i) => ({ ...ROW, requestId: `req-${from + i}` }));
+		async function reachEnd(tr: renderer.ReactTestRenderer) {
+			const list = tr.root.findByProps({ testID: "association-request-status-screen" });
+			await renderer.act(async () => {
+				list.props.onEndReached?.({ distanceFromEnd: 0 });
+			});
+			await flush();
+		}
+
+		it("a FULL page loads the next one on reaching the end", async () => {
+			mockListAssociationRequests = jest.fn(async (_a: string, _s: unknown, o: { limit: number }) =>
+				page(Math.min(o.limit, ASSOCIATION_REQUEST_PAGE_SIZE + 7)),
+			);
+			const tr = await renderScreen();
+			await reachEnd(tr);
+			expect(mockListAssociationRequests).toHaveBeenLastCalledWith("fixture-authority-1", undefined, {
+				limit: ASSOCIATION_REQUEST_PAGE_SIZE * 2,
+			});
+			const data = tr.root.findByProps({ testID: "association-request-status-screen" }).props.data;
+			expect(data).toHaveLength(ASSOCIATION_REQUEST_PAGE_SIZE + 7);
+			// The second page came back short: the end is reached and no third read fires.
+			const calls = mockListAssociationRequests.mock.calls.length;
+			await reachEnd(tr);
+			expect(mockListAssociationRequests.mock.calls.length).toBe(calls);
+			expect(pressableCount(tr)).toBe(0);
+		});
+
+		it("a SHORT first page never asks for more", async () => {
+			mockListAssociationRequests = jest.fn(async () => page(3));
+			const tr = await renderScreen();
+			await reachEnd(tr);
+			expect(mockListAssociationRequests).toHaveBeenCalledTimes(1);
+		});
+
+		it("a FAILED later page keeps the rows already shown instead of the empty state", async () => {
+			let first = true;
+			mockListAssociationRequests = jest.fn(async () => {
+				if (first) {
+					first = false;
+					return page(ASSOCIATION_REQUEST_PAGE_SIZE);
+				}
+				throw new Error("later page failed");
+			});
+			const tr = await renderScreen();
+			await reachEnd(tr);
+			expect(mockListAssociationRequests).toHaveBeenCalledTimes(2);
+			expect(has(tr, "association-request-status-empty")).toBe(false);
+			const data = tr.root.findByProps({ testID: "association-request-status-screen" }).props.data;
+			expect(data).toHaveLength(ASSOCIATION_REQUEST_PAGE_SIZE);
+		});
 	});
 
 	it("7. source assertions: no pressable component names, no InlineError, exactly one listAssociationRequests call site, no getAssociationRequest, no direct SQL", async () => {

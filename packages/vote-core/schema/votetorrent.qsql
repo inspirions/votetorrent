@@ -2492,6 +2492,12 @@ declare schema main
 		with context ( SigningNonce text, Tid int );
 
 	index AssociationRequestAuthorityStatus on AssociationRequest (AuthorityId, Status);
+	-- Spike 110 (2026-11-12): the officer's request list (newest first, paged) and the Voter's own
+	-- requests by device key walk these in order instead of reading and sorting every row. The
+	-- pending sweep (AuthorityId, Status) still picks the index above. Spike 109: adding an index is
+	-- safe on an existing network, and an older build keeps opening it.
+	index AssociationRequestAuthorityTime on AssociationRequest (AuthorityId, SubmittedAt, Id);
+	index AssociationRequestDeviceTime on AssociationRequest (DeviceKey, SubmittedAt, Id);
 
 	-- 62-01 (D-03, D-05, D-07) staging row for the association-request P2P transport leg 1
 	-- (p2p-association-transport.ts). Same shape and SAME rationale as RegistrationRequestStaging

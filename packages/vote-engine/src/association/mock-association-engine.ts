@@ -281,9 +281,15 @@ export class MockAssociationEngine implements IAssociationEngine, IReassociation
     return { challengesIssued, associated, rejected }
   }
 
-  /** D-06 mock parity — filters the in-memory map; no signature verification, no ordering guarantee beyond Map insertion order. */
-  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
-    return [...this.associationRequests.values()].filter((r) => r.authorityId === authorityId && (status === undefined || r.status === status))
+  /** D-06 mock parity — filters the in-memory map, newest `submittedAt` first (id as the tiebreak) like the real engine; no signature verification. */
+  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus, options?: { limit?: number }): Promise<AssociationRequestRead[]> {
+    const rows = newestFirst([...this.associationRequests.values()].filter((r) => r.authorityId === authorityId && (status === undefined || r.status === status)))
+    return options?.limit === undefined ? rows : rows.slice(0, options.limit)
+  }
+
+  /** Mock parity for the Voter's own-requests read. */
+  async listAssociationRequestsByDeviceKey (deviceKey: string): Promise<AssociationRequestRead[]> {
+    return newestFirst([...this.associationRequests.values()].filter((r) => r.deviceKey === deviceKey))
   }
 
   /** D-06 mock parity — returns `undefined` for an unknown id rather than throwing. */
@@ -392,4 +398,9 @@ export class MockAssociationEngine implements IAssociationEngine, IReassociation
   async getDeviceRetirement (deviceKey: string, _source?: ReassociationDecisionSource): Promise<DeviceRetirement | undefined> {
     return this.deviceRetirements.get(deviceKey)
   }
+}
+
+/** The real engine's `order by SubmittedAt desc, Id desc`. */
+function newestFirst (rows: AssociationRequestRead[]): AssociationRequestRead[] {
+  return rows.sort((a, b) => a.submittedAt < b.submittedAt ? 1 : a.submittedAt > b.submittedAt ? -1 : a.requestId < b.requestId ? 1 : a.requestId > b.requestId ? -1 : 0)
 }

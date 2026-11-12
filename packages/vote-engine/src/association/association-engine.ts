@@ -1924,27 +1924,51 @@ export class AssociationEngine implements IAssociationEngine, IReassociationEngi
    * does not render a shuffling list. SELECT-and-map only: no `insert`/`update`/`delete`/
    * `seedSignedMutation` anywhere in this method or `getAssociationRequest` below.
    */
-  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]> {
+  async listAssociationRequests (authorityId: string, status?: AssociationRequestStatus, options?: { limit?: number }): Promise<AssociationRequestRead[]> {
     if (!this.ctx) return []
     const ctx = this.ctx
     const out: AssociationRequestRead[] = []
+    const limit = options?.limit
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      throw new TypeError(`listAssociationRequests: options.limit must be a positive integer, got ${String(limit)}`)
+    }
     try {
       // Reserved bind-name trap: never `:limit`/`:desc`/`:group`/`:order`/`:type` — `:rowStatus`
-      // (not `:status`) sidesteps it defensively, mirroring this file's other `row`-prefixed binds.
-      const sql = status === undefined
-        ? `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
-             from AssociationRequest where AuthorityId = :rowAuthorityId order by SubmittedAt desc, Id desc`
-        : `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
-             from AssociationRequest where AuthorityId = :rowAuthorityId and Status = :rowStatus order by SubmittedAt desc, Id desc`
-      const params: Record<string, string> = status === undefined
-        ? { rowAuthorityId: authorityId }
-        : { rowAuthorityId: authorityId, rowStatus: status }
+      // (not `:status`) and `:rowLimit` (not `:limit`) sidestep it, mirroring this file's other
+      // `row`-prefixed binds. Spike 110: without a status, AssociationRequestAuthorityTime serves
+      // the order and the limit stops the walk early (no SORT over every request).
+      const where = status === undefined
+        ? 'where AuthorityId = :rowAuthorityId'
+        : 'where AuthorityId = :rowAuthorityId and Status = :rowStatus'
+      const sql = `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
+             from AssociationRequest ${where} order by SubmittedAt desc, Id desc${limit === undefined ? '' : ' limit :rowLimit'}`
+      const params: Record<string, string | number> = { rowAuthorityId: authorityId }
+      if (status !== undefined) params.rowStatus = status
+      if (limit !== undefined) params.rowLimit = limit
       for await (const row of ctx.db.eval(sql, params)) {
         out.push(this.mapAssociationRequestRow(row))
       }
       return out
     } catch (err) {
       this.rethrow(err, 'listAssociationRequests')
+    }
+  }
+
+  /** Every request under one device key, newest first. Filters on `DeviceKey` ALONE so the
+   * planner walks AssociationRequestDeviceTime (spike 110: adding `AuthorityId = ...` made it pick
+   * AssociationRequestAuthorityTime and filter every request of the authority instead). */
+  async listAssociationRequestsByDeviceKey (deviceKey: string): Promise<AssociationRequestRead[]> {
+    if (!this.ctx) return []
+    const out: AssociationRequestRead[] = []
+    try {
+      const sql = `select Id, AuthorityId, RegistrantId, DeviceKey, ElectionId, Status, ChallengeNonce, SubmittedAt, ReceivedAt, DecidedAt, RejectionReason
+             from AssociationRequest where DeviceKey = :rowDeviceKey order by SubmittedAt desc, Id desc`
+      for await (const row of this.ctx.db.eval(sql, { rowDeviceKey: deviceKey })) {
+        out.push(this.mapAssociationRequestRow(row))
+      }
+      return out
+    } catch (err) {
+      this.rethrow(err, 'listAssociationRequestsByDeviceKey')
     }
   }
 

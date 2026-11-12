@@ -49,7 +49,7 @@ export interface RegistrationStatusDeps {
 	/** Defaults to `resolveVoterRequestTransports` — injected so every branch below is testable
 	 * without the real P2P/strand transport source (D-28/D-32). */
 	resolveTransports?: (deps: VoterRequestTransportDeps) => Promise<VoterRequestTransports | undefined>;
-	/** Narrows `listAssociationRequests` results to this election — a request whose own
+	/** Narrows `listAssociationRequestsByDeviceKey` results to this election — a request whose own
 	 * `electionId` is set and differs is ignored; a request with no `electionId` is accepted
 	 * regardless. */
 	electionId?: string;
@@ -137,9 +137,11 @@ export async function resolveRegistrationStatus(deps: RegistrationStatusDeps): P
 		// which THROWS when no network is established. So a resolved `association` engine always
 		// has a bound ctx, and an empty `rows`/`requests` result here is a real, determinate
 		// empty — not a silent unbound-engine result that should be treated as indeterminate.
-		const requests = await association.listAssociationRequests(authorityId);
+		// Own requests only (indexed on DeviceKey), never every request in the network.
+		const requests = await association.listAssociationRequestsByDeviceKey(p256DeviceKey);
 		const mine = requests.filter(
 			r =>
+				r.authorityId === authorityId &&
 				r.deviceKey === p256DeviceKey &&
 				(r.electionId === undefined || deps.electionId === undefined || r.electionId === deps.electionId),
 		);

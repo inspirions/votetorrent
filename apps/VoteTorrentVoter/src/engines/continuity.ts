@@ -408,9 +408,15 @@ export async function resolveReassociationResume(deps: ContinuityDeps): Promise<
 		const authorityId = details.network.primaryAuthorityId;
 
 		const association = await deps.getEngine<IAssociationEngine>('association');
-		const requests = await association.listAssociationRequests(authorityId);
+		// Own requests only (indexed on DeviceKey), never every request in the network.
+		const requests = await association.listAssociationRequestsByDeviceKey(p256DeviceKey);
 		const mine = requests
-			.filter(r => r.deviceKey === p256DeviceKey && r.registrantId === REASSOCIATION_UNRESOLVED_REGISTRANT_ID)
+			.filter(
+				r =>
+					r.authorityId === authorityId &&
+					r.deviceKey === p256DeviceKey &&
+					r.registrantId === REASSOCIATION_UNRESOLVED_REGISTRANT_ID,
+			)
 			.sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : a.submittedAt > b.submittedAt ? -1 : 0));
 
 		const newest = mine[0];

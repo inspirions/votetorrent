@@ -163,7 +163,7 @@ const mockGetNetworkDetails = jest.fn(async () => ({
 const mockNetworkEngine = {getDetails: mockGetNetworkDetails};
 const mockGetAssociationsByDeviceKey = jest.fn(async () => [] as unknown[]);
 const mockListAssociationRequests = jest.fn(async () => [] as unknown[]);
-const mockAssociationEngine = {getAssociationsByDeviceKey: mockGetAssociationsByDeviceKey, listAssociationRequests: mockListAssociationRequests};
+const mockAssociationEngine = {getAssociationsByDeviceKey: mockGetAssociationsByDeviceKey, listAssociationRequestsByDeviceKey: mockListAssociationRequests};
 
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'elections') {
@@ -1102,7 +1102,7 @@ describe('TimelineScreen — registration panel re-reads on focus (regression, s
 		// The device just completed a real Register ceremony elsewhere -- the engine's own answer
 		// has changed, but nothing has remounted this screen.
 		mockListAssociationRequests.mockImplementation(async () => [
-			{deviceKey: 'p256-stub-device-key', status: 'p', electionId: SEEDED_ELECTION_ID},
+			{authorityId: 'authority-1', deviceKey: 'p256-stub-device-key', status: 'p', electionId: SEEDED_ELECTION_ID},
 		]);
 
 		await renderer.act(async () => {
