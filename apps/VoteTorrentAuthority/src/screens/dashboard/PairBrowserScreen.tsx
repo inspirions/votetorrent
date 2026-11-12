@@ -543,7 +543,7 @@ export default function PairBrowserScreen() {
 
 	return (
 		<KeyboardAvoidingScreen testID="pair-browser-screen">
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<View style={[styles.card, { backgroundColor: colors.background }]}>
 					{screen === "checking" ? (
 						<ThemedText type="default" testID="pair-browser-checking" style={{ color: colors.textSecondary }}>

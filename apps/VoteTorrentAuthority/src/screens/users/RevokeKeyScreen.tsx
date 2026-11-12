@@ -153,7 +153,7 @@ export function RevokeKeyScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<View style={[styles.section, styles.detailContainer]}>
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("id")}:</ThemedText>

@@ -237,6 +237,7 @@ export default function AuthorityPeersScreen() {
 
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			testID="authority-peers-screen"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}

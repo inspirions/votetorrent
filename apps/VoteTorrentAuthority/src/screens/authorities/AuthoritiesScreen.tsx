@@ -134,7 +134,7 @@ export default function AuthoritiesScreen() {
 	if (hasNetwork && !networkEngine && errorMessage) {
 		// The network engine could not be opened: say so (translated) instead of the no-network state.
 		return (
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<InlineError message={errorMessage} />
 			</ScrollView>
 		);
@@ -164,7 +164,7 @@ export default function AuthoritiesScreen() {
 
 	if (bothListsEmpty && (peerUnavailable || errorMessage)) {
 		return (
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<InlineError message={errorMessage} />
 				{notice}
 			</ScrollView>
@@ -188,7 +188,7 @@ export default function AuthoritiesScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container}>
+		<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 			<InlineError message={errorMessage} />
 			{notice}
 			{pinnedAuthorities.length > 0 ? (

@@ -275,7 +275,7 @@ export default function AuthorityInvitationScreen() {
 	if (mode === "send") {
 		return (
 			<View style={styles.content}>
-				<ScrollView style={styles.container}>
+				<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 					<View style={styles.section}>
 						<ThemedText type="title" style={styles.sectionTitle}>
 							{t("authorityInvitation")}
@@ -324,7 +324,7 @@ export default function AuthorityInvitationScreen() {
 	const invitationKey = (seedInvite as any)?.key ?? (seedInvite as any)?.inviteKey ?? parsed?.inviteKey;
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{!parsed ? <ThemedText>{t("invitationAcceptPasteHint")}</ThemedText> : null}
 					{expired ? (

@@ -114,6 +114,7 @@ export function EditQuestionOption() {
 	return (
 		<KeyboardAvoidingScreen>
 			<ScrollView
+				keyboardShouldPersistTaps="handled"
 				style={[styles.container, { backgroundColor: colors.background }]}
 				contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.detail}>

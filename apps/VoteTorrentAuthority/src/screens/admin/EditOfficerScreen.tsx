@@ -321,7 +321,7 @@ export default function EditOfficerScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				{pending ? (
 					// Cancel lives on Proposed Administration and Authority details; never a second path here.
 					<PendingAdminChangeCard pending={pending} canCancel={false} onCancel={() => undefined} />

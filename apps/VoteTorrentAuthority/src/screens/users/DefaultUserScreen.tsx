@@ -51,7 +51,7 @@ export function DefaultUserScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={[styles.container, { backgroundColor: colors.background }]}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={[styles.container, { backgroundColor: colors.background }]}>
 				<CustomTextInput
 					title={t("name")}
 					value={defaultUserState.name}

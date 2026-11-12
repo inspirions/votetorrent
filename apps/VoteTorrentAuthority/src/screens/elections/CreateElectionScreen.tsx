@@ -309,6 +309,7 @@ export function CreateElectionScreen() {
 	return (
 		<KeyboardAvoidingScreen>
 			<ScrollView
+				keyboardShouldPersistTaps="handled"
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
 			>

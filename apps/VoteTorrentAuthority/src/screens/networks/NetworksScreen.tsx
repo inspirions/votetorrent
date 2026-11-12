@@ -158,6 +158,7 @@ export default function NetworksScreen() {
 	// first section (UI-SPEC A1), and Join a network is always visible.
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			testID="networks-scroll"
 			ref={scrollRef}
 			{...preserveScroll}

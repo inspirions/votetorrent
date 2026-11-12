@@ -151,7 +151,7 @@ export const ElectionsScreen = () => {
 	};
 
 	return (
-		<ScrollView style={styles.container}>
+		<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 			<InlineError message={loadError} />
 			{peerUnavailable ? (
 				<PeerReadUnavailableNotice variant={hasLoaded ? "stale" : "unavailable"} onRetry={retryLoad} />

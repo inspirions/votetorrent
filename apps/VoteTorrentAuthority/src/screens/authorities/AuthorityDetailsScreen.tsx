@@ -340,6 +340,7 @@ export default function AuthorityDetailsScreen() {
 		};
 		return (
 			<ScrollView
+				keyboardShouldPersistTaps="handled"
 				testID="authority-details-engine-failed"
 				style={styles.container}
 				contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}
@@ -365,7 +366,7 @@ export default function AuthorityDetailsScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}>
+		<ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={{ paddingBottom: 32 + keyboardInset }}>
 			<InlineError message={errorMessage} />
 			<View style={styles.section}>
 				{/* The 200x200 box renders only when there is an image; without one it was a large

@@ -234,7 +234,7 @@ export default function PollingDevicesScreen() {
 	}
 
 	return (
-		<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
+		<ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
 			<View style={styles.section}>
 				<InlineError message={errorMessage} />
 			</View>

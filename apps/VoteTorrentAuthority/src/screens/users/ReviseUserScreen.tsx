@@ -96,7 +96,7 @@ export function ReviseUserScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={[styles.container, { backgroundColor: colors.background }]}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={[styles.container, { backgroundColor: colors.background }]}>
 				<View style={[styles.section, styles.detailContainer]}>
 					<ThemedText type="defaultSemiBold">{t("id")}:</ThemedText>
 					<ThemedText>{userState.id}</ThemedText>

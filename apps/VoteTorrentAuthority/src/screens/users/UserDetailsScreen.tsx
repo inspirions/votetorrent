@@ -108,7 +108,7 @@ export function UserDetailsScreen() {
 	);
 
 	return (
-		<ScrollView style={styles.container}>
+		<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 			<InlineError message={loadError} />
 			<View style={styles.imageContainer}>
 				<Image source={{ uri: (user as any).image?.url }} style={styles.image} />

@@ -497,6 +497,7 @@ export default function AddNetworkScreen() {
 	return (
 		<KeyboardAvoidingScreen>
 			<ScrollView
+				keyboardShouldPersistTaps="handled"
 				ref={scrollViewRef}
 				style={styles.container}
 				onScroll={handleScroll}

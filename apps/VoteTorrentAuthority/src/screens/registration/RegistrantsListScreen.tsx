@@ -261,6 +261,7 @@ export default function RegistrantsListScreen() {
 
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>

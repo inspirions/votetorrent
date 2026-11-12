@@ -327,6 +327,7 @@ export default function RegistrationInboxScreen() {
 
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>
