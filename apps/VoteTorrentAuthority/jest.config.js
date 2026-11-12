@@ -136,6 +136,9 @@ module.exports = {
       '<rootDir>/node_modules/@votetorrent/vote-engine/dist/index.js',
     '^@votetorrent/vote-engine/rn$':
       '<rootDir>/node_modules/@votetorrent/vote-engine/dist/rn-entry.js',
+    // polyfills/native-crypto.js installs the engine's native ECDH through this subpath.
+    '^@votetorrent/vote-engine/crypto-backend$':
+      '<rootDir>/node_modules/@votetorrent/vote-engine/dist/crypto/backend.js',
     // 50-07 (D-07/D-13): the browser-facing bootstrap barrel. Jest's CJS
     // resolver does not follow the package's "exports" map for this
     // subpath (same class of gap the "./rn" mapper above already works

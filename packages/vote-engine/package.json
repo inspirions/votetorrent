@@ -25,6 +25,11 @@
 			"types": "./dist/browser-entry.d.ts",
 			"import": "./dist/browser-entry.js"
 		},
+		"./crypto-backend": {
+			"types": "./dist/crypto/backend.d.ts",
+			"import": "./dist/crypto/backend.js",
+			"default": "./dist/crypto/backend.js"
+		},
 		"./bootstrap": {
 			"types": "./dist/bootstrap/index.d.ts",
 			"import": "./dist/bootstrap/index.js"

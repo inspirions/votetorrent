@@ -36,7 +36,7 @@ function stripComments (src: string): string {
  * make this gate fail on a file this plan does not own and must not touch.
  */
 function cryptoSourceFiles (): string[] {
-  return ['encoding.ts', 'envelope.ts', 'block-cipher.ts', 'vault.ts', 'index.ts'].map((name) => join(CRYPTO_DIR, name))
+  return ['encoding.ts', 'envelope.ts', 'block-cipher.ts', 'vault.ts', 'index.ts', 'backend.ts'].map((name) => join(CRYPTO_DIR, name))
 }
 
 /** Extract bare `from '...'` specifiers only (relative specifiers start with '.'). */
