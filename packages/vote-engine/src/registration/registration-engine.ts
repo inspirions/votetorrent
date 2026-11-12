@@ -2603,16 +2603,11 @@ export class RegistrationEngine implements IRegistrationEngine {
     const ctx = this.ctx
     const out: string[] = []
     try {
-      // T-62-19-QUEREUS-01 (found via TDD): `R.AuthorityId = :x and R.Status in ('a','r')` (and the
-      // equivalent `and (R.Status = 'a' or R.Status = 'r')`, with either literal or bound operands)
-      // silently returns ZERO rows against this table, while the identical predicate keyed on `R.Id`
-      // instead of `R.AuthorityId` works. `R.AuthorityId = :x and R.Status = :oneValue` also works —
-      // only the AuthorityId-equality-AND-Status-OR combination is affected. `Status <> 'p'` is
-      // semantically identical here (StatusValid closes the vocabulary to exactly 'p'/'a'/'r') and
-      // does not trip the bug — empirically confirmed before shipping this form.
+      // Quereus before 5.1 returned zero rows for this `= :x and in (...)` shape over the
+      // (AuthorityId, Status) index (T-62-19-QUEREUS-01); fixed in 5.1.0. Guarded by registration-dedup D9.
       for await (const row of ctx.db.eval(
         `select R.Id, R.DecidedAt from RegistrationRequest R
-           where R.AuthorityId = :rowAuthorityId and R.Status <> 'p'
+           where R.AuthorityId = :rowAuthorityId and R.Status in ('a', 'r')
              and not exists (select 1 from RegistrationDecision D where D.RequestId = R.Id and D.AuthorityId = R.AuthorityId)
            order by R.DecidedAt, R.Id`,
         { rowAuthorityId: authorityId }
