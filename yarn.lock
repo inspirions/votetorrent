@@ -5123,23 +5123,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@react-native-documents/picker@npm:10.1.7":
-  version: 10.1.7
-  resolution: "@react-native-documents/picker@npm:10.1.7"
+"@react-native-documents/picker@npm:12.0.3":
+  version: 12.0.3
+  resolution: "@react-native-documents/picker@npm:12.0.3"
   peerDependencies:
     react: "*"
-    react-native: "*"
-  checksum: 10c0/f2578398ec590c7ee5a0fda8f0625e54fa8da3a9c21608a802bf30905ff9a02d2ec94bf0e0625f206bfa0552c19c685de207d2e79868960d0efe39aaffe8c5cf
-  languageName: node
-  linkType: hard
-
-"@react-native-documents/picker@patch:@react-native-documents/picker@npm%3A10.1.7#~/.yarn/patches/@react-native-documents-picker-npm-10.1.7-70f0bbf0eb.patch":
-  version: 10.1.7
-  resolution: "@react-native-documents/picker@patch:@react-native-documents/picker@npm%3A10.1.7#~/.yarn/patches/@react-native-documents-picker-npm-10.1.7-70f0bbf0eb.patch::version=10.1.7&hash=860cdf"
-  peerDependencies:
-    react: "*"
-    react-native: "*"
-  checksum: 10c0/c7f2539f6f8b16694017cd9f8f041308cd31f0ba6b2671fab91f175c5850f6d34edf7745b51fd03774626d4937d208408193ce66de3357a857d95ce848387aa5
+    react-native: ">=0.79.0"
+  checksum: 10c0/e166fe4d40232c7dcfbab40445cd116e563a0ac838b5d0462904cbf0e507f14042e204f4a219a65758b28b3e013e01b50c08a2ecd45e689ebd17bc1ef73f017c
   languageName: node
   linkType: hard
 
@@ -22406,7 +22396,7 @@ __metadata:
     "@react-native-community/cli-platform-ios": "npm:20.2.0"
     "@react-native-community/datetimepicker": "npm:^9.1.0"
     "@react-native-community/slider": "npm:^5.2.1"
-    "@react-native-documents/picker": "patch:@react-native-documents/picker@npm%3A10.1.7#~/.yarn/patches/@react-native-documents-picker-npm-10.1.7-70f0bbf0eb.patch"
+    "@react-native-documents/picker": "npm:12.0.3"
     "@react-native/babel-preset": "npm:0.87.1"
     "@react-native/eslint-config": "npm:0.87.1"
     "@react-native/gradle-plugin": "npm:0.87.1"

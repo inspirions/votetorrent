@@ -140,7 +140,6 @@ descriptor. What each one carries, which neither file says:
 | `@libp2p/websockets` | Closes an aborted dial's socket, and never sends the reserved close code 1006. |
 | `react-native-nitro-modules` | `JSICache` drops released references when its vectors fill; unpatched, every value passed to a native method leaked until the runtime was torn down. Guarded by `apps/VoteTorrentVoter/__tests__/nitro-jsicache-prune.test.ts`. Native: needs an app rebuild. |
 | `rn-leveldb` | All databases share one 32 MB block cache and keep a 1 MB write buffer (Quereus opens one database per table and index). Native: needs an app rebuild. |
-| `@react-native-documents/picker` | Reads `currentActivity` from the React context, for React Native 0.87. |
 
 To change a patch, run `yarn patch <pkg>@npm:<version>`, edit the extracted
 copy, and `yarn patch-commit`. On a version bump, dry-run the old patch against
