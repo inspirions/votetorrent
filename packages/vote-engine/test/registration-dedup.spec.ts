@@ -758,4 +758,55 @@ describe('D-43/D-44 registration duplicate detection and closure', function () {
       expect(noClosureStats).to.not.have.property('closedAsDuplicate')
     })
   })
+
+  // ---- D9: the unpublished-decisions list reads `Status in ('a','r')` ----
+  //
+  // Quereus before 5.1 returned ZERO rows for `AuthorityId = :x and Status in ('a','r')` over the
+  // (AuthorityId, Status) index (the composite multi-seek dropped a bound `=` and seeked
+  // Literal(undefined); quereus bug-composite-in-seek-drops-a-bound-equality), so the engine read
+  // `Status <> 'p'` instead (T-62-19-QUEREUS-01). 5.1 fixed it; the engine reads the IN form again.
+  // This test goes red on the pre-5.1 planner with the IN form, because the list comes back empty.
+
+  describe('D9: listUnpublishedRegistrationDecisions over Status in (a, r)', () => {
+    it('returns exactly the accepted and rejected requests of this authority, oldest decision first', async () => {
+      const tasksEngine = new SignatureTasksEngine(makeNetworkRef(), fixture.auth.ctx)
+      const officerSign = makeTestSignCallback(fixture.net.user)
+      const authorityId = fixture.auth.authority.id
+
+      const { requestId: pending } = await submitPending(fixture, { firstName: 'Pia', lastName: 'Lund' })
+      const { requestId: accepted } = await submitPending(fixture, { firstName: 'Abe', lastName: 'Moss' })
+      const { requestId: rejected } = await submitPending(fixture, { firstName: 'Rey', lastName: 'Nash' })
+      await acceptRequest(tasksEngine, officerSign, accepted)
+      await wait(5)
+      await rejectAs(fixture, rejected, 'reason')
+
+      const siblingAuthorityId = await addSiblingAuthority(fixture.auth, { scopes: ['vrg'] })
+      await provisionTestIntakeRecipient(fixture.auth.ctx, siblingAuthorityId)
+      const { requestId: sibling } = await submitPending(fixture, { firstName: 'Sid', lastName: 'Ortiz' }, { authorityId: siblingAuthorityId })
+      await rejectAs(fixture, sibling, 'reason')
+
+      // Positive control: every status the predicate has to tell apart is present, and the
+      // sibling's decided row sits on the same (AuthorityId, Status) index under another authority.
+      const statusOf = async (id: string): Promise<unknown> =>
+        (await fixture.db.prepare('select Status from RegistrationRequest where Id = :id').get({ id }))?.Status
+      expect(await statusOf(pending)).to.equal('p')
+      expect(await statusOf(accepted)).to.equal('a')
+      expect(await statusOf(rejected)).to.equal('r')
+      expect(await statusOf(sibling)).to.equal('r')
+
+      // The query shape quereus < 5.1 got wrong, read straight off the store.
+      const inForm: string[] = []
+      for await (const row of fixture.db.eval(
+        `select Id from RegistrationRequest where AuthorityId = :authorityId and Status in ('a', 'r') order by Id`,
+        { authorityId }
+      )) inForm.push(String(row.Id))
+      expect(inForm).to.deep.equal([accepted, rejected].sort())
+
+      expect(await engine.listUnpublishedRegistrationDecisions(authorityId)).to.deep.equal([accepted, rejected])
+      expect(await engine.listUnpublishedRegistrationDecisions(siblingAuthorityId)).to.deep.equal([sibling])
+
+      await engine.publishRegistrationDecision(publisher, rejected)
+      expect(await engine.listUnpublishedRegistrationDecisions(authorityId)).to.deep.equal([accepted])
+    })
+  })
 })

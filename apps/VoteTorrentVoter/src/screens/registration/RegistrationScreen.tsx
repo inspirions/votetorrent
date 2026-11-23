@@ -4,13 +4,12 @@
  * Card callbacks map to navigation: Register now -> DeviceAttestation, Update registration ->
  * RegisterPersonal, (?) help -> RegistrationInfo.
  *
- * Phase 44-07 (D-02): `isRegistered`/`registeredAt` are no longer `useVoterApp()` context fields
- * (the mock booleans were removed alongside the registration-flow real-engine swap) — they are now
- * local, session-only component state (same shape/behavior as the old context setter: flipping
- * true freezes `registeredAt` to the confirm-time ISO timestamp). This is a deliberate, documented
- * simplification: deriving real registration status from the engine's `Registrant` rows is a later
- * phase's concern (44-CONTEXT.md Phase Boundary scopes this phase to the registration FLOW, not
- * the status-read surface).
+ * UAT 65 gap 5 / D-100: the card now reads the authoritative registration status
+ * (`resolveRegistrationStatus`, the Association row for this device's key) on every focus, so a
+ * device the election office has approved shows the registered card without any in-session action.
+ * The session-only `isRegistered`/`registeredAt` state from Phase 44-07 remains as the __DEV__
+ * toggle's override for manual QA: once toggled in this session it wins over the engine read. An
+ * engine-derived registration carries no date, so `registeredAt` stays null (the card handles it).
  *
  * headerShown:false for RegistrationHome (navigation/index.tsx) — NetworkHeader replaces the plain
  * native header. A __DEV__-gated isRegistered toggle is kept for manual QA (compiled out of release).
@@ -22,9 +21,8 @@
  * and an unsettled read (null) -> a distinct "checking" line, so "still loading" is never visually
  * identical to "settled with nothing to show" (UAT 62 test 14: a settled 'unavailable' rendered
  * nothing and read as a hang).
- * Known limitation (flagged in the plan SUMMARY): this read is independent of the session-only
- * `isRegistered` toggle above, so a toggled-off approved device can show the not-registered card
- * alongside "Show my registration code".
+ * Known limitation: the code read is independent of the __DEV__ toggle override above, so a
+ * toggled-off approved device can show the not-registered card alongside "Show my registration code".
  */
 import React, {useCallback, useRef, useState} from 'react';
 import {Pressable, ScrollView, StyleSheet, Text, View} from 'react-native';
@@ -33,9 +31,11 @@ import type {ExtendedTheme} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import {useTranslation} from 'react-i18next';
 import {useVoterApp} from '../../providers/VoterAppProvider';
+import {useNetworkName} from '../../hooks/useNetworkName';
 import {useRegistrationDraft} from '../../providers/RegistrationDraftProvider';
 import {resolveAttestationProducer} from '../../engines/attestation-producer';
 import {resolveRegistrationCodeAvailability} from '../../engines/continuity';
+import {resolveRegistrationStatus} from '../../engines/registration-status';
 import type {RegistrationCodeAvailability} from '../../engines/continuity';
 import {RegistrationConfirmationCodeCard} from './RegistrationConfirmationCodeCard';
 import type {RegistrationStackParamList} from '../../navigation/types';
@@ -49,20 +49,26 @@ type RegistrationNavigationProp = NativeStackNavigationProp<
 
 export default function RegistrationScreen() {
 	// D-06/SHELL-03: every screen routes through useVoterApp() — no inline fixture-module import.
-	const {isInitialized, getEngine} = useVoterApp();
+	const {isInitialized, getEngine, hasNetwork} = useVoterApp();
+	const networkName = useNetworkName();
 	const {draft} = useRegistrationDraft();
-	// Phase 44-07 (D-02): local session-only state — see file header comment.
-	const [isRegistered, setIsRegisteredState] = useState(false);
-	const [registeredAt, setRegisteredAt] = useState<string | null>(null);
+	// __DEV__ toggle override (null until toggled this session) — see file header comment.
+	const [devOverride, setDevOverride] = useState<boolean | null>(null);
+	const [devRegisteredAt, setDevRegisteredAt] = useState<string | null>(null);
+	// D-100: the authoritative read, re-resolved on every focus.
+	const [engineRegistered, setEngineRegistered] = useState(false);
+	const isRegistered = devOverride ?? engineRegistered;
+	const registeredAt = devOverride === true ? devRegisteredAt : null;
 	const setIsRegistered = useCallback((value: boolean) => {
-		setIsRegisteredState(value);
+		setDevOverride(value);
 		if (value) {
-			setRegisteredAt(new Date().toISOString());
+			setDevRegisteredAt(new Date().toISOString());
 		}
 	}, []);
 	const {colors, type: typeScale} = useTheme() as ExtendedTheme;
 	const navigation = useNavigation<RegistrationNavigationProp>();
 	const {t} = useTranslation('continuity');
+	const {t: tJoin} = useTranslation('join');
 
 	const [codeAvailability, setCodeAvailability] = useState<RegistrationCodeAvailability | null>(null);
 	// Explicit, voter-initiated reveal (D-23/D-45) — set only by the showAgainLink tap below, and
@@ -82,6 +88,30 @@ export default function RegistrationScreen() {
 			return () => {
 				cancelled = true;
 				setRevealed(null);
+			};
+			// eslint-disable-next-line react-hooks/exhaustive-deps
+		}, [getEngine]),
+	);
+
+	useFocusEffect(
+		useCallback(() => {
+			let cancelled = false;
+			(async () => {
+				try {
+					const result = await resolveRegistrationStatus({
+						getEngine,
+						getCurrentDeviceKey: () => resolveAttestationProducer().getCurrentDeviceKey(),
+					});
+					// An indeterminate read (a dangling linkage, or a failed network or strand read) is not a
+					// "no": it leaves the card as it was, like a throw. `pending` is determinate (no active
+					// association yet), so it shows the not-registered card.
+					if (!cancelled && result.kind !== 'indeterminate') setEngineRegistered(result.kind === 'registered');
+				} catch {
+					// An unreadable status leaves the card as it was.
+				}
+			})();
+			return () => {
+				cancelled = true;
 			};
 			// eslint-disable-next-line react-hooks/exhaustive-deps
 		}, [getEngine]),
@@ -112,14 +142,26 @@ export default function RegistrationScreen() {
 
 	return (
 		<View style={[styles.screen, {backgroundColor: colors.background}]}>
-			<NetworkHeader onPressNetwork={() => navigation.navigate('RegistrationInfo')} />
+			<NetworkHeader networkName={networkName} onPressNetwork={() => navigation.navigate('RegistrationInfo')} />
 
 			<ScrollView contentContainerStyle={styles.content}>
+				{/* Spike 100: no network open yet — the way in is the authority's join code. */}
+				{isInitialized && !hasNetwork ? (
+					<Pressable
+						testID="join-network-entry-link"
+						onPress={() => navigation.navigate('JoinNetwork')}
+						style={styles.link}>
+						<Text style={[styles.linkText, {color: colors.link, fontSize: typeScale.body.fontSize}]}>
+							{tJoin('entryLink')}
+						</Text>
+					</Pressable>
+				) : null}
 				{isInitialized ? (
 					<RegistrationCard
 						isRegistered={isRegistered}
 						draft={draft}
 						registeredAt={registeredAt}
+						networkName={networkName}
 						onRegisterNow={() => navigation.navigate('DeviceAttestation')}
 						onUpdateRegistration={() => navigation.navigate('RegisterPersonal')}
 						onHelp={() => navigation.navigate('RegistrationInfo')}

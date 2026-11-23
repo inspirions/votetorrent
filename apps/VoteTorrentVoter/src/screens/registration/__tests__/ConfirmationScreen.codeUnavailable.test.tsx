@@ -5,6 +5,7 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
 import {Linking, Platform} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import i18n from '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
@@ -34,6 +35,7 @@ jest.mock('@react-navigation/native', () => ({
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
 			medium: {fontFamily: 'System', fontWeight: '500'},
+			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
 		type: {
 			h2: {fontSize: 28, lineHeight: 34},
@@ -64,12 +66,19 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockDeriveRegistrationCode = jest.fn(async (_registrantId: string, _sign: unknown) => 'ABCDE12345');
 const mockAssociationEngine = {deriveRegistrationCode: mockDeriveRegistrationCode};
 
+// 64 D-28: the election the registration binds to is read from the joined network's own list.
+// Pushes NOTHING to callOrder, so the exact callOrder assertions stay unchanged.
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
 	}
 	if (engineName === 'association') {
 		return mockAssociationEngine;
+	}
+	if (engineName === 'elections') {
+		return {getElections: mockGetElections};
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
@@ -336,7 +345,15 @@ function findHostNodeByType(json: unknown, targetType: string): TreeNode | null 
 	return null;
 }
 
+// The ceremony stores its in-flight attempt (registration-attempt-store.ts) so a remount resumes it;
+// every test starts with no stored attempt, as a fresh install does.
+beforeEach(async () => {
+	await AsyncStorage.clear();
+});
+
 beforeEach(() => {
+	mockGetElections.mockReset();
+	mockGetElections.mockImplementation(async () => []);
 	mockPopToTop.mockClear();
 	mockClearDraft.mockClear();
 	mockSign.mockClear();

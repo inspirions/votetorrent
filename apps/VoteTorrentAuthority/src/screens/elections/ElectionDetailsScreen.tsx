@@ -37,6 +37,7 @@ import { useKeyboardInset } from "../../hooks/useKeyboardInset";
  *   6.  Ballot Templates section (one InfoCard per template with Questions subtitle)
  *   7.  Registration Policy entry (InfoCard -> RegistrationPolicy) — Phase 46 (D-01)
  *   8.  Registrants entry (InfoCard -> RegistrantsList, election filter pre-applied) — Phase 47 plan 47-21 (D-07/D-08)
+ *   8b. Results entry (InfoCard -> ElectionResults: decrypt + validate + tally after the key release)
  *   9.  More section (collapsible) + filter-authorities input
  */
 type BallotConfirmationState = { locked: boolean; confirmed: boolean };
@@ -274,6 +275,7 @@ export default function ElectionDetailsScreen() {
 
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}>
 
@@ -306,7 +308,7 @@ export default function ElectionDetailsScreen() {
 
 				<View style={styles.detail}>
 					<ThemedText type="defaultSemiBold">{t("keyholderPolicy")}: </ThemedText>
-					<ThemedText>{current.keyholderThreshold} of {current.keyholders.length}</ThemedText>
+					<ThemedText>{t("keyholderPolicyValue", { threshold: current.keyholderThreshold, count: current.keyholders.length })}</ThemedText>
 				</View>
 
 				{revisionSignature ? (
@@ -405,7 +407,7 @@ export default function ElectionDetailsScreen() {
 
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("keyholderPolicy")}: </ThemedText>
-						<ThemedText>{proposed!.proposed.keyholderThreshold} of {proposed!.proposed.keyholders.length}</ThemedText>
+						<ThemedText>{t("keyholderPolicyValue", { threshold: proposed!.proposed.keyholderThreshold, count: proposed!.proposed.keyholders.length })}</ThemedText>
 					</View>
 
 					{/* Signing rows — one per proposed keyholder */}
@@ -568,6 +570,22 @@ export default function ElectionDetailsScreen() {
 						navigation.navigate("RegistrantsList", {
 							authorityId: election.authorityId,
 							electionFilter: { electionId: election.id, electionTitle: election.title },
+						})
+					}
+				/>
+			</View>
+
+			{/* 8b. Results entry: decrypt + validate + tally on this device once enough keyholders have released
+			    their shares (the results screen explains the locked state before that). */}
+			<View style={styles.section} testID="election-details-results-entry">
+				<InfoCard
+					title={t("resultsEntryTitle")}
+					icon="chevron-right"
+					onPress={() =>
+						navigation.navigate("ElectionResults", {
+							electionId: election.id,
+							electionTitle: election.title,
+							authorityId: election.authorityId,
 						})
 					}
 				/>

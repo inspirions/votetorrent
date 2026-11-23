@@ -1,5 +1,5 @@
 /**
- * HomeScreen.test.tsx (Phase 63 plan 14) - H1..H13: Home derives its saved-vote state from the
+ * HomeScreen.test.tsx (Phase 63 plan 14) - H1..H20: Home derives its saved-vote state from the
  * marker on every focus (D-12, D-19, D-21). `readSavedVoteStatus` is mocked for the state cases;
  * H11 runs the real store and vault with an in-memory wrapper to prove zero prompts.
  */
@@ -28,6 +28,7 @@ import {createVoteRecordWrapProvider, setVoteRecordWrapProviderForTests} from '.
 import {isVoteRecord, sealVoteRecord} from '../../../engines/vote-record-vault';
 import type {VoteRecord} from '../../../engines/vote-record-vault';
 import {buildVoteMarker, writeVoteRecord} from '../../../engines/vote-record-store';
+import {recordVoteSent} from '../../../engines/vote-sent-store';
 import {LIFECYCLE_ORDER} from '../../../providers/types';
 import HomeScreen from '../HomeScreen';
 import {lightTheme} from '../../../theme/themes';
@@ -259,6 +260,121 @@ describe('HomeScreen saved vote (D-12, D-19, D-21)', () => {
 		expect(readStatus.mock.calls.length).toBe(before + 1);
 		expect(textById('election-card-saved-vote-status')).toBe('Vote saved — not sent');
 		expect(has('election-card-vote-now')).toBe(false);
+	});
+
+	// UAT 65 gap 2 (Run 4): the first return to Home 29 s after Sent still read "not sent"; later
+	// returns read sent. The focus read waits on the strand election read before it looks at the sent
+	// store, so a slow first read left the pre-send line on screen. Unproven on device: modelled here
+	// as a strand read that has not landed yet.
+	async function sendWhileOnReceipt(fullRead: () => Promise<unknown>) {
+		const record = makeRecord(EID, 2);
+		await writeVoteRecord(await sealVoteRecord(record, {prompt: PROMPT}), buildVoteMarker(record));
+		await mountOpen({state: 'saved', revisionKnown: true});
+		expect(has('election-card-saved-vote-status')).toBe(true);
+		await renderer.act(async () => {
+			navRef.navigate('VoteReceipt', {electionId: EID});
+		});
+		await flush();
+		await recordVoteSent(EID, 2, 'ballot-1', 'cid-sent');
+		readStatus.mockImplementation(fullRead);
+		await renderer.act(async () => {
+			navRef.goBack();
+		});
+		await flush();
+	}
+
+	it('H14: back from a send, Home shows sent before the slow full read lands (gap 2)', async () => {
+		await sendWhileOnReceipt(() => new Promise(() => undefined));
+		expect(has('election-card-saved-vote-sent')).toBe(true);
+		expect(has('election-card-saved-vote-status')).toBe(false);
+	});
+
+	it('H15: the full read keeps the last word (stale wins over the local sent line)', async () => {
+		let land: (s: unknown) => void = () => undefined;
+		await sendWhileOnReceipt(() => new Promise(r => { land = r; }));
+		expect(has('election-card-saved-vote-sent')).toBe(true);
+		await renderer.act(async () => {
+			land({state: 'stale', revisionKnown: true});
+		});
+		await flush();
+		expect(has('election-card-saved-vote-stale')).toBe(true);
+		expect(has('election-card-saved-vote-sent')).toBe(false);
+	});
+
+	it('H16: with nothing in the sent store the saved line stays until the full read lands', async () => {
+		const record = makeRecord(EID, 2);
+		await writeVoteRecord(await sealVoteRecord(record, {prompt: PROMPT}), buildVoteMarker(record));
+		await mountOpen({state: 'saved', revisionKnown: true});
+		await renderer.act(async () => {
+			navRef.navigate('VoteReceipt', {electionId: EID});
+		});
+		await flush();
+		readStatus.mockImplementation(() => new Promise(() => undefined));
+		await renderer.act(async () => {
+			navRef.goBack();
+		});
+		await flush();
+		expect(has('election-card-saved-vote-status')).toBe(true);
+		expect(has('election-card-saved-vote-sent')).toBe(false);
+	});
+
+	// WR-03: the usual path is vote -> Submit -> Send -> Done -> Home, so the line Home last showed is
+	// the pre-vote none (no vote saved yet), not saved. The fast read covers that line too.
+	async function voteAndSendFromNone(opts: {sent: boolean, electionId?: string}, fullRead: () => Promise<unknown>) {
+		await mountOpen({state: 'none'});
+		expect(has('election-card-vote-now')).toBe(true);
+		await renderer.act(async () => {
+			navRef.navigate('VoteReceipt', {electionId: EID});
+		});
+		await flush();
+		const record = makeRecord(opts.electionId ?? EID, 2);
+		await writeVoteRecord(await sealVoteRecord(record, {prompt: PROMPT}), buildVoteMarker(record));
+		if (opts.sent) {
+			await recordVoteSent(opts.electionId ?? EID, 2, 'ballot-1', 'cid-sent');
+		}
+		readStatus.mockImplementation(fullRead);
+		await renderer.act(async () => {
+			navRef.goBack();
+		});
+		await flush();
+	}
+
+	it('H17: from a none line, back from vote and send, Home shows sent before the slow full read lands (WR-03)', async () => {
+		await voteAndSendFromNone({sent: true}, () => new Promise(() => undefined));
+		expect(has('election-card-saved-vote-sent')).toBe(true);
+		expect(has('election-card-vote-now')).toBe(false);
+	});
+
+	it('H18: from a none line, a saved but unsent vote keeps the line until the full read lands; no unchecked-revision caption flashes (WR-03)', async () => {
+		let land: (s: unknown) => void = () => undefined;
+		await voteAndSendFromNone({sent: false}, () => new Promise(r => { land = r; }));
+		expect(has('election-card-saved-vote-sent')).toBe(false);
+		expect(has('election-card-saved-vote-status')).toBe(false);
+		await renderer.act(async () => {
+			land({state: 'saved', revisionKnown: true});
+		});
+		await flush();
+		expect(textById('election-card-saved-vote-status')).toBe('Vote saved — not sent');
+		expect(has('election-card-vote-now')).toBe(false);
+	});
+
+	it('H19: from a none line, the full read keeps the last word (stale wins over the local sent line) (WR-03)', async () => {
+		let land: (s: unknown) => void = () => undefined;
+		await voteAndSendFromNone({sent: true}, () => new Promise(r => { land = r; }));
+		expect(has('election-card-saved-vote-sent')).toBe(true);
+		await renderer.act(async () => {
+			land({state: 'stale', revisionKnown: true});
+		});
+		await flush();
+		expect(has('election-card-saved-vote-stale')).toBe(true);
+		expect(has('election-card-saved-vote-sent')).toBe(false);
+	});
+
+	it('H20: a vote saved and sent for another election never decorates this one (WR-03)', async () => {
+		await voteAndSendFromNone({sent: true, electionId: 'another-election'}, () => new Promise(() => undefined));
+		expect(has('election-card-saved-vote-sent')).toBe(false);
+		expect(has('election-card-saved-vote-status')).toBe(false);
+		expect(has('election-card-vote-now')).toBe(true);
 	});
 
 	it('H8: a rejected read fails closed to unreadable with no error text', async () => {

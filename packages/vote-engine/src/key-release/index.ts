@@ -18,7 +18,13 @@ export {
   encryptElectionBlock,
   openElectionBlock,
   parseElectionBlockPayload,
-  serializeElectionBlockPayload
+  serializeElectionBlockPayload,
+  encryptVoteEntry,
+  openVoteEntries,
+  voteEntryBinding,
+  encryptPoolBlock,
+  reencryptElectionBlock
 } from './election-block.js'
+export type { OpenedVoteEntry, DisclosedBlockRandomness } from './election-block.js'
 export { KeyReleaseEngine, KeyReleaseError, releaseKeyTaskId } from './key-release-engine.js'
 export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release-engine.js'

@@ -96,7 +96,7 @@
 
 import { StrandDatabase } from '@serfab/cadre-core';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
-import { VOTETORRENT_SCHEMA_SQL } from '@votetorrent/vote-engine/browser';
+import { VOTETORRENT_SCHEMA_SQL, VOTETORRENT_SCHEMA_VERSION, registerVoteTorrentFunctions } from '@votetorrent/vote-engine/browser';
 
 /**
  * A strand-read failure naming a table, an option or a limit — NEVER a row
@@ -182,13 +182,14 @@ const VOTETORRENT_INNER_DDL = VOTETORRENT_SCHEMA_SQL.replace(/^\s*declare\s+sche
  * skipped check, it is a check that never existed here, which is a STRONGER
  * posture than a relaxed one, not a weaker one.
  *
- * @returns {Readonly<{ id: string, version: string, schema: string, latencyHint: 'interactive' }>}
+ * @returns {Readonly<{ id: string, version: string, schema: string, schemaVersion: number, latencyHint: 'interactive' }>}
  */
 export function publicSAppConfig() {
 	return Object.freeze({
 		id: 'org.votetorrent',
 		version: '1.0.0',
 		schema: VOTETORRENT_INNER_DDL,
+		schemaVersion: VOTETORRENT_SCHEMA_VERSION,
 		latencyHint: /** @type {'interactive'} */ ('interactive'),
 	});
 }
@@ -251,6 +252,9 @@ export async function openStrandReadHandle(options, deps) {
 	const strandDatabase = new StrandDatabaseCtor({
 		strandId,
 		sAppConfig: publicSAppConfig(),
+		// The schema's CHECKs call VoteTorrent's own SQL functions; quereus 5.6 refuses such a CHECK at CREATE
+		// TABLE unless they are registered first (VoteTorrent cadre-core patch: strand-database-setup).
+		databaseSetup: registerVoteTorrentFunctions,
 		libp2pNode: node,
 		coordinatedRepo,
 		// 'o' (open): every VoteTorrent network's control-network strand row is
@@ -265,7 +269,17 @@ export async function openStrandReadHandle(options, deps) {
 		founder: false,
 	});
 
-	await strandDatabase.initialize();
+	try {
+		await strandDatabase.initialize();
+	} catch (err) {
+		// Release the half-built database before rethrowing, so a caller that
+		// retries (`coordinator-wait.js`) does not leave one behind per attempt.
+		// The injected node is not stopped: `connectToStrand` never stops a node
+		// it was given (`@serfab/cadre-core` `dist/strand-database.js`), the same
+		// close-and-rebuild cadre-core's own joiner build does on one node.
+		await strandDatabase.close().catch(() => undefined);
+		throw err;
+	}
 
 	const db = strandDatabase.getDatabase();
 
@@ -396,7 +410,7 @@ async function readOneTable(strandHandle, uiDb, table) {
 
 /**
  * @typedef {object} StrandRowSource
- * @property {(projected: { collectionId: string, revision: number, invalidation: boolean | undefined }) => Promise<ReadonlyArray<{ table: string, ops: ReadonlyArray<{ op: 'upsert', row: import('@quereus/quereus').SqlValue[] }> }>>} readRows
+ * @property {(_ignored?: unknown) => Promise<ReadonlyArray<{ table: string, ops: ReadonlyArray<{ op: 'upsert', row: import('@quereus/quereus').SqlValue[] }> }>>} readRows
  *   `56-09`'s required `readRows` option, satisfied.
  * @property {() => Promise<void>} close - idempotent.
  */
@@ -425,7 +439,11 @@ export function createStrandRowSource(options) {
 	 * derives it from the three public read modules' own frozen lists, so a
 	 * second copy here cannot drift).
 	 *
-	 * DOES NOT decode `projected.collectionId` to one table. Deliberate,
+	 * Called with NO argument since the bridge moved to `node.reactivityWatch`
+	 * (step 3, 2026-11-03): a wake carries no payload. An argument, if one is
+	 * passed, is ignored -- the reasoning below is why that was already so.
+	 *
+	 * DOES NOT decode a collection id to one table. Deliberate,
 	 * reasoned non-optimization: the table -> collection mapping is
 	 * Optimystic-internal and undocumented, a mis-decode silently drops a
 	 * change, and the resulting page looks correct while being stale
@@ -436,17 +454,17 @@ export function createStrandRowSource(options) {
 	 * RETURNED EFFECTIVE `BackingRowChange[]`, and
 	 * `@quereus/quereus` `dist/src/vtab/backing-host.d.ts:26-35` pins that a
 	 * value-identical upsert "reports nothing" -- re-reading an unchanged
-	 * table announces nothing downstream. `projected.revision` and
-	 * `projected.invalidation` are likewise ignored for row selection: acting
+	 * table announces nothing downstream. A revision or invalidation flag
+	 * would likewise be ignored for row selection: acting
 	 * on a revision number would make this module trust a peer-supplied
 	 * ordinal to decide what to read, and the projection exists to keep
 	 * signatures, signer lists and deltas out of here, not to hand this
 	 * module a selector.
 	 *
-	 * @param {{ collectionId: string, revision: number, invalidation: boolean | undefined }} _projected
+	 * @param {unknown} [_ignored]
 	 * @returns {Promise<ReadonlyArray<{ table: string, ops: ReadonlyArray<{ op: 'upsert', row: import('@quereus/quereus').SqlValue[] }> }>>}
 	 */
-	async function readRows(_projected) {
+	async function readRows(_ignored) {
 		/** @type {{ table: string, ops: ReadonlyArray<{ op: 'upsert', row: import('@quereus/quereus').SqlValue[] }> }[]} */
 		const batches = [];
 		for (const table of PUBLIC_SUBSCRIBED_TABLES) {

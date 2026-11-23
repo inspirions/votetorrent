@@ -6,6 +6,11 @@
 // Spike 002 scaffold — see polyfills.bootstrap.js.
 import './polyfills.bootstrap';
 
+// Native SHA-256/512 + Ed25519 (react-native-quick-crypto) in place of the pure-JS ones above.
+// After the bootstrap, whose shims it replaces; before App, because @libp2p/crypto probes
+// WebCrypto Ed25519 once when it loads. See polyfills/native-crypto.js.
+import './polyfills/native-crypto';
+
 // Before App: see rnscreens-flags.js (keyboard open/close must not reset Screen sizes).
 import './rnscreens-flags';
 

@@ -154,6 +154,11 @@ export function encryptBlockContent (
  * repeated AES-GCM nonce always is (see `envelope.ts`'s equivalent warning).
  * Production code must call `encryptBlockContent`.
  *
+ * One production caller, by design: `key-release/election-block.ts`'s pool-block pair
+ * (`encryptPoolBlock` draws FRESH CSPRNG randomness and discloses it in the pool's `form`
+ * message; `reencryptElectionBlock` lets each member re-derive the stored ciphertext from it
+ * before signing — spike 102). Neither ever reuses randomness across blocks.
+ *
  * This function is deliberately NOT re-exported from `src/crypto/index.ts`.
  */
 export function encryptBlockContentWithRandomness (

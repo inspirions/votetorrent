@@ -208,11 +208,80 @@ declare schema main
 	)
 		with context ( SigningNonce text null, InviteSlotCid text null, InviteSignature text null, Tid int );
 
+	-- An officer who holds the administration-revision scope ('rad') in the CURRENT administration stops ONE
+	-- administration change that has not taken effect yet. A row means: this generation of this authority
+	-- (AuthorityId, AdminEffectiveAt) is cancelled, and UserId is the officer who cancelled it. A cancelled
+	-- generation never becomes current: the current-administration view and the three inline current-generation
+	-- CHECKs (registration decision, association decision, tally publication) all skip it.
+	-- One signature is enough, whatever threshold approved the change: stopping a change only keeps the
+	-- administration that is already in force, so it needs no co-signers (D-05).
+	-- The signature and signer key travel in the insert's context, as for UserKey, and are not stored in the row.
+	-- The digest is over TEXT columns of the new row only (AuthorityId, AdminEffectiveAt as the canonical
+	-- 19-character UTC string without a zone suffix, UserId), with the domain tag 'vt-admin-cancel'.
+	-- The target is matched in Admin OR in ProposedAdmin, because a change that needs only one officer is promoted
+	-- into Admin at once and still waits there for its effective time.
+	-- The pending test trusts the writer's context.now, the same trust model as every other context.now CHECK in
+	-- this file (rows that arrive by replication are not re-validated; see the 62-48 note).
+	-- The primary key stops a second cancellation of the same generation. Append-only: a committed row can be
+	-- neither updated nor deleted (the SEPARATE update and delete forms; the combined form does not refuse).
+	-- No reactivity tag: the table is not watched for live updates.
+	table AdminCancellation (
+		AuthorityId text,
+		AdminEffectiveAt text,
+		UserId text,
+		primary key (AuthorityId, AdminEffectiveAt),
+		-- Signed by the cancelling officer's key, with the curve chosen by that key's registered Type
+		-- (default 'M', secp256k1; 'P' is P-256).
+		constraint CancelSignatureValid check on insert (
+			(
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') = 'P'
+				and SignatureValidP256(
+					Digest('vt-admin-cancel', new.AuthorityId, new.AdminEffectiveAt, new.UserId),
+					context.Signature,
+					context.UserKey
+				)
+			)
+			or (
+				coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') <> 'P'
+				and SignatureValid(
+					Digest('vt-admin-cancel', new.AuthorityId, new.AdminEffectiveAt, new.UserId),
+					context.Signature,
+					context.UserKey
+				)
+			)
+		),
+		-- Only a change that has not taken effect yet, and only one that exists (promoted or still proposed).
+		constraint TargetPending check on insert (
+			new.AdminEffectiveAt > context.now
+				and (
+					exists (select 1 from Admin A where A.AuthorityId = new.AuthorityId and A.EffectiveAt = new.AdminEffectiveAt)
+					or exists (select 1 from ProposedAdmin P where P.AuthorityId = new.AuthorityId and P.EffectiveAt = new.AdminEffectiveAt)
+				)
+		),
+		-- The signer is a live key of the named user, who is an officer of the generation current at
+		-- context.now and holds 'rad' there. The current generation is found the same way as in the
+		-- registration-decision CHECK, and it also skips cancelled generations, so an officer whose only
+		-- generation was cancelled cannot cancel (measured by the 66.1-01 probe, row A2).
+		constraint CancellerIsRadOfficer check on insert (
+			exists (
+				select 1 from UserKey K join Officer O on O.UserId = K.UserId and O.AuthorityId = new.AuthorityId
+					where K.UserId = new.UserId and K.PubKey = context.UserKey and K.Expiration > context.now
+						and O.AdminEffectiveAt = (
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now and not exists (select 1 from AdminCancellation C where C.AuthorityId = A.AuthorityId and C.AdminEffectiveAt = A.EffectiveAt)
+						)
+						and exists (select 1 from json_each(O.Scopes) where value = 'rad')
+			)
+		),
+		constraint CantUpdate check on update (false),
+		constraint CantDelete check on delete (false)
+	)
+		with context ( UserKey text null, Signature text null, now datetime );
+
 	view CurrentAdmin as
-		select AuthorityId, max(EffectiveAt) as EffectiveAt
-			from Admin
-			where EffectiveAt <= datetime('now')
-			group by AuthorityId;
+		select A.AuthorityId, max(A.EffectiveAt) as EffectiveAt
+			from Admin A
+			where A.EffectiveAt <= datetime('now') and not exists (select 1 from AdminCancellation C where C.AuthorityId = A.AuthorityId and C.AdminEffectiveAt = A.EffectiveAt)
+			group by A.AuthorityId;
 
 	table Officer (
 		AuthorityId text,
@@ -962,6 +1031,10 @@ declare schema main
 		-- context.CtxTid on this table specifically).
 		with context ( CtxTid int, now datetime );
 
+	-- "optimystic.network_watch" (2026-11-02, @optimystic 1.24 / @serfab 1.20 strandReactivity): the tables a
+	-- screen re-reads on change carry this tag, so a commit made on ANOTHER machine wakes this machine's
+	-- Database.watch (and cadre-core watchTables) even when it stores none of the table's blocks. A tag-only
+	-- change is applied by `apply schema` as a catalog update; it changes no row, column or constraint.
 	table Election (
 		Id text primary key, -- 32 byte random id
 		AuthorityId text, -- authority that created the election
@@ -988,7 +1061,7 @@ declare schema main
 						)
 			)
 		)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( SigningNonce text, Tid int, now text );
 
 	table ProposedElection (
@@ -1000,7 +1073,7 @@ declare schema main
 		BallotDeadline datetime, -- deadline for adding or revising ballots to the election
 		Type text, -- references ElectionType(Code)
 		constraint UserValid check (context.IsUserValid = true)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( UserId text, UserKey text, Signature text, Tid int, now datetime, IsUserValid boolean );
 
 	table ElectionRevision (
@@ -1040,7 +1113,7 @@ declare schema main
 						)
 			)
 		)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( SigningNonce text, Tid int, now text );
 
 	table ProposedElectionRevision (
@@ -1062,7 +1135,7 @@ declare schema main
 					exists (select 1 from ProposedElection PE where PE.Id = new.ElectionId)
 		),
 		constraint UserValid check (context.IsUserValid = true)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( UserId text, UserKey text, Signature text, Tid int, now datetime, IsUserValid boolean );
 
 	table Ballot (
@@ -1102,7 +1175,7 @@ declare schema main
 						)
 			)
 		)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( SigningNonce text, Tid int, now datetime );
 
 	table ProposedBallot (
@@ -1478,7 +1551,7 @@ declare schema main
 		constraint GroupCommitmentsPresent check (new.GroupCommitments is not null and length(new.GroupCommitments) > 0),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
-	);
+	) with tags ("optimystic.network_watch" = true);
 
 	-- D-13/D-17: a keyholder's PUBLICLY released signing share -- by design (D-17), release makes
 	-- the share public so ANYONE with k shares may reconstruct; this is not a partial-decryption
@@ -1554,7 +1627,7 @@ declare schema main
 					) )
 		),
 		constraint MutationValid check on insert, update (context.IsMutationValid = true)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( IsMutationValid boolean, Tid int );
 
 	table ReleaseKeyTaskExtension (
@@ -2114,7 +2187,7 @@ declare schema main
 							)
 				)
 		)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		-- At INSERT no signing session exists, so only Tid is meaningful -- 48-07 still binds both
 		-- declared params. Do not "fix" the insert path by inventing a ceremony, and do not add a
 		-- third context param.
@@ -2249,12 +2322,14 @@ declare schema main
 		-- `datetime('now')` directly inside a constraint body. Replaced with the inline correlated
 		-- max(EffectiveAt) form the plan's fallback names, bound to `context.now` instead of
 		-- `datetime('now')` -- the shipped form.
+		-- A cancelled generation is skipped here, as in the current-administration view, so a cancelled
+		-- administration change never becomes current for this CHECK.
 		constraint DeciderIsOfficerWithScope check on insert (
 			exists (
 				select 1 from UserKey K join Officer O on O.UserId = K.UserId and O.AuthorityId = new.AuthorityId
 					where K.PubKey = new.DeciderKey
 						and O.AdminEffectiveAt = (
-							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now and not exists (select 1 from AdminCancellation C where C.AuthorityId = A.AuthorityId and C.AdminEffectiveAt = A.EffectiveAt)
 						)
 						and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
 			)
@@ -2293,7 +2368,7 @@ declare schema main
 		),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( now datetime );
 
 	unique index RegistrationDecisionCursor on RegistrationDecision (StrandId, Cursor);
@@ -2417,6 +2492,12 @@ declare schema main
 		with context ( SigningNonce text, Tid int );
 
 	index AssociationRequestAuthorityStatus on AssociationRequest (AuthorityId, Status);
+	-- Spike 110 (2026-11-12): the officer's request list (newest first, paged) and the Voter's own
+	-- requests by device key walk these in order instead of reading and sorting every row. The
+	-- pending sweep (AuthorityId, Status) still picks the index above. Spike 109: adding an index is
+	-- safe on an existing network, and an older build keeps opening it.
+	index AssociationRequestAuthorityTime on AssociationRequest (AuthorityId, SubmittedAt, Id);
+	index AssociationRequestDeviceTime on AssociationRequest (DeviceKey, SubmittedAt, Id);
 
 	-- 62-01 (D-03, D-05, D-07) staging row for the association-request P2P transport leg 1
 	-- (p2p-association-transport.ts). Same shape and SAME rationale as RegistrationRequestStaging
@@ -2559,7 +2640,7 @@ declare schema main
 				select 1 from UserKey K join Officer O on O.UserId = K.UserId and O.AuthorityId = new.AuthorityId
 					where K.PubKey = new.DeciderKey
 						and O.AdminEffectiveAt = (
-							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now and not exists (select 1 from AdminCancellation C where C.AuthorityId = A.AuthorityId and C.AdminEffectiveAt = A.EffectiveAt)
 						)
 						and exists (select 1 from json_each(O.Scopes) where value = 'vrg')
 			)
@@ -3361,7 +3442,7 @@ declare schema main
 		),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( NowMs integer );
 
 	index VoteBlockBallot on VoteBlock (ElectionId, BallotId);
@@ -3408,8 +3489,121 @@ declare schema main
 		),
 		constraint NoUpdate check on update (false),
 		constraint NoDelete check on delete (false)
-	)
+	) with tags ("optimystic.network_watch" = true)
 		with context ( now datetime );
+
+	-- The published tally of one election revision (2026-11-02; user decision: an officer's device computes it
+	-- after the key release and writes ONE signed row). TallyJson is the full vt-tally-tree/1 tree (blocks/
+	-- tally-tree.ts); TallyRoot commits to every node's histogram and BlockRoot to every block, so anyone holding
+	-- the replicated blocks recomputes both and compares (verifyTallyTree, plus a fresh buildTallyTree). The schema
+	-- checks what it can without an EC or Merkle UDF: the columns match the tree's own header fields, the keys were
+	-- released (at least Threshold shares), the publisher is an officer of the election's authority signing with
+	-- one of its UserKeys, and the row never changes. Whether the tree is CORRECT is the reader's check, by design.
+	table ElectionTally (
+		ElectionId text, -- references Election.Id
+		ElectionRevision integer, -- references ElectionRevision.Revision
+		BlockRoot text, -- 64 lowercase hex: the R5 block Merkle root
+		TallyRoot text, -- 64 lowercase hex: the R8 tally tree root
+		BlockCount integer, -- tree size = committed blocks counted
+		TallyJson text, -- the vt-tally-tree/1 tree as JSON
+		PublishedAt text, -- ISO-Z
+		PublisherUserId text,
+		PublisherKey text,
+		Signature text,
+		primary key (ElectionId, ElectionRevision),
+		constraint RootFormats check (length(new.BlockRoot) = 64 and length(new.TallyRoot) = 64 and lower(new.BlockRoot) = new.BlockRoot and lower(new.TallyRoot) = new.TallyRoot),
+		constraint BlockCountValid check (typeof(new.BlockCount) = 'integer' and new.BlockCount >= 0),
+		constraint TallyMatchesColumns check (
+			json_extract(new.TallyJson, '$.format') = 'vt-tally-tree/1'
+				and json_extract(new.TallyJson, '$.electionId') = new.ElectionId
+				and json_extract(new.TallyJson, '$.electionRevision') = new.ElectionRevision
+				and json_extract(new.TallyJson, '$.blockRoot') = new.BlockRoot
+				and json_extract(new.TallyJson, '$.root') = new.TallyRoot
+				and json_extract(new.TallyJson, '$.size') = new.BlockCount
+		),
+		constraint KeysReleased check on insert (
+			exists (select 1 from ElectionKey EK where EK.ElectionId = new.ElectionId and EK.ElectionRevision = new.ElectionRevision)
+				and (
+					select count(*) from KeyholderShareRelease R where R.ElectionId = new.ElectionId and R.ElectionRevision = new.ElectionRevision
+				) >= (
+					select EK.Threshold from ElectionKey EK where EK.ElectionId = new.ElectionId and EK.ElectionRevision = new.ElectionRevision
+				)
+		),
+		-- A CURRENT officer of the election's authority: the inline max(EffectiveAt) form bound to context.now,
+		-- as RegistrationDecision.DeciderIsOfficerWithScope (a CurrentAdmin join is non-deterministic in a CHECK).
+		-- A cancelled generation is skipped here, as in the current-administration view, so a cancelled
+		-- administration change never becomes current for this CHECK.
+		constraint PublisherIsOfficer check on insert (
+			exists (
+				select 1 from Election E join Officer O on O.AuthorityId = E.AuthorityId
+					where E.Id = new.ElectionId and O.UserId = new.PublisherUserId
+						and O.AdminEffectiveAt = (
+							select max(A.EffectiveAt) from Admin A where A.AuthorityId = O.AuthorityId and A.EffectiveAt <= context.now and not exists (select 1 from AdminCancellation C where C.AuthorityId = A.AuthorityId and C.AdminEffectiveAt = A.EffectiveAt)
+						)
+			)
+		),
+		constraint PublisherKeyIsUsers check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.PublisherUserId and K.PubKey = new.PublisherKey)
+		),
+		constraint SignatureValid check (
+			SignatureValid(
+				Digest('ElectionTally', new.ElectionId, new.ElectionRevision, new.BlockRoot, new.TallyRoot, new.BlockCount, new.PublishedAt, new.PublisherUserId),
+				new.Signature,
+				new.PublisherKey
+			)
+				or SignatureValidP256(
+					Digest('ElectionTally', new.ElectionId, new.ElectionRevision, new.BlockRoot, new.TallyRoot, new.BlockCount, new.PublishedAt, new.PublisherUserId),
+					new.Signature,
+					new.PublisherKey
+				)
+		),
+		constraint PublishedAtValid check (isISODatetime(new.PublishedAt) and like('%Z', new.PublishedAt)),
+		constraint NoUpdate check on update (false),
+		constraint NoDelete check on delete (false)
+	) with tags ("optimystic.network_watch" = true)
+		with context ( now datetime );
+
+	-- An officer revokes ONE dashboard browser pairing: the row names the officer (UserId) and the pairing's
+	-- nonce, and a browser that sees a row for its own (UserId, Nonce) unpairs itself. Enforcement is
+	-- cooperative: the browser wipes itself, and removing the browser's machine from the network is the
+	-- network-side half. The signature and signer key travel in the insert's context, as for UserKey, and are
+	-- not stored in the row.
+	-- The digest is over TEXT columns only (UserId, Nonce), so it avoids the deferred-CHECK datetime-coercion
+	-- trap. The table carries no reactivity tag (it is not watched for live updates). Append-only: a committed
+	-- row can be neither updated nor deleted (the SEPARATE update and delete forms; the combined form does not refuse).
+	table DashboardPairingRevocation (
+		UserId text,
+		Nonce text,
+		primary key (UserId, Nonce),
+		-- No UserIdValid check: measured unreachable. InsertValid already requires a UserKey row of new.UserId,
+		-- UserKey requires that user to exist, and a User row can never be deleted.
+		-- Signed by a non-expired key of that same officer, over Digest('vt-pairing-revoke', UserId, Nonce),
+		-- with the curve chosen by the signer key's registered Type (default 'M', secp256k1).
+		constraint InsertValid check on insert (
+			exists (select 1 from UserKey K where K.UserId = new.UserId and K.PubKey = context.UserKey and K.Expiration > context.now)
+				and (
+					(
+						coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') = 'P'
+						and SignatureValidP256(
+							Digest('vt-pairing-revoke', new.UserId, new.Nonce),
+							context.Signature,
+							context.UserKey
+						)
+					)
+					or (
+						coalesce((select K.Type from UserKey K where K.PubKey = context.UserKey), 'M') <> 'P'
+						and SignatureValid(
+							Digest('vt-pairing-revoke', new.UserId, new.Nonce),
+							context.Signature,
+							context.UserKey
+						)
+					)
+				)
+		),
+		constraint CantUpdate check on update (false),
+		constraint CantDelete check on delete (false)
+	)
+		with context ( UserKey text null, Signature text null, now datetime );
 
 	index VoteBlockVoterBlock on VoteBlockVoter (BlockCid);
 }

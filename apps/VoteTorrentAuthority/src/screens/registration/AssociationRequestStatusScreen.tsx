@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ScrollView, StyleSheet, View } from "react-native";
+import { FlatList, StyleSheet, View } from "react-native";
 import { ExtendedTheme, useRoute, useTheme } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
@@ -38,6 +38,15 @@ import { useApp } from "../../providers/AppProvider";
  * every state at once, so filtering (if ever added) must stay client-side
  * to keep this the only call site. The engine's single-row lookup method is
  * never called here — this screen has no detail route.
+ *
+ * PAGING (spike 110): the read asks for the newest `limit` requests only
+ * (newest first), starting at ASSOCIATION_REQUEST_PAGE_SIZE. Scrolling near
+ * the end raises the limit by one page — no button, so the zero-pressable
+ * property above still holds. A full page means there may be more; a short
+ * page means the end was reached. Requests are never deleted (the schema's
+ * NoDelete CHECK), so a larger limit can never legitimately return FEWER
+ * rows: an empty result for a larger limit is a failed read, and the rows
+ * already shown are kept rather than replaced by the empty state.
  *
  * NO PII: only `status`, `submittedAt`, `receivedAt`, and (for a `'c'` row)
  * the PRESENCE of a challenge nonce reach this screen — never the nonce's
@@ -85,6 +94,9 @@ export function associationRequestStatusCopy(status: AssociationRequestStatus): 
 	}
 }
 
+/** Requests per page; each scroll to the end asks for one more page. */
+export const ASSOCIATION_REQUEST_PAGE_SIZE = 50;
+
 interface AssociationRequestStatusRouteParams {
 	authorityId: string;
 }
@@ -98,6 +110,8 @@ export default function AssociationRequestStatusScreen() {
 
 	const [rows, setRows] = useState<AssociationRequestRead[]>([]);
 	const [loading, setLoading] = useState(true);
+	const [limit, setLimit] = useState(ASSOCIATION_REQUEST_PAGE_SIZE);
+	const [hasMore, setHasMore] = useState(false);
 
 	// CR-02-class guard against a stale setState after unmount (this app's
 	// established convention — see AssociationsSection.tsx).
@@ -113,88 +127,106 @@ export default function AssociationRequestStatusScreen() {
 		if (!unmountedRef.current) setLoading(true);
 		const result = await resolveAssociationRequestRows(async () => {
 			const engine = await getEngine<IAssociationEngine>("association");
-			return engine.listAssociationRequests(authorityId);
+			return engine.listAssociationRequests(authorityId, undefined, { limit });
 		});
-		if (!unmountedRef.current) {
+		if (unmountedRef.current) return;
+		if (result.length === 0 && limit > ASSOCIATION_REQUEST_PAGE_SIZE) {
+			// A later page failed (see PAGING above): keep what is shown, stop paging.
+			setHasMore(false);
+		} else {
 			setRows(result);
-			setLoading(false);
+			setHasMore(result.length >= limit);
 		}
-	}, [getEngine, authorityId]);
+		setLoading(false);
+	}, [getEngine, authorityId, limit]);
 
 	useEffect(() => {
 		load();
 	}, [load]);
 
+	const loadOlder = useCallback(() => {
+		if (!loading && hasMore) setLimit((current) => current + ASSOCIATION_REQUEST_PAGE_SIZE);
+	}, [loading, hasMore]);
+
 	const showEmpty = !loading && rows.length === 0;
 
+	const renderRow = ({ item: row }: { item: AssociationRequestRead }) => {
+		const copy = associationRequestStatusCopy(row.status);
+		const statusColor =
+			row.status === "a" ? colors.success : row.status === "r" ? colors.error : colors.warning;
+		const rowTestID = `association-request-status-row-${row.requestId}`;
+
+		return (
+			<View
+				testID={rowTestID}
+				style={[
+					styles.cardSurface,
+					{ backgroundColor: colors.card, borderLeftWidth: 4, borderLeftColor: statusColor },
+				]}
+			>
+				<View style={localStyles.headingRow}>
+					<View testID={`${rowTestID}-icon`}>
+						<FontAwesome6 name="shield-halved" size={16} color={statusColor} />
+					</View>
+					<ThemedText type="defaultSemiBold" testID={`${rowTestID}-status`}>
+						{t(copy.labelKey)}
+					</ThemedText>
+				</View>
+
+				<ThemedText
+					type="default"
+					style={localStyles.bodyText}
+					testID={`${rowTestID}-submitted-at`}
+				>
+					{t("associationRequestStatusSubmittedAtLabel")}: {row.submittedAt}
+				</ThemedText>
+
+				<ThemedText type="default" testID={`${rowTestID}-received-at`}>
+					{t("associationRequestStatusReceivedAtLabel")}: {row.receivedAt}
+				</ThemedText>
+
+				{/* Presence only — never the nonce's value (T-51-10-03). A 'c' row
+				    always has a nonce by construction; this line simply names that
+				    fact for the officer, it never reads row.challengeNonce. */}
+				{row.status === "c" && (
+					<ThemedText type="small" testID={`${rowTestID}-challenge`}>
+						{t("associationRequestStatusChallengeIssuedNote")}
+					</ThemedText>
+				)}
+			</View>
+		);
+	};
+
 	return (
-		<ScrollView
+		<FlatList
 			testID="association-request-status-screen"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
-		>
-			{showEmpty && (
-				<View
-					testID="association-request-status-empty"
-					style={[styles.cardSurface, { backgroundColor: colors.card }]}
-				>
-					<ThemedText type="defaultSemiBold" testID="association-request-status-empty-heading">
-						{t("associationRequestStatusEmptyHeading")}
-					</ThemedText>
-					<ThemedText
-						type="default"
-						style={localStyles.bodyText}
-						testID="association-request-status-empty-body"
-					>
-						{t("associationRequestStatusEmptyBody")}
-					</ThemedText>
-				</View>
-			)}
-
-			{rows.map((row) => {
-				const copy = associationRequestStatusCopy(row.status);
-				const statusColor =
-					row.status === "a" ? colors.success : row.status === "r" ? colors.error : colors.warning;
-				const rowTestID = `association-request-status-row-${row.requestId}`;
-
-				return (
+			data={rows}
+			keyExtractor={(row) => row.requestId}
+			renderItem={renderRow}
+			onEndReached={loadOlder}
+			onEndReachedThreshold={0.5}
+			ListHeaderComponent={
+				showEmpty ? (
 					<View
-						key={row.requestId}
-						testID={rowTestID}
-						style={[
-							styles.cardSurface,
-							{ backgroundColor: colors.card, borderLeftWidth: 4, borderLeftColor: statusColor },
-						]}
+						testID="association-request-status-empty"
+						style={[styles.cardSurface, { backgroundColor: colors.card }]}
 					>
-						<View style={localStyles.headingRow}>
-							<View testID={`${rowTestID}-icon`}>
-								<FontAwesome6 name="shield-halved" size={16} color={statusColor} />
-							</View>
-							<ThemedText type="defaultSemiBold" testID={`${rowTestID}-status`}>
-								{t(copy.labelKey)}
-							</ThemedText>
-						</View>
-
-						<ThemedText type="default" style={localStyles.bodyText} testID={`${rowTestID}-submitted-at`}>
-							{t("associationRequestStatusSubmittedAtLabel")}: {row.submittedAt}
+						<ThemedText type="defaultSemiBold" testID="association-request-status-empty-heading">
+							{t("associationRequestStatusEmptyHeading")}
 						</ThemedText>
-
-						<ThemedText type="default" testID={`${rowTestID}-received-at`}>
-							{t("associationRequestStatusReceivedAtLabel")}: {row.receivedAt}
+						<ThemedText
+							type="default"
+							style={localStyles.bodyText}
+							testID="association-request-status-empty-body"
+						>
+							{t("associationRequestStatusEmptyBody")}
 						</ThemedText>
-
-						{/* Presence only — never the nonce's value (T-51-10-03). A 'c' row
-						    always has a nonce by construction; this line simply names that
-						    fact for the officer, it never reads row.challengeNonce. */}
-						{row.status === "c" && (
-							<ThemedText type="small" testID={`${rowTestID}-challenge`}>
-								{t("associationRequestStatusChallengeIssuedNote")}
-							</ThemedText>
-						)}
 					</View>
-				);
-			})}
-		</ScrollView>
+				) : undefined
+			}
+		/>
 	);
 }
 

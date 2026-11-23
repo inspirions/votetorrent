@@ -635,6 +635,40 @@ describe('processPendingAssociationRequests — the D-05 automatic authority-sid
     expect(aRows.map((r) => r.requestId)).to.include(challengedRequestId)
   })
 
+  it('listAssociationRequests orders newest submittedAt first, and options.limit returns only the newest rows (spike 110 paging)', async () => {
+    const s = await setup()
+    const now = Date.now()
+    const oldest = await submitDeviceRequest(s, randomTestKeyPair(), { submittedAt: toIsoZDatetime(now - 3000) })
+    const middle = await submitDeviceRequest(s, randomTestKeyPair(), { submittedAt: toIsoZDatetime(now - 2000) })
+    const newest = await submitDeviceRequest(s, randomTestKeyPair(), { submittedAt: toIsoZDatetime(now - 1000) })
+
+    const all = (await s.engine.listAssociationRequests(s.auth.authority.id)).map((r) => r.requestId)
+    expect(all).to.deep.equal([newest, middle, oldest])
+    const page = (await s.engine.listAssociationRequests(s.auth.authority.id, undefined, { limit: 2 })).map((r) => r.requestId)
+    expect(page).to.deep.equal([newest, middle])
+    const pendingPage = (await s.engine.listAssociationRequests(s.auth.authority.id, 'p', { limit: 1 })).map((r) => r.requestId)
+    expect(pendingPage).to.deep.equal([newest])
+    for (const bad of [0, -1, 1.5]) {
+      let threw: unknown
+      try { await s.engine.listAssociationRequests(s.auth.authority.id, undefined, { limit: bad }) } catch (e) { threw = e }
+      expect(threw, `limit ${bad} must be refused`).to.be.instanceOf(TypeError)
+    }
+  })
+
+  it('listAssociationRequestsByDeviceKey returns only that device key\'s requests, newest first', async () => {
+    const s = await setup()
+    const mine = randomTestKeyPair()
+    const now = Date.now()
+    const first = await submitDeviceRequest(s, mine, { submittedAt: toIsoZDatetime(now - 2000) })
+    const second = await submitDeviceRequest(s, mine, { submittedAt: toIsoZDatetime(now - 1000) })
+    await submitDeviceRequest(s, randomTestKeyPair())
+
+    const rows = await s.engine.listAssociationRequestsByDeviceKey(mine.publicHex)
+    expect(rows.map((r) => r.requestId)).to.deep.equal([second, first])
+    for (const r of rows) expect(r.deviceKey).to.equal(mine.publicHex)
+    expect(await s.engine.listAssociationRequestsByDeviceKey('not-a-known-key')).to.deep.equal([])
+  })
+
   it('getAssociationRequest returns the matching AssociationRequestRead for a known id, and undefined (never a throw) for an unknown id', async () => {
     const s = await setup()
     const deviceKeyPair = randomTestKeyPair()

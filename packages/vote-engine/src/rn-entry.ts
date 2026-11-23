@@ -18,8 +18,21 @@ export { verifySigP256 } from './database/initialize.js'
 // the P2P-11 replication proof opens its strand handle directly through the DbFactory, so it must
 // run it too — without it, the first signed insert fails `Function not found: SignatureValidP256/3`.
 export { registerDbPlugins } from './database/initialize.js'
+// cadre-core `strandDatabaseSetup`: VoteTorrent's SQL functions on each strand database before its schema applies.
+export { registerVoteTorrentFunctions } from './database/initialize.js'
 export { NetworksEngine } from './networks/networks-engine.js'
+// Spike 100: a voter joins an authority's network from a join code.
+export { NETWORK_JOIN_CODE_PREFIX, NETWORK_JOIN_CODE_PREFIX_V2, CADRE_INVITATION_PREFIX_EXPECTED, encodeNetworkJoinCode, decodeNetworkJoinCode, looksLikeJoinCode } from './networks/join-code.js'
+export type { NetworkJoinCode, NetworkJoinCodeDecodeResult, NetworkJoinCodeDecodeFailure } from './networks/join-code.js'
+export { joinNetwork } from './networks/network-join.js'
+export type { NetworkJoinNode, NetworkJoinOptions, NetworkJoinResult, NetworkJoinFailureReason, NetworkJoinStep } from './networks/network-join.js'
 export { NetworkEngine } from './network/network-engine.js'
+// Phones pass `createEdgeReaderRefusal().hook` as cadre-core's `strandCohortRefusal`, keeping strand peers
+// that declared themselves read-only edge readers out of write cohorts and coordinator choice.
+export { EDGE_READER_PROTOCOL, EDGE_READER_CONTROL_KEY, EDGE_READER_REFUSAL_MAX_PEERS, createEdgeReaderRefusal } from './network/edge-reader-refusal.js'
+export type { EdgeReaderRefusal, EdgeReaderRefusalOptions, EdgeReaderStrandRefusal } from './network/edge-reader-refusal.js'
+// A minted cadre invitation never names a dashboard as a member to redeem at (edge-reader-members.ts).
+export { excludeEdgeReaderMembers, withoutEdgeReaderMembers, edgeReaderPeerIds, memberAddressPeerId } from './network/edge-reader-members.js'
 export { ElectionsEngine, peekNextElectionTid } from './elections/elections-engine.js'
 export { ElectionEngine } from './election/election-engine.js'
 export type { ElectionSubject } from './election/election-engine.js'
@@ -86,6 +99,7 @@ export type { DigestVector } from './database/digest-vectors.js'
 // passes this into CadreNode.addStrand's sAppConfig.schema (P2P-03) so the
 // strand DB and the LevelDB path declare the SAME schema — no drift.
 export { VOTETORRENT_SCHEMA_SQL } from './database/schema-sql.js'
+export { VOTETORRENT_SCHEMA_VERSION } from './database/schema-version.js'
 // Phase 62 Plan 04 (D-03/D-04/D-13/D-18/D-25): the crypto module, re-exported
 // by name (never `export *`) for its RN consumers — 62-14 (intake
 // sealer/opener and officer key registration), 62-21 (the Authority native
@@ -164,9 +178,14 @@ export {
 	hasEnteredReleasingKeys,
 	releasingKeysAt,
 	encryptElectionBlock,
-	openElectionBlock
+	openElectionBlock,
+	encryptVoteEntry,
+	openVoteEntries
 } from './key-release/index.js'
 export type { KeyReleaseErrorCode, KeyReleaseEngineDeps } from './key-release/index.js'
+// Election results (decrypt + validate + tally after the key release), for the Authority and Voter results screens.
+export { ElectionResultsEngine, summarizeBallot } from './results/index.js'
+export type { ElectionResults, ElectionResultsEngineDeps, BallotResult, QuestionResult, OptionResult } from './results/index.js'
 export type { KeysTasksEngineDeps } from './tasks/keys-tasks-engine.js'
 // Phase 62 Plan 20: a curated DKG surface, named from `./crypto/index.js` —
 // 62-26 mints the receiving key at accept (`generateDkgReceivingKey`) and
@@ -248,3 +267,251 @@ export type {
 	TemplateBallot,
 	VotingKeyCheck
 } from './voting/index.js'
+// Spike 102: vote pools — the Voter runs a PoolAgent through the authority's rendezvous; the
+// Authority serves the rendezvous on its control node.
+export {
+	PoolAgent,
+	POOL_MIN_BLOCK_SIZE,
+	POOL_SIGN_TIMEOUT_MS,
+	createConsentQueue,
+	ConsentAbandonedError,
+	isConsentAbandonedError,
+	POOL_MIN_PROMPT_MS,
+	poolTopic,
+	commitPoolBlock,
+	poolIdentityFromRawKey,
+	createPoolIdentity,
+	PoolRendezvous,
+	createInMemoryRendezvousClient,
+	poolRequests,
+	POOL_RENDEZVOUS_PROTOCOL,
+	attachPoolRendezvous,
+	createLibp2pRendezvousClient,
+	createFailoverRendezvousClient,
+	rendezvousDiscovery,
+	matchmakingDiscovery,
+	mergedDiscovery,
+	POOL_MATCH_TOPIC_KIND,
+	poolMatchTopic
+} from './pool/index.js'
+export type {
+	PoolAgentOptions,
+	PoolAgentStatus,
+	PoolOutcome,
+	ConsentQueueOptions,
+	ConsentCallControl,
+	ConsentQueue,
+	ConsentAbandonReason,
+	PoolContribution,
+	PoolBallot,
+	FormedPoolBlock,
+	ConsentSignature,
+	PoolIdentity,
+	PoolRendezvousClient,
+	RendezvousRequest,
+	RendezvousReply,
+	FailoverRendezvousClient,
+	PoolDiscovery,
+	PoolMatchEntry,
+	PoolMatchProvider,
+	PoolMatchmakingPorts
+} from './pool/index.js'
+// The published tally: an officer's device writes one signed ElectionTally row; any device reads and checks it.
+export { TallyPublicationEngine } from './tally/index.js'
+export type { TallyPublisher, PublishTallyOutcome, PublishedTally, BlockCoverage } from './tally/index.js'
+// Reactivity: screens subscribe to strand table changes (cadre-core watchTables) through one hub.
+export { StrandChangeHub, STRAND_CHANGE_BACKSTOP_MS } from './reactivity/index.js'
+export type { StrandChangeSource, StrandTableWatch, StrandChangeSubscribeOptions } from './reactivity/index.js'
+// Phase 65 Plan 09 (D-61/D-52): the block tree (R5), voter slice checks (R6), comprehensive block
+// validation (R7) and tally tree (R8), re-exported by name (never `export *`). This is the Voter's engine
+// port for these checks; no screen calls it yet. Mirrors the exact name list on src/blocks/index.ts. R6-R8
+// are deliberately NOT on browser-entry.ts (they reach @noble/curves/secp256k1.js); R5 is, from its module file.
+export {
+	BLOCK_TREE_DOMAIN,
+	BLOCK_TREE_EMPTY_ROOT,
+	blockLeafData,
+	voterListDigest,
+	blockLeafHash,
+	blockNodeHash,
+	isBase32Cid,
+	blockCidOf,
+	selectBlockRows,
+	buildBlockTree,
+	verifyInclusion,
+	blockTreeStatus,
+	finalBlockTree,
+	blockConsentDigest,
+	verifyBlockConsent,
+	blockAuthorizer,
+	judgeBlockVoters,
+	checkElectionSecret,
+	openCommittedBlock,
+	SLICE_CHECK_IDS,
+	sliceChecks,
+	ANSWER_FINDING_CODES,
+	ANSWER_INFO_CODES,
+	validateVoteEntryAgainstBallot,
+	questionType,
+	VALIDATION_CODES,
+	VALIDATION_INFO_CODES,
+	validateElectionBlocks,
+	TALLY_TREE_DOMAIN,
+	tallyNodeHash,
+	tallyLeafHash,
+	tallyParentHash,
+	addHistograms,
+	tallyTreeFrom,
+	buildTallyTree,
+	verifyTallyTree
+} from './blocks/index.js'
+export type {
+	BlockTreeRow,
+	BlockTreeScope,
+	BlockTreeLeaf,
+	BlockTreeNode,
+	BlockProofStep,
+	BlockInclusionProof,
+	BlockProofResult,
+	BlockTree,
+	BlockTreeRefusal,
+	BlockTreeRejectReason,
+	BlockTreeRejection,
+	BlockRowSelection,
+	BlockTreeResult,
+	InclusionCheck,
+	BlockTreeTimeline,
+	BlockTreeStatus,
+	FinalBlockTreeResult,
+	BlockVoterRow,
+	BlockRegistrantRow,
+	BlockAssociationRow,
+	BlockAuthorizationTimeline,
+	BlockAuthorization,
+	BlockConsentScope,
+	BlockAuthorizer,
+	BlockVoterProblemCode,
+	BlockVoterProblem,
+	BlockVoterRepresentative,
+	BlockVoterExtra,
+	BlockVoterJudgement,
+	ElectionKeyLike,
+	CommittedBlockRow,
+	ElectionSecretCheck,
+	OpenedBlockVote,
+	OpenCommittedBlockFailure,
+	OpenCommittedBlockResult,
+	SliceCheckId,
+	SliceCheckStatus,
+	SliceReceipt,
+	SliceBlockRow,
+	SliceVoterRow,
+	SliceTreeAnchor,
+	SliceRelease,
+	SliceAuthorization,
+	SlicePendingPart,
+	SliceFailReason,
+	SliceNotApplicableReason,
+	SliceCheckResult,
+	SliceBallotReport,
+	SliceCheckRefusal,
+	SliceCheckReport,
+	AnswerFindingCode,
+	FindingSeverity,
+	AnswerFinding,
+	AnswerCheckQuestion,
+	AnswerCheckBallot,
+	AnswerCheckScope,
+	VoteEntryValidity,
+	ValidationCode,
+	ValidationFinding,
+	VoteVerdict,
+	BlockFinding,
+	ValidationTotals,
+	ValidationBlockRow,
+	ValidationVoterRow,
+	ValidationRegistrantRow,
+	ValidationAssociationRow,
+	ValidationTimeline,
+	ValidationRelease,
+	ValidateElectionBlocksInput,
+	ValidationRefusal,
+	ElectionValidationResult,
+	TallyQuestionCounts,
+	TallyBallotCounts,
+	TallyHistogram,
+	TallyLeafDisposition,
+	TallyLeaf,
+	TallyNode,
+	TallyTree,
+	TallyTreeRefusal,
+	ReleasedValidation,
+	TallyTreeResult,
+	TallyTreeInput,
+	BuildTallyTreeResult,
+	TallyVerifyFailure,
+	TallyVerifyResult
+} from './blocks/index.js'
+// Phase 66: browser pairing. The Authority's officer phone signs a pairing statement and asks an owner
+// phone to mint the browser's invitation (pair-mint); the owner phone hosts pair-mint and acts on
+// officer-signed revocation rows. Re-exported by name (never `export *`); mirrors the exact name list
+// on src/pairing/index.ts.
+export {
+	PAIRING_CODE_PREFIX,
+	PAIRING_QR_BYTE_BUDGET,
+	PAIRING_CODE_MAX_CHARS,
+	PairingCodeError,
+	encodePairingCode,
+	decodePairingCode,
+	PAIRING_DIGEST_TAG,
+	PAIRING_REMOVE_DIGEST_TAG,
+	pairingStatementDigest,
+	pairingRemoveDigest,
+	verifyPairingStatement,
+	verifyPairingRemove,
+	isCurrentPairingOfficer,
+	PAIR_MINT_PROTOCOL,
+	PAIR_MINT_MAX_FRAME_BYTES,
+	PAIR_MINT_READ_TIMEOUT_MS,
+	PAIR_MINT_REFUSAL_CODES,
+	parsePairMintRequest,
+	parsePairMintReply,
+	PairMintTransportError,
+	attachPairMint,
+	requestPairMint,
+	PAIR_MINT_WINDOW_MS,
+	PAIR_MINT_CLOCK_SKEW_MS,
+	PAIR_MINT_MAX_LIVE_PER_OFFICER,
+	PAIR_MINT_PEER_REQUESTS_PER_MINUTE,
+	createPairMintService,
+	PAIRING_REVOKE_DIGEST_TAG,
+	PairingRevocationError,
+	pairingRevokeDigest,
+	isPairingRevoked,
+	revokeDashboardPairing
+} from './pairing/index.js'
+export type {
+	PairingStatement,
+	DecodedPairingCode,
+	PairingCodeFailure,
+	VerifiablePairingStatement,
+	PairingVerifyFailure,
+	PairingVerifyResult,
+	PairMintRefusalCode,
+	PairMintMintRequest,
+	PairMintRemoveRequest,
+	PairMintRequest,
+	PairMintReply,
+	PairMintHandler,
+	PairMintLibp2pLike,
+	PairMintOutcome,
+	PairMintLogEntry,
+	PairMintPorts,
+	PairMintService,
+	PairingRevocationSigner,
+	PairingRevocationReason
+} from './pairing/index.js'
+
+// Which of this phone's writes no other member holds yet (todo 2026-09-11-optimystic-commit-success-hides-
+// unresolvable-cohort): fed by CadreNode's strand:commit-durability / strand:commit-held events. By name.
+export { CommitDurabilityTracker } from './durability/index.js'
+export type { ActionShareState, CommitDurabilityReport, CommitEventSource, CommitHeldReport } from './durability/index.js'

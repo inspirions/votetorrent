@@ -136,7 +136,7 @@ export default function NetworkRevisionScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<View style={styles.section}>
 					<CustomTextInput
 						title={t("name")}

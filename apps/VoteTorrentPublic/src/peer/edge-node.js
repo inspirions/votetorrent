@@ -69,12 +69,33 @@
  *  5. `strandFilter: { mode: 'all' }` — `StrandFilter` governs which
  *     strands a node PARTICIPATES in and is explicitly NOT D-03's
  *     observability allowlist. Left unset.
- *  6. `circuitRelayTransport(...)`, `network.relayAddrs`, `relay`,
- *     `listenAddrs`, `port`/`wsPort`, `hibernation`, `connectionGater`,
- *     `controlNetwork`, `PARTY_ID`, `CONTROL_ADDR`, and the
- *     `UPDATE_AFTER_DRONE_RESTART` sentinel. A browser dials out and does
- *     not listen. Bootstrap addresses arrive as a parameter from `56-06`'s
- *     config mechanism — this module does not fetch `config.json` itself.
+ *  6. `network.relayAddrs`, `relay`, `listenAddrs` (including a
+ *     `/p2p-circuit` listen, i.e. a relay RESERVATION), `port`/`wsPort`,
+ *     `hibernation`, the RN `connectionGater`, `controlNetwork`, `PARTY_ID`,
+ *     `CONTROL_ADDR`, and the `UPDATE_AFTER_DRONE_RESTART` sentinel. A
+ *     browser dials out and does not listen. Bootstrap addresses arrive as a
+ *     parameter from `56-06`'s config mechanism — this module does not fetch
+ *     `config.json` itself.
+ *
+ *     A `connectionGater` of this module's OWN does carry (2026-11-16): the
+ *     declaration gate (`edgeDeclarationGate`), closed until the node has
+ *     withdrawn storage and declared `EDGE_READER_PROTOCOL`. It leaves
+ *     `denyDialMultiaddr` unset so libp2p's browser default (no plain `ws`,
+ *     no private address) still applies.
+ *
+ *     `circuitRelayTransport()` DOES carry, and only as a DIALER (56-25,
+ *     2026-11-13). Until then this point listed it with the listen-side
+ *     items above, which mixed up the relay's two halves. On a real network
+ *     every strand node is a phone or NATed peer reachable ONLY as
+ *     `/.../p2p/<relay>/p2p-circuit/p2p/<peer>`; without the circuit
+ *     transport libp2p drops that address (`NoValidAddressesError`), the page
+ *     connects only to the relay, and `findCoordinator` reports the relay as
+ *     foreign to the strand. Passing `transports` at all replaces
+ *     `@optimystic/db-p2p`'s defaults wholesale (`libp2p-node-base.js`
+ *     `options.transports ?? defaults.transports`), which is why it must be
+ *     named here. Loopback harnesses hid this: their gateway is directly
+ *     dialable. Same trap and fix as `packages/p2p-probe-host/drone.mjs`.
+ *     Proven by `test/node/edge-circuit-dial.test.mjs`.
  *
  * WHAT DOES CARRY: `createEdgeNode` returns a `stop()` that is idempotent,
  * safe after a partial or failed start, and swallows errors from both the
@@ -139,6 +160,7 @@
 import { openOptimysticWebDb, IndexedDBRawStorage } from '@optimystic/db-p2p-storage-web';
 import { createLibp2pNode } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
+import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { edgeProfile } from '@optimystic/db-core';
 import { attachConnectionLifecycleTap } from './connection-lifecycle-probe.js';
 
@@ -229,6 +251,124 @@ export async function openStrandBlockStorage(strandId) {
 }
 
 /**
+ * The two protocols whose advertisement makes a peer a storage member of a
+ * network (`Libp2pKeyPeerNetwork.servesThisNetwork`).
+ * @param {string} networkName
+ * @returns {string[]}
+ */
+export function storageServiceProtocols(networkName) {
+	return [`/optimystic/${networkName}/cluster/1.0.0`, `/optimystic/${networkName}/repo/1.0.0`];
+}
+
+/**
+ * Stop serving storage on `networkName`: unregister both storage handlers so
+ * no peer counts this node into a storage group or picks it as a coordinator.
+ * @param {{ unhandle(protocols: string[]): Promise<void> }} node
+ * @param {string} networkName
+ * @returns {Promise<void>}
+ */
+export async function withdrawStorageServices(node, networkName) {
+	if (!node || typeof node.unhandle !== 'function') {
+		throw new EdgeNodeConfigError('withdrawStorageServices: the node cannot unregister protocol handlers');
+	}
+	await node.unhandle(storageServiceProtocols(networkName));
+}
+
+/**
+ * The marker protocol a read-only edge reader handles (and closes at once).
+ * Host peers that see it in this node's identify keep it out of their write
+ * cohorts and coordinator choice BEFORE they look at its protocol list (the
+ * `strandCohortRefusal` every Authority provider and rig host passes, from
+ * vote-engine's `createEdgeReaderRefusal`). Same literal as vote-engine's
+ * `EDGE_READER_PROTOCOL` and the dashboard's; `edge-node-shape.test.mjs` pins
+ * the parity. USER DECISION 2026-11-16 ("read only visitor is correct"): it is
+ * one constant string for every page, so it says "a read-only visitor", never
+ * which one, and D-11 unlinkability is unaffected.
+ * @type {'/votetorrent/edge-reader/1.0.0'}
+ */
+export const EDGE_READER_PROTOCOL = '/votetorrent/edge-reader/1.0.0';
+
+/**
+ * The connection checks the declaration gate holds closed until `open()`.
+ * `denyDialMultiaddr` is deliberately NOT here: libp2p's browser build fills in
+ * its own default for that one key only when it is absent (refuse plain `ws`
+ * and private addresses), and defining it here would silently drop that
+ * posture. Outbound dials are still held: `denyDialPeer` refuses a dial to a
+ * known peer, and `denyOutboundConnection` refuses every upgrade.
+ */
+export const EDGE_DECLARATION_GATED_CHECKS = Object.freeze([
+	'denyDialPeer',
+	'denyInboundConnection',
+	'denyOutboundConnection',
+	'denyInboundEncryptedConnection',
+	'denyOutboundEncryptedConnection',
+	'denyInboundUpgradedConnection',
+	'denyOutboundUpgradedConnection',
+	'denyInboundRelayedConnection',
+	'denyOutboundRelayedConnection',
+]);
+
+/**
+ * The gate the Edge node is built behind (2026-11-16). `createLibp2pNode`
+ * starts the node, registers the storage handlers and begins the bootstrap
+ * dials before it returns, so without a gate a strand host's first identify of
+ * the page could list cluster/repo; the host then counted the page as a
+ * storage peer and could name it the coordinator for its own first read
+ * (votetorrent-05's reading of the "Can not dial self" redirect). Closed, every
+ * gated check refuses; once `open()` runs, every check allows.
+ * @returns {{ connectionGater: Record<string, () => boolean>, open: () => void, isOpen: () => boolean }}
+ */
+export function edgeDeclarationGate() {
+	let opened = false;
+	/** @type {Record<string, () => boolean>} */
+	const connectionGater = {};
+	for (const name of EDGE_DECLARATION_GATED_CHECKS) connectionGater[name] = () => !opened;
+	return {
+		connectionGater,
+		open: () => {
+			opened = true;
+		},
+		isOpen: () => opened,
+	};
+}
+
+/**
+ * Declare this node a read-only edge reader: handle `EDGE_READER_PROTOCOL`
+ * with a handler that closes every stream at once (nothing is ever served on
+ * it). Called while the gate is still closed, so no peer has identified the
+ * node yet.
+ * @param {{ handle(protocol: string, handler: (stream: any) => void): Promise<void> }} node
+ * @returns {Promise<void>}
+ */
+export async function declareEdgeReader(node) {
+	if (!node || typeof node.handle !== 'function') {
+		throw new EdgeNodeConfigError('declareEdgeReader: the node cannot register a protocol handler');
+	}
+	await node.handle(EDGE_READER_PROTOCOL, (stream) => {
+		try {
+			stream.abort(new Error('edge-reader marker only'));
+		} catch {
+			// already closed
+		}
+	});
+}
+
+/**
+ * The Edge node's transport list: websockets, plus the DIALER half of
+ * circuit-relay-v2 so a strand node reachable only through a relay
+ * reservation can be dialed (header point 6). Nothing here listens: the node
+ * is built with no listen addresses, so the circuit transport never makes a
+ * reservation and the page stays unreachable.
+ * @param {{ webSockets?: typeof webSockets, circuitRelayTransport?: typeof circuitRelayTransport }} [deps]
+ * @returns {any[]}
+ */
+export function edgeTransports(deps) {
+	const ws = deps?.webSockets ?? webSockets;
+	const circuit = deps?.circuitRelayTransport ?? circuitRelayTransport;
+	return [ws(), circuit()];
+}
+
+/**
  * @typedef {object} CreateEdgeNodeConfig
  * @property {unknown} strandId
  * @property {string} networkName
@@ -240,12 +380,13 @@ export async function openStrandBlockStorage(strandId) {
  * @typedef {object} CreateEdgeNodeDeps
  * @property {typeof createLibp2pNode} [createLibp2pNode]
  * @property {typeof webSockets} [webSockets]
+ * @property {typeof circuitRelayTransport} [circuitRelayTransport]
  * @property {typeof openStrandBlockStorage} [openStrandBlockStorage]
  */
 
 /**
- * Constructs a browser Edge-tier libp2p node: exactly one transport
- * (`webSockets()`), `fretProfile` set to `'edge'`, the caller's injected
+ * Constructs a browser Edge-tier libp2p node: `edgeTransports()` (websockets
+ * plus the circuit-relay dialer), `fretProfile` set to `'edge'`, the caller's injected
  * `privateKey` and `bootstrapNodes`, and a per-strand IndexedDB block
  * store. `deps` defaults to the real implementations and exists so a test
  * can observe the constructed options object without booting a real node.
@@ -268,6 +409,7 @@ export async function createEdgeNode(config, deps) {
 	const resolvedDeps = {
 		createLibp2pNode: deps?.createLibp2pNode ?? createLibp2pNode,
 		webSockets: deps?.webSockets ?? webSockets,
+		circuitRelayTransport: deps?.circuitRelayTransport ?? circuitRelayTransport,
 		openStrandBlockStorage: deps?.openStrandBlockStorage ?? openStrandBlockStorage,
 	};
 
@@ -288,10 +430,15 @@ export async function createEdgeNode(config, deps) {
 	// side effect of deriving the storage name — see strandStorageDbName.
 	const { dbName, db, storage } = await resolvedDeps.openStrandBlockStorage(strandId);
 
+	// Built behind a closed gate: no connection, inbound or outbound, until the
+	// node has withdrawn storage and declared the marker below.
+	const gate = edgeDeclarationGate();
+
 	let node;
 	try {
 		node = await resolvedDeps.createLibp2pNode({
-			transports: [resolvedDeps.webSockets()],
+			connectionGater: gate.connectionGater,
+			transports: edgeTransports(resolvedDeps),
 			storage,
 			bootstrapNodes,
 			networkName,
@@ -317,6 +464,39 @@ export async function createEdgeNode(config, deps) {
 		await db.close?.();
 		throw err;
 	}
+
+	// A READER, NOT A REPLICA (2026-11-03). `createLibp2pNode` registers this
+	// network's two storage services on every node, and a peer that advertises
+	// either is classified as serving the network (`@optimystic/db-p2p`
+	// `Libp2pKeyPeerNetwork.servesThisNetwork`), so strand nodes put this
+	// anonymous browser in their storage groups -- measured on real nodes: the
+	// collection's root group read `[strand-node, PAGE]`. The page then held
+	// blocks pushed to it, and, being half of the group the reactivity root is
+	// placed on while never willing to serve, refused or short-quorumed most of
+	// its own subscription registrations. Withdrawing both handlers makes it
+	// 'foreign' to every node (upstream's own comment calls this the defence
+	// that "keeps a future client-only node out of every cohort"); its reads are
+	// outbound and unaffected. libp2p's identify push tells connected peers.
+	//
+	// 2026-11-16: this now runs while the declaration gate is still closed, so
+	// no peer has identified the node yet; the marker is declared next, then the
+	// gate opens and the bootstrap peers are dialed. The first identify any peer
+	// gets lists the marker and no storage protocol.
+	try {
+		await withdrawStorageServices(node, networkName);
+		await declareEdgeReader(node);
+	} catch (err) {
+		await node?.stop?.();
+		await db.close?.();
+		throw err;
+	}
+	// The first connection then comes from the bootstrap module's discovery,
+	// about 1 s after the node started (its own timer): db-p2p's earlier seed
+	// dial, made inside `createLibp2pNode`, was refused by the closed gate, and
+	// the peer store holds no bootstrap address yet to redial from (measured
+	// 2026-11-16, `edge-reader-declaration.test.mjs`). The boot's first-
+	// connection wait (`first-connection.js`, 10 s) covers that second.
+	gate.open();
 
 	// 56-24: attach the diagnostic-only connection-lifecycle tap the instant
 	// the node exists -- see this module header's point 8. Wrapped so a probe

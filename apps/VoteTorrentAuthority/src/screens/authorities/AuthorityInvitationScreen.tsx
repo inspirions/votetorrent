@@ -15,12 +15,10 @@ import type {
 import { INetworkEngine } from "@votetorrent/vote-core";
 import { ThemedText } from "../../components/ThemedText";
 import { InlineError } from "../../components/InlineError";
-import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { Footer } from "../../components/Footer";
-import { InfoCard } from "../../components/InfoCard";
 import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
 import type { RootStackParamList } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
@@ -28,6 +26,7 @@ import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
 import { globalStyles } from "../../theme/styles";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useUnsharedInviteGuard } from "../../hooks/useUnsharedInviteGuard";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { takeInviteShare } from "../invitations/invite-share-handoff";
@@ -63,6 +62,8 @@ export default function AuthorityInvitationScreen() {
 
 	// D-05: share text shown after a successful send (authority invite material).
 	const [shareText, setShareText] = useState<string>("");
+	// Protects the only copy of the minted invite until it is shared or copied; confirms before discarding it.
+	const markInviteShared = useUnsharedInviteGuard(shareText);
 
 	// D-06: paste field in accept mode.
 	const [pastedInvite, setPastedInvite] = useState<string>(() => takeInviteShare(shareToken) ?? "");
@@ -272,7 +273,7 @@ export default function AuthorityInvitationScreen() {
 	if (mode === "send") {
 		return (
 			<View style={styles.content}>
-				<ScrollView style={styles.container}>
+				<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 					<View style={styles.section}>
 						<ThemedText type="title" style={styles.sectionTitle}>
 							{t("authorityInvitation")}
@@ -292,7 +293,7 @@ export default function AuthorityInvitationScreen() {
 
 						{/* D-05: share text + Copy button after a successful send */}
 						{shareText ? (
-							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="authority-invitation-share" />
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="authority-invitation-share" onShared={markInviteShared} />
 						) : null}
 					</View>
 				</ScrollView>
@@ -321,7 +322,7 @@ export default function AuthorityInvitationScreen() {
 	const invitationKey = (seedInvite as any)?.key ?? (seedInvite as any)?.inviteKey ?? parsed?.inviteKey;
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{!parsed ? <ThemedText>{t("invitationAcceptPasteHint")}</ThemedText> : null}
 					{expired ? (
@@ -383,31 +384,8 @@ export default function AuthorityInvitationScreen() {
 						onChangeText={setDomainName}
 					/>
 
-					{/* Create a new user, OR sign with the existing profile (Figma frame 34) */}
-					<ThemedText style={styles.note}>{t("soleInitialAdministratorNote")}</ThemedText>
-					<ChipButton
-						label={t("createUser")}
-						icon="circle-plus"
-						fullWidth
-						onPress={() => {}}
-					/>
-					<ThemedText type="defaultSemiBold" style={styles.orText}>
-						{t("or")}
-					</ThemedText>
-					<ThemedText style={styles.note}>{t("userIsSoleAdministratorNote")}</ThemedText>
-					<InfoCard
-						additionalInfo={[{ label: t("user"), value: seedInvite?.name }]}
-						icon="chevron-right"
-						onPress={() => {}}
-					/>
-					<CustomButton
-						title={t("sign")}
-						icon="signature"
-						backgroundColor={colors.important}
-						forceDarkText={true}
-						size="thin"
-						onPress={() => {}}
-					/>
+					{/* Figma frame 34 also drew Create User / user card / SIGN here, with two notes about them. None of
+					    them did anything: the answer is Accept / Reject in the footer below. */}
 
 					{/* D-06: paste field for the share text the sender copied. CustomTextInput's `title` is
 					    the field's only label (a separate heading here rendered it twice). */}
@@ -446,14 +424,6 @@ const localStyles = StyleSheet.create({
 	heading: {
 		marginTop: 12,
 		marginBottom: 8,
-	},
-	note: {
-		marginTop: 12,
-		marginBottom: 4,
-	},
-	orText: {
-		textAlign: "center",
-		marginVertical: 8,
 	},
 });
 

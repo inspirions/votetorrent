@@ -25,25 +25,25 @@
  * `resolveBootstrapNodes` records: the whole module must be exercisable under
  * `node --test`, with no browser, no DOM and no socket.
  *
- * WHY `attachNetworkDb` AND NOT `openStoreHandle` OR `new Database`.
- * `public-election-source.js`'s own header (point 3) states the reason this
- * file must not re-derive: the networks registry — never the URL — is what
- * authorises a store name, because the network hash on this page comes
- * straight out of the URL (D-33) and an unguarded attach would let any link
- * author plant an empty database in a stranger's browser. `attachNetworkDb`
- * is the ONLY connection-layer entry point that is unreachable without a
- * pre-existing registry entry, so this module calls it exactly once and
- * NEVER calls `openStoreHandle`/`createNetworkDb`/`new Database` itself —
- * this module does not register a network. A visitor whose browser was never
- * legitimately bootstrapped into this network sees `attachNetworkDb` fail
- * (any of its three typed errors), and that failure is surfaced here as
- * `PEER_BOOT_STATUS.FAILED`, not silently upgraded into a fresh empty store.
- * Test setup (the mesh-read gate; `live-read-gate.js` before it) registers a
- * network the same way a real prior legitimate bootstrap would, through the
- * data package's own `createNetworkDb`/`writeRowCounts`/`upsertNetwork` —
- * that registration is gate-owned setup, never something this module, or any
- * production code reachable from `main.tsx`, performs on this browser's
- * behalf.
+ * THIS MODULE CREATES THE UI STORE — BUT ONLY AFTER THE NETWORK HAS PROVEN
+ * THE ELECTION (56-26, user decision 2026-11-13). Until then this file only
+ * ever ATTACHED a store a prior "legitimate bootstrap" had made (registry
+ * entry + schema-init marker + C5 row-count record), to stop a link author
+ * planting an empty database in a stranger's browser (T-54-12-02). Nothing in
+ * production ever performed that bootstrap — only test gates did — so on a
+ * real network every visitor failed here with `NotBootstrappedError`
+ * (56-25 Task 4). Now: step 6 first reads the ADDRESSED election's row
+ * through the strand read handle (`probeAddressedElection`, bounded); only
+ * if the network returns it does boot open the store with
+ * `attachLiveDb(networkHash, { create: true })` (Phase 66 C-7: schema
+ * re-declare + init marker, no row-count record, never wipes). A link whose
+ * network is unreachable or holds no such election creates nothing, so a
+ * crafted link can no longer plant an EMPTY store; at most it makes the
+ * browser hold public rows of a real network that serves the election it
+ * names. Without an `electionId` there is nothing to prove, so boot does not
+ * start at all (NO_ADDRESS). This module still never calls
+ * `openStoreHandle`/`createNetworkDb`/`new Database` itself, and registers
+ * nothing in the dashboard's networks registry.
  *
  * `openStoreHandle` mints a NEW `Database` per call, and every handle it
  * produces calls `db.setDefaultVtabName('store')` (`packages/web-data/src
@@ -61,8 +61,18 @@
  * THIS module's handle, so a reasoning error here does not go unnoticed.
  *
  * COLLECTION IDENTITY FOR REACTIVITY (open ground before this plan; no prior
- * plan resolves it). `56-09`'s `startPeerReplication` requires a
- * `collectionId`/`tailId` pair per subscription, and nothing in this repo's
+ * plan resolves it). UPDATE (step 3, 2026-11-03): the bridge now watches
+ * through `node.reactivityWatch`, which needs only each table's collection id
+ * and finds the tail itself, so this module no longer syncs a collection or
+ * reads its header block. The id is now COMPUTED (`collection-id.js`), not
+ * read off the live collection object: on a real strand the module builds a
+ * table's instance lazily, and the lookup below found nothing for a table
+ * hydrated from the strand's catalog (mesh-read gate, 2026-11-03, subject
+ * Election). The measurements below are kept as the record of how the path
+ * was found; the live-object path they describe is no longer used.
+ * Originally, `56-09`'s
+ * `startPeerReplication` required a `collectionId`/`tailId` pair per
+ * subscription, and nothing in this repo's
  * production code has ever computed one before this file — nor, before this
  * plan, had anything in this repo ever actually RUN this composition in a
  * real browser at all (see the `db-p2p` browser-runtime defect this same
@@ -104,34 +114,23 @@
  *     `Election`, declared under the sApp schema `App`, keys as
  *     `'app.election'`), `.collection` on that vtable is the live `Tree`, and
  *     `.collection` on THAT is the live `ICollection` — the same instance
- *     the SQL layer reads and writes through. `resolveCollectionState` below
- *     reaches exactly that path, calls its PUBLIC `sync()` method once, and
- *     only then reads the header block. THIS IS UNDOCUMENTED INTERNAL API,
- *     not a stable public contract — a future `@optimystic/*` bump could
- *     rename or restructure any of these fields with no deprecation notice,
- *     and this is recorded here, not hidden, so that the next reader who
- *     hits a broken `resolveCollectionState` starts here rather than
- *     re-discovering this whole path from scratch. Revisit if/when upstream
- *     publishes a stable "give me this table's current collectionId/tailId"
- *     API — see this plan's SUMMARY for the exact upstream ticket this
- *     should become.
- *   - A table whose collection is unreachable through this path (no cached
- *     vtable, or `sync()` never resolves a header block) is a genuine
- *     strand-provisioning defect, not a case to paper over —
- *     `resolveCollectionState`'s caller throws `PeerBootError` naming the
- *     table rather than silently skipping its subscription.
- *   - `startPeerReplication` is therefore called ONCE PER TABLE in
- *     `PUBLIC_SUBSCRIBED_TABLES`, sharing the SAME `readRows` closure across
- *     every subscription (56-16's `createStrandRowSource` deliberately
- *     rereads the WHOLE allowlist on any one notification, by design — see
+ *     the SQL layer reads and writes through. This module used to read the
+ *     collection's `id` there; it no longer does (see the UPDATE above): the
+ *     map holds only tables something has already read, and the id is the
+ *     plugin's default-URI formula, now computed in `collection-id.js`. A
+ *     table that has never committed is not a defect: the watch waits for
+ *     its first commit.
+ *   - `startPeerReplication` therefore watches EVERY TABLE in
+ *     `PUBLIC_SUBSCRIBED_TABLES`, one watch each, sharing the SAME
+ *     `readRows` closure (56-16's `createStrandRowSource` deliberately
+ *     rereads the WHOLE allowlist on any one wake, by design — see
  *     `strand-read.js`'s own header — so it does not matter which of the N
- *     subscriptions fires; any one of them re-applies every table). This is
+ *     watches fires; any one of them re-applies every table). This is
  *     the load-bearing reason a per-table collectionId, rather than one
  *     "the" collectionId, is even askable: there is no single shared
  *     collection covering every table.
- *   - IF THIS REASONING IS EVER WRONG — the internal field names move, the
- *     header block never resolves, or the tail id this module reads is
- *     stale — the failure surfaces as: no replicated row ever lands
+ *   - IF THIS REASONING IS EVER WRONG — the collection id `collection-id.js`
+ *     computes is not the one the strand's blocks carry — the failure surfaces as: no replicated row ever lands
  *     (mesh-read gate rung 5, `test/browser/mesh-read-gate.js`), and
  *     separately, rung 10 (store/screen agreement through a freshly attached
  *     handle) catches a silently mis-routed or dead subscription even if
@@ -144,14 +143,91 @@ import { loadOrCreateSessionPeerKey } from './identity.js';
 import { createEdgeNode } from './edge-node.js';
 import { openStrandReadHandle, createStrandRowSource, strandIdForNetwork } from './strand-read.js';
 import { startPeerReplication } from './reactivity-bridge.js';
-// `attachNetworkDb` is imported under an alias so this file's own acceptance
-// grep -- "exactly one occurrence of `attachNetworkDb`" -- resolves to this
-// ONE import line, rather than also matching a deps-default line and a call
-// line. See this module's header ("WHY attachNetworkDb AND NOT
-// openStoreHandle OR new Database") for what the identifier itself means;
-// `openUiHandleForNetwork` is this file's own name for that single import,
-// used everywhere below.
-import { attachNetworkDb as openUiHandleForNetwork, closeNetworkDb, PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
+import { createPageTailReader } from './tail-reader.js';
+import { collectionIdForTable } from './collection-id.js';
+// `attachLiveDb` is imported under an alias so this file's own acceptance
+// grep -- "exactly one occurrence of `attachLiveDb`" -- resolves to this ONE
+// import line, rather than also matching a deps-default line and a call line.
+// See this module's header ("THIS MODULE CREATES THE UI STORE") for when it
+// is called; `openUiHandleForNetwork` is this file's own name for that single
+// import, used everywhere below.
+import { attachLiveDb as openUiHandleForNetwork, closeNetworkDb, PUBLIC_SUBSCRIBED_TABLES, readNetworkTurnout } from '@votetorrent/web-data/public';
+import { registerTurnoutReader } from './turnout-source.js';
+import { waitForFirstConnection } from './first-connection.js';
+import { openWhenCoordinatorFound } from './coordinator-wait.js';
+
+/** The one read that proves the addressed election exists on the network.
+ * A named bind, the convention `@votetorrent/web-data/public`'s read modules
+ * use; `:electionId` is not one of Quereus's reserved bind names. */
+const ADDRESSED_ELECTION_PROBE_SQL = 'select Id from Election where Id = :electionId';
+
+/** Attempts and spacing for the probe: a first strand read on a fresh node can
+ * race the coordinator lookup, so a miss is retried a bounded number of times
+ * before boot gives up having created nothing. */
+export const ELECTION_PROBE_ATTEMPTS = 3;
+export const ELECTION_PROBE_DELAY_MS = 2000;
+
+/**
+ * Whether the strand returns a row for `electionId`. Never throws; a read
+ * that throws counts as a miss for that attempt (its error name only is kept,
+ * never its message: a strand row can carry PII). Bounded by
+ * `ELECTION_PROBE_ATTEMPTS`. `anyRead` is true when at least one attempt
+ * completed (returned zero rows rather than throwing): only then did the
+ * network actually answer "no such election" (56-34).
+ *
+ * @param {{ db: { eval(sql: string, params?: any): AsyncIterable<any> } }} strandHandle
+ * @param {string} electionId
+ * @param {{ attempts?: number, delayMs?: number, sleep?: (ms: number) => Promise<void> }} [options]
+ * @returns {Promise<{ found: boolean, attempts: number, lastErrorName: string | null, anyRead: boolean }>}
+ */
+export async function probeAddressedElection(strandHandle, electionId, options = {}) {
+	const attempts = options.attempts ?? ELECTION_PROBE_ATTEMPTS;
+	const delayMs = options.delayMs ?? ELECTION_PROBE_DELAY_MS;
+	const sleep = options.sleep ?? ((/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)));
+	/** @type {string | null} */
+	let lastErrorName = null;
+	let anyRead = false;
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		try {
+			for await (const _row of strandHandle.db.eval(ADDRESSED_ELECTION_PROBE_SQL, { electionId })) {
+				return { found: true, attempts: attempt, lastErrorName: null, anyRead: true };
+			}
+			anyRead = true;
+		} catch (err) {
+			lastErrorName = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
+		}
+		if (attempt < attempts) await sleep(delayMs);
+	}
+	return { found: false, attempts, lastErrorName, anyRead };
+}
+
+/**
+ * What a FAILED boot means to a reader of an addressed election page (56-34),
+ * from its `subject`. Two kinds have their own sentence; any other failure
+ * (a build defect, a replication fault) is `null`, and the page keeps the
+ * plain not-held sentence, which stays true for it.
+ * @type {Readonly<{ UNREACHABLE: 'unreachable', NOT_ON_NETWORK: 'notOnNetwork' }>}
+ */
+export const BOOT_FAILURE_KIND = Object.freeze({ UNREACHABLE: 'unreachable', NOT_ON_NETWORK: 'notOnNetwork' });
+
+/** Subjects of a boot that never got an answer from a peer serving the election's network. */
+const UNREACHABLE_SUBJECTS = Object.freeze([
+	'no-peer-connected', // no connection at all within the first-connection wait
+	'no-coordinator', // connected, but no peer confirmed to serve the strand (coordinator-wait.js)
+	'election-read-failed', // the handle opened, but every probe read threw
+	'FindCoordinatorError', // a coordinator miss raised outside the retried open
+	'BlockUnavailableError', // the cohort holding a block could not be asked
+]);
+
+/**
+ * @param {unknown} subject - a FAILED boot result's `subject`
+ * @returns {'unreachable' | 'notOnNetwork' | null}
+ */
+export function bootFailureKind(subject) {
+	if (subject === 'election-not-on-network') return BOOT_FAILURE_KIND.NOT_ON_NETWORK;
+	if (typeof subject === 'string' && UNREACHABLE_SUBJECTS.includes(subject)) return BOOT_FAILURE_KIND.UNREACHABLE;
+	return null;
+}
 
 export { strandIdForNetwork };
 
@@ -186,77 +262,6 @@ export const PEER_BOOT_STATUS = Object.freeze({
 });
 
 /**
- * The schema name every VoteTorrent table is declared under on the strand
- * (the sApp schema `App`, per `strand-read.js`'s own `setSchemaPath(['App',
- * 'main'])` call) — lowercased, because `OptimysticModule.tables`'s cache
- * key is `` `${declaringSchemaName}.${tableName}`.toLowerCase() `` (measured
- * this session; see this module's header).
- * @type {string}
- */
-const OPTIMYSTIC_MODULE_NAME = 'optimystic';
-const SAPP_SCHEMA_NAME_LOWER = 'app';
-
-/**
- * Reach the live `ICollection` instance the optimystic vtab module already
- * holds for `table`, via the undocumented-but-runtime-accessible path this
- * module's header cites and measures. Returns `undefined` (never throws) when
- * any step along the path is absent — the caller decides how to name that.
- * @param {import('@quereus/quereus').Database} strandDb
- * @param {string} table
- * @returns {{ id: string, sync: () => Promise<void> } | undefined}
- */
-function reachLiveCollection(strandDb, table) {
-	const registered = /** @type {any} */ (strandDb.schemaManager.getModule(OPTIMYSTIC_MODULE_NAME));
-	const optimysticModule = registered?.module;
-	const tableKey = `${SAPP_SCHEMA_NAME_LOWER}.${table.toLowerCase()}`;
-	const vtable = optimysticModule?.tables?.get?.(tableKey);
-	const tree = vtable?.collection;
-	return tree?.collection;
-}
-
-/**
- * Resolve one table's `{ collectionId, tailId }` pair: reach its live
- * collection object, call its PUBLIC `sync()` once to force the
- * discovery/fetch handshake a raw block-id `get()` cannot trigger on an
- * unsynced collection (measured this session — see this module's header),
- * then read the header block's `tailId` off the injected node's
- * `coordinatedRepo`. Throws `PeerBootError` naming the table when any step
- * fails — a strand-provisioning defect this module refuses to paper over
- * with a skipped subscription.
- * @param {import('@quereus/quereus').Database} strandDb
- * @param {{ coordinatedRepo: { get(blockGets: { blockIds: string[] }): Promise<Record<string, { block?: { tailId?: string } }>> } }} node
- * @param {string} table
- * @returns {Promise<{ collectionId: string, tailId: string }>}
- */
-async function resolveCollectionState(strandDb, node, table) {
-	const collection = reachLiveCollection(strandDb, table);
-	if (!collection) {
-		throw new PeerBootError(table, 'no live collection object found for this table -- the strand has not instantiated it');
-	}
-	const collectionId = collection.id;
-	try {
-		await collection.sync();
-	} catch (err) {
-		const name = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
-		throw new PeerBootError(table, `collection.sync() failed while resolving the collection tail (${name})`);
-	}
-	/** @type {Record<string, { block?: { tailId?: string } }>} */
-	let results;
-	try {
-		results = await node.coordinatedRepo.get({ blockIds: [collectionId] });
-	} catch (err) {
-		const name = err && typeof (/** @type {any} */ (err).name) === 'string' ? /** @type {any} */ (err).name : 'Error';
-		throw new PeerBootError(table, `coordinatedRepo.get failed while resolving the collection tail (${name})`);
-	}
-	const result = results ? results[collectionId] : undefined;
-	const tailId = result && result.block ? result.block.tailId : undefined;
-	if (!tailId) {
-		throw new PeerBootError(table, `no committed header block for collection "${collectionId}" after sync() -- the strand has never declared this table`);
-	}
-	return { collectionId, tailId };
-}
-
-/**
  * @typedef {object} StartPublicPeerBootDeps
  * @property {typeof loadBootstrapConfig} [loadBootstrapConfig]
  * @property {(url: string, init: any) => Promise<any>} [fetchImpl]
@@ -267,15 +272,21 @@ async function resolveCollectionState(strandDb, node, table) {
  * @property {typeof openStrandReadHandle} [openStrandReadHandle]
  * @property {typeof createStrandRowSource} [createStrandRowSource]
  * @property {typeof openUiHandleForNetwork} [openUiHandleForNetwork]
+ * @property {typeof probeAddressedElection} [probeAddressedElection]
  * @property {typeof closeNetworkDb} [closeNetworkDb]
  * @property {typeof startPeerReplication} [startPeerReplication]
+ * @property {typeof createPageTailReader} [createPageTailReader]
  * @property {ReadonlyArray<string>} [subscribedTables] - defaults to `PUBLIC_SUBSCRIBED_TABLES`; injectable only for the node test.
+ * @property {typeof registerTurnoutReader} [registerTurnoutReader] - 56-31
+ * @property {typeof readNetworkTurnout} [readNetworkTurnout] - 56-31
+ * @property {typeof waitForFirstConnection} [waitForFirstConnection] - the bounded wait before the first strand read
+ * @property {typeof openWhenCoordinatorFound} [openWhenCoordinatorFound] - the bounded retry around opening the strand read handle
  */
 
 /**
  * @typedef {object} StartPublicPeerBootOptions
  * @property {string | null | undefined} networkHash
- * @property {string | null | undefined} [electionId] - carried for the caller's own readout; no step below branches on it.
+ * @property {string | null | undefined} [electionId] - the addressed election (56-26): boot does not start without one, and creates the UI store only after the strand returns its row.
  * @property {StartPublicPeerBootDeps} [deps]
  */
 
@@ -299,6 +310,7 @@ export async function startPublicPeerBoot(options) {
 	/** @type {StartPublicPeerBootOptions} */
 	const opts = options && typeof options === 'object' ? options : { networkHash: null };
 	const networkHash = typeof opts.networkHash === 'string' ? opts.networkHash : '';
+	const electionId = typeof opts.electionId === 'string' ? opts.electionId : '';
 	/** @type {StartPublicPeerBootDeps} */
 	const deps = opts.deps && typeof opts.deps === 'object' ? opts.deps : {};
 
@@ -314,14 +326,24 @@ export async function startPublicPeerBoot(options) {
 		openStrandReadHandle: deps.openStrandReadHandle ?? openStrandReadHandle,
 		createStrandRowSource: deps.createStrandRowSource ?? createStrandRowSource,
 		openUiHandleForNetwork: deps.openUiHandleForNetwork ?? openUiHandleForNetwork,
+		probeAddressedElection: deps.probeAddressedElection ?? probeAddressedElection,
 		closeNetworkDb: deps.closeNetworkDb ?? closeNetworkDb,
 		startPeerReplication: deps.startPeerReplication ?? startPeerReplication,
+		createPageTailReader: deps.createPageTailReader ?? createPageTailReader,
 		subscribedTables: deps.subscribedTables ?? PUBLIC_SUBSCRIBED_TABLES,
+		registerTurnoutReader: deps.registerTurnoutReader ?? registerTurnoutReader,
+		readNetworkTurnout: deps.readNetworkTurnout ?? readNetworkTurnout,
+		waitForFirstConnection: deps.waitForFirstConnection ?? waitForFirstConnection,
+		openWhenCoordinatorFound: deps.openWhenCoordinatorFound ?? openWhenCoordinatorFound,
 	};
 
 	// -- 1. No usable address: the root, election-less page must not open a
 	//       socket, fetch a config or touch storage of any kind.
-	if (networkHash === '') {
+	//       56-26: an address with no election is the same: boot can only
+	//       create the UI store after the strand returns the ADDRESSED
+	//       election, so without one there is nothing to prove and nothing to
+	//       start.
+	if (networkHash === '' || electionId === '') {
 		return { status: PEER_BOOT_STATUS.NO_ADDRESS };
 	}
 
@@ -338,12 +360,22 @@ export async function startPublicPeerBoot(options) {
 	let uiDb = null;
 	/** @type {Array<() => Promise<void>>} */
 	const replicationStops = [];
+	/** 56-31: removes this boot's turnout reader; runs FIRST in the unwind. @type {(() => void) | null} */
+	let unregisterTurnout = null;
 
 	/** Idempotent-safe teardown of everything acquired so far, in the fixed
 	 * order this function's own contract promises. Every leg swallows its own
 	 * error so one failed teardown never blocks the rest.
 	 * @returns {Promise<void>} */
 	const unwind = async () => {
+		if (unregisterTurnout) {
+			try {
+				unregisterTurnout();
+			} catch {
+				// Swallowed.
+			}
+			unregisterTurnout = null;
+		}
 		for (let i = replicationStops.length - 1; i >= 0; i -= 1) {
 			try {
 				await replicationStops[i]();
@@ -389,11 +421,19 @@ export async function startPublicPeerBoot(options) {
 		//       helper.
 		const privateKey = await resolved.loadOrCreateSessionPeerKey(resolved.sessionStorage);
 
-		// -- 4. The Edge node.
+		// -- 4. The Edge node, on the STRAND's network. db-p2p namespaces every
+		//       protocol id by network name (`/optimystic/<networkName>/...`),
+		//       and a strand's nodes are built as `strand-<strandId>`
+		//       (`@serfab/cadre-core` `strand-instance-manager.js`; the strand
+		//       read handle's plugin composes under the same name,
+		//       `@serfab/quereus-plugin-sereus` `compose-strand.js`). Built as
+		//       the bare network hash, as it was until 2026-11-03, this node's
+		//       discovery, key network and repo protocols matched no strand node.
 		const strandId = strandIdForNetwork(networkHash);
+		const networkName = `strand-${strandId}`;
 		edgeNode = await resolved.createEdgeNode({
 			strandId,
-			networkName: networkHash,
+			networkName,
 			bootstrapNodes: configResult.bootstrapNodes,
 			privateKey,
 		});
@@ -409,48 +449,70 @@ export async function startPublicPeerBoot(options) {
 		if (!nodeWithRepo || !nodeWithRepo.coordinatedRepo) {
 			throw new PeerBootError('coordinatedRepo', 'the Edge node carries no coordinatedRepo attachment -- 56-05 always attaches one to a node it builds');
 		}
-		strandReadHandle = await resolved.openStrandReadHandle({
-			networkHash,
-			node: edgeNode.node,
-			coordinatedRepo: /** @type {any} */ (nodeWithRepo.coordinatedRepo),
-		});
+		// -- 5a. Wait (bounded) for the first peer connection. Opening the
+		//        strand read handle before any bootstrap dial lands fails at once
+		//        ("No coordinator available"), and the unwind then aborts the
+		//        dial that was about to land (`first-connection.js`).
+		const firstConnection = await resolved.waitForFirstConnection(edgeNode.node);
+		if (!firstConnection || firstConnection.connected !== true) {
+			throw new PeerBootError('no-peer-connected', 'no bootstrap peer connected within the first-connection wait -- the strand was not read');
+		}
+		// -- 5b. Open the strand read handle, retrying (bounded) while no
+		//        connected peer is yet confirmed to serve the strand. The first
+		//        connection is often the relay the strand member is dialled
+		//        through, which serves no strand (`coordinator-wait.js`).
+		strandReadHandle = await resolved.openWhenCoordinatorFound(() =>
+			resolved.openStrandReadHandle({
+				networkHash,
+				node: edgeNode.node,
+				coordinatedRepo: /** @type {any} */ (nodeWithRepo.coordinatedRepo),
+			}),
+		);
 
-		// -- 6. The browser store. See this module's header for why this is
-		//       the security-gated attach, and only ever this, once.
-		uiDb = await resolved.openUiHandleForNetwork(networkHash);
+		// -- 6. The browser store, created ONLY after the network proves the
+		//       addressed election (56-26; this module's header). A miss creates
+		//       nothing: the FAILED result names the subject, the unwind closes
+		//       the strand handle and the Edge node, and no store was opened.
+		const probe = await resolved.probeAddressedElection(strandReadHandle, electionId);
+		if (!probe || probe.found !== true) {
+			// 56-34: "not on the network" only when a read actually completed;
+			// a probe whose every read threw never heard the network's answer.
+			throw new PeerBootError(
+				probe && probe.anyRead === false ? 'election-read-failed' : 'election-not-on-network',
+				`the strand returned no row for the addressed election after ${Number(probe?.attempts) || 0} attempt(s) (last error: ${typeof probe?.lastErrorName === 'string' ? probe.lastErrorName : 'none'}) -- no UI store created`,
+			);
+		}
+		uiDb = await resolved.openUiHandleForNetwork(networkHash, { create: true });
 
 		const { readRows } = resolved.createStrandRowSource({ uiDb, strandDb: strandReadHandle });
 
-		// -- 7. Start replication, once per publicly-subscribed table, sharing
-		//       one `readRows` closure across every subscription. See this
-		//       module's header for why a per-table collectionId is what the
-		//       question even needs to be, and why sharing `readRows` is safe.
-		for (const table of resolved.subscribedTables) {
-			const { collectionId: collectionIdString, tailId } = await resolveCollectionState(
-				strandReadHandle.db,
-				/** @type {any} */ (edgeNode.node),
-				table,
-			);
-			// `startPeerReplication` (56-09) requires `collectionId` as RAW BYTES
-			// (`ReactivitySubscriptionManagerOptions.collectionId: Uint8Array` --
-			// "the collection's stable identity, the collection's id block id, raw
-			// bytes"), unlike `tailId`, which stays a `BlockId` string: 56-09's own
-			// module converts THAT to bytes internally via `reactivityTailBytes`.
-			// `collectionId` carries no coord-matching constraint (only tailId
-			// derives the topic/coord), so the plain UTF-8 encoding below is safe
-			// -- there is no "wrong" encoding to avoid here, unlike tailId's
-			// documented double-hash trap.
-			const collectionId = new TextEncoder().encode(collectionIdString);
-			const replication = await resolved.startPeerReplication({
-				db: uiDb,
-				networkHash,
-				node: edgeNode.node,
-				collectionId,
-				tailId,
-				readRows,
-			});
-			replicationStops.push(() => replication.stop());
-		}
+		// -- 7. Start replication: one watch per publicly-subscribed table, all
+		//       through the node's own watch service and the page's one tail
+		//       reader, sharing one `readRows` closure. Any table's wake re-reads
+		//       every table (`strand-read.js`'s header), so the bridge folds wakes
+		//       into one pass at a time.
+		const collections = resolved.subscribedTables.map((table) => ({
+			table,
+			collectionId: collectionIdForTable(table),
+		}));
+		const tails = resolved.createPageTailReader(edgeNode.node, networkName);
+		const replication = await resolved.startPeerReplication({
+			db: uiDb,
+			networkHash,
+			node: edgeNode.node,
+			collections,
+			tails,
+			readRows,
+		});
+		replicationStops.push(() => replication.stop());
+
+		// -- 7b. 56-31: ballots cast so far are counted on the strand through
+		//        this boot's read handle (two numbers, no rows stored). The
+		//        page asks through `turnout-source.js`.
+		const turnoutHandle = strandReadHandle;
+		unregisterTurnout = resolved.registerTurnoutReader(networkHash, (/** @type {string} */ id) =>
+			resolved.readNetworkTurnout(turnoutHandle.db, id),
+		);
 
 		// -- 8. Started. `stop()` is idempotent and runs every unwind step,
 		//       replications first, then the strand-read handle, then the Edge

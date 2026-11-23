@@ -18,7 +18,7 @@ import { InlineError } from "../../components/InlineError";
 import { globalStyles } from "../../theme/styles";
 import { useApp } from "../../providers/AppProvider";
 import { useCurrentOfficerScopes } from "../../hooks/useCurrentOfficerScopes";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import type {
 	IRegistrationEngine,
 	ISignatureTasksEngine,
@@ -36,6 +36,8 @@ import { TransparencyStatsCard } from "./components/TransparencyStatsCard";
 import type { RootStackParamList } from "../../navigation/types";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
+import { useStrandChanges } from "../../hooks/useStrandChanges";
+import { useWaitingActionCount } from "../../hooks/useCommitShare";
 
 // D-12: this screen previously carried a screen-local loosely-typed
 // navigation widening because RootStackParamList did not yet carry
@@ -66,6 +68,9 @@ export default function RegistrationInboxScreen() {
 	const { t } = useTranslation();
 	const keyboardInset = useKeyboardInset();
 	const { colors } = useTheme() as ExtendedTheme;
+	// Decisions made on this phone (approval screens track them as "decision:<requestId>") that no
+	// other member holds yet (todo 2026-09-11-optimystic-commit-success-hides-unresolvable-cohort).
+	const unsharedDecisions = useWaitingActionCount("decision:");
 	const insets = useSafeAreaInsets();
 	const { getEngine } = useApp();
 	const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -212,6 +217,11 @@ export default function RegistrationInboxScreen() {
 		}, [loadFirstPage])
 	);
 
+	// A request that arrives (or another officer's decision) while the inbox is on screen re-reads the first page.
+	useStrandChanges(["App.RegistrationRequest", "App.RegistrationDecision"], () => {
+		loadFirstPage();
+	}, "authority-registration-inbox");
+
 	const loadStats = useCallback(async () => {
 		try {
 			const engine = await getEngine<IRegistrationEngine>("registration");
@@ -317,12 +327,24 @@ export default function RegistrationInboxScreen() {
 
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 24 + keyboardInset }}
 		>
 			<View style={styles.section} testID="registration-inbox-error">
 				<InlineError message={errorMessage} />
 			</View>
+
+			{unsharedDecisions > 0 ? (
+				<View style={styles.section}>
+					<View testID="registration-inbox-decisions-not-shared" style={localStyles.banner} accessibilityLiveRegion="polite">
+						<FontAwesome6 name="cloud-arrow-up" size={14} color={colors.warning} />
+						<ThemedText type="small" style={{ color: colors.warningText ?? colors.text, flexShrink: 1 }}>
+							{t("decisionsNotShared", { count: unsharedDecisions })}
+						</ThemedText>
+					</View>
+				</View>
+			) : null}
 
 			{/* Two-branch scope-gate banner — a UI legibility affordance ONLY,
 			    NEVER a security boundary (AdminSigning.SignerKeyValid /
@@ -345,7 +367,7 @@ export default function RegistrationInboxScreen() {
 					<View testID="registration-inbox-readonly-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrationRequestScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
+							{t("registrationRequestScopeReadOnlyBanner", { scope: scopeLabel("vrg", t) })}
 						</ThemedText>
 					</View>
 				))}

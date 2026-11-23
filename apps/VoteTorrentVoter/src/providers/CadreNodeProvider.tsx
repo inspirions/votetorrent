@@ -9,11 +9,19 @@ import type { PropsWithChildren } from "react";
 import { LevelDB, LevelDBWriteBatch } from 'rn-leveldb';
 import { openOptimysticRNDb, loadOrCreateRNPeerKey } from '@optimystic/db-p2p-storage-rn';
 import { createScopedRnStorageProvider } from '../engines/storage-guard';
-import { CadreNode } from '@serfab/cadre-core';
+import { isUnrestorableControlSchemaError } from '../engines/control-schema-recovery';
+import { CadreNode, controlStorageScope } from '@serfab/cadre-core';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import bootstrapConfigDoc from '../../bootstrap.config.json';
 import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootstrap-config';
+import { relayOnlyAddrs } from '../config/relay-only-addrs';
+import { readJoinBootstrap } from '../engines/join-bootstrap';
+import { openBootstrapPeerStore, openTrustedOwnerStore } from '../engines/rn-durable-slot';
+import { noiseCryptoForNode } from '../engines/noise-crypto-config';
+import { createEdgeReaderRefusal, EDGE_READER_PROTOCOL, registerVoteTorrentFunctions } from '@votetorrent/vote-engine/rn';
+import { CommitDurabilityTracker } from '@votetorrent/vote-engine/rn';
+import { CommitShareProvider } from '../hooks/useCommitShare';
 
 // ---------------------------------------------------------------------------
 // Context type
@@ -22,15 +30,28 @@ import { readBootstrapConfig, type BootstrapConfigFault } from '../config/bootst
 interface CadreNodeContextType {
   /** The live CadreNode instance (null until started). */
   node: InstanceType<typeof CadreNode> | null;
+  /**
+   * The once-per-mount settle of the node start (#99; mirrors the Authority's `nodeSettled`
+   * 'ready' | 'failed', as React state so consumers react through effect deps). 'starting' from
+   * mount until start() settles; then 'ready' (set in the same commit as `node`) or 'failed'
+   * (start() rejected, including the control-recreate retry). Changes at most once per mount.
+   */
+  nodeStatus: 'starting' | 'ready' | 'failed';
   /** Event-driven sync state derived from CadreNodeEvents (D-10 — no polling). */
   syncState: 'connected' | 'syncing' | 'offline';
   /**
    * A bootstrap-configuration fault, distinct from being offline: offline
    * means we could not reach peers, a fault means we were never told which
    * peers to reach (D-14). `null` when `bootstrap.config.json` parsed to a
-   * valid, non-empty address list.
+   * valid, non-empty address list, OR when a network join left this phone dial targets
+   * (spike 100: a joined voter's bootstrap comes from its join code, not the shipped file).
    */
   configFault: BootstrapConfigFault | null;
+  /**
+   * Re-read the join bootstrap a network join just stored, so `configFault` clears without a
+   * restart. Optional so test doubles of this context need not provide it.
+   */
+  refreshJoinBootstrap?: () => Promise<void>;
   /**
    * Returns the number of connected peers for a given strandId.
    * Reads node.getStrand(strandId).connectedPeers ?? 0.
@@ -74,6 +95,12 @@ export function useCadreNode(): CadreNodeContextType {
 // ---------------------------------------------------------------------------
 const PARTY_ID = 'votetorrent';
 
+/** Node-local store scope (the same name as the peer-identity store below). */
+const CADRE_STORE_SCOPE = 'votetorrent-voter-cadre-node';
+
+/** Strand-address re-ask interval (ms); see the `controlCohort` comment in the CadreNode config. */
+const STRAND_ADDR_REFRESH_MS = 30_000;
+
 const bootstrapConfig = readBootstrapConfig(bootstrapConfigDoc);
 
 /**
@@ -116,8 +143,9 @@ export function resolveBootstrapNodes(addr: string): string[] {
 // period that denies exactly that dial, so `listen()` fails and the transport manager's
 // FATAL_ALL aborts start. `relayAddrs` takes the 'search' route (one bare `/p2p-circuit`
 // listener, no dial) and CadreNode.start() drives the reservation explicitly once the
-// control database is up. Failure is still fail-fast: a relay that never answers throws
-// RelayReservationFailedError out of start().
+// control database is up. cadre-core's default is fail-fast (a first attempt that lands nothing
+// throws RelayReservationFailedError out of start()); this provider sets `requireRelay: false`
+// below, so a slow relay costs dialability for a while instead of the node.
 //
 // Entries are the BARE relay addrs; cadre-core appends `/p2p-circuit` itself. Still routed
 // through the blank-safe resolveBootstrapNodes guard per address, so an empty validated
@@ -149,6 +177,12 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   const nodeRef = useRef<InstanceType<typeof CadreNode> | null>(null);
   // nodeState is the node instance exposed via context (set after construction).
   const [node, setNode] = useState<InstanceType<typeof CadreNode> | null>(null);
+  const [nodeStatus, setNodeStatus] = useState<'starting' | 'ready' | 'failed'>('starting');
+  // Spike 100: how many dial targets a network join stored (0 = none; the shipped file decides).
+  const [joinBootstrapCount, setJoinBootstrapCount] = useState(0);
+  const refreshJoinBootstrap = useCallback(async () => {
+    setJoinBootstrapCount((await readJoinBootstrap()).length);
+  }, []);
 
   // Boot effect: construct + start the CadreNode.
   // Runs once on mount ([] dep array). node.start() is NOT called in the
@@ -195,7 +229,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // from another's is the LevelDBRawStorage instance (the underlying LevelDB
         // directory). cadre-core is built for exactly this: it calls
         // `provider(strandId)` per strand (strand-instance-manager.js:21) and
-        // `provider('control')` for the control DB (cadre-node.js:180).
+        // `provider(controlStorageScope(partyId))` — 'control-<hex(partyId)>' — for the control DB.
         //
         // The previous `() => new LevelDBRawStorage(db)` IGNORED that argument and
         // returned one shared LevelDB, so EVERY network's Authority/Officer/Admin
@@ -215,10 +249,41 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         // ISO-01 per-scope storage + release-build persistence guardrail — see engines/storage-guard.ts.
         const scopedStorageProvider = createScopedRnStorageProvider('votetorrent-voter-strand');
 
-        localNode = new CadreNode({
+        // Spike 100: a joined phone's bootstrap is the authority's member machines its join code
+        // named (engines/join-bootstrap.ts). They are bootstrap peers ONLY, never `relayAddrs`: a
+        // member is not necessarily a relay, and one that does not answer a reservation would
+        // keep the relay supervisor re-driving it for nothing.
+        const joinBootstrap = await readJoinBootstrap();
+        if (isMounted) setJoinBootstrapCount(joinBootstrap.length);
+        const bootstrapNodes = [...new Set([...CONTROL_RELAY_ADDRS, ...joinBootstrap])];
+        // Spike 100: persist the trusted-owner anchor (the owner keys a redeemed invitation pins)
+        // and the bootstrap-peer store across restarts — see engines/rn-durable-slot.ts for the
+        // measured failure without them.
+        // A store that cannot be opened degrades to cadre-core's in-memory default (what every
+        // launch had before) rather than blocking boot; the closed token says which one.
+        const trustedOwnerStore = await openTrustedOwnerStore(PARTY_ID, CADRE_STORE_SCOPE).catch(() => {
+          console.warn('[CadreNodeProvider] trusted-owner store unavailable; using the in-memory anchor');
+          return undefined;
+        });
+        const bootstrapPeerStore = await openBootstrapPeerStore(PARTY_ID, CADRE_STORE_SCOPE).catch(() => {
+          console.warn('[CadreNodeProvider] bootstrap-peer store unavailable; using the in-memory store');
+          return undefined;
+        });
+
+        // The resolver below reads the node's live addresses, so it needs the node it belongs to.
+        const nodeHolder: { current: InstanceType<typeof CadreNode> | null } = { current: null };
+        const track = (made: InstanceType<typeof CadreNode>) => {
+          nodeHolder.current = made;
+          return made;
+        };
+        // One edge-reader refusal per boot, created outside makeNode so the recovery rebuild reuses it.
+        const edgeReaderRefusal = createEdgeReaderRefusal();
+        const makeNode = () => track(new CadreNode({
           privateKey,
-          controlNetwork: { partyId: PARTY_ID, bootstrapNodes: CONTROL_RELAY_ADDRS },
-          profile: 'transaction',
+          controlNetwork: { partyId: PARTY_ID, bootstrapNodes },
+          ...(trustedOwnerStore ? { trustedOwners: { store: trustedOwnerStore } } : {}),
+          ...(bootstrapPeerStore ? { bootstrapPeers: { store: bootstrapPeerStore } } : {}),
+          nodeClass: 'device',
           // Published @serfab/cadre-core@0.8.1 added a fail-closed sApp-schema signature
           // policy (requireSignedSchemas defaults true): the unsigned `org.votetorrent`
           // demo schema (rn-db-factory sAppConfig has id:'org.votetorrent' + no signature)
@@ -246,6 +311,14 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // CONTROL node network — reserves through the drone's CONTROL relay (P2P-11 41-11).
           network: {
+            // Same as the Authority (D-2): cadre-core 1.13+ waits the full default (10 min) after a
+            // sibling's empty strand-addr answer, which blinds a phone that joined before the
+            // sibling held the strand's addresses. Re-ask every 30 s until the upstream fix lands.
+            controlCohort: { strandAddrRefreshMs: STRAND_ADDR_REFRESH_MS },
+            // Spike 100 (F2 decision): publish only relay-circuit addresses to the cadre, never
+            // this phone's own IP — see config/relay-only-addrs.ts.
+            inviteAddressResolver: async () =>
+              relayOnlyAddrs((nodeHolder.current?.getMultiaddrs() ?? []).map(addr => addr.toString())),
             transports: [
               webSockets(),
               // D-10: cast by the global transportSymbol, not structural type — the
@@ -267,9 +340,23 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
             // The STRAND relay moves to strandNetwork below, so the control and strand
             // libp2p nodes no longer collide at one relay under this peer's shared PeerId.
             relayAddrs: CONTROL_RELAY_ADDRS,
+            // Fail-soft on the FIRST reservation attempt (same as the Authority, outer 5f8e7b2c).
+            // cadre-core's default (requireRelay unset) throws RelayReservationFailedError out of
+            // start() when that attempt lands nothing inside its budget (18 s at the default link),
+            // and the catch below then stops the node for the whole process: VoterAppProvider waits
+            // for a node before it re-opens a joined network, so the phone never re-attaches until
+            // the app is killed. 64-53 hit exactly that on a relaunched Authority keyholder while the
+            // relay admitted a reservation within the same minute. `false` runs the SAME drive and
+            // keeps the SAME background supervisor re-driving the reservation; only the throw is
+            // dropped.
+            requireRelay: false,
             // Permissive gater — allows loopback / emulator host dials (D-11).
             // Per-strand enrollment gating is v2.x scope.
             connectionGater: { denyDialMultiaddr: async () => false },
+            // Native Noise crypto (react-native-quick-crypto) for the control node AND every
+            // strand node, as on the Authority (spike 093): pure-JS Noise on Hermes saturates the
+            // JS thread during bring-up. See engines/noise-crypto-config.ts.
+            noiseCrypto: noiseCryptoForNode(),
           } as any,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           // On cadre-core 0.10.0 the `strandNetwork` override block is REMOVED.
@@ -299,14 +386,57 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
           //
           // Strand nodes therefore inherit `network` above (the single control relay).
           hibernation: { enabled: false },
-        });
+          // Change notifications (cadre-core 1.20 `strandReactivity`, optimystic cohort-topic substrate): every
+          // strand node announces the commits it coordinates, and tables tagged "optimystic.network_watch" get a
+          // network watch, so a screen (useStrandChanges) is woken by a commit made on ANOTHER machine instead of
+          // waiting for its focus reload or a timer. It is also what gives the strand node its matchmaking
+          // handlers (Voter: pool-matchmaking-ports.ts). Cost: one cohort-topic host per strand node (db-p2p
+          // builds it as a core host, 30 s renewals, even on a phone); measure CPU on the Redmi before release.
+          strandReactivity: { enabled: true },
+          // Keeps strand peers that declared themselves read-only edge readers (an officer's browser dashboard,
+          // which stores nothing) out of this phone's write cohorts and coordinator choice, so a write never
+          // waits on an approval that peer cannot give. Reads are unaffected. A peer is refused only on its own
+          // identify, so no peer can get another one refused.
+          strandCohortRefusal: edgeReaderRefusal.hook,
+          // VoteTorrent's SQL functions on each strand database before cadre-core applies the schema (patched
+          // cadre-core `strandDatabaseSetup`): quereus 5.6 refuses a CHECK calling an unregistered function at
+          // CREATE TABLE, so registering them after the strand opened (registerDbPlugins) is too late.
+          strandDatabaseSetup: registerVoteTorrentFunctions,
+          // The same refusal for the CONTROL network (VoteTorrent cadre-core patch): a paired dashboard is a
+          // cadre member and the control cohort is every member, so without it this phone's own control
+          // writes (self-record refresh, StrandPeer) could wait on an unresponsive browser. Reads are unaffected.
+          controlCohortRefusal: edgeReaderRefusal.control,
+          // A phone approves nothing (user decision 2026-11-16; doc/architecture.md "Transaction only"): it declares
+          // itself an edge reader, so every machine's refusal keeps it out of their control and strand write cohorts
+          // and coordinator picks, and its strand node withdraws the storage services (cluster/repo) and stores
+          // nothing. Without it a phone asleep held every write in the network for ~20 s per round (db-p2p waits on
+          // every cohort member): release 298 s and publish 77.6 s with the emulator Voter, 1.5 s / 0.18 s without.
+          // Its own writes still land through the authority's machines (voter-approval-exclusion.harness.spec.ts).
+          edgeReaderProtocol: EDGE_READER_PROTOCOL,
+        }));
 
         // node.start() is inside useEffect — never blocks initial render (D-06 / T-22-03).
-        await localNode.start();
+        localNode = makeNode();
+        try {
+          await localNode.start();
+        } catch (startError) {
+          // Spike 105: a control store an older cadre-core wrote (1.13 -> 1.14: Revocation.RowIsGone
+          // still references the dropped PendingJoin) can be neither migrated nor restored, so every
+          // launch fails. cadre-core's policy is to recreate it. Recreate ONLY the control scope —
+          // the peer key and every network's strand store stay — and start once more.
+          if (!isUnrestorableControlSchemaError(startError)) throw startError;
+          const controlScope = controlStorageScope(PARTY_ID);
+          console.warn(`[CadreNodeProvider] control store '${controlScope}' was written by an older cadre-core and cannot be migrated; recreating it`);
+          await localNode.stop().catch(() => undefined);
+          await scopedStorageProvider.destroyScope(controlScope);
+          localNode = makeNode();
+          await localNode.start();
+        }
 
         if (isMounted) {
           nodeRef.current = localNode;
           setNode(localNode);
+          setNodeStatus('ready');
         } else {
           // Component unmounted before start completed — clean up.
           await localNode.stop().catch(() => undefined);
@@ -318,6 +448,7 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
         } catch {
           // ignore stop errors
         }
+        if (isMounted) setNodeStatus('failed');
       }
     }
 
@@ -376,6 +507,19 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
     };
   }, [node]);
 
+  // Which of this phone's writes no other member holds yet (todo 2026-09-11-optimystic-commit-
+  // success-hides-unresolvable-cohort). One tracker per provider mount, attached to whichever node
+  // is live; screens read it through CommitShareContext (hooks/useCommitShare). Created defensively:
+  // a test that mocks '@votetorrent/vote-engine/rn' without the class gets no tracker, not a throw.
+  const [commitTracker] = useState<CommitDurabilityTracker | null>(() =>
+    typeof CommitDurabilityTracker === 'function' ? new CommitDurabilityTracker() : null,
+  );
+  useEffect(() => {
+    if (!node || !commitTracker) return;
+    commitTracker.attach(node);
+    return () => commitTracker.detach();
+  }, [node, commitTracker]);
+
   // connectedPeers reads live data from the StrandInstance (no polling — D-10).
   const connectedPeers = useCallback(
     (strandId: string): number => {
@@ -386,8 +530,16 @@ export function CadreNodeProvider({ children }: PropsWithChildren) {
   );
 
   return (
-    <CadreNodeContext.Provider value={{ node, syncState, configFault: bootstrapConfig.fault, connectedPeers }}>
-      {children}
+    <CadreNodeContext.Provider
+      value={{
+        node,
+        nodeStatus,
+        syncState,
+        configFault: joinBootstrapCount > 0 ? null : bootstrapConfig.fault,
+        connectedPeers,
+        refreshJoinBootstrap,
+      }}>
+      {commitTracker ? <CommitShareProvider tracker={commitTracker}>{children}</CommitShareProvider> : children}
     </CadreNodeContext.Provider>
   );
 }

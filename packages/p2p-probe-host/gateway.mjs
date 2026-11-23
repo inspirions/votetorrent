@@ -56,7 +56,8 @@ import { resolve as resolvePath, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { X509Certificate, createHash } from 'node:crypto';
-import { CadreNode, PROVISIONAL_ADMISSION_DEADLINE_MS, PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS } from '@serfab/cadre-core';
+import { CadreNode, PROVISIONAL_ADMISSION_DEADLINE_MS, PROVISIONAL_ADMISSION_CLOSE_TIMEOUT_MS, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
+import { VOTETORRENT_SCHEMA_VERSION, registerVoteTorrentFunctions } from '@votetorrent/vote-engine/browser';
 import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
@@ -781,11 +782,14 @@ export async function startGateway(options = {}) {
 
   const identityKey = await generateKeyPair('Ed25519');
   const node = new CadreNode({
+    // VoteTorrent's SQL functions before the sApp schema applies: quereus 5.6 refuses a CHECK that calls an
+    // unregistered function at CREATE TABLE (VoteTorrent cadre-core patch: strand-database-setup).
+    strandDatabaseSetup: registerVoteTorrentFunctions,
     // Explicit privateKey: an ephemeral libp2p key makes getIdentityOwnerKey() throw
     // ("node identity not resolved") — drone.mjs:63-72's stated reason, inherited here.
     privateKey: identityKey,
     controlNetwork: { partyId: config.partyId, bootstrapNodes: [] },
-    profile: 'storage',
+    nodeClass: 'server',
     requireSignedSchemas: false,
     strandFilter: { mode: 'all' },
     strandClusterSize: 2,
@@ -817,7 +821,8 @@ export async function startGateway(options = {}) {
 
   // ── Owner genesis — MUST run while the node is solo, above addStrand and above anything that
   // admits a peer (drone.mjs:202-216's ordering, inherited). ─────────────────────────────────
-  const owner = node.getIdentityOwnerKey();
+  // cadre-core 1.18 deleted getIdentityOwnerKey(); derive the same identity owner key here.
+  const owner = ed25519KeyPairFromLibp2p(identityKey);
   await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
   const controlDb = node.getControlDatabase();
   if (!controlDb) fatal('gateway has no control database after start() — cannot run owner genesis.');
@@ -857,6 +862,7 @@ export async function startGateway(options = {}) {
         id: 'org.votetorrent',
         version: '1.0.0',
         schema,
+        schemaVersion: VOTETORRENT_SCHEMA_VERSION,
         latencyHint: 'interactive',
       },
       // `mode: 'bootstrap'` was deleted from StrandConfig in cadre-core 0.11 and has been ignored

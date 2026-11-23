@@ -142,10 +142,21 @@ export interface IAssociationEngine {
   submitAssociationAttestation(answer: AssociationAttestationAnswer, requesterKey: string, signatureOrCallback: SignatureOrCallback): Promise<void>
 
   /**
-   * D-06 read-only status-screen list. `status` is an OPTIONAL narrowing
-   * predicate — omitted returns every request for the authority.
+   * D-06 read-only status-screen list, newest `submittedAt` first (id as the
+   * tiebreak). `status` is an OPTIONAL narrowing predicate — omitted returns
+   * every request for the authority. `options.limit` returns only the newest
+   * `limit` rows (a screen pages by asking for a larger limit); omitted
+   * returns them all.
    */
-  listAssociationRequests(authorityId: string, status?: AssociationRequestStatus): Promise<AssociationRequestRead[]>
+  listAssociationRequests(authorityId: string, status?: AssociationRequestStatus, options?: { limit?: number }): Promise<AssociationRequestRead[]>
+
+  /**
+   * Every request submitted under one device key, newest `submittedAt` first
+   * (id as the tiebreak), across authorities — the caller narrows by
+   * authority. The Voter reads its own requests through this instead of
+   * listing every request in the network.
+   */
+  listAssociationRequestsByDeviceKey(deviceKey: string): Promise<AssociationRequestRead[]>
 
   /** Returns `undefined` for an unknown id, never throws. */
   getAssociationRequest(requestId: string): Promise<AssociationRequestRead | undefined>

@@ -101,7 +101,7 @@ export default function CreateBallotScreen() {
 	// fires once and never clobbers a user choice.
 	useEffect(() => {
 		if (primaryAuthorityId && !(ballotDraft as any).authority) {
-			setBallotDraft({ ...ballotDraft, authority: primaryAuthorityId } as any);
+			setBallotDraft((prev) => ({ ...prev, authority: primaryAuthorityId }) as any);
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [primaryAuthorityId, (ballotDraft as any).authority]);
@@ -173,15 +173,15 @@ export default function CreateBallotScreen() {
 	};
 
 	const handleDescriptionChange = (description: string) => {
-		setBallotDraft({ ...ballotDraft, description });
+		setBallotDraft((prev) => ({ ...prev, description }));
 	};
 
 	const handleAuthorityChange = (authority: string) => {
-		setBallotDraft({ ...ballotDraft, authority } as any);
+		setBallotDraft((prev) => ({ ...prev, authority }) as any);
 	};
 
 	const handleDistrictsChange = (districts: string[]) => {
-		setBallotDraft({ ...ballotDraft, districts });
+		setBallotDraft((prev) => ({ ...prev, districts }));
 	};
 
 	const handleAddQuestion = () => {

@@ -38,6 +38,8 @@ export { UserEngine } from './user/user-engine.js'
 // re-attach gate.
 export {
 	registerDbPlugins,
+	// cadre-core `strandDatabaseSetup` / `StrandDatabase` `databaseSetup` (quereus 5.6 CHECK function gate).
+	registerVoteTorrentFunctions,
 	initDB,
 	prepareDb,
 	isSchemaInitialized,
@@ -47,6 +49,7 @@ export {
 // The single source of truth for the DDL, bundled as a string so no `node:fs`
 // or `import.meta` is needed in a browser bundle.
 export { VOTETORRENT_SCHEMA_SQL } from './database/schema-sql.js'
+export { VOTETORRENT_SCHEMA_VERSION } from './database/schema-version.js'
 
 // `H16` produces the `networkHash` the browser database name is keyed on; the
 // three datetime helpers are the only correct producers/parsers of the
@@ -54,6 +57,93 @@ export { VOTETORRENT_SCHEMA_SQL } from './database/schema-sql.js'
 export { H16, toCanonicalDatetime, nowCanonicalDatetime, fromCanonicalDatetime } from './utils.js'
 
 export type { DbFactory, EngineContext } from './types.js'
+
+// The R5 block Merkle tree: SHA-256 over public VoteBlock columns, for the dashboard's recomputation
+// of the root. A Cid that several rows name is resolved by consent authentication (T-65-05-03), with the
+// crypto plugin's digest and P-256 verify (already in this graph through database/initialize.ts).
+// Imported from the module file and NOT from the blocks barrel, because the barrel also carries R6-R8.
+export {
+	BLOCK_TREE_DOMAIN,
+	BLOCK_TREE_EMPTY_ROOT,
+	blockLeafData,
+	voterListDigest,
+	blockLeafHash,
+	blockNodeHash,
+	isBase32Cid,
+	blockCidOf,
+	selectBlockRows,
+	buildBlockTree,
+	verifyInclusion,
+	blockTreeStatus,
+	finalBlockTree,
+	blockConsentDigest,
+	verifyBlockConsent,
+	blockAuthorizer,
+	judgeBlockVoters
+} from './blocks/block-tree.js'
+export type {
+	BlockTreeRow,
+	BlockTreeScope,
+	BlockTreeLeaf,
+	BlockTreeNode,
+	BlockProofStep,
+	BlockInclusionProof,
+	BlockProofResult,
+	BlockTree,
+	BlockTreeRefusal,
+	BlockTreeRejectReason,
+	BlockTreeRejection,
+	BlockRowSelection,
+	BlockTreeResult,
+	InclusionCheck,
+	BlockTreeTimeline,
+	BlockTreeStatus,
+	FinalBlockTreeResult,
+	BlockVoterRow,
+	BlockRegistrantRow,
+	BlockAssociationRow,
+	BlockAuthorizationTimeline,
+	BlockAuthorization,
+	BlockConsentScope,
+	BlockAuthorizer,
+	BlockVoterProblemCode,
+	BlockVoterProblem,
+	BlockVoterRepresentative,
+	BlockVoterExtra,
+	BlockVoterJudgement
+} from './blocks/block-tree.js'
+
+// Phase 66 browser pairing. Every name below comes from its MODULE file, never from
+// './pairing/index.js': that barrel also reaches pair-wire.ts and pair-mint-service.ts (owner-phone
+// libp2p code), which test/browser-entry-purity.spec.ts BROWSER-PAIRING-a proves unreachable here.
+//
+// The network join code a pairing code embeds (66-14 pairing flow): decode only. It returns a result
+// union (NetworkJoinCodeDecodeFailure), it does not throw.
+export { decodeNetworkJoinCode, looksLikeJoinCode, NETWORK_JOIN_CODE_PREFIX_V2 } from './networks/join-code.js'
+export type { NetworkJoinCode, NetworkJoinCodeDecodeResult, NetworkJoinCodeDecodeFailure } from './networks/join-code.js'
+// The founding content digest the browser recomputes over its replicated founding rows (66-14).
+export { computeContentDigest } from './bootstrap/snapshot-manifest.js'
+// The pairing code (66-22 pairing screen + scanner limits, 66-14 pairing flow): decode, never encode.
+export {
+	PAIRING_CODE_PREFIX,
+	PAIRING_CODE_MAX_CHARS,
+	PAIRING_QR_BYTE_BUDGET,
+	decodePairingCode,
+	PairingCodeError
+} from './pairing/pairing-code.js'
+export type { PairingStatement, DecodedPairingCode, PairingCodeFailure } from './pairing/pairing-code.js'
+// The officer's signed pairing statement, verified against the replicated Officer and UserKey rows
+// (66-14 pairing flow and per-pass validity check).
+export { PAIRING_DIGEST_TAG, PAIRING_REMOVE_DIGEST_TAG, verifyPairingStatement } from './pairing/pairing-statement.js'
+export type { VerifiablePairingStatement, PairingVerifyFailure, PairingVerifyResult } from './pairing/pairing-statement.js'
+// The revocation row check: a paired browser unpairs itself once its pairing is revoked (66-14, 66-19).
+export { PAIRING_REVOKE_DIGEST_TAG, isPairingRevoked } from './pairing/pairing-revocation.js'
+// The founding rows a paired browser re-derives the founding digest from (66-14 pairing flow and
+// founding check): two read-only point-lookup names and the pure descriptor derivation. Guard G-5
+// (test/founding-bundle-guards.spec.ts, amended with the user's approval) allows exactly these two
+// lines; the replay WRITE path stays barred from every barrel.
+export { readGenesisRows, FOUNDING_BUNDLE_TABLE_ORDER } from './networks/genesis-rows.js'
+export { deriveFoundingDescriptor } from './networks/founding-bundle.js'
 
 // -----------------------------------------------------------------------
 // DELIBERATELY NOT EXPORTED (enforced by test/browser-entry-purity.spec.ts)
@@ -72,3 +162,13 @@ export type { DbFactory, EngineContext } from './types.js'
 //   is read-only (D-01: panel actions are step 3, explicitly OUT) and
 //   because the outline's binding cross-plan contract 2 fixes the
 //   dashboard's only engine-class import as UserEngine.
+// - The R6-R8 functions (slice checks, validation, tally tree) — they import election-block.ts, which
+//   reaches `@noble/curves/secp256k1.js`, outside the 7-entry allowlist, and the dashboard has no consumer.
+// - encodePairingCode — the browser never mints a pairing code; the officer's phone does.
+// - Everything in pairing/pair-wire.ts and pairing/pair-mint-service.ts — the owner phone's pair-mint
+//   protocol and service (libp2p streams, mint policy); the browser never hosts or dials pair-mint.
+// - revokeDashboardPairing, PairingRevocationError, PairingRevocationSigner and the digest builders
+//   (pairingStatementDigest, pairingRemoveDigest, pairingRevokeDigest), plus verifyPairingRemove and
+//   isCurrentPairingOfficer — signing and owner-side paths; the browser holds no officer key (D-04).
+// - The genesis-row REPLAY (the write path) and every other founding-bundle function — guard G-5 allows
+//   this file exactly the two read-only founding lines above, nothing more.

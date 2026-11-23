@@ -163,7 +163,7 @@ const mockGetNetworkDetails = jest.fn(async () => ({
 const mockNetworkEngine = {getDetails: mockGetNetworkDetails};
 const mockGetAssociationsByDeviceKey = jest.fn(async () => [] as unknown[]);
 const mockListAssociationRequests = jest.fn(async () => [] as unknown[]);
-const mockAssociationEngine = {getAssociationsByDeviceKey: mockGetAssociationsByDeviceKey, listAssociationRequests: mockListAssociationRequests};
+const mockAssociationEngine = {getAssociationsByDeviceKey: mockGetAssociationsByDeviceKey, listAssociationRequestsByDeviceKey: mockListAssociationRequests};
 
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'elections') {
@@ -1102,7 +1102,7 @@ describe('TimelineScreen — registration panel re-reads on focus (regression, s
 		// The device just completed a real Register ceremony elsewhere -- the engine's own answer
 		// has changed, but nothing has remounted this screen.
 		mockListAssociationRequests.mockImplementation(async () => [
-			{deviceKey: 'p256-stub-device-key', status: 'p', electionId: SEEDED_ELECTION_ID},
+			{authorityId: 'authority-1', deviceKey: 'p256-stub-device-key', status: 'p', electionId: SEEDED_ELECTION_ID},
 		]);
 
 		await renderer.act(async () => {
@@ -1195,6 +1195,14 @@ describe('TimelineScreen — saved vote on the Voting Period row (D-12, D-21)', 
 		expect(nodeText(hostsById(tr, 'timeline-saved-vote-status')[0])).toBe('Vote saved — not sent');
 		expect(hostsById(tr, 'timeline-row-view-submission-votingStarts').length).toBeGreaterThan(0);
 		expect(hostsById(tr, 'timeline-row-vote-now-votingStarts').length).toBe(0);
+	});
+
+	it('TS3b: sent shows the sent line, no not-sent line, and hides Vote now', async () => {
+		const tr = await mountWith({state: 'sent'});
+		expect(nodeText(hostsById(tr, 'timeline-saved-vote-sent')[0])).toBe('Your vote has been sent to the election.');
+		expect(hostsById(tr, 'timeline-saved-vote-status').length).toBe(0);
+		expect(JSON.stringify(tr.toJSON())).not.toContain('Vote saved — not sent');
+		expect(railOf(tr).props.onVoteNow).toBeUndefined();
 	});
 
 	it('TS4: stale shows the exact D-21 line and keeps Vote now', async () => {

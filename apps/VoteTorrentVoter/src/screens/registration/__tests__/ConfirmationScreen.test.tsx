@@ -18,7 +18,8 @@
  */
 import React from 'react';
 import renderer from 'react-test-renderer';
-import {Linking, Platform} from 'react-native';
+import {Linking, Platform, Text} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import i18n from '../../../i18n'; // initializes the global i18next instance useTranslation() reads from
 
 const mockPopToTop = jest.fn();
@@ -31,9 +32,7 @@ jest.mock('@react-navigation/native', () => ({
 	useFocusEffect: (cb: () => void) => {
 		latestFocusCallback = cb;
 		// eslint-disable-next-line @typescript-eslint/no-var-requires, react-hooks/rules-of-hooks
-		require('react').useEffect(() => {
-			cb();
-		}, [cb]);
+		require('react').useEffect(() => cb(), [cb]);
 	},
 	useTheme: () => ({
 		colors: {
@@ -48,6 +47,7 @@ jest.mock('@react-navigation/native', () => ({
 		fonts: {
 			regular: {fontFamily: 'System', fontWeight: '400'},
 			medium: {fontFamily: 'System', fontWeight: '500'},
+			bold: {fontFamily: 'System', fontWeight: '700'},
 		},
 		type: {
 			h2: {fontSize: 28, lineHeight: 34},
@@ -78,12 +78,19 @@ const mockNetworkEngine = {getDetails: mockGetDetails};
 const mockDeriveRegistrationCode = jest.fn(async (_registrantId: string, _sign: unknown) => 'ABCDE12345');
 const mockAssociationEngine = {deriveRegistrationCode: mockDeriveRegistrationCode};
 
+// 64 D-28: the election the registration binds to is read from the joined network's own list.
+// Pushes NOTHING to callOrder, so the exact callOrder assertions stay unchanged.
+const mockGetElections = jest.fn(async () => [] as Array<{id: string; date: number}>);
+
 const mockGetEngine = jest.fn(async (engineName: string) => {
 	if (engineName === 'network') {
 		return mockNetworkEngine;
 	}
 	if (engineName === 'association') {
 		return mockAssociationEngine;
+	}
+	if (engineName === 'elections') {
+		return {getElections: mockGetElections};
 	}
 	throw new Error(`unexpected getEngine call: ${engineName}`);
 });
@@ -181,8 +188,14 @@ const mockSignDeviceKeyDigest = jest.fn(async (_digest: Uint8Array) => ({
 	signerKey: P256_PUB,
 	signature: 'p256-request-signature',
 }));
+// Read-only lookup a retry uses to confirm the attempt's key is still there (spike 104).
+const mockGetCurrentDeviceKey = jest.fn(async () => {
+	callOrder.push('getCurrentDeviceKey');
+	return {publicKey: P256_PUB};
+});
 const mockResolveAttestationProducer = jest.fn((..._args: unknown[]) => ({
 	provisionDeviceKey: mockProvisionDeviceKey,
+	getCurrentDeviceKey: mockGetCurrentDeviceKey,
 	produce: mockProduce,
 	signDeviceKeyDigest: mockSignDeviceKeyDigest,
 }));
@@ -273,6 +286,10 @@ const mockResolveVoterRequestTransports = jest.fn(
 		ownStagedRegistrationRequestIds: mockOwnStagedRegistrationRequestIds,
 	}),
 );
+const mockResolveRegistrationStatus = jest.fn(async (..._args: unknown[]) => ({kind: 'pending'}));
+jest.mock('../../../engines/registration-status', () => ({
+	resolveRegistrationStatus: (...args: unknown[]) => mockResolveRegistrationStatus(...args),
+}));
 jest.mock('../attach-voter-request-transport', () => ({
 	resolveVoterRequestTransports: (...args: unknown[]) => mockResolveVoterRequestTransports(...args),
 }));
@@ -291,26 +308,138 @@ jest.mock('../../../engines/continuity', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ConfirmationScreen = require('../ConfirmationScreen').default;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const {
+	pollForNotice,
+	decisionWaitClock,
+	DECISION_POLL_INTERVAL_MS,
+	DECISION_WAIT_MAX_MS,
+} = require('../ConfirmationScreen');
+
+/** Awaits microtasks until `predicate` holds; a named failure after `maxTicks`. */
+async function flushUntil(predicate: () => boolean, maxTicks = 5000) {
+	for (let i = 0; i < maxTicks; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(`flushUntil: the predicate never held within ${maxTicks} microtask ticks`);
+}
+
+/**
+ * An instant decision wait over a virtual clock: `sleep` returns at once and moves the clock, so long
+ * waits run without any real or faked timer. The Confirm wait has no deadline, so after
+ * `maxInstantSleeps` the sleep never returns by itself (Stop or unmount still wake it); an unanswered
+ * wait would otherwise spin the microtask queue for ever. Returns its restore function.
+ */
+function installInstantDecisionWait(maxInstantSleeps = 400) {
+	let virtualNow = 1_000_000;
+	let sleeps = 0;
+	const clock = decisionWaitClock as {now(): number; sleep(ms: number): Promise<void>};
+	const nowSpy = jest.spyOn(clock, 'now').mockImplementation(() => virtualNow);
+	const sleepSpy = jest.spyOn(clock, 'sleep').mockImplementation(async (ms: number) => {
+		sleeps += 1;
+		if (sleeps > maxInstantSleeps) {
+			await new Promise<void>(() => undefined);
+		}
+		virtualNow += ms;
+	});
+	return () => {
+		nowSpy.mockRestore();
+		sleepSpy.mockRestore();
+	};
+}
+
+/**
+ * The Confirm press's wait has no deadline (revised 2026-11-17): more reads than the old 180 s
+ * deadline or the 300 s ceiling allowed, with an instant virtual clock.
+ */
+const READS_PAST_OLD_BOUNDS = Math.ceil(DECISION_WAIT_MAX_MS / DECISION_POLL_INTERVAL_MS) + 10;
+
+/**
+ * One Confirm press whose decision wait the voter ends with Stop, after `reads` decision reads.
+ * It replaces the old deadline as the way a test leaves an attempt unanswered.
+ */
+async function pressThenStop(tr: renderer.ReactTestRenderer, reads = 3) {
+	const before = mockPollDecisions.mock.calls.length;
+	await renderer.act(async () => {
+		tr.root.findByProps({testID: 'confirmation-confirm-face-id'}).props.onPress();
+		await flushUntil(() => mockPollDecisions.mock.calls.length - before >= reads);
+	});
+	await renderer.act(async () => {
+		tr.root.findByProps({testID: 'confirmation-waiting-cancel'}).props.onPress();
+		await flushMicrotasks(60);
+	});
+	expect(tr.root.findByProps({testID: 'confirmation-error'}).props.children).toBe(
+		i18n.getFixedT('en', 'registration')('confirmation.error.waitStopped'),
+	);
+}
+
+/** The label of a pressable whose only text child is its label. */
+function labelOf(node: renderer.ReactTestInstance): unknown {
+	return node.findByType(Text).props.children;
+}
+
+/** `mockPollDecisions` with a loose notice type, for the cases that script their own notices. */
+const looseMockPollDecisions = mockPollDecisions as unknown as jest.Mock<Promise<unknown[]>, [string?]>;
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return {promise, resolve, reject};
+}
+
+/** Local console spy: the shared Voter console-leak helper arrives with a later plan. */
+function spyAllConsole() {
+	const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map(method => ({
+		method,
+		spy: jest.spyOn(console, method).mockImplementation(() => undefined),
+	}));
+	return {
+		calls: () => spies.flatMap(({method, spy}) => spy.mock.calls.map(args => ({method, args}))),
+		restore: () => spies.forEach(({spy}) => spy.mockRestore()),
+	};
+}
+
+// D-100: a pending screen holds a 10 s outcome-poll interval; every tree is unmounted after each
+// test so none outlives it (an unmount clears the interval, so jest can exit).
+const renderedTrees: renderer.ReactTestRenderer[] = [];
+afterEach(() => {
+	while (renderedTrees.length > 0) {
+		const tr = renderedTrees.pop()!;
+		try {
+			renderer.act(() => {
+				tr.unmount();
+			});
+		} catch {
+			// already unmounted by the test
+		}
+	}
+});
 
 function renderScreen() {
 	let tr!: renderer.ReactTestRenderer;
 	renderer.act(() => {
 		tr = renderer.create(<ConfirmationScreen />);
 	});
+	renderedTrees.push(tr);
 	return tr;
 }
 
 /** Flushes chained microtasks. The rewritten ceremony has more awaited steps than the old one
  * (device signer resolution, two transport submits, a bounded decision poll, the attestation
- * submit), and the poll-exhaustion test drives up to MAX_POLL_ATTEMPTS (20) loop iterations — so
- * this flushes generously rather than counting exact ticks. */
+ * submit), and the decision wait polls on a clock, not a fixed attempt count — so this flushes
+ * generously rather than counting exact ticks. */
 async function flushMicrotasks(times = 60) {
 	for (let i = 0; i < times; i++) {
 		await Promise.resolve();
 	}
 }
 
-async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id', flushes = 60) {
+async function pressConfirm(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id', flushes = 120) {
 	const cta = tr.root.findByProps({testID});
 	await renderer.act(async () => {
 		cta.props.onPress();
@@ -350,8 +479,18 @@ function findHostNodeByType(json: unknown, targetType: string): TreeNode | null 
 	return null;
 }
 
+// The ceremony stores its in-flight attempt (registration-attempt-store.ts) so a remount resumes it;
+// every test starts with no stored attempt, as a fresh install does.
+beforeEach(async () => {
+	await AsyncStorage.clear();
+});
+
 beforeEach(() => {
+	mockGetElections.mockReset();
+	mockGetElections.mockImplementation(async () => []);
 	mockPopToTop.mockClear();
+	mockResolveRegistrationStatus.mockReset();
+	mockResolveRegistrationStatus.mockImplementation(async () => ({kind: 'pending'}));
 	mockClearDraft.mockClear();
 	mockSign.mockClear();
 	mockCreateDeviceSigner.mockClear();
@@ -361,6 +500,7 @@ beforeEach(() => {
 	mockSendIntent.mockClear();
 	jest.spyOn(Linking, 'sendIntent').mockImplementation((...args: Parameters<typeof Linking.sendIntent>) => mockSendIntent(...args));
 	mockProvisionDeviceKey.mockClear();
+	mockGetCurrentDeviceKey.mockClear();
 	mockProduce.mockClear();
 	mockSignDeviceKeyDigest.mockClear();
 	mockRegistrationSubmitRequest.mockClear();
@@ -377,6 +517,10 @@ beforeEach(() => {
 
 	mockProvisionDeviceKey.mockImplementation(async () => {
 		callOrder.push('provisionDeviceKey');
+		return {publicKey: P256_PUB};
+	});
+	mockGetCurrentDeviceKey.mockImplementation(async () => {
+		callOrder.push('getCurrentDeviceKey');
 		return {publicKey: P256_PUB};
 	});
 	mockProduce.mockImplementation(async (challenge: {nonce: string}) => {
@@ -463,7 +607,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			const ok = renderScreen();
 			await pressConfirm(ok);
 			expect(JSON.stringify(ok.toJSON())).toContain(
-				"Your registration has been submitted. We'll let you know once the authority confirms your device.",
+				'Your registration has been submitted. This screen updates when the election office approves your device.',
 			);
 
 			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
@@ -479,7 +623,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			const ok = renderScreen();
 			await pressConfirm(ok);
 			const okText = JSON.stringify(ok.toJSON());
-			expect(okText).toContain('Tu registro ha sido enviado. Te avisaremos cuando la autoridad confirme tu dispositivo.');
+			expect(okText).toContain('Tu registro se envió. Esta pantalla se actualiza cuando la oficina electoral apruebe tu dispositivo.');
 			expect(okText).not.toContain('Your registration has been submitted');
 
 			mockProduce.mockRejectedValueOnce({code: 'LOCKOUT'});
@@ -493,6 +637,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 
 	it('does NOT navigate on mount (only on the deliberate press)', () => {
 		renderScreen();
+		// D-100 replacing 51-11: no popToTop until Done or Back to registration is pressed.
 		expect(mockPopToTop).not.toHaveBeenCalled();
 	});
 
@@ -532,9 +677,8 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			const text = JSON.stringify(tr.toJSON());
 			expect(text).toContain('submitted');
 			expect(mockClearDraft).toHaveBeenCalledTimes(1);
-			// The screen intentionally does NOT pop to top on this pending outcome — see
-			// ConfirmationScreen.tsx's header comment. Popping would imply a decided success this
-			// screen cannot yet prove.
+			// D-100 (replacing 51-11's no-popToTop pin): reaching pending does not pop by itself;
+			// popToTop runs only when Done or Back to registration is pressed.
 			expect(mockPopToTop).not.toHaveBeenCalled();
 		},
 	);
@@ -612,6 +756,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
 		expect(text).toContain('Try Again');
 		expect(mockClearDraft).not.toHaveBeenCalled();
+		// D-100 replacing 51-11: no popToTop until Done or Back to registration is pressed.
 		expect(mockPopToTop).not.toHaveBeenCalled();
 	});
 
@@ -642,23 +787,32 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		}
 	});
 
-	it('a pollDecisions that never yields a challenge-issued notice within the bounded attempts surfaces the generic failure class', async () => {
+	it('a pollDecisions that never yields a challenge-issued notice keeps waiting past the old 180 s and 300 s bounds, with no error', async () => {
 		mockPollDecisions.mockImplementation(async () => {
 			callOrder.push('association.pollDecisions');
 			return [];
 		});
+		const restore = installInstantDecisionWait();
+		try {
+			const tr = renderScreen();
+			await renderer.act(async () => {
+				tr.root.findByProps({testID: 'confirmation-confirm-face-id'}).props.onPress();
+				await flushUntil(() => mockPollDecisions.mock.calls.length >= READS_PAST_OLD_BOUNDS);
+				await flushMicrotasks(60);
+			});
 
-		const tr = renderScreen();
-		await pressConfirm(tr, 'confirmation-confirm-face-id', 400);
-
-		const text = JSON.stringify(tr.toJSON());
-		expect(text).toContain('Something went wrong verifying your device. Try again.');
-		expect(mockProduce).not.toHaveBeenCalled();
-		expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
-		expect(mockClearDraft).not.toHaveBeenCalled();
-		// Bounded — not unbounded (T-51-11-07).
-		expect(mockPollDecisions.mock.calls.length).toBeGreaterThan(0);
-		expect(mockPollDecisions.mock.calls.length).toBeLessThan(1000);
+			expect(tr.root.findAllByProps({testID: 'confirmation-waiting'}).length).toBeGreaterThan(0);
+			expect(tr.root.findAllByProps({testID: 'confirmation-error'})).toHaveLength(0);
+			expect(JSON.stringify(tr.toJSON())).not.toContain('Something went wrong verifying your device. Try again.');
+			expect(mockProduce).not.toHaveBeenCalled();
+			expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
+			expect(mockClearDraft).not.toHaveBeenCalled();
+			renderer.act(() => {
+				tr.unmount();
+			});
+		} finally {
+			restore();
+		}
 	});
 
 	it('a produce() rejection surfaces the generic failure class and submitAttestation is NOT called', async () => {
@@ -671,6 +825,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(text).toContain('Something went wrong verifying your device. Try again.');
 		expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
 		expect(mockClearDraft).not.toHaveBeenCalled();
+		// D-100 replacing 51-11: no popToTop until Done or Back to registration is pressed.
 		expect(mockPopToTop).not.toHaveBeenCalled();
 	});
 
@@ -690,25 +845,80 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		expect(associationSubmitRequestCalls[0].init.registrantId).toBe(associationSubmitRequestCalls[1].init.registrantId);
 	});
 
+	// Spike 104: on Android `provisionDeviceKey` mints a NEW key every call, so a retry that
+	// re-provisioned would re-submit the cached association request (naming the old key) signed by a
+	// key it does not name. A retry keeps the attempt's key; only a gone or changed key starts over.
+	describe('retry keeps the attempt key (spike 104)', () => {
+		it('a retry reads the key back and never re-provisions while it is unchanged', async () => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1 fails at the answer submit
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+			expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(1);
+			expect(associationSubmitRequestCalls[1].init).toBe(associationSubmitRequestCalls[0].init);
+			expect(associationSubmitRequestCalls[1].requesterKey).toBe(P256_PUB);
+		});
+
+		it.each([
+			['a different key under the alias', async () => ({publicKey: 'P256_PUB_ROTATED'})],
+			['DEVICE_KEY_ABSENT', async () => Promise.reject(Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'}))],
+			['DEVICE_KEY_INVALIDATED', async () => Promise.reject(Object.assign(new Error('invalidated'), {code: 'DEVICE_KEY_INVALIDATED'}))],
+		])('%s: re-provisions and makes a NEW association request for the new key, keeping the registration request', async (_name, lookup) => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1
+
+			mockGetCurrentDeviceKey.mockImplementationOnce(lookup as () => Promise<{publicKey: string}>);
+			mockProvisionDeviceKey.mockImplementationOnce(async () => ({publicKey: 'P256_PUB_NEW'}));
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(2);
+			expect(registrationRequestInits[1]).toBe(registrationRequestInits[0]);
+			const [first, second] = associationSubmitRequestCalls;
+			expect(second.init).not.toBe(first.init);
+			expect(second.init.id).not.toBe(first.init.id);
+			expect(second.init.deviceKey).toBe('P256_PUB_NEW');
+			expect(second.requesterKey).toBe('P256_PUB_NEW');
+			expect(second.init.registrantId).toBe(first.init.registrantId);
+		});
+
+		it('any other lookup failure fails the attempt without minting a new key', async () => {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+			const tr = renderScreen();
+			await pressConfirm(tr); // attempt 1
+
+			mockGetCurrentDeviceKey.mockImplementationOnce(async () =>
+				Promise.reject(Object.assign(new Error('read failed'), {code: 'DEVICE_KEY_READ_FAILED'})),
+			);
+			await pressConfirm(tr, 'confirmation-confirm-face-id'); // attempt 2
+
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+			expect(associationSubmitRequestCalls).toHaveLength(1);
+			expect(JSON.stringify(tr.toJSON())).toContain('Try Again');
+		});
+	});
+
 	it(
-		'idempotent retry (D-05/D-32): a bounded-poll-exhaustion failure, then a successful retry, re-submits the ' +
+		'idempotent retry (D-05/D-32): a failure before the deadline, then a successful retry, re-submits the ' +
 			'SAME registration and association init objects (not merely equal ids), with identical submittedAt',
 		async () => {
-			// Attempt 1: EVERY poll call returns [] (never a challenge-issued notice), so the bounded
-			// poll exhausts and the attempt fails with the generic transient copy. A single
-			// `mockImplementationOnce` would not be enough — `pollForNotice` loops up to
-			// MAX_POLL_ATTEMPTS times within ONE attempt, so the whole-attempt implementation must be
-			// overridden, not just its first call.
+			// Attempt 1: EVERY poll call returns [] (never a challenge-issued notice); the voter stops
+			// the wait (there is no deadline), and the attempt ends with the stopped copy.
 			mockPollDecisions.mockImplementation(async () => {
 				callOrder.push('association.pollDecisions');
 				return [];
 			});
-
-			const tr = renderScreen();
-			await pressConfirm(tr, 'confirmation-confirm-face-id', 400); // attempt 1 — poll exhausts
-
-			const text1 = JSON.stringify(tr.toJSON());
-			expect(text1).toContain('Something went wrong verifying your device. Try again.');
+			const restore = installInstantDecisionWait();
+			let tr!: renderer.ReactTestRenderer;
+			try {
+				tr = renderScreen();
+				await pressThenStop(tr); // attempt 1 — the voter stops waiting
+			} finally {
+				restore();
+			}
 
 			// Attempt 2 ("Try Again"): restore the default pollDecisions implementation (the 'c'
 			// notice), so the retry completes to the pending state.
@@ -759,7 +969,23 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 	});
 
 	describe('D-09 three-way failure UX', () => {
+		const originalOS = Platform.OS;
+		afterEach(() => {
+			Object.defineProperty(Platform, 'OS', {value: originalOS, configurable: true});
+		});
+
+		it('NO_BIOMETRICS_ENROLLED names Face ID on ios', async () => {
+			Object.defineProperty(Platform, 'OS', {value: 'ios', configurable: true});
+			mockProduce.mockRejectedValueOnce({code: 'NO_BIOMETRICS_ENROLLED'});
+			const tr = renderScreen();
+			await pressConfirm(tr);
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('Set up Face ID to continue');
+			expect(text).not.toContain('fingerprint');
+		});
+
 		it('NO_BIOMETRICS_ENROLLED renders the setup prompt + deep-link CTA, and a separate retry — no clearDraft/popToTop', async () => {
+			Object.defineProperty(Platform, 'OS', {value: 'android', configurable: true});
 			mockProduce.mockRejectedValueOnce({code: 'NO_BIOMETRICS_ENROLLED'});
 
 			const tr = renderScreen();
@@ -769,6 +995,7 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 			expect(text).toContain('Set up fingerprint or face unlock to continue');
 			expect(text).toContain('Set up device unlock');
 			expect(mockClearDraft).not.toHaveBeenCalled();
+			// D-100 replacing 51-11: no popToTop until Done or Back to registration is pressed.
 			expect(mockPopToTop).not.toHaveBeenCalled();
 
 			const setupCta = tr.root.findByProps({testID: 'confirmation-setup-cta'});
@@ -918,6 +1145,9 @@ describe('ConfirmationScreen (D-01/D-02/D-03/D-05/D-07/D-08/D-09/D-11/D-12/D-18)
 		it('a terminal-class code (release build, __DEV__ false) renders the terminal wall with NO retry CTA', async () => {
 			const originalDev = (globalThis as {__DEV__?: boolean}).__DEV__;
 			(globalThis as {__DEV__?: boolean}).__DEV__ = false;
+			// 64 D-28: a release build no longer honours the dev seed, so the joined network must list
+			// the election for the ceremony to reach the device key.
+			mockGetElections.mockImplementation(async () => [{id: 'joined-election-7', date: Date.now() + 86_400_000}]);
 			mockProvisionDeviceKey.mockRejectedValueOnce({code: 'NO_STRONGBOX_OR_TEE'});
 
 			const tr = renderScreen();
@@ -1084,5 +1314,1178 @@ describe('ConfirmationScreen — scroll container regression guard (57-17/57-18)
 
 		const scrollNode = findHostNodeByType(tr.toJSON(), 'RCTScrollView');
 		expect(scrollNode).not.toBeNull();
+	});
+});
+
+describe('ConfirmationScreen — current election on a joined network (D-28)', () => {
+	const g = globalThis as {__DEV__?: boolean};
+	const originalDev = g.__DEV__;
+	afterEach(() => {
+		g.__DEV__ = originalDev;
+		mockSeededElectionId = SEEDED_ELECTION_ID;
+	});
+
+	it('registers with the listed election on a joined network: payload, association init and challenge all carry it', async () => {
+		g.__DEV__ = false;
+		mockSeededElectionId = undefined;
+		mockGetElections.mockImplementation(async () => [{id: 'joined-election-7', date: Date.now() + 86_400_000}]);
+
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		expect(registrationRequestInits[0].payload.electionId).toBe('joined-election-7');
+		expect(associationSubmitRequestCalls[0].init.electionId).toBe('joined-election-7');
+		expect(mockProduce.mock.calls[0][0]).toMatchObject({electionId: 'joined-election-7'});
+	});
+
+	it('reads the elections after the identity (WR-04) and before the device key', async () => {
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		const signer = mockCreateDeviceSigner.mock.invocationCallOrder[0];
+		const elections = mockGetElections.mock.invocationCallOrder[0];
+		const provision = mockProvisionDeviceKey.mock.invocationCallOrder[0];
+		expect(signer).toBeLessThan(elections);
+		expect(elections).toBeLessThan(provision);
+	});
+
+	it('release build with a seed and an empty list fails closed: no-election copy, no retry, no device key, no submit', async () => {
+		g.__DEV__ = false;
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		const text = JSON.stringify(tr.toJSON());
+		expect(text).toContain('There is no election to register for on this phone yet.');
+		expect(tr.root.findAllByProps({testID: 'confirmation-confirm-face-id'})).toHaveLength(0);
+		expect(text).not.toContain('Try Again');
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+	});
+
+	it('several listed elections: the nearest to now is used', async () => {
+		const now = 1_900_000_000_000;
+		const spy = jest.spyOn(Date, 'now').mockReturnValue(now);
+		try {
+			mockGetElections.mockImplementation(async () => [
+				{id: 'far', date: now + 90 * 86_400_000},
+				{id: 'near', date: now + 86_400_000},
+			]);
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+			expect(registrationRequestInits[0].payload.electionId).toBe('near');
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it('a rejected election read shows the transient copy and Try Again, never uses the seed, and is not memoised', async () => {
+		g.__DEV__ = true;
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			mockGetElections.mockImplementationOnce(async () => {
+				throw Object.assign(new Error('could not reach peer-xyz'), {name: 'PeerUnavailableError'});
+			});
+			const tr = renderScreen();
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+			const text = JSON.stringify(tr.toJSON());
+			expect(text).toContain('Something went wrong verifying your device. Try again.');
+			expect(text).not.toContain('peer-xyz');
+			expect(tr.root.findByProps({testID: 'confirmation-confirm-face-id'})).toBeDefined();
+			expect(text).toContain('Try Again');
+			expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+			expect(errorSpy).toHaveBeenCalledWith('ConfirmationScreen: registration ceremony failed:', 'PeerUnavailableError');
+
+			// Retry with a readable (empty) list: the dev seed stands in only now.
+			await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+			expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+			expect(registrationRequestInits[0].payload.electionId).toBe(SEEDED_ELECTION_ID);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('memoises the election per attempt: Try Again reads once and reuses the same inits and challenge election', async () => {
+		g.__DEV__ = false;
+		mockSeededElectionId = undefined;
+		mockGetElections.mockImplementationOnce(async () => [{id: 'first-election', date: Date.now() + 86_400_000}]);
+		mockAssociationSubmitAttestation.mockRejectedValueOnce(new Error('submitAttestation failed: transient'));
+
+		const tr = renderScreen();
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+		mockGetElections.mockImplementation(async () => [{id: 'different-election', date: Date.now() + 86_400_000}]);
+		await pressConfirm(tr, 'confirmation-confirm-face-id', 120);
+
+		expect(mockGetElections).toHaveBeenCalledTimes(1);
+		expect(mockProduce.mock.calls[1][0]).toMatchObject({electionId: 'first-election'});
+		expect(registrationRequestInits[1]).toBe(registrationRequestInits[0]);
+		expect(associationSubmitRequestCalls[1].init).toBe(associationSubmitRequestCalls[0].init);
+	});
+});
+
+/**
+ * 2026-11-13 emulator run: the decision wait ran out before the officer challenged the request, and
+ * a remount of the screen (a Fast Refresh there; navigation back and forth or an app restart do the
+ * same) made the next Confirm provision a NEW Android key and file a second request + registrant.
+ * A real officer approves by hand, so the wait ending must never fork the request: a fresh mount
+ * resumes the stored attempt.
+ */
+describe('ConfirmationScreen — a remount resumes the pending attempt (registration-attempt-store)', () => {
+	const {REGISTRATION_ATTEMPT_KEY} = require('../../../engines/registration-attempt-store');
+
+	/** Android: every provisionDeviceKey call mints a new key, and the lookup reads the newest. */
+	function installRotatingDeviceKey() {
+		let current: string | null = null;
+		let minted = 0;
+		mockProvisionDeviceKey.mockImplementation(async () => {
+			callOrder.push('provisionDeviceKey');
+			minted += 1;
+			current = `P256_ROTATED_${minted}`;
+			return {publicKey: current};
+		});
+		mockGetCurrentDeviceKey.mockImplementation(async () => {
+			callOrder.push('getCurrentDeviceKey');
+			if (current === null) {
+				throw Object.assign(new Error('absent'), {code: 'DEVICE_KEY_ABSENT'});
+			}
+			return {publicKey: current};
+		});
+		return () => current;
+	}
+
+	const challengeFor = (requestId: string | undefined) => [{requestId, status: 'c', challengeNonce: CHALLENGE_NONCE, cursor: 'cursor-1'}];
+
+	/** One Confirm press left unanswered: the voter stops the wait (instant virtual clock). */
+	async function pressAndTimeOut(tr: renderer.ReactTestRenderer) {
+		looseMockPollDecisions.mockImplementation(async () => []);
+		const restore = installInstantDecisionWait();
+		try {
+			await pressThenStop(tr);
+		} finally {
+			restore();
+		}
+	}
+
+	function remount(tr: renderer.ReactTestRenderer) {
+		renderer.act(() => {
+			tr.unmount();
+		});
+		return renderScreen();
+	}
+
+	it('a stopped wait, a remount, then Confirm: the SAME request and key are answered — no new key, request or registrant', async () => {
+		const currentKey = installRotatingDeviceKey();
+		const first = renderScreen();
+		await pressAndTimeOut(first);
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+		const firstAssociation = associationSubmitRequestCalls[0].init;
+		const registrantId = registrationRequestInits[0].id;
+
+		// The officer challenges the first request while the phone is away; the screen remounts.
+		looseMockPollDecisions.mockImplementation(async () => challengeFor(firstAssociation.id));
+		const second = remount(first);
+		await pressConfirm(second);
+
+		expect(second.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		// The key is read back, never re-provisioned (Android would rotate it).
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+		expect(currentKey()).toBe(firstAssociation.deviceKey);
+		// The same association request, byte-identical — never a second one.
+		expect(associationSubmitRequestCalls).toHaveLength(2);
+		expect(associationSubmitRequestCalls[1].init).toEqual(firstAssociation);
+		expect(associationSubmitRequestCalls[1].requesterKey).toBe(firstAssociation.deviceKey);
+		// The registration request was staged by the first press: no second registration request.
+		expect(registrationRequestInits).toHaveLength(1);
+		// The challenge is answered for the first registrant, by the first key.
+		expect(mockProduce.mock.calls[0][0]).toMatchObject({registrantId, deviceKey: firstAssociation.deviceKey});
+		expect(associationSubmitAttestationCalls).toHaveLength(1);
+		expect(associationSubmitAttestationCalls[0].answer.requestId).toBe(firstAssociation.id);
+		// Answered: nothing is left to resume.
+		expect(await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY)).toBeNull();
+	});
+
+	it('the stored attempt carries no registration payload (D-22): no name, contact, address or party', async () => {
+		const tr = renderScreen();
+		await pressAndTimeOut(tr);
+		const stored = await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY);
+		expect(stored).not.toBeNull();
+		for (const value of Object.values(sampleDraft).filter(v => v !== '')) {
+			expect(stored).not.toContain(value);
+		}
+		expect(JSON.parse(stored as string)).toEqual({
+			version: 1,
+			identityKey: DEVICE_IDENTITY_PUBLIC_KEY,
+			authorityId: 'authority-1',
+			electionId: SEEDED_ELECTION_ID,
+			registrantId: registrationRequestInits[0].id,
+			registrationSubmittedAt: registrationRequestInits[0].submittedAt,
+			registrationStaged: true,
+			deviceKey: P256_PUB,
+			association: associationSubmitRequestCalls[0].init,
+		});
+	});
+
+	it('a registration submit that failed before a remount is rebuilt byte-identical from the draft (same id and submittedAt)', async () => {
+		installRotatingDeviceKey();
+		mockRegistrationSubmitRequest.mockRejectedValueOnce(new Error('transient'));
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const first = renderScreen();
+			await pressConfirm(first);
+			expect(JSON.stringify(first.toJSON())).toContain('Try Again');
+
+			const second = remount(first);
+			await pressConfirm(second);
+
+			expect(second.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+			// The rejected first call records nothing in `registrationRequestInits`: read the mock's calls.
+			const [[failedInit], [resumedInit]] = mockRegistrationSubmitRequest.mock.calls;
+			expect(mockRegistrationSubmitRequest).toHaveBeenCalledTimes(2);
+			expect(resumedInit).toEqual(failedInit);
+			expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+			expect(associationSubmitRequestCalls).toHaveLength(1);
+			expect(associationSubmitRequestCalls[0].init.registrantId).toBe(failedInit.id);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('a resume whose registration row is already on the strand skips the registration submit', async () => {
+		mockRegistrationSubmitRequest.mockImplementationOnce(async (init: {id: string}) => {
+			// The write landed, but the phone saw a failure.
+			registrationRequestInits.push(init);
+			throw new Error('ack lost');
+		});
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const first = renderScreen();
+			await pressConfirm(first);
+			const registrantId = registrationRequestInits[0].id;
+			mockOwnStagedRegistrationRequestIds.mockImplementation(async () => [registrantId]);
+
+			const second = remount(first);
+			await pressConfirm(second);
+
+			expect(mockOwnStagedRegistrationRequestIds).toHaveBeenCalledWith(DEVICE_IDENTITY_PUBLIC_KEY);
+			expect(registrationRequestInits).toHaveLength(1);
+			expect(associationSubmitRequestCalls[0].init.registrantId).toBe(registrantId);
+			expect(second.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		} finally {
+			mockOwnStagedRegistrationRequestIds.mockImplementation(async () => []);
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('a stored attempt for another election is dropped and a new attempt starts', async () => {
+		const first = renderScreen();
+		await pressAndTimeOut(first);
+		const stale = JSON.parse((await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY)) as string);
+		await AsyncStorage.setItem(REGISTRATION_ATTEMPT_KEY, JSON.stringify({...stale, electionId: 'another-election'}));
+
+		looseMockPollDecisions.mockImplementation(async () => challengeFor(capturedAssociationRequestId));
+		const second = remount(first);
+		await pressConfirm(second);
+
+		expect(registrationRequestInits).toHaveLength(2);
+		expect(registrationRequestInits[1].id).not.toBe(stale.registrantId);
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(2);
+		expect(second.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+	});
+
+	it('a malformed stored attempt reads as none', async () => {
+		await AsyncStorage.setItem(REGISTRATION_ATTEMPT_KEY, '{"version":1,"registrantId":""}');
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		expect(mockProvisionDeviceKey).toHaveBeenCalledTimes(1);
+		expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+	});
+
+	it('a registration request the authority closed is dropped: Try Again shows the failure, the next press starts a new attempt', async () => {
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			const tr = renderScreen();
+			await pressAndTimeOut(tr);
+			const registrantId = registrationRequestInits[0].id;
+			mockRegistrationTransport.pollDecisions.mockImplementation(
+				(async () => [{requestId: registrantId, status: 'r', cursor: 'cursor-r'}]) as never,
+			);
+
+			await pressConfirm(tr); // Try Again: the request is closed
+			expect(JSON.stringify(tr.toJSON())).toContain('Something went wrong verifying your device. Try again.');
+			expect(registrationRequestInits).toHaveLength(1);
+			expect(associationSubmitRequestCalls).toHaveLength(1);
+			expect(await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY)).toBeNull();
+			expect(errorSpy).toHaveBeenCalledWith('ConfirmationScreen: registration ceremony failed:', 'RegistrationRequestClosedError');
+
+			mockRegistrationTransport.pollDecisions.mockImplementation((async () => []) as never);
+			looseMockPollDecisions.mockImplementation(async () => challengeFor(capturedAssociationRequestId));
+			await pressConfirm(tr); // a new attempt
+			expect(registrationRequestInits).toHaveLength(2);
+			expect(registrationRequestInits[1].id).not.toBe(registrantId);
+			expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		} finally {
+			mockRegistrationTransport.pollDecisions.mockImplementation((async () => []) as never);
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('a refused association request is not waited on again: Try Again makes a new one for the same registrant', async () => {
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			looseMockPollDecisions.mockImplementation(async () => [
+				{requestId: capturedAssociationRequestId, status: 'r', cursor: 'cursor-r'},
+			]);
+			const tr = renderScreen();
+			await pressConfirm(tr);
+			expect(JSON.stringify(tr.toJSON())).toContain('Something went wrong verifying your device. Try again.');
+			const refused = associationSubmitRequestCalls[0].init;
+
+			looseMockPollDecisions.mockImplementation(async () => challengeFor(capturedAssociationRequestId));
+			await pressConfirm(tr);
+
+			const renewed = associationSubmitRequestCalls[1].init;
+			expect(renewed.id).not.toBe(refused.id);
+			expect(renewed.registrantId).toBe(refused.registrantId);
+			expect(renewed.deviceKey).toBe(refused.deviceKey);
+			expect(associationSubmitAttestationCalls[0].answer.requestId).toBe(renewed.id);
+			expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it('an answer already staged for the request (duplicate-request-id) reads as answered: pending, nothing left to resume', async () => {
+		mockAssociationSubmitAttestation.mockRejectedValueOnce(
+			Object.assign(new Error('a staged attestation already exists'), {name: 'P2pStagingError', code: 'duplicate-request-id'}),
+		);
+		const tr = renderScreen();
+		await pressConfirm(tr);
+		expect(tr.root.findByProps({testID: 'confirmation-pending'})).toBeDefined();
+		expect(mockClearDraft).toHaveBeenCalledTimes(1);
+		expect(await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY)).toBeNull();
+	});
+
+	it('any other attestation refusal still fails the attempt and keeps it for a retry', async () => {
+		const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+		try {
+			mockAssociationSubmitAttestation.mockRejectedValueOnce(
+				Object.assign(new Error('refused'), {name: 'P2pStagingError', code: 'rejected'}),
+			);
+			const tr = renderScreen();
+			await pressConfirm(tr);
+			expect(JSON.stringify(tr.toJSON())).toContain('Try Again');
+			expect(await AsyncStorage.getItem(REGISTRATION_ATTEMPT_KEY)).not.toBeNull();
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+});
+
+describe('pollForNotice — decision wait, bounded or open-ended (D-27)', () => {
+	/** The old Confirmation deadline, kept to exercise pollForNotice's numeric-deadline mode. */
+	const BOUNDED_MS = 180_000;
+	const REQ = 'req-1';
+	const TERMINAL = new Set(['c', 'r']);
+	const notice = (status: string, cursor = 'k', requestId = REQ) => ({requestId, status, cursor, challengeNonce: 'n'});
+
+	/** A virtual clock: `sleep` records its duration and moves `now`. */
+	function virtualClock(extraJump = 0) {
+		let t = 1_000_000;
+		const sleeps: number[] = [];
+		return {
+			sleeps,
+			now: () => t,
+			sleep: async (ms: number) => {
+				sleeps.push(ms);
+				t += ms + extraJump;
+			},
+			advance: (ms: number) => {
+				t += ms;
+			},
+		};
+	}
+
+	/** Reads answer `batches` in order, then `[]` for ever. */
+	function scripted(batches: Array<Array<ReturnType<typeof notice>>>) {
+		let read = 0;
+		return jest.fn(async (_cursor?: string) => batches[read++] ?? []);
+	}
+
+	const options = (clock: ReturnType<typeof virtualClock>, shouldStop = () => false, deadlineMs: number | null = BOUNDED_MS) => ({
+		now: clock.now,
+		sleep: clock.sleep,
+		deadlineMs,
+		shouldStop,
+	});
+
+	it('(a) the first read is immediate: a matching notice returns with no sleep', async () => {
+		const clock = virtualClock();
+		const poll = scripted([[notice('c')]]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock))).resolves.toMatchObject({status: 'c'});
+		expect(poll).toHaveBeenCalledTimes(1);
+		expect(clock.sleeps).toEqual([]);
+	});
+
+	it('(b) empty reads then the notice: resolves after one interval-long sleep per empty read', async () => {
+		const clock = virtualClock();
+		const poll = scripted([[], [], [], [notice('c')]]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock))).resolves.toMatchObject({status: 'c'});
+		expect(poll).toHaveBeenCalledTimes(4);
+		expect(clock.sleeps).toEqual([DECISION_POLL_INTERVAL_MS, DECISION_POLL_INTERVAL_MS, DECISION_POLL_INTERVAL_MS]);
+	});
+
+	it('(c) forwards the last cursor of a batch to the next read', async () => {
+		const clock = virtualClock();
+		const poll = scripted([[notice('p', 'k1', 'other'), notice('p', 'k2', 'other')], [notice('c', 'k3')]]);
+		await pollForNotice(poll, REQ, TERMINAL, options(clock));
+		expect(poll.mock.calls.map(c => c[0])).toEqual([undefined, 'k2']);
+	});
+
+	it('(d) a non-terminal status for the request and notices for other requests never end the wait', async () => {
+		const clock = virtualClock();
+		const poll = scripted([[notice('p', 'a'), notice('c', 'b', 'other')], [notice('c', 'c')]]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock))).resolves.toMatchObject({cursor: 'c'});
+		expect(poll).toHaveBeenCalledTimes(2);
+	});
+
+	it('(e) never answered: rejects as a timeout after exactly the reads the deadline allows, the last sleep clamped', async () => {
+		const clock = virtualClock();
+		const poll = scripted([]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => false, 5000))).rejects.toMatchObject({
+			name: 'DecisionWaitTimeoutError',
+		});
+		expect(poll).toHaveBeenCalledTimes(3);
+		expect(clock.sleeps).toEqual([2000, 2000, 1000]);
+	});
+
+	it('(f) a clock jump past the deadline during a sleep times out with no further read', async () => {
+		const clock = virtualClock(BOUNDED_MS + 1);
+		const poll = scripted([]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock))).rejects.toMatchObject({name: 'DecisionWaitTimeoutError'});
+		expect(poll).toHaveBeenCalledTimes(1);
+	});
+
+	describe('(g) Stop', () => {
+		it('before any read: rejects as stopped after zero reads', async () => {
+			const clock = virtualClock();
+			const poll = scripted([[notice('c')]]);
+			await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => true))).rejects.toMatchObject({
+				name: 'DecisionWaitStoppedError',
+			});
+			expect(poll).toHaveBeenCalledTimes(0);
+		});
+
+		it('during a read that returns a matching notice: the notice is discarded', async () => {
+			const clock = virtualClock();
+			let stop = false;
+			let read = 0;
+			const poll = jest.fn(async (_cursor?: string) => {
+				read += 1;
+				if (read === 2) {
+					stop = true;
+					return [notice('c')];
+				}
+				return [];
+			});
+			await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => stop))).rejects.toMatchObject({
+				name: 'DecisionWaitStoppedError',
+			});
+			expect(poll).toHaveBeenCalledTimes(2);
+		});
+
+		it('during a sleep: rejects as stopped with no further read', async () => {
+			const clock = virtualClock();
+			let stop = false;
+			const poll = scripted([]);
+			const opts = {
+				...options(clock, () => stop),
+				sleep: async (ms: number) => {
+					stop = true;
+					await clock.sleep(ms);
+				},
+			};
+			await expect(pollForNotice(poll, REQ, TERMINAL, opts)).rejects.toMatchObject({name: 'DecisionWaitStoppedError'});
+			expect(poll).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	it('(h) a poll rejection propagates as the very same object, with no further read', async () => {
+		const clock = virtualClock();
+		const error = new Error('read failed');
+		const poll = jest.fn(async (_cursor?: string): Promise<never[]> => {
+			throw error;
+		});
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock))).rejects.toBe(error);
+		expect(poll).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([['Infinity', Infinity], ['0', 0], ['NaN', NaN]])('(i) a deadline of %s is bounded by DECISION_WAIT_MAX_MS', async (_label, deadlineMs) => {
+		const clock = virtualClock();
+		const poll = scripted([]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => false, deadlineMs as number))).rejects.toMatchObject({
+			name: 'DecisionWaitTimeoutError',
+		});
+		expect(poll).toHaveBeenCalledTimes(Math.ceil(DECISION_WAIT_MAX_MS / DECISION_POLL_INTERVAL_MS));
+	});
+
+	it('(j) the constants are as designed', () => {
+		expect(DECISION_WAIT_MAX_MS).toBe(300_000);
+		expect(DECISION_POLL_INTERVAL_MS).toBe(2000);
+	});
+
+	it('(k) a null deadline never times out: a notice after more reads than the 300 s cap allows still returns', async () => {
+		const clock = virtualClock();
+		const late = Math.ceil(DECISION_WAIT_MAX_MS / DECISION_POLL_INTERVAL_MS) + 50;
+		const poll = scripted([...Array.from({length: late}, () => []), [notice('c')]]);
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => false, null))).resolves.toMatchObject({status: 'c'});
+		expect(poll).toHaveBeenCalledTimes(late + 1);
+	});
+
+	it('(l) a null deadline survives a clock jump and still ends on Stop', async () => {
+		const clock = virtualClock(10 * DECISION_WAIT_MAX_MS);
+		let reads = 0;
+		const poll = jest.fn(async (_cursor?: string) => {
+			reads += 1;
+			return [];
+		});
+		await expect(pollForNotice(poll, REQ, TERMINAL, options(clock, () => reads >= 5, null))).rejects.toMatchObject({
+			name: 'DecisionWaitStoppedError',
+		});
+		expect(poll).toHaveBeenCalledTimes(5);
+	});
+});
+
+describe('ConfirmationScreen — waiting for the decision (D-27, UI-SPEC A3)', () => {
+	const mounted: renderer.ReactTestRenderer[] = [];
+	const tReg = () => i18n.getFixedT('en', 'registration');
+
+	beforeEach(() => {
+		jest.useFakeTimers({doNotFake: ['queueMicrotask']});
+	});
+	afterEach(async () => {
+		while (mounted.length > 0) {
+			const tr = mounted.pop()!;
+			renderer.act(() => {
+				tr.unmount();
+			});
+		}
+		jest.useRealTimers();
+		await renderer.act(async () => {
+			await i18n.changeLanguage('en');
+		});
+	});
+
+	function mount() {
+		const tr = renderScreen();
+		mounted.push(tr);
+		return tr;
+	}
+
+	const decision = (status: string, cursor = 'cursor-w') => ({
+		requestId: capturedAssociationRequestId,
+		status,
+		challengeNonce: CHALLENGE_NONCE,
+		cursor,
+	});
+
+	/** pollDecisions answers `batches` in order, then `[]`. */
+	function scriptPolls(batches: Array<() => unknown[]>) {
+		let read = 0;
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+			callOrder.push('association.pollDecisions');
+			const next = batches[read++];
+			return next ? next() : [];
+		});
+	}
+
+	const present = (tr: renderer.ReactTestRenderer, testID: string) => tr.root.findAllByProps({testID}).length > 0;
+
+	async function press(tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id') {
+		await renderer.act(async () => {
+			tr.root.findByProps({testID}).props.onPress();
+			await flushMicrotasks(120);
+		});
+	}
+
+	async function advance(ms: number) {
+		await renderer.act(async () => {
+			await jest.advanceTimersByTimeAsync(ms);
+			await flushMicrotasks(60);
+		});
+	}
+
+	const style = (node: {props: {style?: unknown}}) => Object.assign({}, ...([] as unknown[]).concat(node.props.style ?? []));
+
+	it('(1) shows the A3 waiting state right after the press, hiding the CTA and the caption, after one read', async () => {
+		scriptPolls([]);
+		const tr = mount();
+		await press(tr);
+
+		expect(style(tr.root.findByProps({testID: 'confirmation-waiting'})).alignItems).toBe('center');
+		const indicator = tr.root.findByProps({testID: 'confirmation-waiting-indicator'});
+		expect(indicator.props.size).toBe('large');
+		expect(indicator.props.color).toBe('#2196f3');
+		expect(indicator.props.accessible).toBe(false);
+		const text = tr.root.findByProps({testID: 'confirmation-waiting-text'});
+		expect(text.props.children).toBe(tReg()('confirmation.waiting'));
+		expect(text.props.children).not.toBe('confirmation.waiting');
+		expect(text.props.numberOfLines).toBeUndefined();
+		expect(text.props.accessibilityLiveRegion).toBe('polite');
+		const stop = tr.root.findByProps({testID: 'confirmation-waiting-cancel'});
+		expect(stop.props.accessibilityRole).toBe('button');
+		expect(style(stop).minHeight).toBeGreaterThanOrEqual(44);
+		expect(style(stop).borderWidth).toBe(1);
+		expect(style(stop).borderColor).toBe('#2196f3');
+
+		expect(present(tr, 'confirmation-confirm-face-id')).toBe(false);
+		expect(present(tr, 'confirmation-retry-cta')).toBe(false);
+		expect(present(tr, 'confirmation-error')).toBe(false);
+		expect(JSON.stringify(tr.toJSON())).not.toContain(tReg()('confirmation.caption'));
+		expect(mockPollDecisions).toHaveBeenCalledTimes(1);
+	});
+
+	// todo 2026-09-11-optimystic-commit-success-hides-unresolvable-cohort: an office cannot approve a
+	// request it never received, so the waiting state says when the request is held only on this phone.
+	function mountTracked(state: 'waiting' | 'shared') {
+		const tracked: string[] = [];
+		const tracker = {
+			unsharedCount: state === 'waiting' ? 1 : 0,
+			subscribe: () => () => undefined,
+			waitingActionCount: () => 0,
+			actionState: (key: string) => (tracked.includes(key) ? state : 'unknown'),
+			track: async (key: string, fn: () => Promise<unknown>) => {
+				tracked.push(key);
+				return fn();
+			},
+		};
+		const {CommitShareProvider} = require('../../../hooks/useCommitShare');
+		let tr!: renderer.ReactTestRenderer;
+		renderer.act(() => {
+			tr = renderer.create(
+				<CommitShareProvider tracker={tracker as never}>
+					<ConfirmationScreen />
+				</CommitShareProvider>,
+			);
+		});
+		renderedTrees.push(tr);
+		mounted.push(tr);
+		return {tr, tracked};
+	}
+
+	it('(1b) a request held only on this phone says so in the waiting state; both submits are attributed to it', async () => {
+		scriptPolls([]);
+		const {tr, tracked} = mountTracked('waiting');
+		await press(tr);
+
+		expect(present(tr, 'confirmation-waiting')).toBe(true);
+		const notice = tr.root.findByProps({testID: 'confirmation-not-shared'});
+		expect(notice.props.children).toBe(tReg()('confirmation.notShared'));
+		expect(notice.props.children).not.toBe('confirmation.notShared');
+		// The registration and association submits, both under ONE registration key.
+		expect(tracked.length).toBe(2);
+		expect(new Set(tracked).size).toBe(1);
+		expect(tracked[0]).toMatch(/^registration:/);
+	});
+
+	it('(1c) control: once the request is shared, the waiting state shows no such notice', async () => {
+		scriptPolls([]);
+		const {tr} = mountTracked('shared');
+		await press(tr);
+		expect(present(tr, 'confirmation-waiting')).toBe(true);
+		expect(present(tr, 'confirmation-not-shared')).toBe(false);
+	});
+
+	it('(2) the officer approves inside the window: the first Confirm finishes with no Try Again', async () => {
+		scriptPolls([() => [], () => [], () => [], () => [decision('c')]]);
+		const tr = mount();
+		await press(tr);
+		await advance(3 * DECISION_POLL_INTERVAL_MS);
+
+		expect(mockProduce).toHaveBeenCalledTimes(1);
+		expect(mockAssociationSubmitAttestation).toHaveBeenCalledTimes(1);
+		expect(present(tr, 'confirmation-pending')).toBe(true);
+		expect(present(tr, 'confirmation-waiting')).toBe(false);
+		expect(present(tr, 'confirmation-retry-cta')).toBe(false);
+		expect(JSON.stringify(tr.toJSON())).not.toContain('Try Again');
+	});
+
+	it('(3) answered after 10 minutes: still waiting with no Try Again, and the late challenge finishes the first Confirm', async () => {
+		const tenMinutesOfReads = (10 * 60_000) / DECISION_POLL_INTERVAL_MS;
+		scriptPolls([...Array.from({length: tenMinutesOfReads}, () => () => []), () => [decision('c')]]);
+		const tr = mount();
+		await press(tr);
+		for (let i = 0; i < 10; i++) {
+			await advance(60_000);
+			if (i === 8) {
+				expect(present(tr, 'confirmation-waiting')).toBe(true);
+				expect(present(tr, 'confirmation-error')).toBe(false);
+				expect(JSON.stringify(tr.toJSON())).not.toContain('Try Again');
+			}
+		}
+		await advance(2 * DECISION_POLL_INTERVAL_MS);
+
+		expect(mockProduce).toHaveBeenCalledTimes(1);
+		expect(mockAssociationSubmitAttestation).toHaveBeenCalledTimes(1);
+		expect(present(tr, 'confirmation-pending')).toBe(true);
+		expect(present(tr, 'confirmation-waiting')).toBe(false);
+	});
+
+	it('(4) a clock jump (app back from the background) does not end the wait: the next tick reads again', async () => {
+		scriptPolls([]);
+		const tr = mount();
+		await press(tr);
+		expect(mockPollDecisions).toHaveBeenCalledTimes(1);
+
+		jest.setSystemTime(Date.now() + 10 * DECISION_WAIT_MAX_MS);
+		await advance(DECISION_POLL_INTERVAL_MS);
+
+		expect(present(tr, 'confirmation-waiting')).toBe(true);
+		expect(present(tr, 'confirmation-error')).toBe(false);
+		expect(mockPollDecisions).toHaveBeenCalledTimes(2);
+	});
+
+	it('(5) Stop during a sleep ends the wait at once with the stopped copy, Try Again, and no further read or prompt', async () => {
+		scriptPolls([]);
+		const tr = mount();
+		await press(tr);
+		await press(tr, 'confirmation-waiting-cancel');
+
+		expect(present(tr, 'confirmation-waiting')).toBe(false);
+		expect(tr.root.findByProps({testID: 'confirmation-error'}).props.children).toBe(tReg()('confirmation.error.waitStopped'));
+		expect(labelOf(tr.root.findByProps({testID: 'confirmation-confirm-face-id'}))).toBe('Try Again');
+
+		const reads = mockPollDecisions.mock.calls.length;
+		await advance(10 * DECISION_POLL_INTERVAL_MS);
+		expect(mockPollDecisions.mock.calls.length).toBe(reads);
+		expect(mockProduce).not.toHaveBeenCalled();
+	});
+
+	it('(6) Stop during an in-flight read discards a late notice: no prompt, no attestation answer', async () => {
+		const late = deferred<unknown[]>();
+		let read = 0;
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+			read += 1;
+			return read === 2 ? late.promise : [];
+		});
+		const tr = mount();
+		await press(tr);
+		await advance(DECISION_POLL_INTERVAL_MS); // read 2 is now in flight
+		expect(mockPollDecisions).toHaveBeenCalledTimes(2);
+
+		await press(tr, 'confirmation-waiting-cancel');
+		await renderer.act(async () => {
+			late.resolve([decision('c')]);
+			await flushMicrotasks(60);
+		});
+
+		expect(tr.root.findByProps({testID: 'confirmation-error'}).props.children).toBe(tReg()('confirmation.error.waitStopped'));
+		expect(mockProduce).not.toHaveBeenCalled();
+		expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
+	});
+
+	it('(7) unmount during an in-flight read: nothing runs afterwards, no state is set and nothing is logged', async () => {
+		const late = deferred<unknown[]>();
+		let read = 0;
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+			read += 1;
+			return read === 2 ? late.promise : [];
+		});
+		const tr = mount();
+		await press(tr);
+		await advance(DECISION_POLL_INTERVAL_MS);
+		expect(mockPollDecisions).toHaveBeenCalledTimes(2);
+
+		const consoleSpy = spyAllConsole();
+		try {
+			renderer.act(() => {
+				tr.unmount();
+			});
+			await renderer.act(async () => {
+				late.resolve([decision('c')]);
+				await flushMicrotasks(60);
+			});
+			await advance(DECISION_WAIT_MAX_MS + DECISION_POLL_INTERVAL_MS);
+
+			expect(mockProduce).not.toHaveBeenCalled();
+			expect(mockAssociationSubmitAttestation).not.toHaveBeenCalled();
+			expect(mockClearDraft).not.toHaveBeenCalled();
+			expect(mockPollDecisions).toHaveBeenCalledTimes(2);
+			expect(consoleSpy.calls()).toEqual([]);
+		} finally {
+			consoleSpy.restore();
+		}
+	});
+
+	it('(8) unmount during a sleep: later time adds no read and no console call', async () => {
+		scriptPolls([]);
+		const tr = mount();
+		await press(tr);
+
+		const consoleSpy = spyAllConsole();
+		try {
+			renderer.act(() => {
+				tr.unmount();
+			});
+			await advance(DECISION_WAIT_MAX_MS + DECISION_POLL_INTERVAL_MS);
+			expect(mockPollDecisions).toHaveBeenCalledTimes(1);
+			expect(consoleSpy.calls()).toEqual([]);
+		} finally {
+			consoleSpy.restore();
+		}
+	});
+
+	it('(9) unmount at the identity read: once it settles nothing downstream runs', async () => {
+		const identity = deferred<typeof mockDeviceSign>();
+		mockCreateDeviceSigner.mockImplementationOnce(() => identity.promise);
+		const tr = mount();
+		await press(tr);
+
+		renderer.act(() => {
+			tr.unmount();
+		});
+		await renderer.act(async () => {
+			identity.resolve(mockDeviceSign);
+			await flushMicrotasks(120);
+		});
+
+		expect(mockGetElections).not.toHaveBeenCalled();
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+		expect(mockRegistrationSubmitRequest).not.toHaveBeenCalled();
+		expect(mockAssociationSubmitRequest).not.toHaveBeenCalled();
+		expect(mockPollDecisions).not.toHaveBeenCalled();
+		expect(mockProduce).not.toHaveBeenCalled();
+	});
+
+	describe.each([
+		['a long wait then a Stop', async (tr: renderer.ReactTestRenderer) => {
+			await advance(DECISION_WAIT_MAX_MS + DECISION_POLL_INTERVAL_MS);
+			await press(tr, 'confirmation-waiting-cancel');
+		}],
+		['a Stop', async (tr: renderer.ReactTestRenderer) => press(tr, 'confirmation-waiting-cancel')],
+	])('(10, 11) Try Again after %s', (_name, endWait) => {
+		it('re-enters the wait, re-submits the byte-identical inits, reuses the election id and finishes', async () => {
+			scriptPolls([]);
+			const tr = mount();
+			await press(tr);
+			await endWait(tr);
+			expect(present(tr, 'confirmation-error')).toBe(true);
+
+			// The retry: its first read is empty, the next carries the decision.
+			let read = 0;
+			looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => {
+				callOrder.push('association.pollDecisions');
+				read += 1;
+				return read === 1 ? [] : [decision('c')];
+			});
+			await press(tr);
+			expect(present(tr, 'confirmation-waiting')).toBe(true);
+			await advance(DECISION_POLL_INTERVAL_MS);
+
+			expect(present(tr, 'confirmation-pending')).toBe(true);
+			expect(registrationRequestInits).toHaveLength(2);
+			expect(registrationRequestInits[1]).toBe(registrationRequestInits[0]);
+			expect(associationSubmitRequestCalls[1].init).toBe(associationSubmitRequestCalls[0].init);
+			expect(mockDeriveRegistrationCode).toHaveBeenCalledTimes(1);
+			expect(mockProduce.mock.calls[0][0]).toMatchObject({electionId: registrationRequestInits[0].payload.electionId});
+		});
+	});
+
+	it('(12) a rejected notice mid-wait leaves the waiting state for the generic transient copy and never prompts', async () => {
+		scriptPolls([() => [], () => [decision('r')]]);
+		const tr = mount();
+		await press(tr);
+		await advance(DECISION_POLL_INTERVAL_MS);
+
+		expect(present(tr, 'confirmation-waiting')).toBe(false);
+		expect(JSON.stringify(tr.toJSON())).toContain('Something went wrong verifying your device. Try again.');
+		expect(mockProduce).not.toHaveBeenCalled();
+	});
+});
+
+describe('ConfirmationScreen — decision-wait logging (D-27, A3 D-06)', () => {
+	beforeEach(() => {
+		jest.useFakeTimers({doNotFake: ['queueMicrotask']});
+	});
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	it('logs only the closed tokens across a long wait, a Stop and a success, and never an id, nonce, cursor or key', async () => {
+		const consoleSpy = spyAllConsole();
+		const trees: renderer.ReactTestRenderer[] = [];
+		try {
+			const press = async (tr: renderer.ReactTestRenderer, testID = 'confirmation-confirm-face-id') => {
+				await renderer.act(async () => {
+					tr.root.findByProps({testID}).props.onPress();
+					await flushMicrotasks(120);
+				});
+			};
+			const advance = async (ms: number) => {
+				await renderer.act(async () => {
+					await jest.advanceTimersByTimeAsync(ms);
+					await flushMicrotasks(60);
+				});
+			};
+			const never = () =>
+				looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
+					{requestId: 'someone-else', status: 'p', cursor: 'cursor-never'},
+				]);
+
+			// 1) a wait past the old bounds: it logs nothing (there is no deadline)
+			never();
+			const longWait = renderScreen();
+			trees.push(longWait);
+			await press(longWait);
+			await advance(DECISION_WAIT_MAX_MS + DECISION_POLL_INTERVAL_MS);
+			// 2) a Stop
+			never();
+			const stopped = renderScreen();
+			trees.push(stopped);
+			await press(stopped);
+			await press(stopped, 'confirmation-waiting-cancel');
+			// 3) a success
+			looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => [
+				{requestId: capturedAssociationRequestId, status: 'c', challengeNonce: CHALLENGE_NONCE, cursor: 'cursor-1'},
+			]);
+			const succeeded = renderScreen();
+			trees.push(succeeded);
+			await press(succeeded);
+			expect(succeeded.root.findAllByProps({testID: 'confirmation-pending'}).length).toBeGreaterThan(0);
+
+			const calls = consoleSpy.calls();
+			const infos = calls.filter(c => c.method === 'info');
+			expect(calls.filter(c => String(c.args[0]).includes('timed-out'))).toHaveLength(0);
+			expect(infos.filter(c => c.args[0] === 'ConfirmationScreen: decision wait: stopped')).toHaveLength(1);
+			expect(calls.filter(c => String(c.args[0]).includes('registration ceremony failed:'))).toHaveLength(0);
+
+			const closed = new Set([
+				'ConfirmationScreen: decision wait: stopped',
+				'ConfirmationScreen: registration ceremony failed:',
+			]);
+			for (const call of calls) {
+				if (typeof call.args[0] === 'string' && call.args[0].startsWith('ConfirmationScreen:')) {
+					expect(closed.has(call.args[0])).toBe(true);
+				}
+			}
+
+			const forbidden = [
+				...associationSubmitRequestCalls.map(c => c.init.id as string),
+				...registrationRequestInits.map(i => i.id as string),
+				CHALLENGE_NONCE,
+				'cursor-1',
+				'cursor-never',
+				P256_PUB,
+				DEVICE_IDENTITY_PUBLIC_KEY,
+			];
+			const dump = JSON.stringify(calls);
+			for (const value of forbidden) {
+				expect(dump).not.toContain(value);
+			}
+		} finally {
+			for (const tr of trees) {
+				renderer.act(() => {
+					tr.unmount();
+				});
+			}
+			consoleSpy.restore();
+		}
+	});
+});
+
+describe('ConfirmationScreen — decision-wait copy in both locales (UI-SPEC A6 11a)', () => {
+	beforeEach(() => {
+		jest.useFakeTimers({doNotFake: ['queueMicrotask']});
+	});
+	afterEach(async () => {
+		jest.useRealTimers();
+		await renderer.act(async () => {
+			await i18n.changeLanguage('en');
+		});
+	});
+
+	async function mountIn(lng: string) {
+		await renderer.act(async () => {
+			await i18n.changeLanguage(lng);
+		});
+		looseMockPollDecisions.mockImplementation(async (_sinceCursor?: string) => []);
+		const tr = renderScreen();
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'confirmation-confirm-face-id'}).props.onPress();
+			await flushMicrotasks(120);
+		});
+		return tr;
+	}
+
+	it.each(['en', 'es'])('%s: the waiting text and the Stop label come from the bundle; Stop shows the stopped copy and the retry label', async lng => {
+		const tr = await mountIn(lng);
+		const tLng = i18n.getFixedT(lng, 'registration');
+		try {
+			const waiting = tLng('confirmation.waiting');
+			const stopLabel = tLng('confirmation.waitingCancel');
+			expect(waiting).not.toBe('confirmation.waiting');
+			expect(stopLabel).not.toBe('confirmation.waitingCancel');
+			expect(tr.root.findByProps({testID: 'confirmation-waiting-text'}).props.children).toBe(waiting);
+			expect(labelOf(tr.root.findByProps({testID: 'confirmation-waiting-cancel'}))).toBe(stopLabel);
+
+			await renderer.act(async () => {
+				tr.root.findByProps({testID: 'confirmation-waiting-cancel'}).props.onPress();
+				await flushMicrotasks(60);
+			});
+			expect(tr.root.findByProps({testID: 'confirmation-error'}).props.children).toBe(tLng('confirmation.error.waitStopped'));
+			expect(labelOf(tr.root.findByProps({testID: 'confirmation-confirm-face-id'}))).toBe(tLng('confirmation.retryCta'));
+		} finally {
+			renderer.act(() => {
+				tr.unmount();
+			});
+		}
+	});
+
+	it.each(['en', 'es'])('%s: Stop shows the stopped copy', async lng => {
+		const tr = await mountIn(lng);
+		try {
+			await renderer.act(async () => {
+				tr.root.findByProps({testID: 'confirmation-waiting-cancel'}).props.onPress();
+				await flushMicrotasks(60);
+			});
+			expect(tr.root.findByProps({testID: 'confirmation-error'}).props.children).toBe(
+				i18n.getFixedT(lng, 'registration')('confirmation.error.waitStopped'),
+			);
+		} finally {
+			renderer.act(() => {
+				tr.unmount();
+			});
+		}
+	});
+});
+
+
+describe('ConfirmationScreen — outcome poll, completion and exits (D-100, UAT 65 gap 5)', () => {
+	const mounted: renderer.ReactTestRenderer[] = [];
+
+	beforeEach(() => {
+		jest.useFakeTimers({doNotFake: ['queueMicrotask']});
+	});
+	afterEach(() => {
+		while (mounted.length > 0) {
+			const tr = mounted.pop()!;
+			renderer.act(() => {
+				tr.unmount();
+			});
+		}
+		jest.useRealTimers();
+	});
+
+	const present = (tr: renderer.ReactTestRenderer, testID: string) => tr.root.findAllByProps({testID}).length > 0;
+
+	async function submitToPending() {
+		const tr = renderScreen();
+		mounted.push(tr);
+		await renderer.act(async () => {
+			tr.root.findByProps({testID: 'confirmation-confirm-face-id'}).props.onPress();
+			await flushMicrotasks(200);
+		});
+		expect(present(tr, 'confirmation-pending')).toBe(true);
+		return tr;
+	}
+
+	async function advance(ms: number) {
+		await renderer.act(async () => {
+			jest.advanceTimersByTime(ms);
+			await flushMicrotasks(30);
+		});
+	}
+
+	it('C-1 completes when a later poll reads registered; Done pops once', async () => {
+		const tr = await submitToPending();
+		mockResolveRegistrationStatus.mockImplementation(async () => ({kind: 'registered'}));
+		await advance(10_000);
+		expect(present(tr, 'confirmation-pending')).toBe(false);
+		expect(present(tr, 'confirmation-registered')).toBe(true);
+		expect(present(tr, 'confirmation-done')).toBe(true);
+		expect(mockPopToTop).not.toHaveBeenCalled();
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'confirmation-done'}).props.onPress();
+		});
+		expect(mockPopToTop).toHaveBeenCalledTimes(1);
+	});
+
+	// todo 2026-11-23-voter-confirmation-faceid-copy-persists: the Face ID step's heading, prompt and caption
+	// belong to that step only; pending and registered must not still tell the voter to confirm.
+	it('the Face ID step copy shows before the confirm and is gone on pending and registered', async () => {
+		const STEP = ['confirmation-heading', 'confirmation-body', 'confirmation-caption'];
+		const tEn = i18n.getFixedT('en', 'registration');
+		const os = (key: string) => tEn(Platform.OS === 'ios' ? key : `${key}.android`);
+		const fresh = renderScreen();
+		mounted.push(fresh);
+		expect(JSON.stringify(fresh.toJSON())).toContain(tEn('confirmation.heading'));
+		expect(JSON.stringify(fresh.toJSON())).toContain(os('confirmation.caption'));
+		fresh.unmount();
+		mounted.pop();
+
+		const tr = await submitToPending();
+		expect(JSON.stringify(tr.toJSON())).not.toContain(tEn('confirmation.heading'));
+		expect(JSON.stringify(tr.toJSON())).not.toContain(os('confirmation.body'));
+		expect(JSON.stringify(tr.toJSON())).not.toContain(os('confirmation.caption'));
+		for (const id of STEP) expect(present(tr, id)).toBe(false);
+
+		mockResolveRegistrationStatus.mockImplementation(async () => ({kind: 'registered'}));
+		await advance(10_000);
+		expect(present(tr, 'confirmation-registered')).toBe(true);
+		for (const id of STEP) expect(present(tr, id)).toBe(false);
+	});
+
+	it('the Face ID step heading, prompt and caption carry their testIDs before the confirm', () => {
+		const fresh = renderScreen();
+		mounted.push(fresh);
+		for (const id of ['confirmation-heading', 'confirmation-body', 'confirmation-caption']) expect(present(fresh, id)).toBe(true);
+	});
+
+	it('C-2 pending shows Back to registration, which pops once', async () => {
+		const tr = await submitToPending();
+		renderer.act(() => {
+			tr.root.findByProps({testID: 'confirmation-pending-back'}).props.onPress();
+		});
+		expect(mockPopToTop).toHaveBeenCalledTimes(1);
+	});
+
+	it('C-3 the poll stops after 10 min and the check-later line appears', async () => {
+		const tr = await submitToPending();
+		expect(present(tr, 'confirmation-pending-check-later')).toBe(false);
+		await advance(600_000);
+		await advance(10_000);
+		expect(present(tr, 'confirmation-pending-check-later')).toBe(true);
+		const calls = mockResolveRegistrationStatus.mock.calls.length;
+		await advance(60_000);
+		expect(mockResolveRegistrationStatus.mock.calls.length).toBe(calls);
+	});
+
+	it('C-4 unmount stops the poll', async () => {
+		const tr = await submitToPending();
+		renderer.act(() => {
+			tr.unmount();
+		});
+		mounted.length = 0;
+		const calls = mockResolveRegistrationStatus.mock.calls.length;
+		await advance(60_000);
+		expect(mockResolveRegistrationStatus.mock.calls.length).toBe(calls);
+	});
+
+	it('C-5 the status read uses the read-only device key lookup, never provisionDeviceKey', async () => {
+		await submitToPending();
+		mockProvisionDeviceKey.mockClear();
+		mockGetCurrentDeviceKey.mockClear();
+		const deps = mockResolveRegistrationStatus.mock.calls.at(-1)![0] as {getCurrentDeviceKey: () => Promise<unknown>};
+		await deps.getCurrentDeviceKey();
+		expect(mockGetCurrentDeviceKey).toHaveBeenCalledTimes(1);
+		expect(mockProvisionDeviceKey).not.toHaveBeenCalled();
+	});
+
+	it.each(['indeterminate', 'notRegistered', 'pending'])('C-6 a %s read keeps the pending state', async kind => {
+		const tr = await submitToPending();
+		mockResolveRegistrationStatus.mockImplementation(async () => ({kind}));
+		await advance(10_000);
+		expect(present(tr, 'confirmation-pending')).toBe(true);
+		expect(present(tr, 'confirmation-done')).toBe(false);
 	});
 });

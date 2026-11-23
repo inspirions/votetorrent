@@ -382,7 +382,8 @@ function freshVoteNonce (): string {
 	return makeVoteNonce(random)
 }
 
-function digestBytesFromBase64Url (digest: string): Uint8Array {
+/** A `Digest()` output (43 base64url characters) as its 32 bytes, for the native signer. */
+export function digestBytesFromBase64Url (digest: string): Uint8Array {
 	if (!/^[A-Za-z0-9_-]{43}$/.test(digest)) throw new Error('digest is not 43 base64url characters')
 	const padded = digest.replace(/-/g, '+').replace(/_/g, '/') + '='
 	const binary = (globalThis as unknown as { atob: (s: string) => string }).atob(padded)
@@ -394,7 +395,9 @@ function digestBytesFromBase64Url (digest: string): Uint8Array {
 
 function classifySignFailure (err: unknown): CastVoteSignFailureReason {
 	const code = (err as { code?: unknown } | null)?.code
-	if (code === 'CANCELED') return 'canceled'
+	// SYSTEM_CANCELED (review CR-01): the system, not the voter, ended the prompt (app backgrounded,
+	// screen locked). Casting is a foreground action the voter retries, so it gets the cancel copy.
+	if (code === 'CANCELED' || code === 'SYSTEM_CANCELED') return 'canceled'
 	if (
 		code === 'NO_BIOMETRICS_ENROLLED' || code === 'LOCKOUT' || code === 'LOCKOUT_PERMANENT'
 		|| code === 'BIOMETRIC_ERROR' || code === 'NO_ACTIVITY' || code === 'DEVICE_LOCKED'

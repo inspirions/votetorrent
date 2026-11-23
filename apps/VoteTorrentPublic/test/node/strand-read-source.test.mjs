@@ -25,8 +25,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ReactivitySubscriberRegistry } from '@optimystic/db-p2p';
 import { PUBLIC_SUBSCRIBED_TABLES } from '@votetorrent/web-data/public';
+import { registerVoteTorrentFunctions } from '@votetorrent/vote-engine/browser';
 import { PeerReplicationError, startPeerReplication } from '../../src/peer/reactivity-bridge.js';
 import {
 	StrandReadError,
@@ -278,6 +278,10 @@ test('openStrandReadHandle passes strandId === networkHash, sAppConfig from publ
 	assert.equal(config.coordinatedRepo, fakeRepo);
 	assert.equal(config.strandType, 'o');
 	assert.equal(config.founder, false);
+	// quereus 5.6 refuses a CHECK calling an unregistered function at CREATE TABLE, and StrandDatabase applies the
+	// sApp schema while it initializes: VoteTorrent's functions go in first (patched cadre-core `databaseSetup`).
+	assert.equal(typeof registerVoteTorrentFunctions, 'function');
+	assert.equal(config.databaseSetup, registerVoteTorrentFunctions);
 });
 
 test('openStrandReadHandle asserts the RESOLVED transactor is "network" and rejects (naming the resolved value) when it is not', async () => {
@@ -300,6 +304,24 @@ test('openStrandReadHandle.close() calls the underlying StrandDatabase.close() e
 	await handle.close();
 	await handle.close();
 	assert.equal(instances[0].closeCallCount, 1);
+});
+
+test('openStrandReadHandle closes a StrandDatabase whose initialize() threw, then rethrows the same error (a retry must not leak one per attempt)', async () => {
+	const miss = Object.assign(new Error('No coordinator available for key'), { name: 'FindCoordinatorError', code: 'NO_NETWORK_COORDINATOR' });
+	const { FakeStrandDatabase, instances } = makeFakeStrandDatabaseCtor({
+		initializeImpl: () => {
+			throw miss;
+		},
+		closeImpl: () => {
+			throw new Error('close also failed');
+		},
+	});
+	await assert.rejects(
+		openStrandReadHandle({ networkHash: NETWORK_HASH, node: FAKE_NODE, coordinatedRepo: FAKE_REPO }, /** @type {any} */ ({ StrandDatabase: FakeStrandDatabase })),
+		(/** @type {any} */ err) => err === miss,
+	);
+	assert.equal(instances.length, 1);
+	assert.equal(instances[0].closeCallCount, 1, 'the half-built StrandDatabase was not closed');
 });
 
 // ---------------------------------------------------------------------------
@@ -451,28 +473,9 @@ test('the readRows produced by createStrandRowSource satisfies 56-09\'s startPee
 	const { readRows } = createStrandRowSource({ uiDb, strandDb });
 
 	// Minimal fakes of startPeerReplication's OTHER required options -- see
-	// `peer-reactivity-bridge.test.mjs`'s own `makeFakeNode`/`makeFakeService`
-	// for the pattern this mirrors.
-	const registry = new ReactivitySubscriberRegistry();
-	const fakeService = {
-		register: async (/** @type {any} */ req) => ({
-			topicId: req.topicId,
-			tier: req.tier,
-			primary: new Uint8Array([1]),
-			backups: [],
-			cohortEpoch: new Uint8Array([2]),
-			cohortMembers: [],
-			renewal: {},
-		}),
-		renew: async () => undefined,
-		withdraw: async () => undefined,
-		lookup: async () => {
-			throw new Error('lookup: not exercised by this fixture');
-		},
-		cohortGossip: () => ({}),
-		verifier: () => ({ verifyMessage: async () => 'verified' }),
-	};
-	const fakeNode = { cohortTopicHost: { service: fakeService }, reactivitySubscribers: registry };
+	// `peer-reactivity-bridge.test.mjs`'s own `makeFakeWatch` for the pattern
+	// this mirrors.
+	const fakeNode = { reactivityWatch: { watch: () => ({ close: async () => undefined }) } };
 	/** @type {any} */
 	const fakeDb = {
 		schemaManager: { getModule: () => undefined, getCurrentSchemaName: () => 'main', getTable: () => ({ name: TABLE_A, columns: [] }) },
@@ -482,12 +485,12 @@ test('the readRows produced by createStrandRowSource satisfies 56-09\'s startPee
 
 	let handle;
 	try {
-		handle = await startPeerReplication({
+		handle = startPeerReplication({
 			db: fakeDb,
 			networkHash: NETWORK_HASH,
 			node: fakeNode,
-			collectionId: new TextEncoder().encode('fixture-collection-id'),
-			tailId: 'fixture-tail-block-id',
+			collections: [{ table: TABLE_A, collectionId: `default/${TABLE_A}` }],
+			tails: { readTails: async () => new Map() },
 			readRows,
 		});
 	} catch (err) {

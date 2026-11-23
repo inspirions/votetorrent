@@ -140,10 +140,27 @@ const PUBLIC_SAFE_NAMES = Object.freeze(
  * counts are turnout; their rows name registrants (the block's frozen voter list, and who voted
  * in which block), so no row is ever published. Forbidden stays 33, 39 -> 41 public-safe,
  * 72 -> 74 total.
+ *
+ * 2026-11-03: +2 tables, both NEVER (the strictest class, so nothing becomes publishable). One is
+ * the officer-published tally row, which had landed unclassified and is now an interim NEVER until
+ * the phase that shows results on the public page reclassifies it. The other is the officer-signed
+ * revocation of one dashboard browser pairing (officer-only pairing machinery). Table names
+ * intentionally NOT repeated here, see the self-trip guard below. 33 -> 35 forbidden, public-safe
+ * stays 41, 74 -> 76 total.
+ *
+ * 2026-11-05: +1 table, NEVER (the strictest class, so nothing becomes publishable): the
+ * officer-signed cancellation of one pending administration change (administration machinery the
+ * current roster already reflects). Table name intentionally NOT repeated here, see the self-trip
+ * guard below. 35 -> 36 forbidden, public-safe stays 41, 76 -> 77 total.
+ *
+ * 2026-11-13 (56-30, USER DECISION "Public, show totals"): one table moves NEVER -> PUBLIC, the
+ * officer-published results row of an election revision, which was an interim NEVER that named the
+ * results work as its owner. Its public read selects no user id. Table name intentionally NOT
+ * repeated here (self-trip guard). 36 -> 35 forbidden, 41 -> 42 public-safe, total stays 77.
  */
-const EXPECTED_FORBIDDEN_COUNT = 33;
-const EXPECTED_PUBLIC_SAFE_COUNT = 41;
-const EXPECTED_TABLE_COUNT = 74;
+const EXPECTED_FORBIDDEN_COUNT = 35;
+const EXPECTED_PUBLIC_SAFE_COUNT = 42;
+const EXPECTED_TABLE_COUNT = 77;
 
 /**
  * The size of the scanned file set, pinned the same way the table counts above
@@ -205,8 +222,46 @@ const EXPECTED_TABLE_COUNT = 74;
  * work added. Test 16 ("D-05: zero forbidden-class table names as code across
  * the public entry source set") was confirmed green over the widened 31-file
  * set before this count moved.
+ *
+ * 2026-11-03 moves this 31 -> 33, deliberately, same evidence standard. Two files landed inside
+ * the public-app scan root after this pin was last set (the dashboard-reactivity work on the
+ * public page, commit `a73b6f78`): `apps/VoteTorrentPublic/src/peer/collection-id.js` and
+ * `apps/VoteTorrentPublic/src/peer/tail-reader.js`. This control was already red on the branch
+ * point before the officer-dashboard schema work began, and that work adds no file under a scan
+ * root. Test 16 ("D-05: zero forbidden-class table names as code across the public entry source
+ * set") was confirmed green over the widened 33-file set before this count moved.
+ *
+ * 2026-11-13 moves this 33 -> 34, deliberately, same evidence standard (56-26, user decision):
+ * `packages/web-data/src/attach-live.js` moved out of `src/officer/` and the `./public` barrel
+ * re-exports it, so it is now inside the public closure. Test 16 was confirmed green over the
+ * widened 34-file set in the same run, with the untracked Finder `.DS_Store` files moved aside
+ * (they trip the unknown-extension controls on their own and are not this change).
+ *
+ * 2026-11-13 moves this 34 -> 35, deliberately, same evidence standard (56-29):
+ * `apps/VoteTorrentPublic/src/peer/network-index.js` is new and the index screen imports it (a
+ * link naming only a network lists that network's elections). Test 16 was confirmed green over
+ * the 35-file set in the same run, `.DS_Store` files moved aside.
+ *
+ * 2026-11-13 moves this 35 -> 37 (56-30): `packages/web-data/src/public/read-tally.js` is new and
+ * exported from `./public`, and (same plan) `apps/VoteTorrentPublic/src/screens/PublishedResults.tsx`,
+ * the results card, is new in the public app: 35 -> 37. Test 16 confirmed green over the 37-file set
+ * in the same run.
+ *
+ * 2026-11-13 moves this 37 -> 39 (56-31): `packages/web-data/src/public/read-turnout.js` (ballots cast so far,
+ * counted on the network) and `apps/VoteTorrentPublic/src/peer/turnout-source.js` (the boot-to-page hand-off)
+ * are new. Test 16 confirmed green over the 39-file set in the same run.
+ *
+ * 2026-11-16 moves this 39 -> 40 (56-32): `apps/VoteTorrentPublic/src/peer/first-connection.js` (the bounded
+ * wait for the Edge node's first peer connection, imported by boot.js and network-index.js) is new. It was
+ * added in 5f25ea38 without this pin moving -- a miss, caught by another session. Test 16 confirmed green
+ * over the 40-file set in the same run.
+ *
+ * 2026-11-16 moves this 40 -> 41: `apps/VoteTorrentPublic/src/peer/coordinator-wait.js` (the bounded retry
+ * around opening the strand read handle while no connected peer is yet confirmed to serve the strand,
+ * imported by boot.js and network-index.js) is new. Test 16 confirmed green over the 41-file set in the
+ * same run.
  */
-const EXPECTED_SCANNED_FILE_COUNT = 31;
+const EXPECTED_SCANNED_FILE_COUNT = 41;
 
 // The sentinel literals are ASSEMBLED, never written out, so each appears in
 // this file exactly once — as the comment that delimits the region. A checker

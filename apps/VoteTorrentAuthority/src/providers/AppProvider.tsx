@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import type { PropsWithChildren } from "react";
 import type { INetworksEngine, IDefaultUserEngine, NetworkReference, User } from "@votetorrent/vote-core";
-import type { BootstrapSnapshot } from "@votetorrent/vote-engine/bootstrap";
 import { ActivityIndicator, Text, TouchableOpacity, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { hideSplash } from "react-native-splash-view";
@@ -19,9 +18,10 @@ import {
 } from "../engines/device-identity-repair";
 import { maybeSeedRegistrantFixtures } from "../engines/registrant-dev-seed";
 import { classifyPeerReadFailure } from "../engines/peer-read-unavailable";
+import { isAppSchemaRefusal } from "../engines/app-schema-refusal";
 import { attachSyncBindings } from "../screens/registration/attach-sync-bindings";
 import { attachPeerSyncBinding } from "../screens/registration/attach-peer-sync-binding";
-import { purgeLegacyStagedPayload, registerDashboardSnapshotProvider } from "../services/dashboard-signin-code";
+import { sweepRetiredDashboardCodeStorage } from "../engines/retired-dashboard-code-storage";
 import { useCadreNode, type CadreNodeSettlement } from "./CadreNodeProvider";
 
 interface AppContextType {
@@ -54,17 +54,6 @@ interface AppContextType {
 	 */
 	isNetworkSelected: () => boolean;
 	/**
-	 * 50-07 (D-07/D-09/D-13): export the whole local database, for the currently
-	 * established network, as a verified 50-02 snapshot envelope. Consumed by
-	 * `DashboardSignInCodeScreen`, which never imports `EngineFactory` directly —
-	 * this passthrough is that screen's ONLY path to a snapshot, mirroring
-	 * `isAttestationVerifierProvisioned`'s existing factory-ref passthrough shape.
-	 * Rejects with a `NoNetworkEstablishedError` (see `engine-factory.ts`) when no
-	 * network is yet selected; the screen detects that with
-	 * `isNoNetworkEstablishedError` and renders `NoNetwork`, never a raw message.
-	 */
-	exportDashboardSnapshot: () => Promise<BootstrapSnapshot>;
-	/**
 	 * 62-21 (D-04/D-28): resolves the Authority's hardware-backed device `SignCallback` ON DEMAND.
 	 * The SAME lazy-factory-thunk class already established by the `maybeSeedRegistrantFixtures`
 	 * argument in the init effect below — calling it reads the device key and may prompt, so it is
@@ -78,14 +67,24 @@ interface AppContextType {
 	/**
 	 * 62-27 (D-41/D-44/D-45): screens open the peer staging transports through this passthrough
 	 * (an officer reviewing a device change, a decide-time registration publish), mirroring
-	 * `exportDashboardSnapshot`'s factory-ref shape. It holds no key material: the caller supplies
-	 * the opener and the decision signer. Throws 62-21's `PeerStrandUnavailableError` when the
+	 * `isAttestationVerifierProvisioned`'s factory-ref passthrough shape. It holds no key material:
+	 * the caller supplies the opener and the decision signer. Throws 62-21's `PeerStrandUnavailableError` when the
 	 * established network cannot back a peer strand. Optional so existing `useApp` fakes stay valid.
 	 */
 	createPeerStagingTransports?: (deps: {
 		opener: StagingOpener;
 		decisionSigner: StagingDecisionSigner;
 	}) => PeerStagingTransports;
+	/**
+	 * Re-bind this session to the device user as it is stored NOW. Called after a signing-key
+	 * replacement commits: the replacement rewrites the stored device user, but the factory's
+	 * current user, the open network's ctx.user and every cached engine still hold the key minted
+	 * before it, so a write that binds `ctx.user.activeKeys[0]` (Propose ballot) failed `UserValid`
+	 * until a relaunch. Reads the stored user, binds it into the factory, re-opens the active
+	 * network with it and rebuilds the cached engines. Rejects when the re-open fails; the caller
+	 * decides what that means. Optional so existing `useApp` fakes stay valid.
+	 */
+	rebindDeviceUser?: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -136,6 +135,14 @@ export function useApp() {
 // D-09 also rejects bounded RETRY (`loadAuthoritiesWithRetry.ts` is
 // deliberately not reused here): retrying re-attempts the SAME ambiguous
 // signal this plan removes, it does not resolve it.
+//
+// Device measurements since (2026-10-15): 16957 ms (Redmi 8, after a control-store
+// recreate) and 24387 ms (Pixel_8_p63 relaunch) — the timer itself fires late on a
+// starved JS thread, and cadre-core's first relay reservation alone may take 18 s
+// (`relayReservationBudgetMs`). The bound is kept: it still only decides when the UI
+// stops waiting. What changed is that a timed-out run no longer treats the timeout as
+// final — the init effect re-runs once on the LATE settlement (see LATE SETTLE below),
+// which reacts to the definitive signal rather than retrying the ambiguous one.
 // ---------------------------------------------------------------------------
 const NODE_SETTLE_TIMEOUT_MS = 15000;
 
@@ -178,7 +185,7 @@ async function resolveNodeDispatch(
 	}
 }
 
-type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic" } | null;
+type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "update-needed" } | { kind: "generic" } | null;
 
 // Automatic re-open delays after a peer-unavailable failure (5 s, then 15 s). This covers
 // short blips only: FRET marks a restored silent peer dead after 3 contact failures, but each
@@ -186,6 +193,30 @@ type BootError = { kind: "peer-unavailable"; reason: string } | { kind: "generic
 // takes minutes. It is deliberately NOT widened to minutes: the officer would sit on a spinner
 // with no explanation; the classified error view with Try Again is the path for the long case.
 const PEER_RETRY_DELAYS_MS = [5000, 15000];
+
+/**
+ * selectNetwork's open, with the same bounded peer-unavailable retry the boot re-attach gives its
+ * open (openWithRetry below). A joiner selects the network seconds after its strand attaches, before
+ * the cohort answers; without the retry the join screen showed "select failed" while a restart opened
+ * the same network fine (2026-11-17 Redmi join). Any other rejection, or the last one, propagates.
+ */
+export async function openWithPeerRetry(
+	open: () => Promise<unknown>,
+	delaysMs: readonly number[] = PEER_RETRY_DELAYS_MS,
+	sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await open();
+			return;
+		} catch (openError) {
+			const peer = classifyPeerReadFailure(openError);
+			if (attempt >= delaysMs.length || !peer) throw openError;
+			console.info("[select-network] open: peer unavailable, retrying:", peer.reason, attempt + 1);
+			await sleep(delaysMs[attempt]);
+		}
+	}
+}
 
 /**
  * WR-R4-04: how long boot / select waits for the identity repair's READS (the inspection and the
@@ -208,6 +239,24 @@ export const IDENTITY_REPAIR_BUDGET_MS = 5000;
  * 'network' / 'user' / ... engines captured the OLD user, so `clearEngineCache()` (its existing
  * public API) drops them and `getEngine("network", ref)` rebuilds against the repaired user.
  */
+/**
+ * Re-bind a session to `user` on an already-open network: bind the user into the factory, re-open
+ * the network with it (cache-first: `NetworksEngine.open` writes the user back into the cached ctx
+ * every sibling reads), then drop the cached engines, which captured the previous ctx, and rebuild
+ * the network engine. The same sequence the forked-identity repair uses after a repair commits.
+ */
+export async function rebindSessionUser(
+	factory: EngineFactory,
+	network: NetworkReference | undefined,
+	user: User,
+): Promise<void> {
+	factory.setCurrentUser(user);
+	if (!network) return;
+	await factory.getNetworksEngine().open(network, user);
+	factory.clearEngineCache();
+	await factory.getEngine("network", network);
+}
+
 async function repairForkedIdentityAfterOpen(
 	factory: EngineFactory,
 	network: NetworkReference,
@@ -311,6 +360,8 @@ export function AppProvider({ children }: PropsWithChildren) {
 		setHasNetworkState(value);
 	}, []);
 	const isNetworkSelected = useCallback(() => hasNetworkRef.current, []);
+	// The network this session last opened (boot re-attach or selectNetwork), for rebindDeviceUser.
+	const activeNetworkRef = useRef<NetworkReference | undefined>(undefined);
 	const [networksEngine, setNetworksEngine] = useState<INetworksEngine | null>(null);
 	// Classified boot failure. The raw error object (engine messages carry block ids and
 	// table names) never reaches state or render; only the closed kind does.
@@ -418,86 +469,61 @@ export function AppProvider({ children }: PropsWithChildren) {
 		return engineFactoryRef.current?.isAttestationVerifierProvisioned() ?? false;
 	}, []);
 
-	// 50-07: passthrough to the factory's snapshot seam (see AppContextType's doc
-	// comment above). No fallback default here — unlike the boolean probe above,
-	// there is no safe "conservative" snapshot value to return if the ref is
-	// somehow absent, so an absent factory ref surfaces as a rejected promise
-	// rather than a silently empty snapshot.
-	const exportDashboardSnapshot = useCallback(async (): Promise<BootstrapSnapshot> => {
-		// An EXPLICIT, NAMED failure rather than a non-null assertion. `!` made
-		// an absent factory ref surface as "Cannot read properties of null
-		// (reading 'exportDashboardSnapshot')" -- a message the producer screen
-		// then rendered to the officer verbatim. Named here so a caller can log
-		// the class and show its own copy.
-		const factory = engineFactoryRef.current;
-		if (!factory) {
-			const error = new Error("AppProvider: the engine factory is not ready; cannot export a dashboard snapshot");
-			error.name = "EngineFactoryUnavailableError";
-			throw error;
-		}
-		return factory.exportDashboardSnapshot();
-	}, []);
-
-	// The one-shot startup sweep of PRE-FIX staged sign-in-code records. Two of
-	// two real devices checked were still carrying a whole-database payload in
-	// AsyncStorage, ~15 hours past that code's own expiry, because nothing in
-	// the tree ever rewrites the key for an expired code nobody tries to
-	// redeem. The sweep is a byte-identical no-op on every record a current
-	// build can write and never throws, so it is safe to run unconditionally
-	// here — an empty dependency array, once, on mount.
-	//
-	// The single log line carries the closed outcome token and NOTHING else:
-	// never a record field, never a byte of the payload. It exists so the
-	// on-device evidence that the sweep ran is visible in logcat without
-	// pulling the RKStorage database off the device. The `clean` and `absent`
-	// outcomes are silent — they are the overwhelmingly common case and would
-	// only add noise to every cold start.
+	// Phones that ran older builds may still hold the retired dashboard sign-in code under two
+	// AsyncStorage keys that nothing reads any more: a bearer code secret and, on some builds, a
+	// whole-database copy. Remove both blindly, once per mount. The sweep never reads a value and
+	// never throws; a failure logs one fixed line with nothing interpolated and boot carries on.
 	useEffect(() => {
-		void purgeLegacyStagedPayload().then((outcome) => {
-			if (outcome === "legacy-payload" || outcome === "unreadable") {
-				console.warn(`AppProvider: staged sign-in-code sweep outcome: ${outcome}`);
-			}
+		void sweepRetiredDashboardCodeStorage().then((outcome) => {
+			if (outcome === "failed") console.warn("AppProvider: retired dashboard code storage sweep failed");
 		});
 	}, []);
-
-	// 50-15 (CR-03): register this callback as the redemption-time regeneration
-	// fallback, so `dashboard-signin-code.ts` never needs to have persisted the
-	// payload to answer a redemption — see `registerDashboardSnapshotProvider`'s
-	// own doc comment. Unregister on unmount so a torn-down provider is never
-	// left dangling.
-	//
-	// FILESYSTEM-BINDING PATH ONLY. This registration is NOT live wiring for
-	// the rendezvous service: on that path the phone seals and uploads at mint
-	// and holds no payload, so there is never anything to regenerate and this
-	// callback is never reached. It is retained for the filesystem binding and
-	// is harmless to leave registered.
-	useEffect(() => {
-		registerDashboardSnapshotProvider(exportDashboardSnapshot);
-		return () => registerDashboardSnapshotProvider(undefined);
-	}, [exportDashboardSnapshot]);
 
 	// Activate a network at runtime (create / picker "Select") without a reboot.
 	// Mirrors the boot re-attach block below so behavior is identical to a restart.
 	const selectNetwork = useCallback(async (networkRef: NetworkReference) => {
 		const factory = engineFactoryRef.current!;
-		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
-		const defaultUser = await defaultUserEng.get();
-		let user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
-		// Same D-19 rationale as the boot re-attach block below: Settings reads DefaultUser via
-		// defaultUserEngine.get(), so a first create (which never goes through boot) must persist
-		// one too or Settings reads "No default user found" until a restart. Write only when
-		// absent, and set ONLY { name } -- never overwrite a user's edited name.
-		if (defaultUser === undefined) {
-			await defaultUserEng.set({ name: user.name });
+		// Closed-token step for the failure line below: callers log only the error class.
+		let step = "default-user";
+		try {
+			const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
+			const defaultUser = await defaultUserEng.get();
+			step = "device-user";
+			let user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
+			// Same D-19 rationale as the boot re-attach block below: Settings reads DefaultUser via
+			// defaultUserEngine.get(), so a first create (which never goes through boot) must persist
+			// one too or Settings reads "No default user found" until a restart. Write only when
+			// absent, and set ONLY { name } -- never overwrite a user's edited name.
+			if (defaultUser === undefined) {
+				await defaultUserEng.set({ name: user.name });
+			}
+			factory.setCurrentUser(user);
+			// open() is cache-first (D-06): a just-created network hits the cache; a recent
+			// network re-attaches. It also writes networkRef to the recentNetworks list.
+			step = "open";
+			const networksEngine = factory.getNetworksEngine();
+			await openWithPeerRetry(() => networksEngine.open(networkRef, user));
+			step = "network-engine";
+			await factory.getEngine("network", networkRef);
+			activeNetworkRef.current = networkRef;
+			step = "identity-repair";
+			user = (await repairForkedIdentityAfterOpen(factory, networkRef, user)) ?? user;
+		} catch (error) {
+			console.warn("[select-network] failed:", step, classifyPeerReadFailure(error)?.reason ?? "other");
+			throw error;
 		}
-		factory.setCurrentUser(user);
-		// open() is cache-first (D-06): a just-created network hits the cache; a recent
-		// network re-attaches. It also writes networkRef to the recentNetworks list.
-		await factory.getNetworksEngine().open(networkRef, user);
-		await factory.getEngine("network", networkRef);
-		user = (await repairForkedIdentityAfterOpen(factory, networkRef, user)) ?? user;
 		setHasNetwork(true);
 	}, [setHasNetwork]);
+
+	// See AppContextType.rebindDeviceUser. The name only matters when no device user is stored,
+	// which cannot happen after a committed replacement; it mirrors selectNetwork's resolution.
+	const rebindDeviceUser = useCallback(async (): Promise<void> => {
+		const factory = engineFactoryRef.current!;
+		const defaultUserEng = await factory.getEngine<IDefaultUserEngine>("defaultUser");
+		const defaultUser = await defaultUserEng.get();
+		const user = await getOrCreateDeviceUser(defaultUser?.name ?? "Device User");
+		await rebindSessionUser(factory, activeNetworkRef.current, user);
+	}, []);
 
 	// ENG-05: register the CadreNode live peer-count source with the factory so
 	// NetworkEngine.getStatistics reports connected peers. connectedPeers is keyed
@@ -607,12 +633,49 @@ export function AppProvider({ children }: PropsWithChildren) {
 				console.info("[AppProvider] node settle:", dispatch.status, Date.now() - settleStart);
 				factory.setNode(dispatch.status === "ready" ? dispatch.node : null);
 
+				// LATE SETTLE: the bound above is a liveness ceiling, not a verdict. On a loaded
+				// device the node routinely settles AFTER it (64-53: `timeout 24387` on a relaunched
+				// keyholder; 64-52: `timeout 16957` on the Redmi after its control-store recreate,
+				// inspirions/votetorrent#97), and a network that lives in a strand can never open on
+				// the solo backend ("Network not opened in this session"). So a timed-out run keeps
+				// listening to `nodeSettled`: if it later settles 'ready' while this run's re-attach is
+				// still in flight or has failed, the run is superseded by a fresh one (the same
+				// initNonce bump Try Again uses), which awaits the now-settled promise and dispatches
+				// on the live node. Bounded: `nodeSettled` settles once and the re-run cannot time out
+				// again, so this adds at most ONE automatic run. A run that attached, or had nothing
+				// to attach, is left alone — the peer-count effect hands the live node to the factory.
+				let lateReady = false;
+				let reattachUnresolved = false;
+				const supersedeOnLiveNode = () => {
+					if (cancelled || !lateReady || !reattachUnresolved || hasNetworkRef.current) return;
+					console.info("[AppProvider] node settle: late-ready", Date.now() - settleStart);
+					setInitError(null);
+					setIsInitialized(false);
+					setInitNonce((n) => n + 1);
+				};
+				if (dispatch.status === "timeout") {
+					void nodeSettled.then((late) => {
+						if (late.status !== "ready" || cancelled) return;
+						// Hand the live node to the factory NOW. The peer-count effect does the same,
+						// but it is a passive effect and on a starved device it lags this settlement
+						// by long enough that a re-attach reaching its open in between still saw null
+						// and went solo (officer Pixel_8 2026-10-16: an hour rebuilding an empty solo
+						// store). The DbFactory reads the node at call time, so every open after this
+						// line goes strand. Same node the effect passes, so setNode's change check
+						// keeps the later effect call a no-op.
+						factory.setNode(late.node);
+						lateReady = true;
+						supersedeOnLiveNode();
+					});
+				}
+
 				const networksEng = factory.getNetworksEngine();
 
 				// Attempt to re-attach to the most recently used network.
 				const networks = await networksEng.getRecentNetworks();
 				if (networks.length > 0) {
 					const network = networks[0];
+					reattachUnresolved = true;
 					try {
 						// D-15: inner try/catch for re-attach; on throw → setInitError, NOT setHasNetwork.
 						// NetworksEngine.open() may throw if the on-device store is corrupt/uninitialized.
@@ -639,6 +702,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						factory.setCurrentUser(user);
 						await openWithRetry(networksEng, network, user);
 						await factory.getEngine("network", network);
+						activeNetworkRef.current = network;
 						// O-06: repair a forked device identity. Bounded (IDENTITY_REPAIR_BUDGET_MS) and
 						// abandoned before any write once this run is cancelled.
 						user = (await repairForkedIdentityAfterOpen(factory, network, user, () => cancelled)) ?? user;
@@ -663,6 +727,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 						// not write hasNetwork/initError — the newer run (or no run at all,
 						// post-escape) owns the UI now.
 						if (cancelled) return;
+						reattachUnresolved = false;
 						// Pitfall 4: setHasNetwork is called by AppProvider (not the factory).
 						setHasNetwork(true);
 						// RE-ATTACH FIX: clear any initError from a previous failed attempt so
@@ -676,7 +741,12 @@ export function AppProvider({ children }: PropsWithChildren) {
 						if (cancelled) return;
 						// D-15: surface the recoverable error; spinner resolves to an error view.
 						const peerFailure = classifyPeerReadFailure(reattachError);
-						if (peerFailure) {
+						if (isAppSchemaRefusal(reattachError)) {
+							// Closed token only. This build's schema does not fit the network's data
+							// (engines/app-schema-refusal.ts): not retryable here, the app needs updating.
+							console.warn("[AppProvider] re-attach refused: app schema");
+							setInitError({ kind: "update-needed" });
+						} else if (peerFailure) {
 							// Closed token only: the message carries block ids and table names.
 							console.warn("[AppProvider] re-attach peer read unavailable:", peerFailure.reason);
 							setInitError({ kind: "peer-unavailable", reason: peerFailure.reason });
@@ -695,12 +765,17 @@ export function AppProvider({ children }: PropsWithChildren) {
 				hideSplash();
 				// Quick task 260928-kkf: a fresh run starts with no elapsed-budget escape shown.
 				setFirstSyncBudgetElapsed(false);
+				// LATE SETTLE: the node may have gone live while the failed re-attach was running.
+				supersedeOnLiveNode();
 			} catch (fatalError) {
 				if (cancelled) return;
 				// Outer catch handles failures before/after the re-attach block
 				// (e.g. getRecentNetworks() failure, LocalStorageReact init failure).
 				const fatalPeer = classifyPeerReadFailure(fatalError);
-				if (fatalPeer) {
+				if (isAppSchemaRefusal(fatalError)) {
+					console.warn("[AppProvider] fatal init refused: app schema");
+					setInitError({ kind: "update-needed" });
+				} else if (fatalPeer) {
 					console.warn("[AppProvider] fatal init peer read unavailable:", fatalPeer.reason);
 					setInitError({ kind: "peer-unavailable", reason: fatalPeer.reason });
 				} else {
@@ -725,9 +800,10 @@ export function AppProvider({ children }: PropsWithChildren) {
 		// D-09/D-10: `node` is deliberately OUT of this array — it was the trigger
 		// for the implicit second attempt the settle-then-dispatch fix above
 		// removes. `initNonce` stays: it is the CR-02 Try Again affordance and is
-		// now also the recovery path for the (rare) timeout branch, since a bump
-		// re-awaits the by-then-settled `nodeSettled` promise and gets the correct
-		// backend. `nodeSettled` itself is NOT in this array either — it is a
+		// also the recovery path for the timeout branch — bumped automatically by
+		// the LATE SETTLE listener above when the node goes live, or by Try Again —
+		// since a bump re-awaits the by-then-settled `nodeSettled` promise and gets
+		// the correct backend. `nodeSettled` itself is NOT in this array either — it is a
 		// stable ref-held promise (CadreNodeProvider.tsx), so listing it would only
 		// matter if some future consumer reconstructed it per render, which would
 		// re-fire this effect and reintroduce the double attempt this plan removes.
@@ -796,6 +872,13 @@ export function AppProvider({ children }: PropsWithChildren) {
 						</Text>
 						<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("peerReadUnavailableBody")}</Text>
 					</>
+				) : initError.kind === "update-needed" ? (
+					<>
+						<Text style={{ marginBottom: 8, textAlign: "center", fontWeight: "bold" }}>
+							{t("bootAppUpdateNeededTitle")}
+						</Text>
+						<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("bootAppUpdateNeededBody")}</Text>
+					</>
 				) : (
 					<Text style={{ marginBottom: 16, textAlign: "center" }}>{t("bootNetworkLoadFailed")}</Text>
 				)}
@@ -832,9 +915,9 @@ export function AppProvider({ children }: PropsWithChildren) {
 				hasNetwork,
 				selectNetwork,
 				isNetworkSelected,
-				exportDashboardSnapshot,
 				resolveDeviceSigner,
 				createPeerStagingTransports,
+				rebindDeviceUser,
 			}}
 		>
 			{children}

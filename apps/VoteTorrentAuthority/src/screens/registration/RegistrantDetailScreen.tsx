@@ -4,7 +4,7 @@ import { ExtendedTheme, useNavigation, useRoute, useTheme } from "@react-navigat
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import FontAwesome6 from "react-native-vector-icons/FontAwesome6";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import type {
 	DisclosedSelective,
 	DisclosureAudience,
@@ -538,7 +538,7 @@ export default function RegistrantDetailScreen() {
 					<View testID="registrant-detail-scope-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrantScopeReadOnlyBanner", { scope: scopeDescriptions.vrg })}
+							{t("registrantScopeReadOnlyBanner", { scope: scopeLabel("vrg", t) })}
 						</ThemedText>
 					</View>
 				))}
@@ -703,7 +703,7 @@ export default function RegistrantDetailScreen() {
 					// enforcement boundary.
 					<View testID="registrant-detail-private-gate">
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrantDetailPrivateGateHeading", { scope: scopeDescriptions.vrg })}
+							{t("registrantDetailPrivateGateHeading", { scope: scopeLabel("vrg", t) })}
 						</ThemedText>
 					</View>
 				) : privateReadState !== "readable" ? (

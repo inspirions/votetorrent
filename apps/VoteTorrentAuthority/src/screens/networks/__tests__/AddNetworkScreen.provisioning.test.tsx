@@ -30,6 +30,9 @@ jest.mock("react-i18next", () => ({
 
 const mockNavigate = jest.fn();
 const mockGoBack = jest.fn();
+const mockReplace = jest.fn();
+// Off by default: most specs use a navigation object without `replace`, like a plain mock.
+let mockNavigationHasReplace = false;
 jest.mock("@react-navigation/native", () => ({
 	useTheme: () => ({
 		colors: {
@@ -49,7 +52,10 @@ jest.mock("@react-navigation/native", () => ({
 			light: "sentinel-light",
 		},
 	}),
-	useNavigation: () => ({ navigate: mockNavigate, goBack: mockGoBack }),
+	useNavigation: () =>
+		mockNavigationHasReplace
+			? { navigate: mockNavigate, goBack: mockGoBack, replace: mockReplace }
+			: { navigate: mockNavigate, goBack: mockGoBack },
 }));
 
 const mockGetOrCreateDeviceUser = jest.fn();
@@ -200,6 +206,40 @@ describe("AddNetworkScreen — 49-16 Gap A closure: routes NO_KEY_PROVISIONED th
 		expect(createButton.props.disabled).toBe(false);
 	});
 
+	it("logs the NO_KEY_PROVISIONED routing as info, never as handleCreate error (no dev error toast on a first Create)", async () => {
+		const rejection = Object.assign(new Error("no device signing key provisioned"), {
+			code: "NO_KEY_PROVISIONED",
+		});
+		mockGetOrCreateDeviceUser.mockRejectedValue(rejection);
+		const info = jest.spyOn(console, "info").mockImplementation(() => undefined);
+		const error = jest.spyOn(console, "error").mockImplementation(() => undefined);
+
+		try {
+			const tr = await renderScreen();
+			await pressSignThenCreate(tr);
+
+			expect(error.mock.calls.filter((c) => c[0] === "handleCreate error:")).toHaveLength(0);
+			expect(info).toHaveBeenCalledWith("[network-create] routed to signing-key setup:", "Error");
+		} finally {
+			info.mockRestore();
+			error.mockRestore();
+		}
+	});
+
+	it("a plain Error still logs handleCreate error", async () => {
+		mockGetOrCreateDeviceUser.mockRejectedValue(new Error("boom"));
+		const error = jest.spyOn(console, "error").mockImplementation(() => undefined);
+
+		try {
+			const tr = await renderScreen();
+			await pressSignThenCreate(tr);
+
+			expect(error).toHaveBeenCalledWith("handleCreate error:", "Error");
+		} finally {
+			error.mockRestore();
+		}
+	});
+
 	it("a plain Error (no code) shows the translated create-failure copy, never its text, and is not a deviceSigningError copy key", async () => {
 		mockGetOrCreateDeviceUser.mockRejectedValue(new Error("boom"));
 
@@ -302,6 +342,28 @@ describe("AddNetworkScreen — 49-19: the recovery-key ceremony survives handleC
 		expect(mockGoBack).not.toHaveBeenCalled();
 	});
 
+	it("REPLACES this screen with the ceremony on a native stack, so finishing it does not land back on the filled form", async () => {
+		// Release APK, 2026-10-31: the ceremony was pushed on top of Add Network, and its own
+		// `goBack()` exit returned the officer to this form although the network existed.
+		mockNavigationHasReplace = true;
+		try {
+			mockGetDeviceProvisioningRecord.mockResolvedValue({
+				recoveryPublicKeyCompressedHex: RECOVERY_KEY,
+			});
+			mockGetSummary.mockResolvedValue({ id: "u1", activeKeys: [{ key: SIGNING_KEY }] });
+
+			const tr = await renderScreen();
+			await pressSignThenCreate(tr);
+
+			expect(mockReplace).toHaveBeenCalledTimes(1);
+			expect(mockReplace).toHaveBeenCalledWith("ProvisionSigningKey", { reason: "first-run" });
+			expect(mockNavigate).not.toHaveBeenCalled();
+			expect(mockGoBack).not.toHaveBeenCalled();
+		} finally {
+			mockNavigationHasReplace = false;
+		}
+	});
+
 	it("still goes back when the recovery key is already registered — the gate must not strand the officer on this screen", async () => {
 		mockGetDeviceProvisioningRecord.mockResolvedValue({
 			recoveryPublicKeyCompressedHex: RECOVERY_KEY,
@@ -328,4 +390,11 @@ describe("AddNetworkScreen — 49-19: the recovery-key ceremony survives handleC
 		expect(mockNavigate).not.toHaveBeenCalled();
 		expect(mockGoBack).toHaveBeenCalledTimes(1);
 	});
+});
+
+// The duplicate-create gate keeps in-flight creates in module state (it must outlive one screen);
+// a commit a spec leaves pending must not refuse the next spec's create of the same network.
+beforeEach(() => {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	require("../networkCreateOutcome").resetNetworkCreatesInFlightForTests();
 });

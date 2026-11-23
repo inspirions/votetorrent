@@ -19,7 +19,8 @@ import { RegistrationFieldsSection } from "./components/RegistrationFieldsSectio
 import { DisclosurePolicySection, isDistrictAudienceAvailable } from "./components/DisclosurePolicySection";
 import { AttestationPolicySection } from "./components/AttestationPolicySection";
 import { ReassociationReviewNote } from "./components/ReassociationReviewNote";
-import { ElectionEvent, scopeDescriptions } from "@votetorrent/vote-core";
+import { ElectionEvent } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import type {
 	IElectionEngine,
 	IRegistrationEngine,
@@ -598,7 +599,7 @@ export default function RegistrationPolicyScreen() {
 					<View testID="registration-policy-readonly-banner" style={localStyles.banner}>
 						<FontAwesome6 name="lock" size={14} color={colors.textSecondary} />
 						<ThemedText type="small" style={{ color: colors.textSecondary }}>
-							{t("registrationPolicyReadOnlyBanner", { scope: scopeDescriptions.mel })}
+							{t("registrationPolicyReadOnlyBanner", { scope: scopeLabel("mel", t) })}
 						</ThemedText>
 					</View>
 				)

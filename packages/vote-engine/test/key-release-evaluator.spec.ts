@@ -436,8 +436,13 @@ describe('key-release: election-block (D-18)', () => {
       expect(parseElectionBlockPayload(utf8ToBytes('not json{'))).to.equal(null)
     })
 
-    it('returns null for v: 2', () => {
-      expect(parseElectionBlockPayload(utf8ToBytes(JSON.stringify({ v: 2, votes: [], voterRecords: [] })))).to.equal(null)
+    it('returns null for an unknown version (v: 3)', () => {
+      expect(parseElectionBlockPayload(utf8ToBytes(JSON.stringify({ v: 3, votes: [], voterRecords: [] })))).to.equal(null)
+    })
+
+    it('accepts v: 2 (pool block: per-vote ciphertexts) only when every vote is a string', () => {
+      expect(parseElectionBlockPayload(utf8ToBytes(JSON.stringify({ v: 2, votes: ['{"ct":1}'], voterRecords: [] })))).to.deep.equal({ v: 2, votes: ['{"ct":1}'], voterRecords: [] })
+      expect(parseElectionBlockPayload(utf8ToBytes(JSON.stringify({ v: 2, votes: [{ ct: 1 }], voterRecords: [] })))).to.equal(null)
     })
 
     it('returns null for a missing votes member', () => {

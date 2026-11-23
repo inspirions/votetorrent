@@ -835,8 +835,9 @@ describe('NetworksEngine — factory DI and persistence seam (Phase 14)', () => 
 
   it('open() propagates factory throw — no silent in-memory fallback (D-13)', async () => {
     const throwingFactory: DbFactory = async (_hash: string) => {
-      throw new Error('LevelDB open failed: disk full');
+      throw factoryError;
     };
+    const factoryError = new Error('LevelDB open failed: disk full');
     const engine = new NetworksEngine(AsyncStorage, throwingFactory);
 
     const ref: NetworkReference = {
@@ -856,6 +857,9 @@ describe('NetworksEngine — factory DI and persistence seam (Phase 14)', () => 
     expect(caught).to.be.an('error');
     // The message should include the factory error (wrapped in D-13 message)
     expect((caught as Error).message).to.include('use create() first');
+    // The factory error rides along as `cause`, so the apps can classify it by type (e.g. cadre-core's
+    // AppSchemaRefusedError -> "update the app") without reading the message.
+    expect((caught as Error).cause).to.equal(factoryError)
 
     // No cached entry — factory failure must not pollute the cache
     const contexts = (engine as unknown as { contexts: Map<string, EngineContext> }).contexts;

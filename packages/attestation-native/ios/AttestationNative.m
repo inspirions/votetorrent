@@ -31,6 +31,21 @@ RCT_EXTERN_METHOD(produceAttestation:(NSString *)keyAlias
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Spike 104 (R1d) — Android-only; the Swift implementations reject UNSUPPORTED_PLATFORM. Selectors
+// must match `@objc(provisionAttestedDeviceKey:attestationChallengeBase64:resolver:rejecter:)` and
+// `@objc(produceFreshAttestation:boundDigest:boundDigestUtf8Base64:enablePlayIntegrity:resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(provisionAttestedDeviceKey:(NSString *)keyAlias
+                  attestationChallengeBase64:(NSString *)attestationChallengeBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(produceFreshAttestation:(NSString *)keyAlias
+                  boundDigest:(NSString *)boundDigest
+                  boundDigestUtf8Base64:(NSString *)boundDigestUtf8Base64
+                  enablePlayIntegrity:(BOOL)enablePlayIntegrity
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(signWithDeviceKey:(NSString *)keyAlias
                   digestBase64:(NSString *)digestBase64
                   promptTitle:(NSString *)promptTitle
@@ -50,6 +65,9 @@ RCT_EXTERN_METHOD(signWithRecoveryKey:(NSString *)keyAlias
                   promptNegativeButton:(NSString *)promptNegativeButton
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
+
+// Selector must match the Swift cancelPendingSign @objc name exactly (mismatch = runtime crash).
+RCT_EXTERN_METHOD(cancelPendingSign:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
 
 // D-42 (Phase 62 plan 08) — generic secret-wrap. Selectors must match the Swift
 // `@objc(wrapSecret:plaintextBase64:aadBase64:requireAuth:promptTitle:promptSubtitle:
@@ -110,6 +128,22 @@ RCT_EXTERN_METHOD(setSecureScreen:(BOOL)enabled
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN__BLOCKING_SYNCHRONOUS_METHOD(copySensitiveText:(NSString *)text)
+
+// Keyholder prompt batching. Selectors must match the Swift `@objc(sealSecret:plaintextBase64:resolver:
+// rejecter:)` / `@objc(unsealSecret:ciphertextBase64:promptTitle:promptSubtitle:promptNegativeButton:
+// resolver:rejecter:)` EXACTLY.
+RCT_EXTERN_METHOD(sealSecret:(NSString *)keyAlias
+                  plaintextBase64:(NSString *)plaintextBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unsealSecret:(NSString *)keyAlias
+                  ciphertextBase64:(NSString *)ciphertextBase64
+                  promptTitle:(NSString *)promptTitle
+                  promptSubtitle:(NSString *)promptSubtitle
+                  promptNegativeButton:(NSString *)promptNegativeButton
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
 
 + (BOOL)requiresMainQueueSetup { return NO; }
 

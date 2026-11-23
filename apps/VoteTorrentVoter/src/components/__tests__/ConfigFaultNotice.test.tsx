@@ -24,17 +24,24 @@ import '../../i18n'; // initializes the global i18next instance useTranslation()
 // resolveBootstrapNodes) imports ESM-only/native leaves that cannot load
 // under the react-native jest preset — virtual-mocked here, mirroring
 // CadreNodeProvider.test.tsx's own convention in the Authority app.
+// Spike 100: every config a FakeCadreNode was built with, so a test can read the wiring.
+const mockCadreConfigs: Array<Record<string, any>> = [];
 jest.mock(
 	'@serfab/cadre-core',
 	() => {
 		class FakeCadreNode {
+			constructor(config: Record<string, any>) {
+				mockCadreConfigs.push(config);
+			}
 			start = jest.fn(async () => {});
 			stop = jest.fn(async () => {});
 			getStrand = jest.fn(() => undefined);
 			on = jest.fn();
 			off = jest.fn();
 		}
-		return {CadreNode: FakeCadreNode};
+		// Spike 100: the provider opens persistent trusted-owner / bootstrap-peer stores at boot.
+		const fakeStore = {open: jest.fn(async () => ({}))};
+		return {CadreNode: FakeCadreNode, PersistentTrustedOwnerStore: fakeStore, PersistentBootstrapPeerStore: fakeStore};
 	},
 	{virtual: true},
 );
@@ -262,5 +269,41 @@ describe('CadreNodeProvider — config-fault wiring on the Voter provider (D-14)
 			}
 		}
 		errorSpy.mockRestore();
+	});
+
+	it('spike 100: a joined phone boots with its join bootstrap, no config fault, and a relay-only address resolver', async () => {
+		const MEMBER = '/ip4/203.0.113.7/tcp/4001/ws/p2p/12D3KooWAuthorityAuthorityAuthorityAuthorityAuthor';
+		mockCadreConfigs.length = 0;
+		const mod = loadRealProviderModuleWithDoc({bootstrapNodes: []});
+		// After the module reset: the SAME AsyncStorage instance the freshly-required provider reads.
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const asyncStorageModule = require('@react-native-async-storage/async-storage');
+		const AsyncStorage = asyncStorageModule.default ?? asyncStorageModule;
+		await AsyncStorage.setItem('@votetorrent/voterJoinBootstrap', JSON.stringify([MEMBER]));
+		const captured: {value: ReturnType<typeof mod.useCadreNode> | null} = {value: null};
+		function Probe() {
+			captured.value = mod.useCadreNode();
+			return null;
+		}
+		await renderer.act(async () => {
+			renderer.create(
+				<mod.CadreNodeProvider>
+					<Probe />
+				</mod.CadreNodeProvider>,
+			);
+			for (let i = 0; i < 10; i++) {
+				// eslint-disable-next-line no-await-in-loop
+				await Promise.resolve();
+			}
+		});
+
+		expect(captured.value!.configFault).toBeNull();
+		const config = mockCadreConfigs[mockCadreConfigs.length - 1]!;
+		expect(config.controlNetwork.bootstrapNodes).toEqual([MEMBER]);
+		// A member is a bootstrap peer, never a relay (an unanswered reservation fails start()).
+		expect(config.network.relayAddrs).toEqual([]);
+		expect(config.network.controlCohort).toEqual({strandAddrRefreshMs: 30_000});
+		expect(typeof config.network.inviteAddressResolver).toBe('function');
+		await AsyncStorage.removeItem('@votetorrent/voterJoinBootstrap');
 	});
 });

@@ -272,6 +272,33 @@ describe("CreateElectionScreen — timeline ordering guard (WR-02)", () => {
     expect(mockBuilderCtor).not.toHaveBeenCalled();
   });
 
+  it("a timeline the builder refuses (engine timeline check) is refused BEFORE either signature", async () => {
+    // The engine check runs inside build(); the screen must call build() before seedElectionSigning,
+    // so an election the Voter would refuse costs the officer no biometric prompt.
+    const refusal = Object.assign(new Error("builder validation failed"), {
+      name: "BuilderValidationError",
+      errors: [
+        {
+          path: "revision.timeline.ballotsFinal",
+          code: "TIMELINE_BALLOTS_FINAL_AFTER_DEADLINE",
+          message: "ballotsFinal falls after Election.BallotDeadline",
+          kind: "cross-field",
+        },
+      ],
+    });
+    mockBuilderInstance.build.mockImplementationOnce(() => {
+      throw refusal;
+    });
+
+    const tree = await renderAndSubmit(orderedForm());
+
+    expect(inlineErrors(tree)).toEqual(["errTimelineBallotsFinalAfterDeadline"]);
+    expect(mockElectionsEngine.seedElectionSigning).not.toHaveBeenCalled();
+    expect(mockElectionsEngine.seedElectionRevisionSigning).not.toHaveBeenCalled();
+    expect(mockElectionsEngine.createElection).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+  });
+
   it("control: an ordered timeline reaches the builder and createElection", async () => {
     const tree = await renderAndSubmit(orderedForm());
 
@@ -300,6 +327,17 @@ describe("CreateElectionScreen — authority header", () => {
     });
     expect(authorityText(tree)).toBe("Lab Auth");
     expect(JSON.stringify(tree.toJSON())).not.toContain("Test Network");
+  });
+
+  // todo 2026-11-23-authority-hardcoded-english-threshold-loading: the pending state was a literal "Loading...".
+  it("shows the translated loading copy while the authority lookup is pending", async () => {
+    mockNetworkEngine.getAuthoritiesByName.mockReturnValueOnce(new Promise(() => {}));
+    let tree!: renderer.ReactTestRenderer;
+    await act(async () => {
+      tree = renderer.create(<CreateElectionScreen />);
+    });
+    expect(authorityText(tree)).toBe("loading");
+    expect(JSON.stringify(tree.toJSON())).not.toContain("Loading...");
   });
 
   it("falls back to the authority id when the authority lookup fails", async () => {

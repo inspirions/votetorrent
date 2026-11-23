@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.util.Base64
+import android.util.Log
 import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.fragment.app.FragmentActivity
@@ -17,6 +18,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.UiThreadUtil
 import com.facebook.react.module.annotations.ReactModule
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * AttestationNativeModule — the `AttestationNative` TurboModule implementation (Phase 45-02:
@@ -56,6 +58,11 @@ import com.facebook.react.module.annotations.ReactModule
  *     specifically so the emulator-vs-hardware question 49-13 left open (whether a real device
  *     ever delivers `ERROR_CANCELED`/5 for a negative-button/BACK dismissal, versus 10/13) stays
  *     answerable from a 49-14 hardware run.
+ *     Phase 65 review CR-01 narrows this for the two persistent-key SIGN paths
+ *     ([signWithDeviceKey], [signWithRecoveryKey]) only: there `ERROR_CANCELED`/5 (the system
+ *     ended the prompt: app backgrounded, screen locked, incoming call, HAL timeout) rejects
+ *     `SYSTEM_CANCELED`, and only 10/13 reject `CANCELED`. [produceAttestation] and the vault
+ *     prompts keep mapping all three to `CANCELED`.
  *   - `LOCKOUT_PERMANENT` is now a DISTINCT recoverable-transient entry, split out from the plain
  *     `LOCKOUT` class above (different remediation copy) — [regenerateAttested]'s own mapping is
  *     NOT retroactively changed to match; it keeps collapsing both lockout codes into `LOCKOUT`.
@@ -76,6 +83,14 @@ import com.facebook.react.module.annotations.ReactModule
  *     [KeyAttestationHelper.signWithRecoveryKey]'s doc comment). TERMINAL, not routing, for the
  *     same reason as `NO_DEVICE_CREDENTIAL`: no on-device ceremony exists that this code could
  *     route the caller into.
+ *
+ * Phase 65 gap 1 adds one further class to [signWithDeviceKey] and [signWithRecoveryKey] and one
+ * method:
+ *   - `PROMPT_BUSY` (D-112): another sign is pending or a BiometricFragment is already attached.
+ *     Nothing was shown and nothing will settle later; decided BEFORE a BiometricPrompt is built.
+ *   - [cancelPendingSign] (D-110/D-111): rejects the pending sign `CANCELED`, dismisses its prompt on
+ *     the UI thread and resolves `{canceled}` once the prompt is gone (2 s cap). Never rejects and
+ *     never touches a wrap/unwrap prompt.
  */
 @ReactModule(name = AttestationNativeModule.NAME)
 class AttestationNativeModule(reactContext: ReactApplicationContext) :
@@ -84,6 +99,9 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	private val keyAttestationHelper by lazy { KeyAttestationHelper(reactApplicationContext) }
 	private val playIntegrityHelper by lazy { PlayIntegrityHelper(reactApplicationContext) }
 	private val secretWrapHelper by lazy { SecretWrapHelper(reactApplicationContext) }
+	private val secretSealHelper by lazy { SecretSealHelper(reactApplicationContext) }
+	/** Seals run here: the first one generates an RSA-2048 Keystore key, which can take seconds. */
+	private val secretSealExecutor by lazy { java.util.concurrent.Executors.newSingleThreadExecutor() }
 
 	override fun getName(): String {
 		return NAME
@@ -134,6 +152,110 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 		} catch (e: Exception) {
 			promise.reject("DEVICE_KEY_READ_FAILED", e)
 		}
+	}
+
+	/**
+	 * Spike 104 (R1d) — [provisionDeviceKey] with an attestation chain: the voting key is generated
+	 * with `attestationChallengeBase64` (the fixed provisioning tag) so its own chain can prove it is
+	 * hardware-backed. Same resolve map and reject codes as [provisionDeviceKey], plus
+	 * `INVALID_CHALLENGE_ENCODING` for an undecodable or empty challenge.
+	 */
+	override fun provisionAttestedDeviceKey(keyAlias: String, attestationChallengeBase64: String, promise: Promise) {
+		val challengeBytes: ByteArray = try {
+			Base64.decode(attestationChallengeBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", e)
+			return
+		}
+		if (challengeBytes.isEmpty()) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", "attestation challenge is empty")
+			return
+		}
+		try {
+			val result = keyAttestationHelper.generateAttestedProvisionKey(keyAlias, challengeBytes)
+			promise.resolve(Arguments.createMap().apply {
+				putString("publicKeyBase64", result.publicKeyBase64)
+				putString("keyAlias", result.keyAlias)
+				putString("securityLevel", result.securityLevel)
+				putString("publicKeyCompressedHex", result.publicKeyCompressedHex)
+			})
+		} catch (e: NoStrongBoxOrTeeException) {
+			promise.reject("NO_STRONGBOX_OR_TEE", e)
+		} catch (e: Exception) {
+			if (noBiometricEnrolled()) {
+				promise.reject("NO_BIOMETRICS_ENROLLED", e)
+			} else {
+				promise.reject("PROVISION_FAILED", e)
+			}
+		}
+	}
+
+	/**
+	 * Spike 104 (R1d) — answer the challenge with a THROWAWAY key, leaving the voting key under
+	 * `keyAlias` untouched (see [KeyAttestationHelper.attestFresh]). Same arguments and Play Integrity
+	 * leg as [produceAttestation]; no biometric prompt. Resolves `{ certificateChainBase64` (the
+	 * throwaway key's nonce-bound chain), `deviceKeyCertificateChainBase64` (the voting key's own
+	 * chain), `integrityToken, androidId, attestationTimeMillis, publicKeyCompressedHex` (the voting
+	 * key, unchanged) `}`. Rejects `NO_KEY_PROVISIONED`, `KEY_INVALIDATED_REASSOCIATE`,
+	 * `DEVICE_KEY_NOT_ATTESTED`, `NO_STRONGBOX_OR_TEE`, `KEY_ATTESTATION_FAILED`,
+	 * `INVALID_CHALLENGE_ENCODING`, `PLAY_INTEGRITY_ERROR`.
+	 */
+	override fun produceFreshAttestation(
+		keyAlias: String,
+		boundDigest: String,
+		boundDigestUtf8Base64: String,
+		enablePlayIntegrity: Boolean,
+		promise: Promise,
+	) {
+		// ATTESTATION-CONTRACT.md §3 — the exact setAttestationChallenge bytes, computed JS-side.
+		val challengeBytes: ByteArray = try {
+			Base64.decode(boundDigestUtf8Base64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_CHALLENGE_ENCODING", e)
+			return
+		}
+
+		val fresh: FreshAttestation = try {
+			keyAttestationHelper.attestFresh(keyAlias, challengeBytes)
+		} catch (e: DeviceKeyAbsentException) {
+			promise.reject("NO_KEY_PROVISIONED", e)
+			return
+		} catch (e: DeviceKeyInvalidatedException) {
+			promise.reject("KEY_INVALIDATED_REASSOCIATE", e)
+			return
+		} catch (e: DeviceKeyNotAttestedException) {
+			promise.reject("DEVICE_KEY_NOT_ATTESTED", e)
+			return
+		} catch (e: NoStrongBoxOrTeeException) {
+			promise.reject("NO_STRONGBOX_OR_TEE", e)
+			return
+		} catch (e: Exception) {
+			promise.reject("KEY_ATTESTATION_FAILED", e)
+			return
+		}
+
+		playIntegrityHelper.requestToken(
+			boundDigest = boundDigest,
+			enablePlayIntegrity = enablePlayIntegrity,
+			onResult = { integrityToken ->
+				promise.resolve(Arguments.createMap().apply {
+					putArray("certificateChainBase64", Arguments.createArray().apply {
+						fresh.freshCertificateChain.forEach { pushString(it) }
+					})
+					putArray("deviceKeyCertificateChainBase64", Arguments.createArray().apply {
+						fresh.deviceKeyCertificateChain.forEach { pushString(it) }
+					})
+					putString("integrityToken", integrityToken)
+					putString("androidId", playIntegrityHelper.getDeviceId())
+					putDouble("attestationTimeMillis", System.currentTimeMillis().toDouble())
+					putString("publicKeyCompressedHex", fresh.deviceKeyCompressedHex)
+				})
+			},
+			onError = { e ->
+				// recoverable-transient (D-09) — the key-attestation leg already succeeded.
+				promise.reject("PLAY_INTEGRITY_ERROR", e)
+			},
+		)
 	}
 
 	private fun noBiometricEnrolled(): Boolean =
@@ -232,6 +354,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	) {
 		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
+			vtSignLog("sign refused kind=DEVICE code=NO_ACTIVITY")
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
 			return
 		}
@@ -279,6 +402,7 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 	) {
 		val activity = reactApplicationContext.currentActivity as? FragmentActivity
 		if (activity == null) {
+			vtSignLog("sign refused kind=RECOVERY code=NO_ACTIVITY")
 			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the recovery ceremony")
 			return
 		}
@@ -311,6 +435,26 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				promise.reject(code, throwable)
 			},
 		)
+	}
+
+	override fun cancelPendingSign(promise: Promise) {
+		// Resolve once: the helper reports `true` itself once it has taken (and settled) a record,
+		// even if a later step throws (review IN-04), so this catch only answers for a throw before
+		// anything was taken.
+		val answered = AtomicBoolean(false)
+		val answer = { canceled: Boolean ->
+			if (answered.compareAndSet(false, true)) {
+				promise.resolve(Arguments.createMap().apply { putBoolean("canceled", canceled) })
+			}
+		}
+		try {
+			// A null activity is allowed: the cancel still settles the pending promise.
+			val activity = reactApplicationContext.currentActivity as? FragmentActivity
+			keyAttestationHelper.cancelPendingSign(activity) { canceled -> answer(canceled) }
+		} catch (e: Exception) {
+			// The contract never rejects.
+			answer(false)
+		}
 	}
 
 	/**
@@ -479,6 +623,85 @@ class AttestationNativeModule(reactContext: ReactApplicationContext) :
 				promise.resolve(Arguments.createMap().apply {
 					putString("plaintextBase64", Base64.encodeToString(plaintext, Base64.NO_WRAP))
 				})
+			},
+			onError = { code, throwable -> promise.reject(code, throwable) },
+		)
+	}
+
+	/**
+	 * Keyholder prompt batching: seal a small secret (1..[MAX_SEAL_PLAINTEXT_BYTES] bytes) to an
+	 * RSA-2048 AndroidKeyStore key's PUBLIC key, creating the key pair on first use. Never prompts.
+	 * Resolves `{ ciphertextBase64, keyAlias, securityLevel, alg }`. See [SecretSealHelper].
+	 */
+	override fun sealSecret(keyAlias: String, plaintextBase64: String, promise: Promise) {
+		val plaintext: ByteArray
+		try {
+			plaintext = Base64.decode(plaintextBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+		secretSealExecutor.execute { sealOnExecutor(keyAlias, plaintext, promise) }
+	}
+
+	private fun sealOnExecutor(keyAlias: String, plaintext: ByteArray, promise: Promise) {
+		try {
+			val (ciphertext, securityLevel) = secretSealHelper.seal(keyAlias, plaintext)
+			promise.resolve(Arguments.createMap().apply {
+				putString("ciphertextBase64", Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+				putString("keyAlias", keyAlias)
+				putString("securityLevel", securityLevel)
+				putString("alg", "RSA-OAEP-SHA256")
+			})
+		} catch (e: InvalidSealKeyAliasException) {
+			promise.reject("INVALID_ARGUMENT", e)
+		} catch (e: IllegalArgumentException) {
+			promise.reject("INVALID_ARGUMENT", e)
+		} catch (e: SealKeyPolicyMismatchException) {
+			promise.reject("SEAL_KEY_POLICY_MISMATCH", e)
+		} catch (e: Exception) {
+			promise.reject("SEAL_FAILED", e)
+		} finally {
+			plaintext.fill(0)
+		}
+	}
+
+	/**
+	 * Keyholder prompt batching: the inverse of [sealSecret]. Exactly one BiometricPrompt (per-use,
+	 * BIOMETRIC_STRONG, CryptoObject-bound). Resolves `{ plaintextBase64 }`. Never creates a key.
+	 */
+	override fun unsealSecret(
+		keyAlias: String,
+		ciphertextBase64: String,
+		promptTitle: String,
+		promptSubtitle: String,
+		promptNegativeButton: String,
+		promise: Promise,
+	) {
+		val ciphertext: ByteArray
+		try {
+			ciphertext = Base64.decode(ciphertextBase64, Base64.NO_WRAP)
+		} catch (e: Exception) {
+			promise.reject("INVALID_ENCODING", e)
+			return
+		}
+		val activity = reactApplicationContext.currentActivity as? FragmentActivity
+		if (activity == null) {
+			promise.reject("NO_ACTIVITY", "no current FragmentActivity available to host the BiometricPrompt")
+			return
+		}
+		secretSealHelper.unseal(
+			alias = keyAlias,
+			ciphertext = ciphertext,
+			activity = activity,
+			promptTitle = promptTitle,
+			promptSubtitle = promptSubtitle,
+			promptNegativeButton = promptNegativeButton,
+			onResult = { plaintext ->
+				promise.resolve(Arguments.createMap().apply {
+					putString("plaintextBase64", Base64.encodeToString(plaintext, Base64.NO_WRAP))
+				})
+				plaintext.fill(0)
 			},
 			onError = { code, throwable -> promise.reject(code, throwable) },
 		)

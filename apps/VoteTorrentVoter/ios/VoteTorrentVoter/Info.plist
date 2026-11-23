@@ -33,6 +33,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>VoteTorrent uses the camera only to scan the QR join code from your election authority. It does not take photos or record video.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>VoteTorrent uses Face ID to authorize signing with your device voting key, which is held in the Secure Enclave and never leaves this device.</string>
 	<key>RCTNewArchEnabled</key>

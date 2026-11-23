@@ -50,10 +50,16 @@ if (globalThis.crypto && typeof globalThis.crypto.randomUUID !== 'function') {
 //    otherwise crash with a bare "undefined is not a function". Every other
 //    SubtleCrypto method is installed as a throwing stub that NAMES the gap so
 //    such a failure is immediately diagnosable instead of latent.
+//
+//    Both are TAGGED so polyfills/native-crypto.js can swap in native code once
+//    react-native-quick-crypto has loaded: the digest with the sereus kit's own tag, which
+//    `@serfab/cadre-rn/native-digest` requires before it replaces anything (untagged, every
+//    block hash stayed pure JS even with native Noise loaded), and the stubs with ours, so
+//    only these placeholders are ever replaced.
 if (globalThis.crypto && !globalThis.crypto.subtle) {
   const {sha256, sha512} = require('@noble/hashes/sha2.js');
-  const notPolyfilled = name =>
-    function () {
+  const notPolyfilled = name => {
+    const stub = function () {
       return Promise.reject(
         new Error(
           `crypto.subtle.${name} is not polyfilled (digest-only shim) — ` +
@@ -63,6 +69,9 @@ if (globalThis.crypto && !globalThis.crypto.subtle) {
         ),
       );
     };
+    stub[Symbol.for('votetorrent/subtle-stub')] = true;
+    return stub;
+  };
   globalThis.crypto.subtle = {
     digest(algorithm, data) {
       const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
@@ -83,6 +92,7 @@ if (globalThis.crypto && !globalThis.crypto.subtle) {
     wrapKey: notPolyfilled('wrapKey'),
     unwrapKey: notPolyfilled('unwrapKey'),
   };
+  globalThis.crypto.subtle.digest[Symbol.for('@serfab/cadre-rn/js-digest')] = true;
 }
 
 // 3. TextDecoder (UTF-8) — bare RN 0.78 Hermes lacks it (Expo provides it; that's why the
@@ -91,11 +101,11 @@ if (typeof globalThis.TextDecoder === 'undefined') {
   globalThis.TextDecoder = require('./polyfills/hermes-text-decoder');
 }
 
-// 4. structuredClone (Quereus B-tree uses it; Hermes lacks it)
-if (typeof globalThis.structuredClone !== 'function') {
-  const sc = require('@ungap/structured-clone').default;
-  globalThis.structuredClone = v => sc(v);
-}
+// 4. structuredClone (Quereus B-tree and Optimystic's db-core use it; Hermes lacks it). The sereus
+//    kit's arm, adopted verbatim (cadre-rn 1.19.0, sereus#51): plain data is copied directly and
+//    anything else goes through @ungap/structured-clone, the bare ungap this used to install. It
+//    checks for a native structuredClone itself. See polyfills/hermes-structured-clone.js.
+require('./polyfills/hermes-structured-clone');
 
 // 5. Web Streams
 if (typeof globalThis.ReadableStream === 'undefined') {
@@ -137,6 +147,17 @@ if (typeof WebSocket !== 'undefined' && !('bufferedAmount' in WebSocket.prototyp
     get() { return 0; },
     configurable: true,
   });
+}
+
+// 6d. WebSocket send batching (ported from sereus-chat, polyfills/websocket-batching.js): the
+//     binary sends libp2p makes in one turn reach native code as ONE message, in order. Each RN
+//     binary send is a bridge crossing that base64-encodes on the JS thread first, and about half
+//     of libp2p's are 16 bytes or fewer. Measured only on NativeScript (62% fewer native sends);
+//     UNVERIFIED on React Native, so it needs a device measurement with this on and off.
+//     Set WEBSOCKET_SEND_BATCHING to false to send every chunk as before.
+const WEBSOCKET_SEND_BATCHING = true;
+if (WEBSOCKET_SEND_BATCHING && typeof WebSocket !== 'undefined') {
+  require('./polyfills/websocket-batching').batchWebSocketSends(WebSocket.prototype);
 }
 
 // 7. AbortSignal.prototype.throwIfAborted

@@ -100,126 +100,6 @@
  */
 /** @type {Record<string, string>} */
 export const COPY = Object.freeze({
-	// Bootstrap and networks
-	'bootstrap.heading': 'Enter your sign-in code',
-	// The FIELD label, deliberately not the page heading. Both were
-	// `bootstrap.heading` until live UAT, so the officer read "Enter your
-	// sign-in code" twice on one screen -- once as the title and again as the
-	// label under it. A label still has to exist and stay associated with the
-	// input for screen readers; it just must not restate the title.
-	'bootstrap.codeFieldLabel': 'Sign-in code',
-	'bootstrap.cta': 'Redeem Code',
-	'bootstrap.emptyNetworksHeading': 'No networks yet',
-	'bootstrap.emptyNetworksBody':
-		"Redeem a sign-in code from the authority app to bring this browser's copy of a network's data up to date.",
-	'bootstrap.errorInvalidCodeHeading': "That code isn't valid.",
-	// NARROWED to the case it now actually covers: a pasted string that failed
-	// the local shape check and NEVER LEFT THIS BROWSER. Its old value hedged
-	// across staleness and prior redemption, so it answered three service
-	// refusals as well -- and was a wrong answer for all four; see the
-	// refusal-family comment below. A code that was never sent to anything
-	// cannot have been spent or gone stale, so the only honest next action here
-	// is a local one.
-	'bootstrap.errorInvalidCodeBody':
-		'A sign-in code is two parts joined by a dot. Copy the whole code from the authority app and paste it again.',
-	'bootstrap.errorInvalidCodeCta': 'Try another code',
-	// --- The three refusal families ---------------------------------------
-	//
-	// WHAT DEFECT THIS CLOSES: one hedging sentence was the dashboard's answer
-	// to three different service refusals AND to a locally malformed paste. An
-	// officer reading it could not tell a typo from a code whose single use was
-	// already spent from one that simply sat too long, and the single action it
-	// offered -- ask for a new code -- is the wrong instruction for the first
-	// of those.
-	//
-	// WHY THIS PRECISION IS AVAILABLE AT ALL -- READ THIS BEFORE SHORTENING THE
-	// SERVICE'S RETENTION WINDOW: the rendezvous service erases a code's
-	// ciphertext as soon as it is served, but deliberately KEEPS the
-	// payload-free record for a grace window past the code's expiry. That
-	// retention is the only reason a late redemption is still answered
-	// precisely ("already redeemed" / "timed out") instead of collapsing to the
-	// weakest answer, "no record here". These three keys are what that
-	// retention buys. Shorten the window and this file quietly regresses to one
-	// hedge for every refusal -- the exact defect above -- with no test to
-	// notice, because each key would still resolve.
-	//
-	// WHY THE WORDS ARE WHAT THEY ARE: the refusal copy is walked by a test
-	// (`test/node/copy.test.mjs`) that forbids any machine identifier -- every
-	// outcome code, plus the literal status values a service can answer -- from
-	// appearing in a string an officer reads. That is why this says "not
-	// recognized", "timed out" and "already been redeemed" rather than echoing
-	// the wire vocabulary. "Redeemed" also matches `bootstrap.cta`.
-	//
-	// All three families reuse `bootstrap.errorInvalidCodeCta` as their action
-	// button; a fourth key with an identical value would buy no locale
-	// flexibility and add a drift surface.
-	'bootstrap.errorCodeNotRecognizedHeading': "That code isn't recognized.",
-	'bootstrap.errorCodeNotRecognizedBody':
-		'Check what you pasted for a typo first — a mistyped code looks exactly like this. If it matches the authority app character for character, ask the officer to generate a new code.',
-	'bootstrap.errorCodeAlreadyUsedHeading': 'That code has already been redeemed.',
-	'bootstrap.errorCodeAlreadyUsedBody':
-		'Each sign-in code works only once, so retrying this one will never succeed. Ask the officer to generate a fresh code in the authority app.',
-	'bootstrap.errorCodeTimedOutHeading': 'That code timed out.',
-	'bootstrap.errorCodeTimedOutBody':
-		'Sign-in codes stop working a few minutes after they are made. Ask the officer for a fresh code and paste it right away, or this will happen again.',
-	'bootstrap.errorTransportHeading': "Couldn't reach the authority app.",
-	'bootstrap.errorTransportBody': 'Check that the code was generated recently and try again.',
-	'bootstrap.errorTransportCta': 'Retry',
-	// One key per BOOTSTRAP_PHASES member, named `bootstrap.phase.<value>` --
-	// keyed by the EXACT machine value (`bootstrap.phase.applying-schema` and
-	// so on), so the screen looks a phase up with a mechanical template
-	// (`` `bootstrap.phase.${state.phase}` ``) rather than through a
-	// hand-maintained mapping table that could drift out of step with
-	// BOOTSTRAP_PHASES. `t()` throws on an unknown key, so a phase added
-	// without a key here is a loud error, never a machine identifier on
-	// screen.
-	'bootstrap.phase.submitting': 'Sending your code…',
-	'bootstrap.phase.verifying': 'Checking the data against your code…',
-	'bootstrap.phase.applying-schema': 'Preparing this browser…',
-	'bootstrap.phase.seeding': 'Copying the data into this browser…',
-	'bootstrap.phase.success': 'Done.',
-
-	// Snapshot freshness, refresh and verification
-	'snapshot.refreshCta': 'Refresh snapshot',
-	'snapshot.asOf': 'as of {{relativeTime}}',
-	'snapshot.verifiedToast': 'Snapshot verified and swapped.',
-	'snapshot.staleBanner':
-		'This copy of the data is more than {{threshold}} old. Refresh to bring it up to date.',
-	'snapshot.errorVerificationHeading': "Couldn't verify the new snapshot.",
-	'snapshot.errorVerificationBody':
-		"The transferred data didn't match its checksum, so nothing was replaced — your existing data is unchanged. Try refreshing again.",
-	// The banner for an attach failure this shell does NOT recognise as an
-	// integrity problem -- a corrupt row-count record, a DDL reconcile error, a
-	// storage quota refusal, a plugin registration failure. Distinct wording
-	// from the verification family on purpose: telling an officer their data
-	// failed its checksum when the database simply would not open is a
-	// different, wrong answer.
-	'snapshot.errorAttachHeading': "Couldn't open this browser's copy of the data.",
-	'snapshot.errorAttachBody':
-		'Nothing was changed. Refresh the snapshot to rebuild this browser’s copy from the authority app.',
-	'snapshot.errorSchemaMismatchHeading': 'This authority app is running a different version.',
-	'snapshot.errorSchemaMismatchBody':
-		'Update the authority app or this dashboard so both match, then try again.',
-
-	// Network lifecycle and chrome
-	'network.redeemAnotherCta': '+ Redeem another code',
-	'network.forgetCta': 'Forget this network',
-	'network.forgetConfirmBody':
-		"This deletes this browser's locally stored copy of {{authorityName}}'s data, including registrant information. There's no undo. Type {{authorityName}} to confirm.",
-	'network.swapConfirmHeading': "Replace this browser's data?",
-	'network.swapConfirmBody':
-		"A different officer's code was just redeemed for {{authorityName}}. Continuing replaces this browser's existing copy and signs you in as the new officer.",
-	'network.swapConfirmCta': 'Replace and continue',
-	// The surfaced swap-failure banner (CR-03, 50-22): renders in the main
-	// region -- not the swap dialog -- when classifying an incoming code
-	// fails before (or without) ever opening the confirm dialog, so the
-	// panel grid can never stand in for a failed replacement. Deliberately
-	// distinct from `snapshot.errorAttachHeading`/`Body`: "couldn't open
-	// this browser's copy of the data" is a wrong answer for a code that
-	// was refused.
-	'network.swapErrorHeading': "This browser's data couldn't be replaced.",
-	'network.swapErrorBody':
-		"The sign-in code couldn't be used to replace this browser's data. Ask the authority app for a new code and try again.",
 	'chrome.moreOptionsAriaLabel': 'More options',
 
 	// Authorization gate and preview control
@@ -280,7 +160,7 @@ export const COPY = Object.freeze({
 	// election; this closes that.
 	'panels.registrations.loading': 'Loading registrations…',
 	'panels.registrations.unavailable': 'No election data is loaded in this browser yet.',
-	'panels.registrations.readFailed': "Couldn't load registrations. Try refreshing the snapshot.",
+	'panels.registrations.readFailed': "Couldn't load registrations. This panel tries again when new data arrives.",
 	// Phase 60 (D-06): section headings for all four Registrations sections,
 	// authored prose rather than literal JSX text (rule R1, contract C2).
 	'panels.registrations.statusHeading': 'Registrants by status',
@@ -316,7 +196,7 @@ export const COPY = Object.freeze({
 	// group above.
 	'panels.keyholders.loading': 'Loading keyholders…',
 	'panels.keyholders.unavailable': 'No election data is loaded in this browser yet.',
-	'panels.keyholders.readFailed': "Couldn't load keyholders. Try refreshing the snapshot.",
+	'panels.keyholders.readFailed': "Couldn't load keyholders. This panel tries again when new data arrives.",
 	// Phase 60 (D-07/D-21): the threshold meter's chart-level empty frame,
 	// and its numeral template ("N of M" per 60-UI-SPEC.md).
 	'panels.keyholders.meter.empty': 'No keyholder threshold set for this election yet.',
@@ -552,10 +432,32 @@ export const COPY = Object.freeze({
 	'public.fact.electorate.label': 'Eligible electorate',
 	'public.fact.keyholders.label': 'Keyholders',
 	'public.fact.turnout.label': 'Ballots cast',
+	// 56-31 (gap A filled): ballots cast so far, counted on the network.
+	// Three states like the results card; the detail says what is and is
+	// not read (counts only, nothing about who voted or how).
+	'public.fact.turnout.detail':
+		'Counted on the network from the vote blocks committed for this election, and checked again every 30 seconds while this page is connected. Ballots in a block that is still forming are counted once that block is committed. Nothing about who voted or how is read.',
+	'public.fact.turnout.counted': 'Ballots cast so far: {{votes}}. Vote blocks committed: {{blocks}}.',
+	'public.fact.turnout.counting': 'Counting the ballots cast on the network.',
+	'public.fact.turnout.unavailable': "This page couldn't count the ballots cast on the network.",
 	'public.fact.receipt.label': 'Checking your own ballot',
 	'public.fact.merkle.label': 'Cryptographic record of the votes',
 	'public.fact.keyrelease.label': 'Keyholder key release',
 	'public.fact.results.label': 'Results',
+	// 56-30 (gap E filled): the results card. "none" is a finding and
+	// "unreadable" a fault, kept apart like notHeld/unreadable. Totals are
+	// shown as published; the detail says plainly that this page does not
+	// recount them (no "verified" claim: the page does not check the
+	// signature). Placeholders carry numbers and authority-supplied titles.
+	'public.fact.results.detail':
+		'These are the totals published for this election once the keyholders had released its key. This page shows them as published and does not recount them.',
+	'public.fact.results.none': 'No results have been published for this election yet.',
+	'public.fact.results.unreadable': "This election's published results couldn't be read.",
+	'public.fact.results.blocks': 'Vote blocks counted: {{blocks}}',
+	'public.fact.results.ballotTotals': 'Votes: {{votes}}. Valid: {{valid}}. Invalid: {{invalid}}. Excluded: {{excluded}}.',
+	'public.fact.results.optionCount': '{{option}}: {{count}}',
+	'public.fact.results.blank': 'No answer: {{count}}',
+	'public.fact.results.unsupported': "{{question}}: {{count}} answered. This page can't show counts for this kind of question yet.",
 	'public.fact.validation.label': 'Validation report',
 	'public.fact.certification.label': 'Certification',
 
@@ -566,34 +468,33 @@ export const COPY = Object.freeze({
 	// human sentence: what is missing, and enough of why that a reader who
 	// stops here is not misled.
 	// `.detail` renders only after a reader opens the details toggle. It
-	// carries the technical reason and the specification citation, which is
-	// why a schema table name may appear in a `.detail` value and appears in
-	// no `.sentence` and no `.label`.
+	// carries the technical reason, which is why a schema table name may
+	// appear in a `.detail` value and appears in no `.sentence` and no
+	// `.label`. The specification citation for each detail is the comment
+	// beside it, never the value: a visitor cannot open the repo, so a path
+	// like doc/election.md:97 on the page is noise (2026-11-23).
 	//
 	// The internal enumeration these gaps come from letters them A through
 	// G. No letter appears in any key name or any value in this table --
 	// not here, not in a heading, not in a detail. A reader has no way to
 	// resolve a letter to a meaning, so it is an identifier leaking out of
 	// the source, not information.
-	'public.gap.turnout.sentence':
-		"How many ballots have been cast isn't shown here — there's no record of vote counts in this system yet.",
-	'public.gap.turnout.detail':
-		"No Vote or VoteEntry table exists; vote and voter entries live in negotiated blocks the schema doesn't model (doc/election.md:95-110).",
 	'public.gap.receipt.sentence':
 		"There's no way on this page to confirm your own ballot was received — that check depends on a private receipt only you hold.",
+	// Spec: doc/election.md:97.
 	'public.gap.receipt.detail':
-		'The vote nonce is held privately by the voter; nothing on the network can be checked against it (doc/election.md:97).',
+		'The vote nonce is held privately by the voter; nothing on the network can be checked against it.',
 	'public.gap.merkle.sentence': "The cryptographic record tying votes together isn't published here.",
-	'public.gap.merkle.detail': 'No Block or MerkleNode table exists yet (doc/election.md:114).',
-	'public.gap.results.sentence':
-		"Results aren't published on this page — there's no tally recorded anywhere in the system yet.",
-	'public.gap.results.detail': 'No Tally table exists (doc/election.md:124-132).',
+	// Spec: doc/election.md:114.
+	'public.gap.merkle.detail': 'No Block or MerkleNode table exists yet.',
 	'public.gap.validation.sentence': 'No validation report or error-margin figure is available here.',
+	// Spec: doc/election.md:134-153.
 	'public.gap.validation.detail':
-		'No Validation table exists, and no error-margin statistic is recorded anywhere (doc/election.md:134-153).',
+		'No Validation table exists, and no error-margin statistic is recorded anywhere.',
 	'public.gap.certification.sentence': "No signed certification of this election's outcome is available here.",
+	// Spec: doc/election.md:155-159.
 	'public.gap.certification.detail':
-		'No Certification table exists; each authority is meant to publish one, but nothing stores it (doc/election.md:155-159).',
+		'No Certification table exists; each authority is meant to publish one, but nothing stores it.',
 
 	// Key release -- the one entry in the outcome group that is FILLED
 	// rather than gapped, and the only fact on this page carrying live data
@@ -623,8 +524,9 @@ export const COPY = Object.freeze({
 	// the call site to pass the read's `.total` reintroduces the "0 of 0"
 	// defect, and this comment is what stands between them and it.
 	'public.fact.keyrelease.sentence': '{{released}} of {{total}} keyholders have released their keys.',
+	// Spec: doc/election.md:118-122.
 	'public.fact.keyrelease.detail':
-		"This counts keyholders whose key-release task has completed; it doesn't show which keyholder released a key or when (doc/election.md:118-122).",
+		"This counts keyholders whose key-release task has completed; it doesn't show which keyholder released a key or when.",
 	// Fail-closed disclosure for the aggregate above, bound by name at its
 	// render site (it cannot be the entry's `emptyKey`: that field is null
 	// on this fact and `facts.js` is a landed file, so this key sits outside
@@ -738,6 +640,17 @@ export const COPY = Object.freeze({
 	'public.index.someUnreadable':
 		"Something stored in this browser couldn't be read, so this page may not be showing everything it holds.",
 
+	// 56-29. A link that names a network but no election: the page now asks
+	// that network for its elections (and stores nothing). Three sentences,
+	// none in an error voice and none offering a remedy, for the reasons the
+	// keys above record. `networkEmpty` is NOT the browser-empty pair above:
+	// "this browser holds no elections" stays true there and is a different
+	// fact from "the network named in this link has none".
+	'public.index.lookingOnNetwork': 'Looking for elections on the network named in this link.',
+	'public.index.networkEmpty': 'No elections were found on the network named in this link.',
+	'public.index.networkUnreachable':
+		"This page couldn't reach the network named in this link, so only elections already stored in this browser are listed.",
+
 	// --- D-02's addressed-but-not-held sentence (54-12) --------------------
 	//
 	// These two answer a DIFFERENT question from the three `public.index.empty*`
@@ -761,6 +674,30 @@ export const COPY = Object.freeze({
 	'public.election.notHeld.title': "This browser doesn't hold this election.",
 	'public.election.notHeld.body':
 		'Nothing has been loaded into this browser for the election this link names, so there is nothing here to show.',
+
+	// 56-28. The page's own network connection is still starting, or has
+	// started and is fetching the election this link names: the true
+	// sentence is "looking", not "doesn't hold". Shown ONLY while that
+	// connection has not failed; once it fails the page falls back to the
+	// not-held pair above, or (56-34) to one of the two failure pairs below. No error voice and no remedy, for the same reasons
+	// as that pair; the one promise ("will appear") is kept by the page
+	// itself, which re-reads on the first write.
+	'public.election.fetching.title': 'Looking for this election on the network.',
+	'public.election.fetching.body':
+		"This browser hasn't stored a copy of this election yet, so it is fetching one from the network now. It will appear here when it arrives.",
+
+	// 56-34 (user decision 2026-11-16). The page's own network connection
+	// FAILED and this browser holds no copy: "doesn't hold" is true but hides
+	// the real fact, which the boot's failure subject tells apart. `unreachable`
+	// is a connection that never found a peer serving the election's network;
+	// `notOnNetwork` is a network that answered and returned no such election.
+	// The not-held pair above stays for a failure of any other kind and for a
+	// shell mounted without a boot. No remedy, same as every pair here; the
+	// unreachable title echoes `public.index.networkUnreachable`.
+	'public.election.unreachable.title': "This page couldn't reach the network named in this link.",
+	'public.election.unreachable.body': "This election can't be shown right now, and nothing from it has been stored in this browser.",
+	'public.election.notOnNetwork.title': "This election wasn't found on the network named in this link.",
+	'public.election.notOnNetwork.body': 'The network answered, but it returned no election matching this link, so there is nothing here to show.',
 
 	// The two details-toggle summary labels. TWO KEYS ON PURPOSE, and a
 	// later merge of them into one is the regression the copy test's
@@ -791,6 +728,169 @@ export const COPY = Object.freeze({
 	'public.config.malformed.title': "This page's network configuration can't be read.",
 	'public.config.malformed.body':
 		"The list of network addresses this page needs is present but couldn't be understood, so it can't look up any election right now. This is a problem with how this page is set up, not with your browser or your connection.",
+	// --- Live dashboard (66-05): pairing screen, webcam scanner, header ----
+	// --- status, officer-swap and forget dialogs, unpaired notice, panel ----
+	// --- action notes, network switcher, change marks ----------------------
+	//
+	// These keys serve the live officer dashboard and arrive ahead of the
+	// screens that mount them, under the same "named by an already-planned
+	// call site" warrant the 54-09 header amendment uses: `t()` throws on an
+	// unknown key, so each key has to exist before the screen that renders it.
+	// Every value is transcribed from the dashboard UI contract.
+	//
+	// `panel.readOnly.*` is an ACTION NOTE on pending items ("decide these in
+	// the Authority app"), not the read-only panel STATE that contract C3
+	// forbids, and neither value contains the word C3 bans.
+	//
+	// `marks.announceOne` is the derived singular partner of the spec's plural
+	// `marks.announceMany`, following this table's separate singular and plural
+	// key convention (`panelFrame.sitePill` / `panelFrame.sitesPill`).
+	'pairing.title': 'Pair this browser',
+	'pairing.intro':
+		"In the Authority app, open Paired browsers and choose Pair a browser. Paste the code it shows, or scan its QR code with this computer's camera.",
+	'pairing.cta': 'Pair this browser',
+	'pairing.scanCta': 'Scan QR code',
+	'pairing.fieldLabel': 'Pairing code',
+	'pairing.fieldHelp':
+		"Single use, valid for about 15 minutes. Keep it private until you've pasted it.",
+	'pairing.emptyHeading': 'No networks yet',
+	'pairing.emptyBody':
+		'Pair this browser from the Authority app to follow a network live. Nothing is shown here until you do.',
+	'pairing.verifying.heading': 'Checking the code',
+	'pairing.verifying.body': 'Making sure the code is genuine and still valid.',
+	// The pairing code names the network, not the Authority (2026-11-23 todo): the heading says so.
+	'pairing.joining.heading': 'Joining the {{networkName}} network',
+	'pairing.joining.body': 'This can take a minute or two the first time.',
+	'pairing.catchingUpSlow':
+		'Still catching up. The data is arriving; you can leave this page open.',
+	'pairing.step.connecting': 'Connecting to the network',
+	'pairing.step.joining': "Joining as {{officerName}}'s browser",
+	'pairing.step.first-sync': 'Catching up on the first sync',
+	'pairing.stepState.waiting': 'Waiting',
+	'pairing.stepState.inProgress': 'In progress',
+	'pairing.stepState.done': 'Done',
+	'pairing.stepState.failed': 'Failed',
+	'pairing.stop': 'Stop pairing',
+	'pairing.action.tryAgain': 'Try again',
+	'pairing.action.tryAnother': 'Try another code',
+	'pairing.action.retry': 'Retry pairing',
+	'pairing.failed.malformed.heading': "That isn't a pairing code.",
+	'pairing.failed.malformed.body':
+		'Paste the whole code from the Authority app, or scan its QR code.',
+	'pairing.failed.old-style.heading': 'This is an old sign-in code.',
+	'pairing.failed.old-style.body':
+		'This dashboard now pairs instead. In the Authority app, open Paired browsers and make a new code.',
+	'pairing.failed.expired.heading': 'That code has expired.',
+	'pairing.failed.expired.body':
+		'Codes last about 15 minutes. Make a new one in the Authority app.',
+	'pairing.failed.spent.heading': 'That code was already used.',
+	'pairing.failed.spent.body': 'Each code works once. Make a new one in the Authority app.',
+	'pairing.failed.unreachable.heading': "Couldn't reach the network.",
+	'pairing.failed.unreachable.body':
+		"The network's relay didn't answer. Check this computer's connection and try again. If it keeps happening, make a new code.",
+	'pairing.failed.digest-mismatch.heading': "This code doesn't match the network it names.",
+	'pairing.failed.digest-mismatch.body':
+		"The network's records don't match what the code promised, so nothing was saved. Make a new code from the Authority app and try again; if it happens again, contact the person who runs the network.",
+	'pairing.failed.officer-not-valid.heading': "That officer can't pair a browser.",
+	'pairing.failed.officer-not-valid.body':
+		"The officer's key in the code isn't current any more. Ask them to check their keys in the Authority app.",
+	'pairing.failed.no-storage.heading': "This browser can't store the data.",
+	'pairing.failed.no-storage.body':
+		'Allow site storage for this page (private windows often block it) and try again.',
+	'pairing.failed.unsupported.heading': "This browser isn't supported.",
+	'pairing.failed.unsupported.body': 'Use a current version of Chrome, Edge, Firefox or Safari.',
+	'scanner.asking':
+		'Allow camera access to scan the QR code. The picture stays in this browser.',
+	'scanner.denied':
+		"Camera access is blocked. Allow it in the browser's site settings, or paste the code instead.",
+	'scanner.noCamera': 'No camera found. Paste the code instead.',
+	'scanner.insecureContext':
+		'The camera needs a secure connection (https). Paste the code instead.',
+	'scanner.instruction': 'Hold the QR code inside the frame, about 30 cm from the camera.',
+	'scanner.found': 'Code found.',
+	'scanner.notPairingCode':
+		"That QR code isn't a pairing code. Keep scanning or paste the code.",
+	'scanner.close': 'Close scanner',
+	'scanner.pasteInstead': 'Paste the code instead',
+	'status.chip.live': 'Live',
+	'status.chip.catching-up': 'Catching up',
+	'status.chip.offline': 'Offline · last update {{time}}',
+	'status.chip.offline-no-update': 'Offline · no update yet',
+	'status.chip.not-live': 'Not live',
+	'status.title.live': 'Connected and up to date. Last checked at {{time}}',
+	'status.title.catching-up': 'Connected. Newer data is still arriving.',
+	'status.reconnect': 'Reconnect',
+	'status.reconnecting': 'Reconnecting…',
+	'status.followerNote':
+		"This network is open in another tab. This tab shows its last data and doesn't update.",
+	'swap.heading': 'Replace {{oldOfficer}} with {{newOfficer}} on this browser?',
+	'swap.body':
+		"This browser is paired as {{oldOfficer}} for {{authorityName}}. Continuing deletes {{oldOfficer}}'s pairing and this browser's local copy of the data, then pairs it as {{newOfficer}}. {{oldOfficer}}'s pairing may still be listed in their Authority app until they remove it.",
+	'swap.confirm': 'Replace and continue',
+	'swap.keep': 'Keep {{oldOfficer}}',
+	'forget.cta': 'Forget this network',
+	'forget.heading': 'Forget {{authorityName}} on this browser?',
+	'forget.body':
+		"This deletes this browser's pairing key and its local copy of {{authorityName}}'s data from this browser. It doesn't remove this browser from the network: do that in the Authority app under Paired browsers. Data this browser has already received may remain in other places, such as backups. Type {{authorityName}} to confirm.",
+	'forget.fieldLabel': 'Network name',
+	'unpaired.heading': 'This browser was unpaired.',
+	'unpaired.body.revoked':
+		"{{officerName}} removed it in the Authority app, so its local copy of {{authorityName}}'s data was deleted from this browser. Pair again with a new code to follow the network.",
+	'unpaired.body.removed':
+		'This browser was removed from the network, so its local copy was deleted from this browser.',
+	'unpaired.body.key-invalid':
+		"{{officerName}}'s key is no longer valid, so this browser was unpaired and its local copy deleted.",
+	'unpaired.dismiss': 'Dismiss',
+	'panel.readOnly.short': 'Taken in the Authority app.',
+	'panel.readOnly.long': 'This dashboard only shows these. Decide them in the Authority app.',
+	'switcher.rowDetail': '{{domain}} · {{officerName}}',
+	'switcher.rowDetailNotSyncing': '{{domain}} · {{officerName}} · Not syncing',
+	'switcher.opening': 'Opening {{authorityName}}…',
+	'switcher.pairAnother': '+ Pair another network',
+	'shell.openFailed':
+		'Something went wrong opening this network. Reconnect, or forget it and pair again.',
+	'marks.updated': 'updated',
+	'marks.announceOne': '{{count}} item updated in {{panel}}',
+	'marks.announceMany': '{{count}} items updated in {{panel}}',
+	// --- Live dashboard gaps (66-22): states the UI contract's copy table ---
+	// --- does not cover --------------------------------------------------
+	//
+	// Five keys found missing while building the pairing screen, the webcam
+	// scanner and the forget dialog. Each fills a state or a datum the
+	// contract's table leaves open:
+	//
+	// `pairing.step.joiningUnnamed` -- the pairing code carries no officer
+	// name, so the named `pairing.step.joining` row is used only when a name
+	// is known (from an accepted officer swap); this is the unnamed row.
+	//
+	// `pairing.officerUnknown` -- the fallback for `{{officerName}}`,
+	// `{{oldOfficer}}` and `{{newOfficer}}` when the local copy holds no name
+	// for that officer.
+	//
+	// `pairing.failed.no-storage.otherTab` -- a delete blocked by another tab
+	// that holds the same network also resolves as no-storage; this extra line
+	// names that cause when the browser's lock list shows it.
+	//
+	// `scanner.unavailable` -- the camera is busy, the request was aborted, or
+	// the decoder failed to load: none of the other scanner states fits.
+	//
+	// `forget.failed` -- the forget dialog's failure line (a teardown blocked
+	// by another tab is the usual cause).
+	'pairing.step.joiningUnnamed': "Joining as the officer's browser",
+	'pairing.officerUnknown': 'Unnamed officer',
+	'pairing.failed.no-storage.otherTab':
+		'This network is open in another tab. Close that tab and try again.',
+	'scanner.unavailable': "The scanner couldn't start. Paste the code instead.",
+	'forget.failed':
+		"Couldn't forget this network. Close any other tab that has it open, then try again.",
+	// --- Wipe-failed banner (2026-11-23 todo) --------------------------------
+	//
+	// The network unpaired this browser and the wipe of its local copy could not finish. The
+	// officer never asked to forget anything, so the banner no longer borrows `forget.failed`
+	// and `forget.cta`: it says what happened and offers to finish deleting the local copy.
+	'wipe.failed':
+		"This browser was unpaired, but its local copy of this network's data couldn't be deleted. Close any other tab that has this network open, then try again.",
+	'wipe.retry': 'Delete the local copy',
 });
 
 /**

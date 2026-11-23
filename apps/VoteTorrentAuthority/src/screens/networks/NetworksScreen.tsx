@@ -18,6 +18,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useKeyboardInset } from "../../hooks/useKeyboardInset";
 import { usePreserveScrollOnResize } from "../../hooks/usePreserveScrollOnResize";
 import { FoundingBundleExportCard } from "./components/FoundingBundleExportCard";
+import { VoterInviteCard } from "./components/VoterInviteCard";
+import { OwnerTrustNotice } from "../../components/OwnerTrustNotice";
 import { reprobeAfterConnect } from "./reprobeAfterConnect";
 
 export default function NetworksScreen() {
@@ -32,6 +34,8 @@ export default function NetworksScreen() {
 	const [joinError, setJoinError] = useState("");
 	// D-35/D-36: which recent network's export card is open (one at a time), keyed on networkHash.
 	const [exportTargetHash, setExportTargetHash] = useState<string | null>(null);
+	// Spike 100: which recent network's "Invite voters" card is open (one at a time).
+	const [inviteTargetHash, setInviteTargetHash] = useState<string | null>(null);
 	const navigation = useNavigation<NavigationProp>();
 	const insets = useSafeAreaInsets();
 	const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
@@ -109,6 +113,10 @@ export default function NetworksScreen() {
 		setJoinError(t("qrScanUnavailable"));
 	}, [t]);
 
+	// Open Settings from the owner-trust notice: Home > Settings is where the "Require saved owner
+	// trust" row lives. The same navigation call the app already uses for the Settings tab.
+	const openSettings = useCallback(() => navigation.navigate("Home", { screen: "Settings" }), [navigation]);
+
 	// Re-query recent networks whenever this screen regains focus (not just on
 	// mount / engine change) — otherwise a network created via AddNetwork and
 	// navigated-back-from would not appear until an app restart, since the engine
@@ -145,13 +153,19 @@ export default function NetworksScreen() {
 		});
 	}, [navigation, t]);
 
+	// The owner-trust notice is persistent, has no dismiss control, reads the cadre-node context and is the
+	// first child of the scroll content. The Import Network and Join a network buttons sit together in the
+	// first section (UI-SPEC A1), and Join a network is always visible.
 	return (
 		<ScrollView
+			keyboardShouldPersistTaps="handled"
+			testID="networks-scroll"
 			ref={scrollRef}
 			{...preserveScroll}
 			style={styles.container}
 			contentContainerStyle={{ paddingBottom: insets.bottom + 16 + keyboardInset }}
 		>
+			<OwnerTrustNotice onOpenSettings={openSettings} onNeedsReinvite={() => navigation.navigate("JoinNetwork")} />
 			<View style={styles.section}>
 				<ThemedText type="defaultSemiBold" style={styles.section}>
 					{t("useOneOfTheFollowingToGetConnected")}
@@ -186,10 +200,19 @@ export default function NetworksScreen() {
 									accessibilityRole="button"
 									accessibilityLabel={t("networkFoundingExportButton")}
 									testID={`founding-export-entry-${networkRef.hash}`}
-									style={styles.exportIconButton}
+									style={styles.iconButton}
 									onPress={() => setExportTargetHash(networkRef.hash)}
 								>
 									<FontAwesome6 name="share-nodes" size={20} color={colors.text} />
+								</TouchableOpacity>
+								<TouchableOpacity
+									accessibilityRole="button"
+									accessibilityLabel={t("voterInviteButton")}
+									testID={`voter-invite-entry-${networkRef.hash}`}
+									style={styles.iconButton}
+									onPress={() => setInviteTargetHash(networkRef.hash)}
+								>
+									<FontAwesome6 name="user-plus" size={20} color={colors.text} />
 								</TouchableOpacity>
 								<TouchableOpacity
 									style={styles.iconButton}
@@ -205,11 +228,20 @@ export default function NetworksScreen() {
 								onClose={() => setExportTargetHash(null)}
 							/>
 						)}
+						{inviteTargetHash === networkRef.hash && (
+							<VoterInviteCard networkRef={networkRef} onClose={() => setInviteTargetHash(null)} />
+						)}
 					</React.Fragment>
 				))}
 				<CustomButton
 					title={t("networkFoundingImportButton")}
 					onPress={() => navigation.navigate("ImportFoundingBundle")}
+				/>
+				<CustomButton
+					title={t("joinNetworkButton")}
+					icon="right-to-bracket"
+					testID="networks-join-network-button"
+					onPress={() => navigation.navigate("JoinNetwork")}
 				/>
 			</View>
 
@@ -272,16 +304,13 @@ const localStyles = StyleSheet.create({
 		flex: 1,
 		marginRight: 8,
 	},
+	// No fixed height: the column sizes to its buttons. A fixed 80 held two buttons; the third
+	// (invite) overflowed it and the database button drew underneath Import Network.
 	iconContainer: {
-		justifyContent: "space-between",
-		height: 80,
+		justifyContent: "center",
 	},
+	// D-36: every entry in the column gets the minimum touch target (44x44).
 	iconButton: {
-		padding: 8,
-	},
-	// D-36: the export entry's minimum touch target (44x44). 44 + the database button's 36
-	// (padding 8 around a 20px glyph) = 80, matching iconContainer's existing height.
-	exportIconButton: {
 		minWidth: 44,
 		minHeight: 44,
 		alignItems: "center",

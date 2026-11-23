@@ -57,6 +57,12 @@ export {
 	removeNetwork,
 } from '../networks-registry.js';
 
+// 56-26: the live-store open path, shared with the officer barrel (it lives at
+// `src/attach-live.js`, not under `src/officer/`, so D-04 still holds). The
+// page's peer boot creates its store with it once the strand has returned the
+// addressed election; the read path checks `hasLiveStore` before any open.
+export { attachLiveDb, hasLiveStore, listLiveStoreNetworks, LiveStoreMissingError, LiveStoreUnavailableError } from '../attach-live.js';
+
 export {
 	readPublicElection,
 	readPublicElectionRevision,
@@ -67,6 +73,10 @@ export {
 export { readRegistrantRoll, TABLES_READ as ROLL_TABLES_READ } from './read-registrant-roll.js';
 
 export { readKeyReleaseProgress, TABLES_READ as KEYRELEASE_TABLES_READ } from './read-keyrelease.js';
+// 56-30: the published results (ElectionTally reclassified PUBLIC by user decision 2026-11-13).
+export { readPublishedResults, TallyUnreadableError, TABLES_READ as TALLY_TABLES_READ } from './read-tally.js';
+// 56-31: ballots cast so far, counted on the network (run against the strand read handle; never replicated).
+export { readNetworkTurnout, TABLES_READ as TURNOUT_TABLES_READ } from './read-turnout.js';
 
 // D-27's live-read seam (54-15). ADDITIVE: nothing above changed. The
 // allowlist it exports is DERIVED from the three read modules' own
@@ -77,6 +87,7 @@ export {
 	subscribeToPublicChanges,
 	enableChangePropagation,
 	notifyPeerWrite,
+	watchNetworkChanges,
 } from './subscribe.js';
 
 /**

@@ -41,6 +41,11 @@ describe('deviceSigningError (D-13 taxonomy)', () => {
 		expect(mapDeviceSigningError({ code: 'CANCELED' })).toBe('cancellation');
 	});
 
+	test('SYSTEM_CANCELED (a system cancel, review CR-01) maps to cancellation too: no new copy', () => {
+		expect(mapDeviceSigningError({ code: 'SYSTEM_CANCELED' })).toBe('cancellation');
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY[mapDeviceSigningError({ code: 'SYSTEM_CANCELED' })]).toBeUndefined();
+	});
+
 	test('DEVICE_SIGNING_ERROR_COPY_KEY has no entry for cancellation, key-invalidated, no-key-provisioned, no-device-credential, or recovery-unsupported-os', () => {
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['cancellation']).toBeUndefined();
 		expect(DEVICE_SIGNING_ERROR_COPY_KEY['key-invalidated']).toBeUndefined();
@@ -146,6 +151,8 @@ describe('recovery-key-invalidated / recovery-key-not-registered (49-14 follow-u
 // Frozen literal copy of CODE_TO_CLASS taken before the O-10 fix.
 const EXPECTED_SNAPSHOT: Record<string, string> = {
 	CANCELED: 'cancellation',
+	// Added by Phase 65 review CR-01 (after the O-10 snapshot): a system cancel, same class.
+	SYSTEM_CANCELED: 'cancellation',
 	NO_BIOMETRICS_ENROLLED: 'no-biometrics-enrolled',
 	LOCKOUT: 'lockout',
 	LOCKOUT_PERMANENT: 'lockout-permanent',
@@ -155,6 +162,8 @@ const EXPECTED_SNAPSHOT: Record<string, string> = {
 	RECOVERY_KEY_INVALIDATED: 'recovery-key-invalidated',
 	RECOVERY_KEY_NOT_REGISTERED: 'recovery-key-not-registered',
 	RECOVERY_UNSUPPORTED_OS: 'recovery-unsupported-os',
+	// Added after the O-10 snapshot: JS-thrown by handleRecovery (2026-08-18 todo), a new terminal class.
+	SIGNING_IDENTITY_UNRECOVERABLE: 'signing-identity-unrecoverable',
 };
 
 describe('own-property code lookup (O-10)', () => {
@@ -180,3 +189,18 @@ describe('own-property code lookup (O-10)', () => {
 		}
 	});
 });
+
+// 2026-08-18 todo: JS-thrown by handleRecovery when neither the recovery key nor the device's signing
+// key can sign for the user. A terminal class: no inline copy, not a navigation class.
+describe('signing-identity-unrecoverable', () => {
+	test('SIGNING_IDENTITY_UNRECOVERABLE maps to signing-identity-unrecoverable', () => {
+		expect(mapDeviceSigningError({ code: 'SIGNING_IDENTITY_UNRECOVERABLE' })).toBe('signing-identity-unrecoverable');
+		expect(isDeviceSigningError({ code: 'SIGNING_IDENTITY_UNRECOVERABLE' })).toBe(true);
+	});
+
+	test('it renders a terminal screen, never InlineError, and is not a navigation class', () => {
+		expect(DEVICE_SIGNING_ERROR_COPY_KEY['signing-identity-unrecoverable']).toBeUndefined();
+		expect(isNavigationClass('signing-identity-unrecoverable')).toBe(false);
+	});
+});
+

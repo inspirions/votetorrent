@@ -8,7 +8,7 @@
 import React from 'react';
 import renderer from 'react-test-renderer';
 import { InvitationEngine } from '@votetorrent/vote-engine/rn';
-import type { Signature, User } from '@votetorrent/vote-core';
+import type { OfficerAcceptProvisioning, Signature, User } from '@votetorrent/vote-core';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyDb = any;
@@ -22,6 +22,12 @@ const { createTestNetwork, addTestAuthority, makeTestSignCallback } = require('@
 		user: User;
 	}>;
 	makeTestSignCallback: (user: User) => (digest: Uint8Array) => Promise<Signature>;
+};
+
+// An officer ('of') accept must carry the accepting device's provisioning (66.1 D-12).
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { makeOfficerProvisioning } = require('@votetorrent/vote-engine/test/fixtures/officer-provisioning') as {
+	makeOfficerProvisioning: () => OfficerAcceptProvisioning;
 };
 
 const mockGoBack = jest.fn();
@@ -118,7 +124,7 @@ describe('AuthorityDetailScreen over the real AuthorityEngine', () => {
 	async function answeredChain() {
 		const f = await realChain();
 		const head = await f.authority.resendInvite(f.original);
-		await f.invitation.respondToInvite(head, true, f.s.invitePrivate);
+		await f.invitation.respondToInvite(head, true, f.s.invitePrivate, undefined, undefined, undefined, makeOfficerProvisioning());
 		mockEngine = f.authority;
 		mockRouteParams = { authorityId: 'a1', slotCid: f.original };
 		return { ...f, head };

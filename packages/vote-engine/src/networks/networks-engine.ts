@@ -1,6 +1,6 @@
 import { Database, MisuseError, QuereusError } from '@quereus/quereus';
 import { NetworkEngine } from '../network/network-engine.js';
-import { H16, nowCanonicalDatetime, toCanonicalDatetime } from '../utils.js';
+import { H16, fromCanonicalDatetime, nowCanonicalDatetime, toCanonicalDatetime } from '../utils.js';
 import type { EngineContext } from '../types.js';
 import type { DbFactory } from '../types.js';
 import type {
@@ -15,6 +15,11 @@ import type {
 	FoundingBundleImportResult,
 	FoundingBundleInspection,
 	FoundingBundleRows,
+	FoundingAnchor,
+	FoundingAnchorFounder,
+	JoinFromStrandOptions,
+	JoinFromStrandResult,
+	NetworkJoinAnchor,
 } from '@votetorrent/vote-core';
 import type {
 	INetworksEngine,
@@ -36,6 +41,7 @@ import {
 	FOUNDING_BUNDLE_TABLE_ORDER,
 	readGenesisRows,
 	replayGenesisRows,
+	type GenesisRowKeys,
 } from './genesis-rows.js';
 import {
 	FOUNDING_BUNDLE_FORMAT,
@@ -95,7 +101,9 @@ export class NetworksEngine implements INetworksEngine {
 		try {
 			ctx = await this.createContext(user, networkHash);
 		} catch (error) {
-			throw new Error('Failed to create database context: ' + error);
+			// `cause` keeps the original error's type (e.g. cadre-core's AppSchemaRefusedError) for
+			// the apps' boot-error classifiers; the message is unchanged.
+			throw new Error('Failed to create database context: ' + error, { cause: error });
 		}
 
 		// Prepare json fields
@@ -311,10 +319,15 @@ export class NetworksEngine implements INetworksEngine {
 	 * returns it. Rejects with a `FoundingBundleExportError` (never a partial
 	 * bundle) — see the named codes on `FoundingBundleExportErrorCode`.
 	 */
-	async exportFoundingBundle(
+	/**
+	 * The six founding rows of an open network, selected by the founding
+	 * officer's user id and key — the one read `exportFoundingBundle` and
+	 * `getFoundingAnchor` share, with the same refusals.
+	 */
+	private async readFoundingRows(
 		networkHash: string,
-		exporter: FoundingBundleExporter,
-	): Promise<FoundingBundleExport> {
+		founder: { readonly userId: string; readonly signerKey: string },
+	): Promise<{ rows: FoundingBundleRows; genesis: GenesisRowKeys }> {
 		const ctx = this.contexts.get(networkHash);
 		if (!ctx) throw new FoundingBundleExportError('network-not-open');
 
@@ -349,8 +362,8 @@ export class NetworksEngine implements INetworksEngine {
 		let rows: FoundingBundleRows;
 		try {
 			rows = await readGenesisRows(ctx.db, {
-				userId: exporter.userId,
-				signerKey: exporter.signerKey,
+				userId: founder.userId,
+				signerKey: founder.signerKey,
 				authorityId: primaryAuthorityId,
 				adminEffectiveAt,
 			});
@@ -367,6 +380,166 @@ export class NetworksEngine implements INetworksEngine {
 		if (rows.UserKey.length === 0) {
 			throw new FoundingBundleExportError('signer-key-invalid');
 		}
+		return {
+			rows,
+			genesis: { userId: founder.userId, signerKey: founder.signerKey, authorityId: primaryAuthorityId, adminEffectiveAt },
+		};
+	}
+
+	/**
+	 * Spike 100: the founding anchor a network join code carries — the same
+	 * rows and digest `exportFoundingBundle` would bundle, but unsigned and
+	 * without the rows themselves (the voter reads its own replicated copy).
+	 */
+	async getFoundingAnchor(networkHash: string, founder: FoundingAnchorFounder): Promise<FoundingAnchor> {
+		const { rows, genesis } = await this.readFoundingRows(networkHash, founder);
+		return this.anchorFromRows(rows, genesis);
+	}
+
+	/**
+	 * R-C (D-22): the join anchor any officer's device can build, also after
+	 * an Admin revision. It derives the founding generation from the
+	 * replicated rows (see `resolveJoinGenesis`) instead of taking the
+	 * founder's keys, and never refuses with `admin-revised` — that D-38
+	 * refusal belongs to `getFoundingAnchor` / `exportFoundingBundle` only.
+	 * Read-only: point lookups plus the shared genesis-row reader.
+	 */
+	async getJoinAnchor(networkHash: string): Promise<FoundingAnchor> {
+		const ctx = this.contexts.get(networkHash);
+		if (!ctx) throw new FoundingBundleExportError('network-not-open');
+
+		const genesis = await this.resolveJoinGenesis(ctx, networkHash);
+
+		let rows: FoundingBundleRows;
+		try {
+			rows = await readGenesisRows(ctx.db, genesis);
+		} catch {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		if (rows.User.length === 0 || rows.Officer.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		if (rows.Authority.length === 0 || rows.Admin.length === 0 || rows.Network.length === 0) {
+			throw new FoundingBundleExportError('genesis-unreadable');
+		}
+		if (rows.UserKey.length === 0) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+		return this.anchorFromRows(rows, genesis);
+	}
+
+	/**
+	 * The founding generation's keys, from the replicated rows alone. The rule
+	 * (the browser's founding check mirrors it): the primary authority's Admin
+	 * row with the EARLIEST EffectiveAt; that generation's only Officer row;
+	 * that user's UserKey with the earliest Expiration, ties by PubKey
+	 * ascending. Two-key equality and single-key point predicates only (no IN
+	 * list), so the Quereus AND+IN zero-row trap cannot apply.
+	 */
+	private async resolveJoinGenesis(ctx: EngineContext, networkHash: string): Promise<GenesisRowKeys> {
+		const unreadable = () => new FoundingBundleExportError('genesis-unreadable');
+		const instant = (value: unknown): number =>
+			fromCanonicalDatetime(typeof value === 'number' ? value : String(value));
+
+		let networkRow: Record<string, unknown> | undefined;
+		try {
+			networkRow = (await ctx.db
+				.prepare(
+					'select Id, Hash, PrimaryAuthorityId, Name, ImageRef, Relays, TimestampAuthorities, NumberRequiredTSAs, ElectionType from Network',
+				)
+				.get({})) as Record<string, unknown> | undefined;
+		} catch {
+			throw unreadable();
+		}
+		if (!networkRow || networkRow.Hash !== networkHash) throw unreadable();
+		const authorityId = String(networkRow.PrimaryAuthorityId);
+
+		const adminRows: Array<{ EffectiveAt: unknown }> = [];
+		const officerRows: Array<{ UserId: unknown }> = [];
+		const keyRows: Array<{ PubKey: unknown; Expiration: unknown }> = [];
+		try {
+			for await (const row of ctx.db.eval(
+				'select EffectiveAt from Admin where AuthorityId = :authorityId',
+				{ authorityId },
+			)) {
+				adminRows.push(row as { EffectiveAt: unknown });
+			}
+		} catch {
+			throw unreadable();
+		}
+		if (adminRows.length === 0) throw unreadable();
+		let founding = adminRows[0]!;
+		let foundingAt = instant(founding.EffectiveAt);
+		for (const row of adminRows) {
+			const at = instant(row.EffectiveAt);
+			if (!Number.isFinite(at)) throw unreadable();
+			if (at < foundingAt) {
+				founding = row;
+				foundingAt = at;
+			}
+		}
+		// Bind the chosen row's own stored text so the point lookups match it.
+		const adminEffectiveAt = String(founding.EffectiveAt);
+
+		try {
+			for await (const row of ctx.db.eval(
+				'select UserId from Officer where AuthorityId = :authorityId and AdminEffectiveAt = :adminEffectiveAt',
+				{ authorityId, adminEffectiveAt },
+			)) {
+				officerRows.push(row as { UserId: unknown });
+			}
+		} catch {
+			throw unreadable();
+		}
+		// create() writes exactly one founding officer.
+		if (officerRows.length !== 1) throw unreadable();
+		const userId = String(officerRows[0]!.UserId);
+
+		try {
+			for await (const row of ctx.db.eval(
+				'select PubKey, Expiration from UserKey where UserId = :userId',
+				{ userId },
+			)) {
+				keyRows.push(row as { PubKey: unknown; Expiration: unknown });
+			}
+		} catch {
+			throw unreadable();
+		}
+		if (keyRows.length === 0) throw new FoundingBundleExportError('signer-key-invalid');
+		const ranked = keyRows.map((row) => ({ pubKey: String(row.PubKey), expiresAt: instant(row.Expiration) }));
+		if (ranked.some((row) => !Number.isFinite(row.expiresAt))) {
+			throw new FoundingBundleExportError('signer-key-invalid');
+		}
+		ranked.sort((a, b) =>
+			a.expiresAt !== b.expiresAt
+				? a.expiresAt - b.expiresAt
+				: a.pubKey < b.pubKey
+					? -1
+					: a.pubKey > b.pubKey
+						? 1
+						: 0,
+		);
+		return { userId, signerKey: ranked[0]!.pubKey, authorityId, adminEffectiveAt };
+	}
+
+	/** The anchor for a set of founding rows: what a join code embeds. */
+	private anchorFromRows(rows: FoundingBundleRows, genesis: GenesisRowKeys): FoundingAnchor {
+		const digest = computeContentDigest(rows as unknown as SnapshotTables);
+		const descriptor = deriveFoundingDescriptor(rows);
+		return {
+			networkHash: descriptor.networkHash,
+			name: descriptor.name,
+			genesis,
+			digest,
+			fingerprint: foundingBundleFingerprint(digest),
+		};
+	}
+
+	async exportFoundingBundle(
+		networkHash: string,
+		exporter: FoundingBundleExporter,
+	): Promise<FoundingBundleExport> {
+		const { rows } = await this.readFoundingRows(networkHash, exporter);
 		const expiration = String(rows.UserKey[0]!.Expiration);
 		if (!(expiration > nowCanonicalDatetime())) {
 			throw new FoundingBundleExportError('signer-key-invalid');
@@ -663,6 +836,141 @@ export class NetworksEngine implements INetworksEngine {
 	}
 
 	/**
+	 * Spike 100: a voter, already admitted to the authority's cadre, joins the
+	 * network by opening its strand and accepting it only when the REPLICATED
+	 * founding rows hash to the join code's digest. Unlike importFoundingBundle
+	 * it never replays genesis rows: a voter writing founding rows into a shared
+	 * strand would race the authority's own (and a peerless voter would found a
+	 * second copy). Never throws; `no-peers` and `not-synced` are retryable.
+	 */
+	async joinFromStrand(
+		anchor: NetworkJoinAnchor,
+		user: User | undefined,
+		options: JoinFromStrandOptions,
+	): Promise<JoinFromStrandResult> {
+		const hash = anchor.networkHash;
+		let fingerprint: string;
+		try {
+			fingerprint = foundingBundleFingerprint(anchor.digest);
+		} catch {
+			return { ok: false, reason: 'digest-mismatch', retryable: false, detail: 'join: the code\'s digest is not a founding digest' };
+		}
+
+		// Already joined (or created/imported here): recentNetworks is written only by a
+		// successful open(), so an entry means there is nothing left to do.
+		const recent: NetworkReference[] = (await this.localStorage.getItem('recentNetworks')) ?? [];
+		const existingRef = recent.find((r) => r.hash === hash);
+		if (existingRef) {
+			return { ok: true, outcome: 'already-joined', networkRef: existingRef, fingerprint };
+		}
+
+		// Before ANY DbFactory call: the strand factory founds the strand when no peer is
+		// connected, which would give this phone a second, empty copy of the network.
+		if (!(options.getPeerCount() > 0)) {
+			return { ok: false, reason: 'no-peers', retryable: true, detail: 'join: no peer of the authority\'s network is connected yet' };
+		}
+
+		// UAT 65 F1: ONE deadline for the whole call. The strand factory is the longest await here: a
+		// joiner's strand open waits for its first sync (cadre-core's gate, 360 s, and the app then
+		// keeps waiting), so an unbounded await made the caller's budget meaningless. The open is
+		// left running (a retry finds the same launch), only this call stops waiting on it.
+		const deadline = Date.now() + (options.timeoutMs ?? 60_000);
+		let ctx: EngineContext;
+		try {
+			const opened = await settleBy(this.createContext(user, hash), deadline);
+			if (opened === TIMED_OUT) {
+				return { ok: false, reason: 'not-synced', retryable: true, detail: 'join: the network\'s strand has not finished its first sync' };
+			}
+			ctx = opened;
+		} catch {
+			return { ok: false, reason: 'target-open-failed', retryable: true, detail: 'join: the network\'s database could not be opened' };
+		}
+		// Same release rule as importFoundingBundle's failClosed: a strand-backed handle
+		// belongs to the strand host (which keeps syncing into it for the retry), so only
+		// a handle this engine owns is closed.
+		const borrowedFromStrandHost = ((): boolean => {
+			try {
+				return ctx.db.declaredSchemaManager.hasDeclaredSchema('App');
+			} catch {
+				return false;
+			}
+		})();
+		const decline = async (
+			reason: 'not-synced' | 'digest-mismatch' | 'target-open-failed',
+			retryable: boolean,
+			detail: string,
+		): Promise<JoinFromStrandResult> => {
+			this.contexts.delete(hash);
+			const closable = ctx.db as unknown as { close?: () => Promise<void> };
+			if (!borrowedFromStrandHost && typeof closable.close === 'function') {
+				try {
+					await closable.close();
+				} catch {
+					// best-effort — the handle is discarded either way.
+				}
+			}
+			return { ok: false, reason, retryable, detail };
+		};
+
+		// Wait for all six founding rows to replicate. Point lookups only (readGenesisRows),
+		// so polling a strand that is still syncing never scans.
+		const pollMs = options.pollMs ?? 500;
+		let rows: FoundingBundleRows | undefined;
+		for (;;) {
+			try {
+				// UAT 65 F1: a point read on a strand whose cohort is unreachable can stay pending; the
+				// deadline is checked against the read itself, not only between reads.
+				const read = await settleBy(readGenesisRows(ctx.db, anchor.genesis), deadline);
+				if (read === TIMED_OUT) {
+					return decline('not-synced', true, 'join: the network\'s founding rows have not arrived yet');
+				}
+				if (FOUNDING_BUNDLE_TABLE_ORDER.every((table) => read[table].length > 0)) {
+					rows = read;
+					break;
+				}
+			} catch {
+				// A strand still applying its schema can refuse a read; keep waiting.
+			}
+			if (Date.now() >= deadline) {
+				return decline('not-synced', true, 'join: the network\'s founding rows have not arrived yet');
+			}
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+
+		// The anchor: the replicated founding rows must be exactly the ones the code names.
+		options.onVerifying?.();
+		if (computeContentDigest(rows as unknown as SnapshotTables) !== anchor.digest) {
+			return decline('digest-mismatch', false, 'join: this network\'s founding rows do not match the join code');
+		}
+		let descriptor: ReturnType<typeof deriveFoundingDescriptor>;
+		try {
+			descriptor = deriveFoundingDescriptor(rows);
+		} catch {
+			return decline('digest-mismatch', false, 'join: this network\'s founding rows are not readable');
+		}
+		if (descriptor.networkHash !== hash) {
+			return decline('digest-mismatch', false, 'join: the founding rows name a different network');
+		}
+
+		const networkRef: NetworkReference = {
+			hash,
+			imageUrl: descriptor.imageUrl,
+			relays: [...descriptor.relays],
+			name: descriptor.name,
+			primaryAuthorityDomainName: descriptor.primaryAuthorityDomainName,
+		};
+		// open() finds the context cached and, with storeAsRecent, is the single writer of
+		// recentNetworks — nothing durable is written before it resolves.
+		this.contexts.set(hash, ctx);
+		try {
+			await this.open(networkRef, user, true, options.getStrandPeerCount);
+		} catch {
+			return decline('target-open-failed', true, 'join: the network could not be opened');
+		}
+		return { ok: true, outcome: 'joined', networkRef, fingerprint };
+	}
+
+	/**
 	 * 62-102: validity check without anchors and without any database. Returns
 	 * ONLY the network name on success, deliberately never the digest or the
 	 * fingerprint (the importing officer must type the exporter's value).
@@ -743,8 +1051,12 @@ export class NetworksEngine implements INetworksEngine {
 		try {
 			db = await this.dbFactory(ref.hash);
 		} catch (error) {
+			// `cause` keeps the original error's type (e.g. cadre-core's AppSchemaRefusedError, when
+			// this build's schema cannot be applied to the network's data) for the apps' boot-error
+			// classifiers; the message is unchanged.
 			throw new Error(
 				'Network not opened in this session — use create() first: ' + error,
+				{ cause: error },
 			);
 		}
 
@@ -916,6 +1228,20 @@ export class NetworksEngine implements INetworksEngine {
 		const ctx: EngineContext = { db, user };
 		return ctx;
 	}
+}
+
+const TIMED_OUT: unique symbol = Symbol('networks-engine.timed-out');
+
+/** `promise`'s value, or TIMED_OUT at `deadlineMs` (epoch ms). A rejection after the race is absorbed. */
+function settleBy<T>(promise: Promise<T>, deadlineMs: number): Promise<T | typeof TIMED_OUT> {
+	promise.catch(() => undefined);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expiry = new Promise<typeof TIMED_OUT>((resolve) => {
+		timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, deadlineMs - Date.now()));
+	});
+	return Promise.race([promise, expiry]).finally(() => {
+		if (timer !== undefined) clearTimeout(timer);
+	});
 }
 
 /**

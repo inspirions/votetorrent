@@ -18,17 +18,19 @@
  *   full       adds x25519, which is paid per handshake rather than per frame.
  *
  * A mismatch between peers is safe. Each side's crypto only has to be correct, not the same.
+ *
+ * This app runs `full` (2026-11-12), not the kit's `symmetric` default. The kit holds `full` back
+ * until `symmetric` has proven itself on a device, which it has (spike 093, P2P-11 runs since
+ * 2026-10). An instrumented election then showed x25519 as the largest Noise cost left in JS:
+ * about 15 ms per keygen or shared secret on the Pixel_8 AVD against 0.15-0.22 ms native, about
+ * 0.9 s per Voter and 2.9 s across an Authority's officer and keyholder work in one election.
  */
-import {
-  buildNoiseCrypto,
-  DEFAULT_NOISE_CRYPTO_MODE,
-  type NoiseCryptoMode,
-} from '@serfab/cadre-rn/noise-crypto';
+import { buildNoiseCrypto, type NoiseCryptoMode } from '@serfab/cadre-rn/noise-crypto';
 
 export type { NoiseCryptoMode };
 
 /** Read at node CONSTRUCTION; changing it means rebuilding the node. */
-export const NOISE_CRYPTO_MODE: NoiseCryptoMode = DEFAULT_NOISE_CRYPTO_MODE;
+export const NOISE_CRYPTO_MODE: NoiseCryptoMode = 'full';
 
 /** The `network.noiseCrypto` value for a CadreNode; `undefined` (stock) when the mode is 'off'. */
 export function noiseCryptoForNode(mode: NoiseCryptoMode = NOISE_CRYPTO_MODE) {

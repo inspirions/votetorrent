@@ -119,6 +119,15 @@ export const TOTAL_RUNGS = 10;
 export const LIBP2P_DIAL_DEBUG_NAMESPACES =
 	'libp2p:bootstrap,libp2p:connection-manager,libp2p:connection-manager:dial-queue,libp2p:websockets,libp2p:websockets:connection';
 
+/**
+ * MESH_READ_DIAG=1 (diagnostic, opt-in): also arm the page's reactivity watch, subscription and
+ * cohort-topic channels (`@optimystic/db-p2p` / `db-core` `createLogger` namespaces), and pass `diag=1`
+ * to the page so it logs each replication pass by table and row count.
+ * @type {string}
+ */
+export const MESH_READ_DIAG_NAMESPACES =
+	'optimystic:db-p2p:reactivity-collection-watch*,optimystic:db-p2p:reactivity-subscription*,optimystic:db-p2p:reactivity-subscribers*,optimystic:db-core:cohort-topic:service*,optimystic:db-core:cohort-topic:registration*';
+
 /** A way this gate could certify something false, named and thrown from
  * anywhere in the run — never a bare `process.exit`, so the origin is
  * always stopped and every opened resource always closed. */
@@ -144,6 +153,8 @@ export class OriginController {
 		this.facts = {};
 		/** @type {string[]} */
 		this.controlAddrs = [];
+		/** @type {string[]} */
+		this.strandAddrs = [];
 		/** @type {Set<(line: string) => void>} */
 		this.listeners = new Set();
 		this.exited = false;
@@ -165,6 +176,7 @@ export class OriginController {
 			const key = line.slice(0, eq);
 			const value = line.slice(eq + 1);
 			if (key === 'ORIGIN_CONTROL_ADDR') this.controlAddrs.push(value);
+			if (key === 'ORIGIN_STRAND_ADDR') this.strandAddrs.push(value);
 			else this.facts[key] = value;
 		}
 		for (const fn of [...this.listeners]) fn(line);
@@ -347,7 +359,17 @@ export async function bootOrigin(strandId, originConfig = GATEWAY_CONFIG) {
  * @returns {{ config: any, expectations: any }}
  */
 export function writeGateRuntimeFiles({ outDir, origin, strandId }) {
-	const configJson = { bootstrapNodes: [origin.controlAddrs[0]] };
+	// MESH_READ_HOST_ALIAS (experiment): libp2p's browser gater denies `localhost` and private IPs
+	// (`isPrivate`), so hand the browser a non-private name that launchPinnedBrowser maps to loopback.
+	const alias = process.env.MESH_READ_HOST_ALIAS;
+	// MESH_READ_BOOTSTRAP=strand (experiment): bootstrap to the gateway's STRAND node, per
+	// upstream's open-strand read route (sereus#23), instead of its control node.
+	const baseAddr = process.env.MESH_READ_BOOTSTRAP === 'strand' ? origin.strandAddrs[0] : origin.controlAddrs[0];
+	if (!baseAddr) throw new PreflightFailedError(`bootstrap-addr-absent: no ${process.env.MESH_READ_BOOTSTRAP === 'strand' ? 'ORIGIN_STRAND_ADDR' : 'ORIGIN_CONTROL_ADDR'}`);
+	const bootAddr = alias
+		? baseAddr.replace(/^\/ip4\/127\.0\.0\.1\/|^\/dns4\/localhost\//, `/dns4/${alias}/`)
+		: baseAddr;
+	const configJson = { bootstrapNodes: [bootAddr] };
 	writeFileSync(path.join(outDir, 'config.json'), JSON.stringify(configJson, null, 2));
 	const gateExpectations = {
 		electionId: origin.facts.ORIGIN_ELECTION_ID,
@@ -373,7 +395,10 @@ export async function launchPinnedBrowser(spkiPin) {
 	if (!spkiPin) throw new PreflightFailedError('tls-pin-absent: refusing to launch a browser with no pin');
 	return await chromium.launch({
 		headless: true,
-		args: [`--ignore-certificate-errors-spki-list=${spkiPin}`],
+		args: [
+			`--ignore-certificate-errors-spki-list=${spkiPin}`,
+			...(process.env.MESH_READ_HOST_ALIAS ? [`--host-resolver-rules=MAP ${process.env.MESH_READ_HOST_ALIAS} 127.0.0.1`] : []),
+		],
 	});
 }
 
@@ -419,7 +444,7 @@ export async function runBrowserPhase(origin, strandId, options = {}) {
 				} catch {
 					// A storage-denied context must never fail this run.
 				}
-			}, LIBP2P_DIAL_DEBUG_NAMESPACES);
+			}, process.env.MESH_READ_DIAG === '1' ? `${LIBP2P_DIAL_DEBUG_NAMESPACES},${MESH_READ_DIAG_NAMESPACES}` : LIBP2P_DIAL_DEBUG_NAMESPACES);
 		} catch {
 			// addInitScript itself failing must never fail this run either.
 		}
@@ -430,7 +455,7 @@ export async function runBrowserPhase(origin, strandId, options = {}) {
 		// ONE navigation, for the whole run. No second `page.goto` and no
 		// `location.reload()` anywhere — either would prove nothing about the
 		// seam.
-		const url = `${server.url}/${entryRel}?network=${encodeURIComponent(strandId)}&election=${encodeURIComponent(origin.facts.ORIGIN_ELECTION_ID)}`;
+		const url = `${server.url}/${entryRel}?network=${encodeURIComponent(strandId)}&election=${encodeURIComponent(origin.facts.ORIGIN_ELECTION_ID)}${process.env.MESH_READ_DIAG === '1' ? '&diag=1' : ''}`;
 		console.log(`[mesh-read-gate] ${url}`);
 		await page.goto(url, { waitUntil: 'load' });
 

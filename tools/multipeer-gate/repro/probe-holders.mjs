@@ -9,7 +9,7 @@
  *
  * RELAYS=1 (passing) vs RELAYS=2 (failing) is the A/B.
  */
-import { CadreNode } from '@serfab/cadre-core';
+import { CadreNode, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
 import { MemoryRawStorage } from '@optimystic/db-p2p';
 import { webSockets } from '@libp2p/websockets';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
@@ -50,7 +50,7 @@ const loopback = (a) => a.find(x => x.includes('/ip4/127.0.0.1/') && x.includes(
 async function drone(name, boots) {
   const n = new CadreNode({
     ...base(boots, await generateKeyPair('Ed25519'), name),
-    profile: 'storage',
+    nodeClass: 'server',
     network: { transports: [webSockets()], listenAddrs: ['/ip4/0.0.0.0/tcp/0/ws'],
       relayServerInit: { reservations: { maxReservations: 32, defaultDurationLimit: 600000, defaultDataLimit: BigInt(1 << 20) }, maxInboundHopStreams: 64, maxOutboundStopStreams: 64 } },
   });
@@ -61,7 +61,7 @@ async function drone(name, boots) {
 async function peer(name, relays, boots) {
   const n = new CadreNode({
     ...base(boots, await generateKeyPair('Ed25519'), name),
-    profile: 'transaction',
+    nodeClass: 'device',
     // cadre-core 0.12.0: relays live in `network.relayAddrs`, not `listenAddrs` — the old
     // shape is rejected on a control node (it dials the relay during the bring-up quiet
     // period). `listenAddrs` stays unset so this peer keeps no direct listener.
@@ -78,7 +78,7 @@ try {
   L(`DRONES=${DRONES} PEERS=${PEERS} RELAYS=${RELAYS}`);
   const a = await drone('drone-A', []);
   const genesis = async (when) => {
-    const owner = a.getIdentityOwnerKey();
+    const owner = ed25519KeyPairFromLibp2p(await generateKeyPair('Ed25519')); // 1.18: owner key apart from the identity
     await a.trustOwnerKeys([owner.publicKeyB64], 'operator');
     await a.getControlDatabase().ensureOwnerKey(owner.publicKeyB64);
     await a.initializeSeedBootstrap(owner.privateKeyB64);
@@ -104,7 +104,7 @@ try {
   L('--- enrolment: one attempt per joiner ---');
   for (const { name, node } of nodes.slice(1)) {
     try {
-      const { invitation } = await a.createCadreInvitation({ peerId: node.peerId.toString(), grantsOwner: false });
+      const { invitation } = await a.createCadreInvitation({ peerId: node.peerId.toString() });
       await node.redeemCadreInvitation(invitation);
       const ok = await a.isAuthorizedMember(node.peerId.toString());
       L(`${name}: redeemCadreInvitation ok, authorized=${ok}`);

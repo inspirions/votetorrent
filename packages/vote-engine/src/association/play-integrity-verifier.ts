@@ -1,7 +1,7 @@
 import type { AttestationChallenge, AttestationVerification, DeviceAttestation, IAttestationVerifier } from '@votetorrent/vote-core'
 import type { IIntegrityKeyProvider } from './key-provider.js'
 import { verifyPlayIntegrity } from './verifiers/play-integrity.js'
-import { verifyKeyAttestation } from './verifiers/key-attestation.js'
+import { verifyKeyAttestation, type KeyAttestationRole } from './verifiers/key-attestation.js'
 import type { ExpectedAppIdentity } from './verifiers/app-identity.js'
 // `Buffer` is NOT a Hermes global (see ../utils.ts) — import it from the `buffer`
 // module, which metro.config.js aliases and both apps declare as a dependency.
@@ -68,8 +68,23 @@ export class PlayIntegrityVerifier implements IAttestationVerifier {
     const piResult = await verifyPlayIntegrity(android.safetyNetAttestation, challenge, this.keyProvider, this.expectedAppIdentity)
     if (!piResult.ok) return piResult
 
-    const certChainDer = attestation.certificateChain.map((cert) => new Uint8Array(Buffer.from(cert, 'base64')))
-    const keyAttResult = await verifyKeyAttestation(certChainDer, challenge, this.pinnedHardwareRoots, this.revokedSerials, this.expectedAppIdentity)
+    const toDer = (chain: string[]): Uint8Array[] => chain.map((cert) => new Uint8Array(Buffer.from(cert, 'base64')))
+    const verifyChain = (chain: string[], role: KeyAttestationRole) =>
+      verifyKeyAttestation(toDer(chain), challenge, this.pinnedHardwareRoots, this.revokedSerials, this.expectedAppIdentity, role)
+
+    // Spike 104 (R1d): the voting key's own chain, when present, proves the voting key is
+    // hardware-backed; `certificateChain` then belongs to the throwaway key that answered the nonce.
+    // Both must pass. The requester key's signature over the whole answer (checked engine-side in
+    // `validateStagedAttestationAnswer`) is what ties the two chains to one holder.
+    if (android.deviceKeyCertificateChain !== undefined) {
+      const deviceKeyResult = await verifyChain(android.deviceKeyCertificateChain, 'device-key')
+      if (!deviceKeyResult.ok) return { ok: false, reason: `device-key chain: ${deviceKeyResult.reason ?? 'rejected'}` }
+      const freshResult = await verifyChain(attestation.certificateChain, 'fresh')
+      if (!freshResult.ok) return { ok: false, reason: `nonce-bound chain: ${freshResult.reason ?? 'rejected'}` }
+      return { ok: true }
+    }
+
+    const keyAttResult = await verifyChain(attestation.certificateChain, 'single')
     if (!keyAttResult.ok) return keyAttResult
 
     return { ok: true }

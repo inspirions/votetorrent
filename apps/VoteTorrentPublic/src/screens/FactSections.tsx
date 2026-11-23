@@ -2,8 +2,11 @@ import { t } from '@votetorrent/ui-web';
 import { BarSeries, DetailsToggle, Meter } from '@votetorrent/ui-web/components';
 import { groupFactsForPhase } from '../fact-groups.js';
 import { foldDistrictCounts } from '../roll-disclosure.js';
+import { formatCount } from '../format-count.js';
 import { RegistrantRoll } from './RegistrantRoll';
 import type { RegistrantRollRow } from './RegistrantRoll';
+import { PublishedResults } from './PublishedResults';
+import type { PublicResultsReading, PublicTurnoutReading } from './use-public-election';
 
 /**
  * FactSections.tsx — the body of the public election page: the facts, and,
@@ -117,6 +120,8 @@ interface FactEntryView {
 	emptyKey: string | null;
 	interpolates: ReadonlyArray<string> | null;
 	gap: string | null;
+	/** 56-30: read as a branch predicate only (the results card); never rendered. */
+	filledGap: string | null;
 }
 
 export interface FactSectionsProps {
@@ -131,7 +136,15 @@ export interface FactSectionsProps {
 	 * database was opened. Passed straight through to the roll card, which
 	 * renders the same honest empty state for both. */
 	roll: ReadonlyArray<RegistrantRollRow> | null;
+	/** 56-30: the published results (or why there are none). Optional so a
+	 * mount that predates it (a gate) renders the honest "couldn't be read". */
+	results?: PublicResultsReading;
+	/** 56-31: ballots cast so far. Optional for the same reason as `results`. */
+	turnout?: PublicTurnoutReading;
 }
+
+const RESULTS_UNREADABLE: PublicResultsReading = Object.freeze({ state: 'unreadable' });
+const TURNOUT_UNAVAILABLE: PublicTurnoutReading = Object.freeze({ state: 'unavailable' });
 
 /**
  * The card's body text. Returns `null` for a label-only fact, which renders a
@@ -188,10 +201,14 @@ function FactCard({
 	fact,
 	keyRelease,
 	roll,
+	results,
+	turnout,
 }: {
 	fact: FactEntryView;
 	keyRelease: KeyReleaseProgress | null;
 	roll: ReadonlyArray<RegistrantRollRow> | null;
+	results: PublicResultsReading;
+	turnout: PublicTurnoutReading;
 }) {
 	const body = factBody(fact, keyRelease);
 	// Header point 7: a collection card owns its own detail sentence and its
@@ -202,6 +219,12 @@ function FactCard({
 	// introduces no new state branch.
 	const rendersKeyRelease = fact.interpolates !== null && fact.sentenceKey !== null;
 	const districtBuckets = rendersCollection ? foldDistrictCounts(roll) : [];
+	// 56-30/56-31, header point 5 extended: the two filled gaps without
+	// interpolation are told apart by their filled letter (E results, A
+	// turnout). Selected on the data, never on the id; the letter is never
+	// rendered.
+	const rendersResults = fact.filledGap === 'E';
+	const rendersTurnout = fact.filledGap === 'A';
 
 	if (fact.gap !== null) {
 		return (
@@ -230,6 +253,12 @@ function FactCard({
 				</div>
 			) : null}
 			{rendersCollection ? <RegistrantRoll rows={roll} /> : null}
+			{rendersResults ? <PublishedResults results={results} /> : null}
+			{rendersTurnout && turnout.state === 'counted' ? (
+				<p className="fact-card__body">{t('public.fact.turnout.counted', { votes: formatCount(turnout.votes), blocks: formatCount(turnout.blocks) })}</p>
+			) : null}
+			{rendersTurnout && turnout.state === 'counting' ? <p className="fact-card__body">{t('public.fact.turnout.counting')}</p> : null}
+			{rendersTurnout && turnout.state === 'unavailable' ? <p className="fact-card__body">{t('public.fact.turnout.unavailable')}</p> : null}
 			{districtBuckets.length > 0 ? (
 				<div className="fact-card__chart">
 					<BarSeries
@@ -239,7 +268,7 @@ function FactCard({
 								key: bucket.key,
 								label,
 								value: bucket.count,
-								tooltip: t('public.registrantRoll.chart.tooltip', { district: label, count: String(bucket.count) }),
+								tooltip: t('public.registrantRoll.chart.tooltip', { district: label, count: formatCount(bucket.count) }),
 							};
 						})}
 						orientation="horizontal"
@@ -272,7 +301,7 @@ function FactCard({
  * has no loading semantics of its own, and the shell is already held to that
  * rule one file over.
  */
-export function FactSections({ phase, keyRelease, roll }: FactSectionsProps) {
+export function FactSections({ phase, keyRelease, roll, results = RESULTS_UNREADABLE, turnout = TURNOUT_UNAVAILABLE }: FactSectionsProps) {
 	const groups = groupFactsForPhase(phase);
 	if (groups.length === 0) return null;
 
@@ -282,7 +311,7 @@ export function FactSections({ phase, keyRelease, roll }: FactSectionsProps) {
 				<section className="fact-section" key={group.group} data-fact-group={group.group}>
 					<h2 className="fact-section__heading">{t(group.headingKey)}</h2>
 					{group.facts.map((fact: FactEntryView) => (
-						<FactCard fact={fact} keyRelease={keyRelease} roll={roll} key={fact.id} />
+						<FactCard fact={fact} keyRelease={keyRelease} roll={roll} results={results} turnout={turnout} key={fact.id} />
 					))}
 				</section>
 			))}

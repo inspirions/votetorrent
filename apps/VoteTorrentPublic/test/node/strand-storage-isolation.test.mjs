@@ -70,6 +70,10 @@ test('rung 2 (load-bearing) -- a block written through strand A storage is NOT r
 	const openedB = await openStrandBlockStorage(strandB);
 	try {
 		await openedA.storage.saveMetadata(FIXTURE_BLOCK_ID, FIXTURE_METADATA);
+		// Applied to strand A's object stores before strand B looks (see rung 3): without it,
+		// B reading `undefined` could only mean the write had not landed yet, and this rung
+		// could not fail on the shared-database bug it exists to catch.
+		await openedA.storage.flush();
 
 		const readBackA = await openedA.storage.getMetadata(FIXTURE_BLOCK_ID);
 		assert.deepStrictEqual(readBackA, FIXTURE_METADATA);
@@ -101,6 +105,13 @@ test('rung 3 (positive control) -- a second handle over strand A OWN name reads 
 	const openedA1 = await openStrandBlockStorage(strandA);
 	try {
 		await openedA1.storage.saveMetadata(FIXTURE_BLOCK_ID, FIXTURE_METADATA);
+		// @optimystic 1.16+ (Optimystic#37): the browser store records each write group in a
+		// journal at once and applies it to the object stores within its durability window
+		// (at most 5 s), so a SECOND handle sees the row only once it is applied. Measured
+		// 2026-10-26 on 1.19.0: immediately undefined, after flush() or a 6 s wait the row.
+		// flush() is the store's own way to apply now; the control still proves that the same
+		// name opens the same database.
+		await openedA1.storage.flush();
 
 		const openedA2 = await openStrandBlockStorage(strandA);
 		try {

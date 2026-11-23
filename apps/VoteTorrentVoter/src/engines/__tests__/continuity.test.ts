@@ -734,7 +734,7 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-p', status: 'p', submittedAt: '2026-01-01T00:00:00.000Z'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'pending', requestId: 'req-p'});
 	});
 
@@ -742,7 +742,7 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-c', status: 'c', submittedAt: '2026-01-02T00:00:00.000Z', challengeNonce: 'nonce-xyz'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'pending', requestId: 'req-c', challengeNonce: 'nonce-xyz'});
 	});
 
@@ -750,7 +750,7 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-a', status: 'a', submittedAt: '2026-01-03T00:00:00.000Z'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'approved'});
 	});
 
@@ -758,7 +758,7 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-r', status: 'r', submittedAt: '2026-01-01T00:00:00.000Z'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
 	});
 
@@ -766,15 +766,24 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-x', status: 'p', submittedAt: '2026-01-01T00:00:00.000Z', deviceKey: 'someone-elses-key'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
+	});
+
+	test('an own sentinel row for ANOTHER authority resolves fresh (not this network)', async () => {
+		const listAssociationRequests = jest.fn(async () => [
+			{...makeSentinelRequest({requestId: 'req-o', status: 'p', submittedAt: '2026-01-01T00:00:00.000Z'}), authorityId: 'some-other-authority'},
+		]);
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
+		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
+		expect(listAssociationRequests).toHaveBeenCalledWith(P256_PUB);
 	});
 
 	test('a non-sentinel registrantId row resolves fresh (not a re-association)', async () => {
 		const listAssociationRequests = jest.fn(async () => [
 			makeSentinelRequest({requestId: 'req-y', status: 'p', submittedAt: '2026-01-01T00:00:00.000Z', registrantId: 'real-registrant-id'}),
 		]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
 	});
 
@@ -782,7 +791,7 @@ describe('resolveReassociationResume', () => {
 		const listAssociationRequests = jest.fn(async () => {
 			throw new Error('boom');
 		});
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'fresh'});
 	});
 
@@ -790,7 +799,7 @@ describe('resolveReassociationResume', () => {
 		const older = makeSentinelRequest({requestId: 'req-old', status: 'r', submittedAt: '2026-01-01T00:00:00.000Z'});
 		const newer = makeSentinelRequest({requestId: 'req-new', status: 'p', submittedAt: '2026-01-05T00:00:00.000Z'});
 		const listAssociationRequests = jest.fn(async () => [older, newer]);
-		const deps = makeContinuityDeps({association: {listAssociationRequests}});
+		const deps = makeContinuityDeps({association: {listAssociationRequestsByDeviceKey: listAssociationRequests}});
 		expect(await resolveReassociationResume(deps)).toEqual({kind: 'pending', requestId: 'req-new'});
 	});
 });

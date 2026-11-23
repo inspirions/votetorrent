@@ -212,8 +212,9 @@ export function NetworkDetailsScreen() {
 			// enrolment from a stranded device. The ceremony is idempotent and registers only
 			// what is missing, so the gate below decides whether there is anything to do.
 			// Checked BEFORE goBack() so the officer lands on the ceremony rather than having it
-			// appear over the network home they just returned to.
-			if (await promptRecoveryKeyRegistrationIfNeeded()) return;
+			// appear over the network home they just returned to. The ceremony replaces this
+			// screen, so its `goBack()` exit lands where ours would have, not on these details.
+			if (await promptRecoveryKeyRegistrationIfNeeded({ replaceCurrent: true })) return;
 			navigation.goBack();
 		} catch (error) {
 			// A device with no signing key (`getOrCreateDeviceUser` rejects with code

@@ -12,7 +12,7 @@
 // top-level named exports only, no class wrapper, no default export.
 
 import { SecurityLevel } from '@peculiar/asn1-android'
-import type { AttestationChallenge, DeviceAttestation } from '@votetorrent/vote-core'
+import { ANDROID_DEVICE_KEY_ATTESTATION_TAG, type AttestationChallenge, type DeviceAttestation } from '@votetorrent/vote-core'
 import { recomputeChallengeDigest } from '../../../src/association/verifiers/digest-binding.js'
 import {
   buildDefaultSyntheticPayload,
@@ -49,6 +49,13 @@ export interface BuildSyntheticDeviceAttestationOverrides {
    * landed. See `synthetic-key-description.ts`'s `generateAndroidDeviceKeyPair()`.
    */
   leafKeyPair?: CryptoKeyPair
+  /**
+   * Spike 104 (R1d) two-chain form: ALSO build the voting key's own chain and carry it as
+   * `platformDetails.deviceKeyCertificateChain`. `certificateChain` then belongs to the throwaway
+   * key (`leafKeyPair`, or a random one) that answered the nonce. `attestationChallengeBytes`
+   * defaults to utf8(`ANDROID_DEVICE_KEY_ATTESTATION_TAG`).
+   */
+  deviceKeyChain?: { leafKeyPair: CryptoKeyPair, attestationChallengeBytes?: Uint8Array, securityLevel?: SecurityLevel }
 }
 
 export interface BuildSyntheticDeviceAttestationOptions {
@@ -91,6 +98,16 @@ export async function buildSyntheticDeviceAttestation (options: BuildSyntheticDe
   // entries before parsing DER (play-integrity-verifier.ts:38) — encode accordingly.
   const certificateChain = chainDer.map((der) => Buffer.from(der).toString('base64'))
 
+  const deviceKeyChain = overrides?.deviceKeyChain
+  const deviceKeyCertificateChain = deviceKeyChain === undefined
+    ? undefined
+    : (await buildSyntheticKeyDescription({
+        root: testRoot,
+        securityLevel: deviceKeyChain.securityLevel ?? SecurityLevel.trustedEnvironment,
+        attestationChallenge: deviceKeyChain.attestationChallengeBytes ?? new TextEncoder().encode(ANDROID_DEVICE_KEY_ATTESTATION_TAG),
+        leafKeyPair: deviceKeyChain.leafKeyPair
+      })).chainDer.map((der) => Buffer.from(der).toString('base64'))
+
   return {
     publicKey: overrides?.publicKey ?? 'synthetic-device-voting-pubkey',
     deviceId: overrides?.deviceId ?? `synthetic-device-${Date.now()}-${Math.floor(Math.random() * 100_000)}`,
@@ -104,7 +121,8 @@ export async function buildSyntheticDeviceAttestation (options: BuildSyntheticDe
       // equal the draft's own `nonce` (the challenge nonce being answered) —
       // defaults to the real challenge nonce so the accepting variant passes
       // BOTH the builder's cross-field check and the verifier's D-06 binding.
-      nonce: overrides?.platformNonce ?? challenge.nonce
+      nonce: overrides?.platformNonce ?? challenge.nonce,
+      ...(deviceKeyCertificateChain !== undefined ? { deviceKeyCertificateChain } : {})
     }
   }
 }

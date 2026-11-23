@@ -21,6 +21,8 @@ export type RootStackParamList = {
 	Hosting: undefined;
 	// Phase 62 plan 62-23 — D-35/D-36 founding-bundle import (Surface 2)
 	ImportFoundingBundle: undefined;
+	// D-26 Join a network: paste screen; no params, so the join code never enters navigation state (UI-SPEC A1)
+	JoinNetwork: undefined;
 	// Phase 62 plan 62-27 — D-41/D-45 device-change review (Surface 4)
 	AssociationRequestApproval: { requestId: string; authorityId: string };
 	// Phase 62 plan 62-29 — D-17/D-20 key release ceremony (Surface 6), reached from a release-key task; the param is the public task object (ids and election metadata), never key material
@@ -133,11 +135,14 @@ export type RootStackParamList = {
 	// sits here: adding a param name inside either scanned span would spuriously widen
 	// that gate's allow-list rather than proving anything about THIS route's own hygiene.
 	AssociationRequestStatus: { authorityId: string };
-	// 50-07 (D-03/D-05/D-09) — the authority-app producer screen for the web
-	// dashboard's bearer sign-in code. No params: the screen reads its staged
-	// record straight out of AsyncStorage (dashboard-signin-code.ts) and
-	// resolves the live network snapshot through useApp() itself.
-	DashboardSignInCode: undefined;
+	// Pair a browser. No params: the pairing code never enters navigation state.
+	PairBrowser: undefined;
+	// The officer's own paired browsers. No params: nothing identifying a pairing enters navigation state.
+	PairedBrowsers: undefined;
+	// Election results (decrypt + validate + tally after the key release). Identifiers plus the public election
+	// title only; the screen resolves its engine from useApp().getEngine('electionResults'). authorityId (the
+	// election's authority) lets the screen offer Publish to this authority's officers only.
+	ElectionResults: { electionId: string; electionTitle?: string; authorityId?: string };
 	// Phase 9 plan 09-01 — type entries for routes whose screens land in later
 	// plans (CreateElection in 09-02, CreateBallot in 09-04). Stack.Screen
 	// registration is deferred; only the type signature is added here so the
@@ -165,4 +170,6 @@ export type NavigationProp = {
 	navigate: (screen: keyof RootStackParamList, params?: any) => void;
 	setOptions: (options: any) => void;
 	goBack: () => void;
+	/** Native-stack only; optional so plain navigation mocks still satisfy the type. */
+	replace?: (screen: keyof RootStackParamList, params?: any) => void;
 };

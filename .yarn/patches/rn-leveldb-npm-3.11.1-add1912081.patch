@@ -43,3 +43,40 @@ index 6084dbfb3b98747d7c95c460c63e60e7474e8bbf..1a80b33b129a30888693ac2e55faf13a
    return @true;
  }
  
+diff --git a/cpp/react-native-leveldb.cpp b/cpp/react-native-leveldb.cpp
+index 64d48f885c6c55f3f7cf23eac57bd3b51c8a00c1..6d5324294a5fc2a42d94917c5929a3df2f5fa30a 100644
+--- a/cpp/react-native-leveldb.cpp
++++ b/cpp/react-native-leveldb.cpp
+@@ -3,11 +3,23 @@
+ #include <iostream>
+ #include <fstream>
+ #include <sstream>
++#import <leveldb/cache.h>
+ #import <leveldb/db.h>
+ #import <leveldb/write_batch.h>
+ 
+ using namespace facebook;
+ 
++// With LevelDB's default options every open database gets its own 8 MB block cache and a 4 MB
++// write buffer. Quereus opens one database per table and per index (100+ for one network), which
++// grew the app's native heap to ~800 MB. All databases share one block cache instead, and each
++// keeps a small write buffer. The cache is never freed: it must outlive every database using it.
++static const size_t kSharedBlockCacheBytes = 32 << 20;
++static const size_t kWriteBufferBytes = 1 << 20;
++
++static leveldb::Cache* sharedBlockCache() {
++  static leveldb::Cache* cache = leveldb::NewLRUCache(kSharedBlockCacheBytes);
++  return cache;
++}
+ 
+ // TODO(savv): consider re-using unique_ptrs, if they are empty.
+ std::vector<std::unique_ptr<leveldb::DB>> dbs;
+@@ -107,6 +119,8 @@ void installLeveldb(jsi::Runtime& jsiRuntime, std::string documentDir) {
+         std::string path = documentDir + arguments[0].getString(runtime).utf8(runtime);
+         options.create_if_missing = arguments[1].getBool();
+         options.error_if_exists = arguments[2].getBool();
++        options.block_cache = sharedBlockCache();
++        options.write_buffer_size = kWriteBufferBytes;
+         leveldb::DB* db;
+         leveldb::Status status = leveldb::DB::Open(options, path, &db);
+         dbs.push_back(std::unique_ptr<leveldb::DB>{db});

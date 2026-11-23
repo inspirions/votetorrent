@@ -38,12 +38,33 @@ module.exports = {
     '^react-native-splash-view$': '<rootDir>/__mocks__/react-native-splash-view.js',
     // The native TurboModule cannot load under jest; the mock is copied verbatim from the Authority (R-7).
     '^@react-native-clipboard/clipboard$': '<rootDir>/__mocks__/@react-native-clipboard/clipboard.js',
+    // Phase 64 plan 64-01 (D-05): the VisionCamera 5 stack is Nitro HybridObject bindings that jest
+    // cannot load, and transformIgnorePatterns does not transform them. Stand-ins with test seams.
+    '^react-native-vision-camera$': '<rootDir>/__mocks__/react-native-vision-camera.js',
+    '^react-native-vision-camera-barcode-scanner$':
+      '<rootDir>/__mocks__/react-native-vision-camera-barcode-scanner.js',
+    '^react-native-nitro-modules$': '<rootDir>/__mocks__/react-native-nitro-modules.js',
+    '^react-native-nitro-image$': '<rootDir>/__mocks__/react-native-nitro-image.js',
     '^@quereus/plugin-react-native-leveldb$':
       '<rootDir>/node_modules/@quereus/plugin-react-native-leveldb/dist/src/index.js',
     '^@optimystic/db-p2p$': '<rootDir>/__mocks__/@optimystic/db-p2p.js',
+    // db-core is ESM-only over ESM-only deps (multiformats). pool-matchmaking-ports.ts imports its matchmaking
+    // helpers; the stand-in throws if a test reaches one (no jest node has a cohort-topic host).
+    '^@optimystic/db-core$': '<rootDir>/__mocks__/@optimystic/db-core.js',
+    // Native Noise crypto, as in the Authority (spike 093). The real module needs
+    // react-native-quick-crypto (Nitro/JSI), which cannot load under Jest; the mock, copied from
+    // the Authority, keeps the mode contract.
+    '^@serfab/cadre-rn/noise-crypto$': '<rootDir>/__mocks__/@serfab/cadre-rn-noise-crypto.js',
+    // The REAL module (pure JS, no native import): its exports map is import-only, which Jest's
+    // CJS resolver cannot follow.
+    '^@serfab/cadre-rn/native-digest$': '<rootDir>/node_modules/@serfab/cadre-rn/dist/native-digest.js',
     '^@multiformats/multiaddr$': '<rootDir>/__mocks__/@multiformats/multiaddr.js',
     '^@votetorrent/vote-core$':
       '<rootDir>/node_modules/@votetorrent/vote-core/dist/src/index.js',
+    // Phase 64 (planning notes 4.3): the real-encoder join-code fixtures that plan 64-04 generates.
+    // Pure data with no imports; the package exports field blocks subpath access.
+    '^@votetorrent/vote-engine/test/fixtures/join-code-fixtures$':
+      '<rootDir>/../../packages/vote-engine/test/fixtures/join-code-fixtures.generated.ts',
     '^@votetorrent/vote-engine$':
       '<rootDir>/node_modules/@votetorrent/vote-engine/dist/index.js',
     '^@votetorrent/vote-engine/rn$':

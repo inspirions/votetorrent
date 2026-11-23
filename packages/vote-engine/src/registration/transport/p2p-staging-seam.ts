@@ -153,8 +153,22 @@ export async function readConformingRows<T extends { Cursor: string }> (
 ): Promise<{ rows: T[], ceiling: string }> {
   const since = sinceCursor !== undefined && isConformingStagingCursor(sinceCursor) ? sinceCursor : null
   const ceiling = await stagingCursorCeiling(port, table, strandId)
-  const rows = await port.query<T>(selectSql, { strandId, sinceCursor: since })
+  const rows = await port.query<T>(sinceCursorRangeSql(selectSql, since), { strandId, sinceCursor: since })
   return { rows: rows.filter((row) => isConformingStagingCursor(row.Cursor)), ceiling }
+}
+
+/** The optional-cursor predicate every staging/decision reader's `selectSql` carries. */
+export const SINCE_CURSOR_PREDICATE = '(:sinceCursor is null or Cursor > :sinceCursor)'
+
+/**
+ * Spike 110: Quereus cannot turn `SINCE_CURSOR_PREDICATE` into an index range, so a poll WITH a
+ * cursor walked every row of the strand and filtered (5,000 rows, 100 new: 191 ms against 9 ms for
+ * the plain range on the (StrandId, Cursor) index). With a cursor bound the predicate is exactly
+ * `Cursor > :sinceCursor`, so that is what runs; with none, every row is read either way and the
+ * SQL is left as written. SQL without the predicate is returned unchanged.
+ */
+export function sinceCursorRangeSql (selectSql: string, since: string | null): string {
+  return since === null ? selectSql : selectSql.replace(SINCE_CURSOR_PREDICATE, 'Cursor > :sinceCursor')
 }
 
 /**

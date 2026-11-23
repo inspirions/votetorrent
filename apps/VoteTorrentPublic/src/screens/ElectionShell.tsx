@@ -7,6 +7,7 @@ import { AppChrome } from './AppChrome';
 import { ElectionIndex } from './ElectionIndex';
 import { FactSections } from './FactSections';
 import { usePublicElection } from './use-public-election';
+import type { PublicTurnoutReading } from './use-public-election';
 import { parseElectionAddress } from '../election-address.js';
 import { formatReaderInstant } from '../reader-instant.js';
 
@@ -72,7 +73,19 @@ export interface ElectionShellProps {
 	 * sees a byte-identical page -- which is what keeps the existing browser
 	 * gates green. */
 	peerFeed?: Parameters<typeof usePublicElection>[0]['peerFeed'];
+	/** 56-31: ballots cast so far, counted on the network by `PublicApp`.
+	 * Absent on every gate mount, which renders the honest "couldn't count". */
+	turnout?: PublicTurnoutReading;
+	/** 56-34: what a FAILED boot means to the reader (`bootFailureKind` in
+	 * `peer/boot.js`), read only when `peerFeed` is `'stopped'`. Absent or
+	 * `null` keeps the plain not-held sentence, so every gate mount that
+	 * omits it sees a byte-identical page. */
+	bootFailure?: PublicBootFailure;
 }
+
+/** 56-34: the two failed-connection sentences an addressed page can say
+ * instead of "doesn't hold"; `null` says the not-held sentence. */
+export type PublicBootFailure = 'unreachable' | 'notOnNetwork' | null;
 
 /**
  * The public election view: chrome words, genuine mounts of the three shared
@@ -129,7 +142,7 @@ export interface ElectionShellProps {
  * closure therefore lives in `use-public-election.ts`, whose own header
  * records the same constraint from the other side.
  */
-export function ElectionShell({ search, at = null, election = null, source, configFault = null, peerFeed }: ElectionShellProps) {
+export function ElectionShell({ search, at = null, election = null, source, configFault = null, peerFeed, turnout, bootFailure = null }: ElectionShellProps) {
 	const address = parseElectionAddress(search ?? window.location.search);
 
 	// Called UNCONDITIONALLY, above the address branch, for the same reason
@@ -184,6 +197,19 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 	// is the only gate that can see a slot silently disappear.
 	const addressed = address.status === 'ok';
 	const holdsNothing = addressed && read.state === 'notHeld';
+	// 56-28. "Doesn't hold" is false while this page's own network connection
+	// is still starting ('unobserved') or has started and is filling the store
+	// ('running'): the browser is fetching the election, so it says so. Only a
+	// connection that FAILED ('stopped') leaves the not-held sentence true. An
+	// absent `peerFeed` (every gate that mounts the shell without a boot) is
+	// not a connection in progress, so it keeps the not-held sentence.
+	const stillLooking = holdsNothing && (peerFeed === 'unobserved' || peerFeed === 'running');
+	// 56-34. A connection that FAILED says why when the boot could tell:
+	// it never reached a peer serving the election's network, or the network
+	// answered and returned no such election. Any other failure, and a shell
+	// mounted without a boot, keeps the not-held sentence, which stays true.
+	const failedKind = holdsNothing && !stillLooking && peerFeed === 'stopped' ? bootFailure : null;
+	const saysNotHeld = holdsNothing && !stillLooking && failedKind === null;
 	const showBanner = addressed && (read.state === 'ready' || read.state === 'unreadable');
 	const showLifecycleSlot = !addressed || read.state === 'reading' || holdsNothing;
 	// 56-12/D-17: never on 'reading' (nothing to be stale yet), never on
@@ -277,15 +303,19 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 				{/* D-02's addressed-but-not-held sentence. Distinct from the
 				    index's own empty label, which answers "this browser holds
 				    no elections AT ALL"; this one answers "this browser holds
-				    no copy of the election you asked for". Deliberately
-				    UNCLASSED: 54-09 declared no selector for this block, and
-				    css-class-coverage reports every rendered class with no
-				    matching selector as missing, so an invented name would be
-				    a red gate — an unclassed element inherits the section's
-				    own type and colour instead. 54-13 may give it a class
-				    TOGETHER WITH its selector. */}
-				{holdsNothing ? <h2>{t('public.election.notHeld.title')}</h2> : null}
-				{holdsNothing ? <p>{t('public.election.notHeld.body')}</p> : null}
+				    no copy of the election you asked for". The bodies are
+				    unclassed text; the four failure/looking titles below
+				    carry `.election-notice__title` (app.css), which sizes them
+				    under the election title instead of at the browser's
+				    default h2 size, larger than the title itself. */}
+				{saysNotHeld ? <h2 className="election-notice__title">{t('public.election.notHeld.title')}</h2> : null}
+				{saysNotHeld ? <p>{t('public.election.notHeld.body')}</p> : null}
+				{failedKind === 'unreachable' ? <h2 className="election-notice__title">{t('public.election.unreachable.title')}</h2> : null}
+				{failedKind === 'unreachable' ? <p>{t('public.election.unreachable.body')}</p> : null}
+				{failedKind === 'notOnNetwork' ? <h2 className="election-notice__title">{t('public.election.notOnNetwork.title')}</h2> : null}
+				{failedKind === 'notOnNetwork' ? <p>{t('public.election.notOnNetwork.body')}</p> : null}
+				{stillLooking ? <h2 className="election-notice__title">{t('public.election.fetching.title')}</h2> : null}
+				{stillLooking ? <p>{t('public.election.fetching.body')}</p> : null}
 				{/* The status banner: the tone chip and the headline sentence,
 				    and NEITHER MAY RENDER ALONE (app.css's own markup
 				    contract). Colour without a word fails colour-blindness and
@@ -343,7 +373,7 @@ export function ElectionShell({ search, at = null, election = null, source, conf
 				    the published voter roll (D-18), read by the same seam for
 				    the same reason; `null` means it could not be read, and the
 				    card renders its honest empty state rather than an error. */}
-				<FactSections phase={phaseResult.phase} keyRelease={read.keyRelease} roll={read.roll} />
+				<FactSections phase={phaseResult.phase} keyRelease={read.keyRelease} roll={read.roll} results={read.results} turnout={turnout} />
 			</section>
 		);
 	}

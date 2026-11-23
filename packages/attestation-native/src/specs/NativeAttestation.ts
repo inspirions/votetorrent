@@ -93,6 +93,34 @@ export interface Spec extends TurboModule {
 	): Promise<Object>
 
 	/**
+	 * Spike 104 (R1d), ANDROID ONLY — `provisionDeviceKey` with an attestation chain. The voting key
+	 * is generated with `attestationChallengeBase64` (base64 of utf8(`ANDROID_DEVICE_KEY_ATTESTATION_TAG`))
+	 * as its attestation challenge, so its own chain can later prove the VOTING key is
+	 * hardware-backed — the nonce does not exist yet at this point. Regenerates the alias like
+	 * `provisionDeviceKey` and resolves the same shape. iOS rejects `UNSUPPORTED_PLATFORM`.
+	 */
+	provisionAttestedDeviceKey(keyAlias: string, attestationChallengeBase64: string): Promise<Object>
+
+	/**
+	 * Spike 104 (R1d), ANDROID ONLY — answers the challenge WITHOUT replacing the voting key. A
+	 * throwaway key is generated with `boundDigestUtf8Base64` as its attestation challenge, its chain
+	 * exported and the key deleted; the key under `keyAlias` is never touched (unlike
+	 * `produceAttestation`, which deletes and regenerates it). Same arguments and Play Integrity leg
+	 * as `produceAttestation`; no biometric prompt. Resolves `{ certificateChainBase64` (the
+	 * throwaway, nonce-bound chain), `deviceKeyCertificateChainBase64` (the voting key's own chain),
+	 * `integrityToken, androidId, attestationTimeMillis, publicKeyCompressedHex` (the voting key,
+	 * unchanged) `}`. Rejects `NO_KEY_PROVISIONED`, `KEY_INVALIDATED_REASSOCIATE`,
+	 * `DEVICE_KEY_NOT_ATTESTED`, `NO_STRONGBOX_OR_TEE`, `KEY_ATTESTATION_FAILED`,
+	 * `INVALID_CHALLENGE_ENCODING`, `PLAY_INTEGRITY_ERROR`. iOS rejects `UNSUPPORTED_PLATFORM`.
+	 */
+	produceFreshAttestation(
+		keyAlias: string,
+		boundDigest: string,
+		boundDigestUtf8Base64: string,
+		enablePlayIntegrity: boolean,
+	): Promise<Object>
+
+	/**
 	 * Phase 49 (D-06/D-04): produces a biometric-gated, hardware-backed P-256 signature
 	 * over `digestBase64` using the key under `keyAlias`. Resolves
 	 * `{ signatureHex: string }` — a 64-byte compact, low-S, hex-encoded signature
@@ -122,11 +150,28 @@ export interface Spec extends TurboModule {
 	 * only the subtitle varies (see `49-UI-SPEC.md` §"Native BiometricPrompt string
 	 * contract").
 	 *
-	 * Rejects with one of the typed codes: `CANCELED` (native
-	 * `ERROR_CANCELED`/`ERROR_USER_CANCELED`/`ERROR_NEGATIVE_BUTTON` all map here — 49-15/
-	 * Gap B), `NO_BIOMETRICS_ENROLLED`, `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`,
+	 * Rejects with one of the typed codes: `CANCELED`, `SYSTEM_CANCELED`,
+	 * `NO_BIOMETRICS_ENROLLED`, `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`,
 	 * `KEY_INVALIDATED_REASSOCIATE`, `NO_KEY_PROVISIONED`, `NO_ACTIVITY`,
-	 * `INVALID_DIGEST_ENCODING`.
+	 * `INVALID_DIGEST_ENCODING`, `PROMPT_BUSY`.
+	 *
+	 * `CANCELED`: the voter dismissed the prompt (Android `ERROR_USER_CANCELED`/
+	 * `ERROR_NEGATIVE_BUTTON`; iOS `LAError.userCancel`/`.userFallback`/`errSecUserCanceled`), or
+	 * the app cancelled it through `cancelPendingSign` (always `CANCELED`, on both platforms).
+	 *
+	 * `SYSTEM_CANCELED` (Phase 65 review CR-01): the SYSTEM ended the prompt, not the voter: the
+	 * app went to the background, the screen locked, a call came in, or the HAL timed out (Android
+	 * `ERROR_CANCELED`/5; iOS `LAError.systemCancel`/`.appCancel` when the app did not cancel the
+	 * sign itself). It is not a decline. Callers with user copy show their `CANCELED` copy for it.
+	 * The vault prompts (`wrapSecret`/`unwrapSecret`) and `produceAttestation` never reject it.
+	 *
+	 * `NO_ACTIVITY`: the app has no foreground activity that can host a prompt, including (Android)
+	 * an activity whose state is already saved because the app is in the background, and a prompt
+	 * that androidx.biometric silently did not start for that reason. Nothing was shown.
+	 *
+	 * `PROMPT_BUSY` (D-112): another biometric prompt is already showing or a sign is pending (on
+	 * iOS also: an earlier sign's system call is still running after its cancel hit the 2 s cap);
+	 * nothing was shown and nothing will settle later. Callers treat it as a consent not given.
 	 */
 	signWithDeviceKey(
 		keyAlias: string,
@@ -181,6 +226,11 @@ export interface Spec extends TurboModule {
 	 * OS-version check and any ceremony begins.
 	 * `RECOVERY_UNSUPPORTED_OS` (D-26a rescope) — see above.
 	 *
+	 * `PROMPT_BUSY` (D-112) applies to `signWithRecoveryKey` too: another biometric prompt is already
+	 * showing or a sign is pending; nothing was shown and nothing will settle later.
+	 * `SYSTEM_CANCELED` and `NO_ACTIVITY` mean the same as for `signWithDeviceKey`: the system, not
+	 * the voter, ended the prompt; no activity could host it.
+	 *
 	 * **Unproven at runtime** — the API 30+ branch is proven by D-24 leg 3 on real hardware
 	 * (Samsung SM-M166P, API 36) in 49-14.
 	 * Compilation is not evidence of it.
@@ -192,6 +242,19 @@ export interface Spec extends TurboModule {
 		promptSubtitle: string,
 		promptNegativeButton: string,
 	): Promise<Object>
+
+	/**
+	 * D-110/D-111/D-113: dismisses a pending device-key or recovery-key sign. Resolves
+	 * `{ canceled: boolean }`: `true` only when a pending sign existed and has now settled (its own
+	 * promise rejected `CANCELED`); `false` when nothing was pending. Never rejects for "nothing
+	 * pending". Resolves only after the pending sign has settled and, on Android, its prompt is
+	 * gone, or after a 2 s native cap, whichever is first. Never cancels a wrapSecret/unwrapSecret
+	 * (vault) prompt. Either way the cancelled sign no longer holds the pending-sign slot when this
+	 * resolves. On Android a prompt that has not detached within the cap can still make the next sign
+	 * `PROMPT_BUSY`; on iOS a next sign issued while the old system call is still running (cap
+	 * expired) is refused `PROMPT_BUSY` at once, never queued behind it (review WR-06).
+	 */
+	cancelPendingSign(): Promise<Object>
 
 	/**
 	 * D-42: wraps an arbitrary `plaintextBase64` secret (1..4096 bytes) under a generic,
@@ -285,6 +348,37 @@ export interface Spec extends TurboModule {
 	 * key; never deleted) or `WRAP_FAILED`.
 	 */
 	deleteWrapKey(keyAlias: string): Promise<Object>
+
+	/**
+	 * Keyholder prompt batching: seals `plaintextBase64` (1..128 bytes) to the PUBLIC half of a
+	 * hardware key pair under `keyAlias` (`^VOTETORRENT_[A-Z0-9_]+_SEAL_KEY_V[0-9]+$`), creating the
+	 * pair on first use. NEVER prompts: only the public key is used. Android: RSA-2048 AndroidKeyStore
+	 * key (StrongBox, else TEE), RSA-OAEP with SHA-256 and MGF1-SHA-1, alg `RSA-OAEP-SHA256`. iOS:
+	 * Secure Enclave P-256 key, `eciesEncryptionCofactorVariableIVX963SHA256AESGCM`, alg
+	 * `ECIES-P256-SHA256-AESGCM`. The private half is per-use, biometric-only and destroyed by a
+	 * biometric enrolment change on both platforms.
+	 *
+	 * Resolves `{ ciphertextBase64, keyAlias, securityLevel, alg }`. Rejects `INVALID_ARGUMENT`,
+	 * `INVALID_ENCODING`, `SEAL_KEY_POLICY_MISMATCH` (the alias holds a different kind of key; never
+	 * replaced), `SEAL_UNAVAILABLE` (no secure hardware for this key, e.g. the iOS Simulator) or
+	 * `SEAL_FAILED`.
+	 */
+	sealSecret(keyAlias: string, plaintextBase64: string): Promise<Object>
+
+	/**
+	 * The inverse of `sealSecret`: exactly ONE biometric prompt, then decrypts with the private half.
+	 * Never creates a key. Resolves `{ plaintextBase64 }`. Rejects `INVALID_ARGUMENT`,
+	 * `INVALID_ENCODING`, `NO_SEAL_KEY`, `SEAL_KEY_POLICY_MISMATCH`, `KEY_INVALIDATED`,
+	 * `UNSEAL_FAILED`, `NO_ACTIVITY`, or a biometric class (`CANCELED`, `NO_BIOMETRICS_ENROLLED`,
+	 * `LOCKOUT`, `LOCKOUT_PERMANENT`, `BIOMETRIC_ERROR`, iOS also `DEVICE_LOCKED`).
+	 */
+	unsealSecret(
+		keyAlias: string,
+		ciphertextBase64: string,
+		promptTitle: string,
+		promptSubtitle: string,
+		promptNegativeButton: string,
+	): Promise<Object>
 
 	/**
 	 * Phase 63 review CR-01: Android adds (`enabled` true) or clears (`false`) `FLAG_SECURE` on the

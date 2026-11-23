@@ -31,6 +31,7 @@
  * fine — that is a pure type-only re-export, not a runtime dependency on vote-core).
  */
 import type {NetworkReference} from '@votetorrent/vote-core';
+import type {NetworkJoinCode, NetworkJoinResult, NetworkJoinStep, PoolMatchmakingPorts} from '@votetorrent/vote-engine/rn';
 
 /**
  * The 7-state election lifecycle, in canonical order (D-03). Phase 40's `__DEV__` cycler steps
@@ -224,6 +225,12 @@ export interface VoterAppContextType {
 	 */
 	hasNetwork: boolean;
 	/**
+	 * The open network's name (`Network.Name`), read after each join, re-attach or dev seed.
+	 * `undefined` until a network is open or when that read fails; screens then show the
+	 * `common:networkName` fallback (see `useNetworkName`).
+	 */
+	networkName?: string;
+	/**
 	 * Real engine accessor — delegates to the `EngineFactory` this provider owns via `useRef`.
 	 * Mirrors the authority app's `AppProvider.getEngine` (D-02/D-04).
 	 */
@@ -235,6 +242,23 @@ export interface VoterAppContextType {
 	 * Mirrors the authority app's `AppProvider.selectNetwork` (D-02/D-04).
 	 */
 	selectNetwork: (networkRef: NetworkReference) => Promise<void>;
+	/**
+	 * Spike 100: join an authority-created network from a decoded join code — redeem its cadre
+	 * invitation, open and verify the network's strand, then make it current (selectNetwork).
+	 * Resolves a typed result for every join problem; only an identity failure rejects.
+	 */
+	joinNetwork: (code: NetworkJoinCode, onStep?: (step: NetworkJoinStep) => void) => Promise<NetworkJoinResult>;
+	/**
+	 * Spike 102: the running network node, whose control connection carries vote-pool traffic to
+	 * the authority's rendezvous; null until the node boots. Screens hand it to engines only.
+	 */
+	getNetworkNode: () => {getControlNode(): unknown} | null;
+	/**
+	 * Optimystic matchmaking ports for the current network's strand node (engines/pool-matchmaking-ports.ts),
+	 * or null when the node, the strand or its cohort-topic substrate is not up. Optional so test doubles of
+	 * this context need not provide it.
+	 */
+	getPoolMatchmaking?: () => PoolMatchmakingPorts | null;
 	/**
 	 * The D-07 dev-seeded election's id, captured from `seedDevNetwork`'s return — pass as
 	 * `RegisterInit.electionId` (44-08) so `validateFieldPolicy` enforces the seeded policy.

@@ -24,6 +24,7 @@
 
 import { secp256k1 } from '@noble/curves/secp256k1.js'
 import { utf8ToBytes } from '@noble/hashes/utils.js'
+import { installedEcdhX, nativeEcdhInputsOk } from './backend.js'
 
 /** Unpadded base64url, the only encoding this module reads or writes. */
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/
@@ -119,7 +120,21 @@ export function isCompressedPublicKeyHex (value: unknown): boolean {
  * are the x-coordinate this function returns. This deliberately differs
  * from a raw 33-byte shared-secret convention — it matches OpenSSL's
  * `computeSecret` and the standard.
+ *
+ * A native backend installed through `./backend.js` serves the inputs noble
+ * itself would accept. If it throws, or returns anything but 32 bytes, noble
+ * computes the answer instead, so an invalid key throws noble's error exactly
+ * as it did before any backend existed.
  */
 export function ecdhX (secretKey: Uint8Array, publicKeyBytes: Uint8Array): Uint8Array {
+  const native = installedEcdhX()
+  if (native !== undefined && nativeEcdhInputsOk(secretKey, publicKeyBytes)) {
+    try {
+      const x = native(secretKey, publicKeyBytes)
+      if (x instanceof Uint8Array && x.length === 32) return x
+    } catch {
+      // noble below decides, and throws its own error for a bad key.
+    }
+  }
   return secp256k1.getSharedSecret(secretKey, publicKeyBytes, true).slice(1)
 }

@@ -153,7 +153,7 @@ export function RevokeKeyScreen() {
 
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 				<View style={[styles.section, styles.detailContainer]}>
 					<View style={styles.detail}>
 						<ThemedText type="defaultSemiBold">{t("id")}:</ThemedText>
@@ -181,7 +181,7 @@ export function RevokeKeyScreen() {
 								const isSelected = selectedKeys.has(key.key);
 								const revokeTextStyle = isSelected
 									? { color: colors.error }
-									: { color: colors.warning };
+									: { color: colors.warningText };
 								const revokeText = isSelected ? t("revoke") : t("unchanged");
 								const iconName = isSelected ? "square-check" : "square";
 

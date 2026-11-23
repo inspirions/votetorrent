@@ -109,13 +109,33 @@ class AttestationNativeModule: NSObject {
     return key
   }
 
-  private func loadKey(tag: String) -> SecKey? {
-    let query: [String: Any] = [
+  /// The access control a sign must satisfy: the key's own (read from its attributes), else the
+  /// flags `createSecureEnclaveKey` gives that kind of key. nil only if neither can be had; the sign
+  /// then lets `SecKeyCreateSignature` raise the sheet itself (the pre-Run-6 path).
+  private func signingAccessControl(for key: SecKey, recovery: Bool) -> SecAccessControl? {
+    if let attrs = SecKeyCopyAttributes(key) as? [String: Any],
+       let stored = attrs[kSecAttrAccessControl as String],
+       CFGetTypeID(stored as CFTypeRef) == SecAccessControlGetTypeID() {
+      return (stored as! SecAccessControl)
+    }
+    return SecAccessControlCreateWithFlags(
+      kCFAllocatorDefault,
+      kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+      recovery ? [.privateKeyUsage, .devicePasscode] : [.privateKeyUsage, .biometryCurrentSet],
+      nil
+    )
+  }
+
+  private func loadKey(tag: String, context: LAContext? = nil) -> SecKey? {
+    var query: [String: Any] = [
       kSecClass as String: kSecClassKey,
       kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
       kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
       kSecReturnRef as String: true
     ]
+    if let context = context {
+      query[kSecUseAuthenticationContext as String] = context
+    }
     var item: CFTypeRef?
     guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
     return (item as! SecKey)
@@ -427,6 +447,30 @@ class AttestationNativeModule: NSObject {
     }
   }
 
+  // MARK: - (2b) Android-only R1d methods (spike 104)
+
+  /// Android binds an attestation challenge only at key generation, so its voting key is provisioned
+  /// with a fixed tag and the nonce is answered by a throwaway key. iOS has no such constraint (App
+  /// Attest attests a separate key and cross-signs the vote key), and the iOS producer never calls
+  /// these two. They exist so the four ABI layers agree.
+  @objc(provisionAttestedDeviceKey:attestationChallengeBase64:resolver:rejecter:)
+  func provisionAttestedDeviceKey(_ keyAlias: String,
+                                  attestationChallengeBase64: String,
+                                  resolver resolve: @escaping RCTPromiseResolveBlock,
+                                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED_PLATFORM", "provisionAttestedDeviceKey is Android-only; iOS uses provisionDeviceKey", nil)
+  }
+
+  @objc(produceFreshAttestation:boundDigest:boundDigestUtf8Base64:enablePlayIntegrity:resolver:rejecter:)
+  func produceFreshAttestation(_ keyAlias: String,
+                               boundDigest: String,
+                               boundDigestUtf8Base64: String,
+                               enablePlayIntegrity: Bool,
+                               resolver resolve: @escaping RCTPromiseResolveBlock,
+                               rejecter reject: @escaping RCTPromiseRejectBlock) {
+    reject("UNSUPPORTED_PLATFORM", "produceFreshAttestation is Android-only; iOS uses produceAttestation", nil)
+  }
+
   // MARK: - (3) signWithDeviceKey
 
   /// Biometric-gated P-256 signature over `digestBase64`.
@@ -489,66 +533,326 @@ class AttestationNativeModule: NSObject {
 
   // MARK: - shared signing path
 
+  /// One pending device-key / recovery-key sign at a time (D-112). `canceled` and `settled` are
+  /// read and written under `pendingSignLock`. `settled` makes the JS promise settle exactly once:
+  /// either `finishPendingSign` (the system call returned) or `cancelPendingSign` (its 2 s cap ran
+  /// out first) settles it, never both.
+  private final class PendingSign {
+    let context: LAContext
+    let reject: RCTPromiseRejectBlock
+    let done = DispatchGroup()
+    /// "device" or "recovery", for the `[VtSign]` debug lines only
+    let kind: String
+    let startedAt = DispatchTime.now()
+    var canceled = false
+    var settled = false
+    init(context: LAContext, reject: @escaping RCTPromiseRejectBlock, kind: String) {
+      self.context = context
+      self.reject = reject
+      self.kind = kind
+    }
+    var elapsedMs: UInt64 { (DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000 }
+  }
+
+  /// Debug trace of the device-key / recovery-key sign lifecycle (start, busy refuse, settle, cancel):
+  /// `[VtSign] ...` in the device console (Console.app / `idevicesyslog | grep VtSign`). Kinds, codes,
+  /// timings and flags only: never digest, signature or key bytes, never an error message text.
+  /// DEBUG builds only (review WR-05): a Release build compiles the body away and never evaluates
+  /// the line (autoclosure), so no install records when or how fast a voter confirmed a sign.
+  private static func vtSignLog(_ line: @autoclosure () -> String) {
+    #if DEBUG
+    NSLog("%@", "[VtSign] " + line())
+    #endif
+  }
+
+  private let signQueue = DispatchQueue(label: "org.votetorrent.attestation.sign",
+                                        qos: .userInitiated)
+  private let pendingSignLock = NSLock()
+  private var pendingSign: PendingSign?
+  /// Review WR-06: how many `SecKeyCreateSignature` calls are running on `signQueue` right now,
+  /// read and written under `pendingSignLock`. A capped cancel frees `pendingSign` while its system
+  /// call may still be running; a new sign that queued behind it would wait silently, so `signWith`
+  /// refuses `PROMPT_BUSY` while this is non-zero.
+  private var systemCallsInFlight = 0
+
+  /// The LocalAuthentication evaluation's answer, written once by its reply before the semaphore
+  /// is signalled and read after the wait on `signQueue`.
+  private final class EvaluationResult: @unchecked Sendable {
+    var ok = false
+    var error: NSError?
+  }
+
+  private enum SignOutcome {
+    case signature(String)
+    case failure(code: String, message: String, error: Error?)
+  }
+
+  /// Signs run on `signQueue` with a fresh LAContext per call (reuse duration 0), so an open
+  /// Face ID / passcode sheet never blocks the module's method queue. Only one device/recovery
+  /// sign may be pending (`PROMPT_BUSY` otherwise); `cancelPendingSign` invalidates it (D-110,
+  /// D-112, D-113; todo 2026-10-31-ios-native-sign-has-no-timeout-or-cancel). A sign is also
+  /// refused `PROMPT_BUSY` while an earlier sign's system call is still running after its cancel
+  /// hit the cap (review WR-06): it never queues silently behind it. The sheet comes from a
+  /// LocalAuthentication evaluation of the key's access control (UAT 65 Run 6, F3), so the cancel's
+  /// `invalidate()` ends it, a "Face Not Recognized" alert included; the signature then uses the
+  /// evaluated context without a second sheet.
   private func signWith(tag: String, digestBase64: String, reason: String,
                         resolve: @escaping RCTPromiseResolveBlock,
                         reject: @escaping RCTPromiseRejectBlock) {
+    let kind = tag == Self.recoveryKeyTag ? "recovery" : "device"
+    Self.vtSignLog("sign start kind=\(kind)")
     guard let digest = Data(base64Encoded: digestBase64), digest.count == 32 else {
+      Self.vtSignLog("sign refused kind=\(kind) code=INVALID_DIGEST_ENCODING")
       reject("INVALID_DIGEST_ENCODING",
              "digestBase64 must be plain base64 of 32 raw digest bytes", nil)
       return
     }
-    guard let key = loadKey(tag: tag) else {
-      reject("NO_KEY_PROVISIONED", "no key under \(tag)", nil); return
+    let context = LAContext()
+    context.localizedReason = reason
+    context.touchIDAuthenticationAllowableReuseDuration = 0
+    let pending = PendingSign(context: context, reject: reject, kind: kind)
+    pendingSignLock.lock()
+    if pendingSign != nil || systemCallsInFlight > 0 {
+      let stuck = pendingSign == nil
+      pendingSignLock.unlock()
+      Self.vtSignLog("sign refused kind=\(kind) code=PROMPT_BUSY inFlight=\(stuck)")
+      reject("PROMPT_BUSY", "another biometric sign is already pending", nil)
+      return
     }
+    pending.done.enter()
+    pendingSign = pending
+    pendingSignLock.unlock()
+    Self.vtSignLog("reserve ok kind=\(kind)")
 
-    var error: Unmanaged<CFError>?
+    signQueue.async { [self] in
+      pendingSignLock.lock()
+      let alreadyCanceled = pending.canceled
+      pendingSignLock.unlock()
+      if alreadyCanceled {
+        finishPendingSign(pending, outcome: .failure(code: "CANCELED",
+                                                     message: "signing was cancelled", error: nil),
+                          resolve: resolve, reject: reject)
+        return
+      }
+      guard let key = loadKey(tag: tag, context: pending.context) else {
+        finishPendingSign(pending, outcome: .failure(code: "NO_KEY_PROVISIONED",
+                                                     message: "no key under \(tag)", error: nil),
+                          resolve: resolve, reject: reject)
+        return
+      }
+
+      // WR-06: count the system call as in flight, under the lock, and only if no cancel got here
+      // first (a sign cancelled while its key loaded never raises a sheet).
+      pendingSignLock.lock()
+      if pending.canceled {
+        pendingSignLock.unlock()
+        finishPendingSign(pending, outcome: .failure(code: "CANCELED",
+                                                     message: "signing was cancelled", error: nil),
+                          resolve: resolve, reject: reject)
+        return
+      }
+      systemCallsInFlight += 1
+      pendingSignLock.unlock()
+
+      // The Face ID / passcode sheet is raised by LocalAuthentication, evaluating the key's access
+      // control on this sign's context (the iOS analogue of Android's "authenticate"). UAT 65 Run 6
+      // (F3): when SecKeyCreateSignature raised the sheet itself, a failed Face ID left the system
+      // "Face Not Recognized" alert up after invalidate(), the call never returned, and every later
+      // sign was refused PROMPT_BUSY. An evaluation that LocalAuthentication owns is ended by
+      // invalidate() (LAError.appCancel), alert included. The signature below then uses the
+      // evaluated context and raises no second sheet.
+      Self.vtSignLog("prompt requested kind=\(pending.kind) ms=\(pending.elapsedMs)")
+      let evaluation = EvaluationResult()
+      if let access = signingAccessControl(for: key, recovery: kind == "recovery") {
+        let answered = DispatchSemaphore(value: 0)
+        pending.context.evaluateAccessControl(access, operation: .useKeySign,
+                                              localizedReason: reason) { ok, err in
+          evaluation.ok = ok
+          evaluation.error = err as NSError?
+          answered.signal()
+        }
+        answered.wait()
+        Self.vtSignLog("evaluate end kind=\(pending.kind) ok=\(evaluation.ok) code=\(evaluation.error?.code ?? 0) ms=\(pending.elapsedMs)")
+      }
+      let evaluated = evaluation.ok
+      let evaluationError = evaluation.error
+      // A cancel that landed before or during the evaluation: no signature, settle CANCELED.
+      pendingSignLock.lock()
+      let canceledMeanwhile = pending.canceled
+      pendingSignLock.unlock()
+      // Only the answers this mapping knows end the sign here. Any other evaluation failure falls
+      // through to the direct signature, so the measured invalidated-key result (CryptoTokenKit -3
+      // from SecKeyCreateSignature, below) is reported exactly as before.
+      let knownEvaluationAnswers: Set<Int> = [
+        LAError.userCancel.rawValue, LAError.userFallback.rawValue, LAError.systemCancel.rawValue,
+        LAError.appCancel.rawValue, LAError.biometryLockout.rawValue, LAError.biometryNotEnrolled.rawValue
+      ]
+      var error: Unmanaged<CFError>?
+      var signed: Data?
+      var failure: NSError?
+      if canceledMeanwhile {
+        failure = NSError(domain: LAErrorDomain, code: LAError.appCancel.rawValue)
+      } else if let evalErr = evaluationError, !evaluated, evalErr.domain == LAErrorDomain,
+                knownEvaluationAnswers.contains(evalErr.code) {
+        failure = evalErr
+      } else {
     // `.ecdsaSignatureDigestX962SHA256` treats the input as the FINAL ECDSA hash (no internal
     // hash) = noble `prehash: false`. Android's SHA256withECDSA hashes once, so the shared JS helper
     // (nativeSignInputBytes) pre-hashes on iOS to compensate. The PoP relies on this raw behaviour:
     // do NOT switch to the `...MessageX962...` variant without changing the PoP verifier, the
     // contract doc and the pinned hardware vector together.
-    guard let sig = SecKeyCreateSignature(key, .ecdsaSignatureDigestX962SHA256,
-                                          digest as CFData, &error) as Data? else {
-      let err = error!.takeRetainedValue() as Error as NSError
-      // LAError.userCancel / .userFallback / .biometryLockout map onto the Android code table.
-      // DOMAIN FIRST — these code spaces OVERLAP, measured 2026-08-25 (spike 085 leg 7):
-      //
-      //     LAError.userFallback            = -3   (com.apple.LocalAuthentication)
-      //     key invalidated by re-enrolment = -3   (CryptoTokenKit)
-      //
-      // Matching on the raw code alone reports an INVALIDATED KEY as CANCELED — a permanent,
-      // recoverable-by-re-provisioning condition disguised as "the user tapped cancel", so the app
-      // would retry forever instead of re-provisioning. An earlier revision of this fix had exactly
-      // that bug: it checked CryptoTokenKit only in `default`, which `-3` never reached because the
-      // CANCELED case matched first. Do not collapse this back into a single switch on `err.code`.
-      let code: String
-      if err.domain == "CryptoTokenKit" {
-        // -3 is the observed invalidation code. Other CryptoTokenKit failures are token-level
-        // faults with no better mapping than the generic bucket.
-        code = err.code == -3 ? "KEY_INVALIDATED_REASSOCIATE" : "BIOMETRIC_ERROR"
-      } else {
-      switch err.code {
-      case Int(errSecUserCanceled), LAError.userCancel.rawValue, LAError.systemCancel.rawValue,
-           LAError.appCancel.rawValue, LAError.userFallback.rawValue:
-        // MEASURED: cancelling the prompt yields com.apple.LocalAuthentication code -2
-        // (LAError.userCancel) — this mapping is correct.
-        code = "CANCELED"
-      case LAError.biometryNotEnrolled.rawValue: code = "NO_BIOMETRICS_ENROLLED"
-      case LAError.biometryLockout.rawValue:     code = "LOCKOUT_PERMANENT"
-      // A genuinely absent key. Distinct from invalidation (see above) but the same recovery
-      // action, and it may be how other iOS versions surface invalidation.
-      case Int(errSecItemNotFound):              code = "KEY_INVALIDATED_REASSOCIATE"
-      default:                                   code = "BIOMETRIC_ERROR"
+        signed = SecKeyCreateSignature(key, .ecdsaSignatureDigestX962SHA256,
+                                       digest as CFData, &error) as Data?
+        if signed == nil { failure = error!.takeRetainedValue() as Error as NSError }
       }
+      // WR-06: the system call has returned; decrement before settling, so a sign the caller starts
+      // the moment this one settles is not refused.
+      pendingSignLock.lock()
+      systemCallsInFlight -= 1
+      pendingSignLock.unlock()
+      guard let sig = signed else {
+        let err = failure!
+          // LAError.userCancel / .userFallback / .biometryLockout map onto the Android code table.
+          // DOMAIN FIRST — these code spaces OVERLAP, measured 2026-08-25 (spike 085 leg 7):
+          //
+          //     LAError.userFallback            = -3   (com.apple.LocalAuthentication)
+          //     key invalidated by re-enrolment = -3   (CryptoTokenKit)
+          //
+          // Matching on the raw code alone reports an INVALIDATED KEY as CANCELED — a permanent,
+          // recoverable-by-re-provisioning condition disguised as "the user tapped cancel", so the app
+          // would retry forever instead of re-provisioning. An earlier revision of this fix had exactly
+          // that bug: it checked CryptoTokenKit only in `default`, which `-3` never reached because the
+          // CANCELED case matched first. Do not collapse this back into a single switch on `err.code`.
+          let code: String
+          if err.domain == "CryptoTokenKit" {
+            // -3 is the observed invalidation code. Other CryptoTokenKit failures are token-level
+            // faults with no better mapping than the generic bucket.
+            code = err.code == -3 ? "KEY_INVALIDATED_REASSOCIATE" : "BIOMETRIC_ERROR"
+          } else {
+          switch err.code {
+          case Int(errSecUserCanceled), LAError.userCancel.rawValue, LAError.userFallback.rawValue:
+            // MEASURED: cancelling the prompt yields com.apple.LocalAuthentication code -2
+            // (LAError.userCancel) — this mapping is correct.
+            code = "CANCELED"
+          case LAError.systemCancel.rawValue, LAError.appCancel.rawValue:
+            // Review CR-01: the SYSTEM ended the sheet (another app came forward, the app went to
+            // the background), not the voter, so this must not read as the voter's decline. A sign
+            // that OUR cancelPendingSign invalidated also ends with appCancel, but it is marked
+            // `canceled` first and finishPendingSign rejects it CANCELED whatever this code says.
+            code = "SYSTEM_CANCELED"
+          case LAError.biometryNotEnrolled.rawValue: code = "NO_BIOMETRICS_ENROLLED"
+          case LAError.biometryLockout.rawValue:     code = "LOCKOUT_PERMANENT"
+          // A genuinely absent key. Distinct from invalidation (see above) but the same recovery
+          // action, and it may be how other iOS versions surface invalidation.
+          case Int(errSecItemNotFound):              code = "KEY_INVALIDATED_REASSOCIATE"
+          default:                                   code = "BIOMETRIC_ERROR"
+          }
+          }
+        finishPendingSign(pending, outcome: .failure(code: code,
+                                                     message: err.localizedDescription, error: err),
+                          resolve: resolve, reject: reject)
+        return
       }
-      reject(code, err.localizedDescription, err)
+      do {
+        finishPendingSign(pending, outcome: .signature(try derToCompactLowSHex(sig)),
+                          resolve: resolve, reject: reject)
+      } catch {
+        finishPendingSign(pending, outcome: .failure(code: "KEY_ERROR",
+                                                     message: error.localizedDescription, error: error),
+                          resolve: resolve, reject: reject)
+      }
+    }
+  }
+
+  /// Single completion path: clears the record BEFORE settling (JS may start the next sign the
+  /// moment the promise settles), settles exactly once, `done.leave()` last. A cancelled sign can
+  /// only reject CANCELED, whatever the system call returned. The identity check tolerates a slot
+  /// that `cancelPendingSign` already cleared (or that a newer sign now holds): it then leaves the
+  /// slot alone. If the cancel's cap already settled the promise, nothing is settled here.
+  private func finishPendingSign(_ pending: PendingSign, outcome: SignOutcome,
+                                 resolve: RCTPromiseResolveBlock,
+                                 reject: RCTPromiseRejectBlock) {
+    pendingSignLock.lock()
+    let wasCanceled = pending.canceled
+    let alreadySettled = pending.settled
+    pending.settled = true
+    if pendingSign === pending { pendingSign = nil }
+    pendingSignLock.unlock()
+    let outcomeTag: String
+    switch outcome {
+    case .signature: outcomeTag = "signature"
+    case .failure(let code, _, _): outcomeTag = "code=" + code
+    }
+    if alreadySettled {
+      // cancelPendingSign settled this sign CANCELED when its cap ran out; drop the outcome.
+      Self.vtSignLog("settle dropped kind=\(pending.kind) \(outcomeTag) ms=\(pending.elapsedMs)")
+    } else if wasCanceled {
+      Self.vtSignLog("settle error kind=\(pending.kind) code=CANCELED canceled=true \(outcomeTag) ms=\(pending.elapsedMs)")
+      reject("CANCELED", "signing was cancelled", nil)
+    } else {
+      switch outcome {
+      case .signature(let hex):
+        Self.vtSignLog("settle ok kind=\(pending.kind) ms=\(pending.elapsedMs)")
+        resolve(["signatureHex": hex])
+      case .failure(let code, let message, let error):
+        Self.vtSignLog("settle error kind=\(pending.kind) code=\(code) ms=\(pending.elapsedMs)")
+        reject(code, message, error)
+      }
+    }
+    pending.done.leave()
+  }
+
+  /// Cancels the pending device-key / recovery-key sign, if any (D-110). Never touches a secret
+  /// wrap/unwrap prompt. Resolves `{canceled: true}` only after the sign's JS promise has rejected
+  /// CANCELED, as the spec says.
+  ///
+  /// Like Android's `take()`, the slot is cleared under the lock at once (review WR-03), so the
+  /// cancelled sign's JS promise settles and JS is answered honestly. A new sign is still refused
+  /// PROMPT_BUSY (fast, never a silent wait) for as long as the old `SecKeyCreateSignature` has not
+  /// returned (`systemCallsInFlight`, review WR-06), after a capped cancel and an uncapped one alike.
+  /// The pool's consent queue awaits the cancel and re-pools on PROMPT_BUSY; another caller signing
+  /// in that short window sees its existing sign-failed path.
+  /// `canceled = true` (set in the same lock) guarantees the old sign can only reject CANCELED.
+  /// `invalidate()` ends the sign's LocalAuthentication evaluation with LAError.appCancel within the
+  /// 2 s wait. UAT 65 Run 6 measured the earlier design, where SecKeyCreateSignature raised the
+  /// sheet itself: after a failed Face ID its "Face Not Recognized" alert outlived invalidate() and
+  /// the cap ran out. If the cap runs out, the promise is rejected CANCELED here (settle-once through
+  /// `settled`), and `finishPendingSign` later drops the real outcome.
+  ///
+  /// Serial-queue implication (review WR-06): if the old system call is still running after the
+  /// cap, `systemCallsInFlight` stays non-zero until it returns, and a new sign is refused
+  /// `PROMPT_BUSY` at once rather than waiting silently behind it on the serial `signQueue`.
+  @objc(cancelPendingSign:rejecter:)
+  func cancelPendingSign(_ resolve: @escaping RCTPromiseResolveBlock,
+                         rejecter reject: @escaping RCTPromiseRejectBlock) {
+    pendingSignLock.lock()
+    let pending = pendingSign
+    pending?.canceled = true
+    pendingSign = nil
+    pendingSignLock.unlock()
+    guard let pending = pending else {
+      Self.vtSignLog("cancel start held=false")
+      resolve(["canceled": false])
       return
     }
-    do {
-      resolve(["signatureHex": try derToCompactLowSHex(sig)])
-    } catch {
-      reject("KEY_ERROR", error.localizedDescription, error)
+    Self.vtSignLog("cancel start held=true kind=\(pending.kind) signMs=\(pending.elapsedMs)")
+    let cancelAt = DispatchTime.now()
+    pending.context.invalidate()
+    var settledBySign = true
+    if pending.done.wait(timeout: .now() + .seconds(2)) == .timedOut {
+      settledBySign = false
+      NSLog("AttestationNative.cancelPendingSign: sign did not settle within the 2 s cap")
+      pendingSignLock.lock()
+      let settleHere = !pending.settled
+      pending.settled = true
+      pendingSignLock.unlock()
+      if settleHere {
+        pending.reject("CANCELED", "signing was cancelled", nil)
+      }
     }
+    let waitedMs = (DispatchTime.now().uptimeNanoseconds - cancelAt.uptimeNanoseconds) / 1_000_000
+    Self.vtSignLog("cancel end kind=\(pending.kind) settled=\(settledBySign) capHit=\(!settledBySign) waitedMs=\(waitedMs)")
+    resolve(["canceled": true])
   }
 
   // MARK: - Secret wrap (D-42)
@@ -839,6 +1143,140 @@ class AttestationNativeModule: NSObject {
       } catch {
         reject("UNWRAP_FAILED", error.localizedDescription, error)
       }
+    }
+  }
+
+  // MARK: - Keyholder prompt batching: public-key seal (Secure Enclave ECIES)
+  //
+  // `sealSecret` encrypts a small secret to the PUBLIC half of a Secure Enclave P-256 key, so it
+  // never prompts. `unsealSecret` raises exactly one Face ID / Touch ID sheet (from the decrypt call
+  // itself, see the note inside) and decrypts inside the Secure Enclave. The key is
+  // `.privateKeyUsage + .biometryCurrentSet`: a biometric enrolment change destroys it.
+  // Unproven on device; the Simulator has no Secure Enclave and answers SEAL_UNAVAILABLE.
+
+  /// Must equal `SEAL_KEY_ALIAS_PATTERN` in secret-seal.ts and SecretSealHelper.kt.
+  private static let sealKeyAliasPattern = try! NSRegularExpression(pattern: "^VOTETORRENT_[A-Z0-9_]+_SEAL_KEY_V[0-9]+$")
+  /// Must equal `MAX_SEAL_PLAINTEXT_BYTES` in secret-seal.ts and SecretSealHelper.kt.
+  private static let maxSealPlaintextBytes = 128
+  private static let sealAlgorithm: SecKeyAlgorithm = .eciesEncryptionCofactorVariableIVX963SHA256AESGCM
+  private let secretSealQueue = DispatchQueue(label: "org.votetorrent.secretseal")
+
+  private static func sealKeyTag(for alias: String) -> String? {
+    let range = NSRange(alias.startIndex..<alias.endIndex, in: alias)
+    guard sealKeyAliasPattern.firstMatch(in: alias, range: range) != nil else { return nil }
+    return "org.votetorrent.sealkey." + alias
+  }
+
+  /// A key reference never prompts; only using the private key does. `interactionNotAllowed` keeps
+  /// this lookup UI-free.
+  private func lookupSealKey(tag: String) -> SecKey? {
+    let context = LAContext()
+    context.interactionNotAllowed = true
+    return loadKey(tag: tag, context: context)
+  }
+
+  @objc(sealSecret:plaintextBase64:resolver:rejecter:)
+  func sealSecret(_ keyAlias: String,
+                  plaintextBase64: String,
+                  resolver resolve: @escaping RCTPromiseResolveBlock,
+                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretSealQueue.async {
+      guard let tag = Self.sealKeyTag(for: keyAlias) else {
+        reject("INVALID_ARGUMENT", "invalid seal key alias: \(keyAlias)", nil); return
+      }
+      guard var plaintext = Data(base64Encoded: plaintextBase64) else {
+        reject("INVALID_ENCODING", "plaintextBase64 did not decode", nil); return
+      }
+      defer { self.zeroize(&plaintext) }
+      guard plaintext.count >= 1, plaintext.count <= Self.maxSealPlaintextBytes else {
+        reject("INVALID_ARGUMENT", "plaintext must be 1..\(Self.maxSealPlaintextBytes) bytes", nil); return
+      }
+      var key = self.lookupSealKey(tag: tag)
+      if key == nil {
+        do {
+          key = try self.createSecureEnclaveKey(tag: tag, requireBiometry: true)
+        } catch {
+          // No Secure Enclave (the Simulator) or no passcode set: the caller falls back.
+          reject("SEAL_UNAVAILABLE", error.localizedDescription, error); return
+        }
+      }
+      guard let privateKey = key, let publicKey = SecKeyCopyPublicKey(privateKey),
+            SecKeyIsAlgorithmSupported(publicKey, .encrypt, Self.sealAlgorithm) else {
+        reject("SEAL_KEY_POLICY_MISMATCH", "the key under \(keyAlias) cannot seal", nil); return
+      }
+      var error: Unmanaged<CFError>?
+      guard let ciphertext = SecKeyCreateEncryptedData(publicKey, Self.sealAlgorithm, plaintext as CFData, &error) as Data? else {
+        let err = error?.takeRetainedValue() as Error?
+        reject("SEAL_FAILED", err?.localizedDescription ?? "SecKeyCreateEncryptedData failed", err); return
+      }
+      resolve([
+        "ciphertextBase64": ciphertext.base64EncodedString(),
+        "keyAlias": keyAlias,
+        "securityLevel": "secure-enclave",
+        "alg": "ECIES-P256-SHA256-AESGCM"
+      ])
+    }
+  }
+
+  /// `promptTitle`/`promptNegativeButton` are accepted for ABI parity with Android; iOS shows
+  /// `promptSubtitle` as the sheet's reason.
+  @objc(unsealSecret:ciphertextBase64:promptTitle:promptSubtitle:promptNegativeButton:resolver:rejecter:)
+  func unsealSecret(_ keyAlias: String,
+                    ciphertextBase64: String,
+                    promptTitle: String,
+                    promptSubtitle: String,
+                    promptNegativeButton: String,
+                    resolver resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+    secretSealQueue.async {
+      guard let tag = Self.sealKeyTag(for: keyAlias) else {
+        reject("INVALID_ARGUMENT", "invalid seal key alias: \(keyAlias)", nil); return
+      }
+      guard let ciphertext = Data(base64Encoded: ciphertextBase64), !ciphertext.isEmpty else {
+        reject("INVALID_ENCODING", "ciphertextBase64 did not decode", nil); return
+      }
+      let context = LAContext()
+      context.localizedReason = promptSubtitle
+      context.touchIDAuthenticationAllowableReuseDuration = 0
+      guard let key = self.loadKey(tag: tag, context: context) else {
+        reject("NO_SEAL_KEY", "no seal key under alias \(keyAlias)", nil); return
+      }
+
+      // The sheet is raised by the decrypt itself, on `context` (reason = promptSubtitle). Not a
+      // pre-evaluation as in signWith: an ECIES decrypt on a Secure Enclave key is authorized as the
+      // key's key-exchange operation, so evaluating `.useKeyDecrypt` first could cost a second sheet.
+      // signWith pre-evaluates only so cancelPendingSign can end the sheet; unseal has no cancel.
+      var failure: NSError?
+      var error: Unmanaged<CFError>?
+      let plaintext = SecKeyCreateDecryptedData(key, Self.sealAlgorithm, ciphertext as CFData, &error) as Data?
+      if plaintext == nil { failure = error?.takeRetainedValue() as Error? as NSError? }
+      guard var opened = plaintext else {
+        let err = failure ?? NSError(domain: "org.votetorrent.secretseal", code: -1)
+        // DOMAIN FIRST: CryptoTokenKit -3 (key invalidated by re-enrolment) overlaps
+        // LAError.userFallback (-3). See signWith's identical note.
+        let code: String
+        if err.domain == "CryptoTokenKit" {
+          code = err.code == -3 ? "KEY_INVALIDATED" : "BIOMETRIC_ERROR"
+        } else if err.domain == LAErrorDomain {
+          switch err.code {
+          case LAError.userCancel.rawValue, LAError.userFallback.rawValue,
+               LAError.systemCancel.rawValue, LAError.appCancel.rawValue: code = "CANCELED"
+          case LAError.biometryNotEnrolled.rawValue: code = "NO_BIOMETRICS_ENROLLED"
+          case LAError.biometryLockout.rawValue:     code = "LOCKOUT_PERMANENT"
+          default:                                   code = "BIOMETRIC_ERROR"
+          }
+        } else {
+          switch err.code {
+          case Int(errSecUserCanceled):          code = "CANCELED"
+          case Int(errSecInteractionNotAllowed): code = "DEVICE_LOCKED"
+          case Int(errSecItemNotFound):          code = "KEY_INVALIDATED"
+          default:                               code = "UNSEAL_FAILED"
+          }
+        }
+        reject(code, err.localizedDescription, err); return
+      }
+      defer { self.zeroize(&opened) }
+      resolve(["plaintextBase64": opened.base64EncodedString()])
     }
   }
 

@@ -51,7 +51,7 @@ function makeAssociationEngine(opts: {
 }) {
 	const base = {
 		getAssociationsByDeviceKey: jest.fn(async (_deviceKey: string) => opts.rows ?? []),
-		listAssociationRequests: jest.fn(async (_authorityId: string) => opts.requests ?? []),
+		listAssociationRequestsByDeviceKey: jest.fn(async (_deviceKey: string) => opts.requests ?? []),
 	};
 	if (opts.deviceRetirement === undefined && !('deviceRetirement' in opts)) {
 		// No getDeviceRetirement member at all.
@@ -253,6 +253,14 @@ describe('resolveRegistrationStatus (D-06/D-23, four-outcome derived read)', () 
 		const associationEngineC = makeAssociationEngine({rows: [], requests: [challengeIssuedRequest]});
 		const resultC = await resolveRegistrationStatus(buildDeps({associationEngine: associationEngineC}));
 		expect(resultC).toEqual({kind: 'pending', networkName: NETWORK_NAME});
+	});
+
+	test('notRegistered: a pending request under this device key for ANOTHER authority is not this network\'s pending', async () => {
+		const otherAuthorityRequest = {...makeRequest({requestId: 'req-elsewhere', status: 'p'}), authorityId: 'some-other-authority'};
+		const associationEngine = makeAssociationEngine({rows: [], requests: [otherAuthorityRequest]});
+		const result = await resolveRegistrationStatus(buildDeps({associationEngine}));
+		expect(result).toEqual({kind: 'notRegistered', networkName: NETWORK_NAME});
+		expect(associationEngine.listAssociationRequestsByDeviceKey).toHaveBeenCalledWith(DEVICE_KEY);
 	});
 
 	test('pending (transport corroboration, D-23 d / D-32): a \'c\' notice for a request id IN ownAssociationRequestIds(p256DeviceKey) corroborates pending', async () => {

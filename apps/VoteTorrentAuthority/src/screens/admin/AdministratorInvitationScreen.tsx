@@ -12,23 +12,24 @@ import type {
 	Scope,
 	SentOfficerInvite,
 } from "@votetorrent/vote-core";
-import { scopeDescriptions } from "@votetorrent/vote-core";
+import { scopeLabel } from "../../utils/scopeLabel";
 import { ThemedText } from "../../components/ThemedText";
-import { ChipButton } from "../../components/ChipButton";
 import { CustomButton } from "../../components/CustomButton";
 import { CustomTextInput } from "../../components/CustomTextInput";
 import { InviteShareBlock } from "../invitations/InviteShareBlock";
 import { Footer } from "../../components/Footer";
-import { InfoCard } from "../../components/InfoCard";
 import { InlineError } from "../../components/InlineError";
 import { SignatureTaskFooter } from "../../components/SignatureTaskFooter";
 import type { RootStackParamList } from "../../navigation/types";
 import { useApp } from "../../providers/AppProvider";
 import { createDeviceSigner } from "../../engines/device-signer";
 import { getOrCreateDeviceUser } from "../../engines/device-user";
+import { getOfficerAcceptProvisioning } from "../../engines/officer-accept-provisioning";
+import { adminChangeErrorKey } from "../../utils/adminChangeErrors";
 import { globalStyles } from "../../theme/styles";
 import { FOUNDING_OFFICER_SCOPES } from "../../utils/foundingOfficerScopes";
 import { useDeviceSigningErrorHandler } from "../../hooks/useDeviceSigningErrorHandler";
+import { useUnsharedInviteGuard } from "../../hooks/useUnsharedInviteGuard";
 import { KeyboardAvoidingScreen } from "../../components/KeyboardAvoidingScreen";
 import { inviteAcceptErrorKey, inviteLoadErrorKey, isShareExpired, parseInviteExpirationMs, parseInviteShare, resolveInviteFromShare } from "../invitations/invite-share";
 import { takeInviteShare } from "../invitations/invite-share-handoff";
@@ -53,6 +54,8 @@ export default function AdministratorInvitationScreen() {
 	const [title, setTitle] = useState(mode === "send" ? (officerInit?.title ?? "") : "");
 	// Share text shown after a successful send (D-05)
 	const [shareText, setShareText] = useState<string>("");
+	// Protects the only copy of the minted invite until it is shared or copied; confirms before discarding it.
+	const markInviteShared = useUnsharedInviteGuard(shareText);
 	const [errorMessage, setErrorMessage] = useState<string>("");
 	const [isSending, setIsSending] = useState(false);
 	const handleDeviceSigningError = useDeviceSigningErrorHandler();
@@ -216,17 +219,29 @@ export default function AdministratorInvitationScreen() {
 		setIsResponding(true);
 		setErrorMessage("");
 		try {
+			// 66.1-07 (D-12): an accept carries the phone's own user id, name and current signing key, read
+			// BEFORE any engine call so a phone with no key goes straight to secure signing setup. Decline
+			// never reads it, so declining never needs a signing key.
+			const officer = accept ? await getOfficerAcceptProvisioning() : undefined;
 			const engine = await getEngine<IInvitationEngine>("invitations");
 			// gap7/WR-01: always re-resolve at press time so a resend made while the screen was open is
 			// answered on the live head, not the Cid captured at mount.
 			const target = await resolveInviteFromShare(engine, pastedInvite, "of");
 			// T-21-11-03: accept and decline both call the SIGNED respondToInvite path (D-09).
-			await engine.respondToInvite(target.slotCid, accept, target.invitePrivate);
+			if (officer) {
+				// invokedId equals officer.userId (66.1-05 refuses a mismatch).
+				await engine.respondToInvite(target.slotCid, true, target.invitePrivate, undefined, officer.userId, undefined, officer);
+			} else {
+				await engine.respondToInvite(target.slotCid, false, target.invitePrivate);
+			}
 			// GAP-2: navigate ONLY on success - the InviteResult is now written.
 			navigation.goBack();
 		} catch (error) {
 			console.warn("Error responding to invite:", error instanceof Error ? error.name : "unknown");
-			setErrorMessage(mapAcceptError(error));
+			const outcome = handleDeviceSigningError(error);
+			if (outcome.handled) return;
+			const key = adminChangeErrorKey(error);
+			setErrorMessage(key ? t(key) : mapAcceptError(error));
 		} finally {
 			respondingRef.current = false;
 			setIsResponding(false);
@@ -238,7 +253,7 @@ export default function AdministratorInvitationScreen() {
 	if (mode === "send") {
 		return (
 			<View style={styles.content}>
-				<ScrollView style={styles.container}>
+				<ScrollView keyboardShouldPersistTaps="handled" style={styles.container}>
 					<View style={styles.section}>
 						<ThemedText type="title" style={styles.sectionTitle}>
 							{t("administratorInvitation")}
@@ -248,7 +263,7 @@ export default function AdministratorInvitationScreen() {
 
 						{/* D-05: render share text + Copy button after a successful send */}
 						{shareText ? (
-							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" />
+							<InviteShareBlock label={t("invitationKey")} shareText={shareText} testIDPrefix="administrator-invitation-share" onShared={markInviteShared} />
 						) : null}
 
 						{/* Pattern B error display */}
@@ -274,11 +289,11 @@ export default function AdministratorInvitationScreen() {
 	// Accept mode (Figma frame 32)
 	const seedInvite = invite?.invite;
 	const permissions = (seedInvite?.scopes ?? [])
-		.map((scope: Scope) => scopeDescriptions[scope] ?? t(`scope_${scope}`))
+		.map((scope: Scope) => scopeLabel(scope, t))
 		.join(", ");
 	return (
 		<KeyboardAvoidingScreen>
-			<ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
+			<ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={{ paddingBottom: 24 }}>
 				<View style={styles.section}>
 					{expired ? (
 						<ThemedText testID="invitation-expired-notice">{t("invitationAcceptExpired", { when: expiredAt })}</ThemedText>
@@ -304,32 +319,8 @@ export default function AdministratorInvitationScreen() {
 								<ThemedText style={styles.permissionsText}>{permissions}</ThemedText>
 							</View>
 
-							{/* Create a new user, OR sign with the existing profile (Figma frame 32) */}
-							<ChipButton
-								label={t("createUser")}
-								icon="circle-plus"
-								fullWidth
-								onPress={() => {}}
-							/>
-							<ThemedText type="defaultSemiBold" style={styles.orText}>
-								{t("or")}
-							</ThemedText>
-							<InfoCard
-								additionalInfo={[
-									{ label: t("user"), value: seedInvite.name },
-									{ label: t("sid"), value: (seedInvite as any).userId },
-								]}
-								icon="chevron-right"
-								onPress={() => {}}
-							/>
-							<CustomButton
-								title={t("sign")}
-								icon="signature"
-								backgroundColor={colors.important}
-								forceDarkText={true}
-								size="thin"
-								onPress={() => {}}
-							/>
+							{/* Figma frame 32 also drew Create User / user card / SIGN here. None of them did anything:
+							    Accept below signs with this phone's own user and key (getOfficerAcceptProvisioning). */}
 						</>
 					) : !parsed ? (
 						<ThemedText>{t("invitationAcceptPasteHint")}</ThemedText>
@@ -371,10 +362,6 @@ const localStyles = StyleSheet.create({
 	permissionsText: {
 		flex: 1,
 		flexWrap: "wrap",
-	},
-	orText: {
-		textAlign: "center",
-		marginVertical: 8,
 	},
 	scopesSection: {
 		marginTop: 16,

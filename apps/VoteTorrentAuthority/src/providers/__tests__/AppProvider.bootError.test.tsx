@@ -133,7 +133,6 @@ jest.mock("../../engines/engine-factory", () => {
 		setGetPeerCount = jest.fn();
 		hasEngine = jest.fn(() => false);
 		isAttestationVerifierProvisioned = jest.fn(() => false);
-		exportDashboardSnapshot = jest.fn(async () => ({}));
 
 		private firstSyncListener: ((strandId: string) => void) | undefined;
 		setFirstSyncListenerCalls: Array<((strandId: string) => void) | undefined> = [];
@@ -218,11 +217,8 @@ jest.mock("../../screens/registration/attach-sync-bindings", () => ({
 	attachSyncBindings: jest.fn(),
 }));
 
-const mockPurgeLegacyStagedPayload = jest.fn(async () => "clean" as const);
-const mockRegisterDashboardSnapshotProvider = jest.fn();
-jest.mock("../../services/dashboard-signin-code", () => ({
-	purgeLegacyStagedPayload: () => mockPurgeLegacyStagedPayload(),
-	registerDashboardSnapshotProvider: (...args: unknown[]) => mockRegisterDashboardSnapshotProvider(...args),
+jest.mock("../../engines/retired-dashboard-code-storage", () => ({
+	sweepRetiredDashboardCodeStorage: jest.fn(async () => "removed"),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -336,6 +332,29 @@ describe("AppProvider boot error classification (gap 4)", () => {
 		expectNoRaw(tr);
 		// B-6: generic keeps console.error with the error object
 		expect(err.mock.calls.some((c) => c[0] === "Re-attach failed:")).toBe(true);
+		err.mockRestore();
+	});
+
+	it("B-7: an app-schema refusal (through open()'s cause) is not retried and shows the update copy, never raw text", async () => {
+		const refusal = new Error("sApp schema cannot be applied to this strand's tables: ALTER TABLE App.TidHighWater ADD COLUMN");
+		refusal.name = "AppSchemaRefusedError";
+		mockOpenErrors = [new Error("Network not opened in this session — use create() first: x", { cause: refusal })];
+		const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+		const err = jest.spyOn(console, "error").mockImplementation(() => undefined);
+		const tr = renderApp();
+		await flushMicrotasks();
+		await advance(30000);
+		expect(mockEngineFactoryInstances[0].openCalls.length).toBe(1);
+		const json = JSON.stringify(tr.toJSON());
+		expect(json).toContain("bootAppUpdateNeededTitle");
+		expect(json).toContain("bootAppUpdateNeededBody");
+		expect(json).toContain("bootTryAgain");
+		expect(json).not.toContain("bootNetworkLoadFailed");
+		expectNoRaw(tr);
+		expect(json).not.toContain("sApp schema");
+		expect(warn).toHaveBeenCalledWith("[AppProvider] re-attach refused: app schema");
+		expect(err.mock.calls.some((c) => c[0] === "Re-attach failed:")).toBe(false);
+		warn.mockRestore();
 		err.mockRestore();
 	});
 

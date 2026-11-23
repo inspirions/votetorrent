@@ -246,9 +246,14 @@ export interface ReconstructedElectionKey {
  * Y. A payload missing either array is refused before encryption (see
  * `encryptElectionBlock` in vote-engine's `src/key-release/election-block.ts`),
  * so a block builder cannot leave voter records in clear by accident.
+ *
+ * `v: 1` carries each vote entry in clear inside the block. `v: 2` (pool-formed
+ * blocks, spike 102) carries each vote entry ALREADY encrypted to Y on its own
+ * (`votes` is an array of `BlockCiphertext` JSON strings), so the voter who
+ * forms the block never sees a vote before the key release.
  */
 export interface ElectionBlockPayload {
-  v: 1
+  v: 1 | 2
   votes: unknown[]
   voterRecords: unknown[]
 }

@@ -128,7 +128,7 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
   })
 
   // PUB-01-c — the 6 packages resolve to their published version lines.
-  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.13.x, @optimystic/db-* 1.12.x)', () => {
+  it('PUB-01-c: the 6 de-vendored packages resolve to published versions (@serfab 1.19.x, @optimystic/db-* 1.20.x)', () => {
     for (const pkg of DEVENDORED_PACKAGES) {
       const versions = resolvedVersionsFor(lock, pkg)
       expect(versions.length, `expected at least one resolved ${pkg} block in yarn.lock`).to.be.greaterThan(0)
@@ -170,9 +170,66 @@ describe('no-portal / no-vendor regression (PUB-01 / PUB-02)', () => {
       // 2026-10-09: @serfab 1.13.0 -> 1.14.0 (cadre invitations replace the invite/accept ceremony,
       // per-stream control-protocol guard, provisional stranger admission; the public-observer +
       // cohort-topic patch forward-ported with a new guard-classification hunk). @optimystic stays 1.12.1.
+      // 2026-10-13: @serfab 1.14.0 -> 1.15.0 (sereus#34 relay first-attempt fixed, strand redial on the
+      // link budget, `sereus-invite:1.` invitations, CadrePeer `Profile` column; the patch carried with
+      // identical hunk bodies) and @optimystic 1.12.1 -> 1.13.0 (lazy read-repair, isNetworkMember,
+      // prepared streams, commit durability; p2p-fret ^1.0.2). @quereus 4.20.1 -> 4.20.2.
+      // 2026-10-14: @optimystic 1.13.0 -> 1.14.0 (owed cancels re-sent by the writer; a two-member
+      // cohort skips the commit round and defers a sole-reservation pend's delivery onto its commit).
+      // @serfab stays 1.15.0 (latest), quereus 4.20.2, p2p-fret 1.0.2.
+      // 2026-10-16: @serfab 1.15.0 -> 1.16.0 (dependency ranges only: cadre-core's dist is byte-identical
+      // to 1.15.0, so the patch carries verbatim) and @optimystic 1.14.0 -> 1.15.0 (FRET maintenance
+      // redial on the node's dial deadline; p2p-fret ^1.1.0 with idle backoff). quereus stays 4.20.2.
+      // 2026-10-26: @serfab 1.16.0 -> 1.18.0 (owner keys apart from the node identity, machine
+      // invitations grant no ownership, control-schema versions with in-place migration from 1.17 on
+      // (a 1.16 store is refused `before-migrations`), identify-gated sibling reachability; the
+      // public-observer patch forward-ported and the control-fork guard added) and @optimystic
+      // 1.15.0 -> 1.19.0 (catalog-only ALTER, storage durability window, one request per member per
+      // multi-collection commit, size-split blocks, Optimystic#35's 1 MiB cap lifted; p2p-fret ^1.2.1).
+      // @quereus 4.20.2 -> 4.20.3, @libp2p/websockets 10.1.18 -> 10.1.25 (patched).
+      // 2026-10-29: @serfab 1.18.0 -> 1.19.0 (cadre-rn's chunked TextDecoder + fast structuredClone,
+      // sereus#51; cadre-core re-publishes only on address churn and pushes catch-up blocks in
+      // db-p2p 1.19's shape, so the patch's peer-join-backfill hunk is dropped). @optimystic stays 1.19.0.
+      // 2026-10-30: @serfab 1.19.0 -> 1.19.1 (strand offline mode, off by default; a control write whose
+      // read no member answered retries on the typed BlockUnavailableError) and @optimystic 1.19.0 ->
+      // 1.20.1 (typed PromiseShortfallError / ValidityRejectedError / BlockUnavailableError, the plugin's
+      // offline queue). @quereus 4.20.3 -> 4.21.1 (statement write scope). All three patches carried
+      // with identical hunk bodies.
+      // 2026-11-02: @serfab 1.19.1 -> 1.20.0 (strandReactivity, StrandDatabase.watchTables) and @optimystic
+      // 1.20.1 -> 1.24.0 (cohort-topic reactivity cheaper when idle, matchmaking sessions, client signatures
+      // txsig:v3, so every machine moves together). @quereus 4.21.1 -> 4.24.0, p2p-fret 1.2.1 -> 1.3.0.
+      // 2026-11-05: @serfab 1.20.0 -> 1.21.0 (a relay reservation re-dials after a dropped dial; a refused app
+      // schema change keeps the earlier schema) and @optimystic 1.24.0 -> 1.25.0 (adapts to quereus 4.25's
+      // unwound schema commit). @quereus 4.24.0 -> 4.26.0. cadre-core and db-p2p patches carried byte-identical.
+      // 2026-11-08: @serfab 1.21.0 -> 1.22.0 (machine removal rotates the party key, offline queue waits for
+      // party machines, close awaits quereus, a refused app schema stops relaunching) and @optimystic 1.25.0 ->
+      // 1.26.0 (index walks serve order by / ranges / in lists, flat-cost offline queue, delete reports its
+      // row). @quereus 4.26.0 -> 5.0.0, forced by both families' ^5.0.0 ranges. db-p2p patch carried
+      // byte-identical; cadre-core patch forward-ported (3 hunks re-placed by hand).
+      // 2026-11-12: @optimystic 1.26.0 -> 1.27.0 (in-list seeks span every key column, ordered reads priced by
+      // LIMIT, a fully connected cohort skips the 10 s read-repair consult; engine id quereus@5.4.0, so every
+      // machine moves together). @quereus 5.0.0 -> 5.4.0, forced by the plugins' ^5.4.0 peer range. @serfab
+      // stays 1.22.0 (no newer release). db-p2p and quereus patches carried byte-identical.
+      // 2026-11-16: @serfab 1.22.0 -> 1.23.0 (a claimed storage replica whose app schema the strand's rows
+      // refuse falls back to the replica; PendingPartyKeyRotation gains `sealedTo`). cadre-core patch carried
+      // with identical hunk bodies. @optimystic stays 1.27.0 (latest). @quereus HELD at 5.4.0: 5.5.0 removed
+      // the getTypeOrDefault export that @optimystic/quereus-plugin-optimystic 1.27.0 imports.
+      // 2026-11-19: @optimystic 1.27.0 -> 1.28.0 (client nodes, a silent member no longer holds up a write,
+      // commit proofs stored once by message hash (a new store; no downgrade), matchmaking on 1-3 machines,
+      // relay reservations renewed; engine id quereus@5.6.0, so every machine moves together). @quereus
+      // 5.4.0 -> 5.6.0, forced by the plugins' ^5.6.0 peer range. @serfab stays 1.23.0 (no newer release);
+      // the cadre-core patch gains the four commit-proof methods on lazyRawStorage, which 1.28.0 calls.
+      // 2026-11-21: @optimystic 1.28.0 -> 1.29.0 (native blobs, IndexedDB version 5, a commit proof crosses
+      // the wire once, reservations of a vanished writer lapse after 5 min; engine id quereus@5.6.1, so every
+      // machine moves together). @quereus 5.6.0 -> 5.6.1, forced by the plugins' ^5.6.1 peer range. @serfab
+      // stays 1.23.0 (no newer release). db-p2p and quereus patch target files byte-identical: renamed only.
+      // 2026-11-23: @serfab 1.23.0 -> 1.24.0 (sApp configs declare a required schemaVersion and a strand refuses an
+      // older one; NodeProfile 'transaction'/'storage' renamed nodeClass 'device'/'server'; per-node roles incl. a
+      // strandCohortMember:false client). cadre-core patch forward-ported: 7 hunks re-placed by hand, two concerns
+      // dropped as upstreamed (lazyRawStorage commit-proof methods; the joiner coordinator-miss deferral).
       const expectedPrefix = pkg === '@serfab/strand-proto'
         ? '0.11.'
-        : pkg.startsWith('@serfab/') ? '1.14.' : '1.12.'
+        : pkg.startsWith('@serfab/') ? '1.24.' : '1.29.'
       expect(
         distinct[0],
         `Resolved ${pkg} version must start with ${expectedPrefix}, got ${distinct[0]}`

@@ -46,7 +46,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { CadreNode, collectStrandAddrs, STRAND_ADDR_PROTOCOL } from '@serfab/cadre-core';
+import { CadreNode, collectStrandAddrs, STRAND_ADDR_PROTOCOL, ed25519KeyPairFromLibp2p } from '@serfab/cadre-core';
+import { VOTETORRENT_SCHEMA_VERSION, registerVoteTorrentFunctions } from '@votetorrent/vote-engine/browser';
 import { createLibp2pNode, RepoClient } from '@optimystic/db-p2p/rn';
 import { webSockets } from '@libp2p/websockets';
 import { generateKeyPair } from '@libp2p/crypto/keys';
@@ -147,7 +148,9 @@ export async function buildGateway({
   const node = new CadreNode({
     privateKey,
     controlNetwork: { partyId: PARTY_ID, bootstrapNodes: [] },
-    profile: 'storage',
+    // VoteTorrent's SQL functions before the sApp schema applies (quereus 5.6 CHECK gate).
+    strandDatabaseSetup: registerVoteTorrentFunctions,
+    nodeClass: 'server',
     requireSignedSchemas: false,
     strandFilter: { mode: 'all' },
     network: {
@@ -169,6 +172,7 @@ export async function buildGateway({
         id: 'org.votetorrent',
         version: '1.0.0',
         schema: VOTETORRENT_QSQL,
+        schemaVersion: VOTETORRENT_SCHEMA_VERSION,
         latencyHint: 'interactive',
       },
       mode: 'bootstrap',
@@ -179,7 +183,8 @@ export async function buildGateway({
     // Owner genesis MUST run while the node is solo — see drone.mjs:202-216 for the same
     // ordering constraint. This node boots with empty bootstrapNodes so "solo" holds by
     // construction.
-    const owner = node.getIdentityOwnerKey();
+    // cadre-core 1.18 deleted getIdentityOwnerKey(); derive the same identity owner key here.
+    const owner = ed25519KeyPairFromLibp2p(privateKey);
     await node.trustOwnerKeys([owner.publicKeyB64], 'operator');
     const controlDb = node.getControlDatabase();
     if (!controlDb) throw new Error('gateway has no control database after start()');

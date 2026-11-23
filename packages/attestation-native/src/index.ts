@@ -55,6 +55,19 @@ export type {
 	SecretWrapErrorCode,
 } from './secret-wrap'
 
+// Keyholder prompt batching: public-key sealing of small secrets (seal never prompts, unseal prompts
+// once). Same lazy-native rule as secret-wrap.ts.
+export {
+	SEAL_KEY_ALIAS_PATTERN,
+	MAX_SEAL_PLAINTEXT_BYTES,
+	SEAL_ALGORITHMS,
+	SECRET_SEAL_ERROR_CODES,
+	SecretSealError,
+	isValidSealKeyAlias,
+	createNativeSecretSealer,
+} from './secret-seal'
+export type { SealAlgorithm, SealSecurityLevel, SealedSecret, SecretSealPrompt, SecretSealer, SecretSealErrorCode } from './secret-seal'
+
 // Phase 62 plan 75 (D-36): write a cache file and share it AS A FILE. Named exports only — same
 // "no re-export of the TurboModule default" rule as above; `file-share.ts` requires it lazily.
 export { FileShareError, writeShareFile, shareFileAndroid, deleteCachedFile } from './file-share'
@@ -64,6 +77,10 @@ export type { FileShareErrorCode } from './file-share'
 // only; `secure-surface.ts` requires the TurboModule lazily and never throws.
 export { setSecureScreen, copySensitiveText } from './secure-surface'
 export type { SensitiveCopyResult } from './secure-surface'
+
+// Phase 65 gap 1 (D-110): dismiss a pending device-key or recovery-key sign. Named exports only;
+// `sign-cancel.ts` requires the TurboModule lazily and never throws.
+export { cancelPendingSign, SIGN_CANCEL_JS_CAP_MS } from './sign-cancel'
 
 // Phase 62 plan 90 (gap 2): the single definition of the bytes native signs for verifySigP256-checked
 // signatures. Pure module (no TurboModule), safe in the barrel.

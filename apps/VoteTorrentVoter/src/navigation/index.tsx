@@ -43,8 +43,10 @@ import ContinueOnAnotherDeviceScreen from '../screens/registration/ContinueOnAno
 import {DeviceRetiredNotice, useDeviceRetired} from '../screens/registration/DeviceRetiredNotice';
 import ScanScreen from '../screens/scan/ScanScreen';
 import SettingsScreen from '../screens/settings/SettingsScreen';
+import JoinNetworkScreen from '../screens/settings/JoinNetworkScreen';
 import TimelineScreen from '../screens/timeline/TimelineScreen';
 import KeyholdersScreen from '../screens/timeline/KeyholdersScreen';
+import ResultsScreen from '../screens/timeline/ResultsScreen';
 import RegistrationInfoScreen from '../screens/registration/RegistrationInfoScreen';
 import {RegistrationDraftProvider} from '../providers/RegistrationDraftProvider';
 import {BallotSelectionProvider} from '../providers/BallotSelectionProvider';
@@ -136,6 +138,7 @@ function TimelineStackNavigator() {
 	const {t: tKeyholders} = useTranslation('timeline');
 	const {t: tBallot} = useTranslation('ballot');
 	const {t: tRegistration} = useTranslation('registration');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<TimelineStack.Navigator>
@@ -227,12 +230,23 @@ function TimelineStackNavigator() {
 				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Spike 100 (D-14 route closure) — RegistrationScreen's join entry link. */}
+			<TimelineStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
+			/>
 			{/* D-15: plain push (default header, back chevron) — mirrors ValidationDetails on the
 			    Vote stack, never presentation:'modal'. */}
 			<TimelineStack.Screen
 				name="Keyholders"
 				component={KeyholdersScreen}
 				options={{title: tKeyholders('keyholders.screenTitle')}}
+			/>
+			<TimelineStack.Screen
+				name="Results"
+				component={ResultsScreen}
+				options={{title: tKeyholders('results.screenTitle')}}
 			/>
 		</TimelineStack.Navigator>
 	);
@@ -245,6 +259,7 @@ const RegistrationStack = createNativeStackNavigator<RegistrationStackParamList>
 
 function RegistrationStackNavigator() {
 	const {t} = useTranslation('registration');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<RegistrationStack.Navigator>
@@ -291,6 +306,12 @@ function RegistrationStackNavigator() {
 				component={ContinueOnAnotherDeviceScreen}
 				options={{headerShown: false}}
 			/>
+			{/* Spike 100: RegistrationHome's join entry link, shown while no network is open. */}
+			<RegistrationStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
+			/>
 			<RegistrationStack.Screen
 				name="RegistrationInfo"
 				component={RegistrationInfoScreen}
@@ -327,6 +348,7 @@ const SettingsStack = createNativeStackNavigator<SettingsStackParamList>();
 
 function SettingsStackNavigator() {
 	const {t} = useTranslation('settings');
+	const {t: tJoin} = useTranslation('join');
 
 	return (
 		<SettingsStack.Navigator>
@@ -334,6 +356,11 @@ function SettingsStackNavigator() {
 				name="SettingsHome"
 				component={SettingsScreen}
 				options={{title: t('headerTitle')}}
+			/>
+			<SettingsStack.Screen
+				name="JoinNetwork"
+				component={JoinNetworkScreen}
+				options={{title: tJoin('headerTitle')}}
 			/>
 		</SettingsStack.Navigator>
 	);
@@ -431,6 +458,7 @@ export function RootNavigator() {
 						// not the Tab.Navigator itself.
 						headerShown: false,
 						tabBarLabel: t('tabVote'),
+						tabBarButtonTestID: 'tab-vote',
 						tabBarIcon: ({color, size}) => (
 							<FontAwesome6 name="check-to-slot" size={size} color={color} />
 						),
@@ -448,6 +476,7 @@ export function RootNavigator() {
 					options={({route}) => ({
 						headerShown: false,
 						tabBarLabel: t('tabTimeline'),
+						tabBarButtonTestID: 'tab-timeline',
 						tabBarIcon: ({color, size}) => (
 							<FontAwesome6 name="timeline" size={size} color={color} />
 						),
@@ -462,6 +491,7 @@ export function RootNavigator() {
 					options={({route}) => ({
 						headerShown: false,
 						tabBarLabel: t('tabRegistration'),
+						tabBarButtonTestID: 'tab-registration',
 						tabBarIcon: ({color, size}) => (
 							<FontAwesome6 name="user-plus" size={size} color={color} />
 						),
@@ -475,6 +505,7 @@ export function RootNavigator() {
 					options={{
 						headerShown: false,
 						tabBarLabel: t('tabScan'),
+						tabBarButtonTestID: 'tab-scan',
 						tabBarIcon: ({color, size}) => (
 							<FontAwesome6 name="qrcode" size={size} color={color} />
 						),
@@ -486,6 +517,7 @@ export function RootNavigator() {
 					options={{
 						headerShown: false,
 						tabBarLabel: t('tabSettings'),
+						tabBarButtonTestID: 'tab-settings',
 						tabBarIcon: ({color, size}) => (
 							<FontAwesome6 name="gear" size={size} color={color} />
 						),

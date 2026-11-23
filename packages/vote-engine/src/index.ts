@@ -7,6 +7,9 @@ export * from './elections/index.js'
 export * from './local-storage-react.js'
 export * from './network/index.js'
 export * from './networks/index.js'
+// Spike 100: the voter join code and its orchestration (pure; no cadre-core import, D-03).
+export * from './networks/join-code.js'
+export * from './networks/network-join.js'
 export * from './association/index.js'
 export * from './user/index.js'
 export * from './tasks/index.js'
@@ -33,7 +36,26 @@ export * from './keyholder/index.js'
 // reconstruction and the D-18 block-payload contract. Named-export barrel —
 // see src/key-release/index.ts's header.
 export * from './key-release/index.js'
+// Election results: decrypt, validate and tally one election after the key release (R5-R8 over the
+// replicated rows). Named-export barrel; see src/results/election-results-engine.ts's header.
+export * from './results/index.js'
 // Phase 63 Plan 03 (D-23/D-28): the voting module (vote/voter entry builders, the template digest,
 // the canonical ordering rule and the voting-key normalisation). Named-export barrel; see
 // src/voting/index.ts's header.
 export * from './voting/index.js'
+// Spike 102: vote pools (block negotiation through the authority's rendezvous). Named-export
+// barrel; see src/pool/index.ts.
+export * from './pool/index.js'
+// Strand table-change subscriptions (reactivity), see src/reactivity/index.ts.
+export * from './reactivity/index.js'
+// The published, officer-signed tally (ElectionTally), see src/tally/index.ts.
+export * from './tally/index.js'
+// Phase 65 Plan 05 (D-50/D-51): the R5 block Merkle tree. Named-export barrel; see
+// src/blocks/index.ts. rn-entry and browser-entry exposure is decided in 65-09 (D-52).
+export * from './blocks/index.js'
+// Phase 66: browser pairing (pairing code, statement verifiers, pair-mint wire and service, revocation).
+// Named-export barrel; see src/pairing/index.ts.
+export * from './pairing/index.js'
+// Which of this phone's writes no other member holds yet (todo 2026-09-11-optimystic-commit-success-hides-unresolvable-cohort).
+export * from './durability/index.js'
+export { VOTETORRENT_SCHEMA_VERSION } from './database/schema-version.js'
